@@ -1,0 +1,6 @@
+[submodule "data/polygon"]
+	path = data/polygon
+	url = git@github.com:mateusz-klatt/polygon.git
+[submodule "proprietary"]
+	path = proprietary
+	url = git@github.com:mateusz-klatt/proprietary.git

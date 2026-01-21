@@ -1,0 +1,38 @@
+/**
+ * Entity types re-exported from generated file.
+ * This file provides a stable import path for entities.
+ *
+ * The actual entity definitions are auto-generated in entities.generated.ts
+ * Regenerate with: make ui-gen-entities
+ */
+
+export type {
+  // WS Envelope entities (backend naming)
+  Bar,
+  Fill,
+  Heartbeat,
+  OrderRequest,
+  OrderStatus,
+  ReplayEnd,
+  ReplayStart,
+  SettingChanged,
+  Signal,
+  SymbolMappingUpdate,
+  Tick,
+  Trade,
+  // API Snapshot entities
+  Candle,
+  Position,
+  // Request entities
+  AdminResetPassword,
+  ChangePassword,
+  CreateUser,
+  Login,
+  ProcessCreate,
+  ProcessStart,
+  UpdateUser,
+  // Re-exported common types
+  TradeSide,
+  OrderType,
+  HeartbeatStatus,
+} from './entities.generated'

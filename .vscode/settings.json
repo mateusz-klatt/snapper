@@ -1,0 +1,62 @@
+{
+  "python.defaultInterpreterPath": ".venv",
+  "python.venvPath": "${workspaceFolder}",
+  "python.venvFolders": [
+    ".venv"
+  ],
+  "python.terminal.activateEnvironment": true,
+  "python.terminal.activateEnvInCurrentTerminal": true,
+  "terminal.integrated.env.linux": {
+    "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+    "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}"
+  },
+  "terminal.integrated.env.osx": {
+    "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+    "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}"
+  },
+  "terminal.integrated.env.windows": {
+    "VIRTUAL_ENV": "${workspaceFolder}\\.venv",
+    "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+  },
+  "terminal.integrated.shellIntegration.enabled": true,
+  "python.analysis.extraPaths": [
+    "./src"
+  ],
+  "python.envFile": "${workspaceFolder}/.env",
+  "chat.agent.maxRequests": 1000,
+  "chat.tools.autoApprove": true,
+  "chat.tools.global.autoApprove": true,
+  "chat.tools.terminal.autoApprove": {
+    ".*": true
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.coverage": true,
+    "**/.eslintcache": true,
+    "**/.mypy_cache": true,
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/.idea": true,
+    "**/.venv": true,
+    "**/*.egg-info": true,
+    "**/build": true,
+    "**/coverage": true,
+    "**/dist": true,
+    "**/node_modules": true
+  },
+  "github.copilot.chat.anthropic.thinking.enabled": true,
+  "python.testing.pytestEnabled": true,
+  "claudeCode.selectedModel": "opus",
+  "claudeCode.terminalShellIntegration": true,
+  "claudeCode.autoCheckpointEnabled": true,
+  "github.copilot.chat.anthropic.tools.websearch.maxUses": 20,
+  "github.copilot.chat.anthropic.tools.websearch.enabled": true,
+  "chat.useAgentSkills": true,
+  "chat.agentSkills": [
+    "github.copilot.chat.anthropic.skills.pythonExpert",
+    "github.copilot.chat.anthropic.skills.webSearch"
+  ],
+  "chatgpt.runCodexInWindowsSubsystemForLinux": true,
+  "claudeCode.allowDangerouslySkipPermissions": true,
+  "claudeCode.useTerminal": false
+}

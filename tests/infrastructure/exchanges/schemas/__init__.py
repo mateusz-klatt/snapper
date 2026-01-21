@@ -1,0 +1,1 @@
+"""Exchange schema tests package."""

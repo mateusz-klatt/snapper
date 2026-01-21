@@ -1,0 +1,394 @@
+# Trading Strategies
+
+Snapper provides a framework for creating trading strategies based on
+ZeroMQ messaging. Strategies subscribe to market data and publish signals.
+
+## Strategy Architecture
+
+```mermaid
+flowchart TB
+    MarketData["Market Data<br/>ZMQ"] --> Strategy
+
+    subgraph Strategy["BaseStrategy"]
+        OnBar["on_bar()"]
+        OnTick["on_tick()"]
+    end
+
+    Strategy -->|Signal| SignalOut["Signal ZMQ"]
+    SignalOut --> Coordinator["Trader Coordinator"]
+    Coordinator --> Executor
+```
+
+## Creating Strategies
+
+### Basic Structure
+
+```python
+from snapper.strategies.base import BaseStrategy, Signal, StrategyConfig
+from snapper.strategies.decorators import register_strategy, create_strategy_process
+from snapper.messaging.schemas.messages import BarEnvelope
+
+
+@register_strategy("MyStrategy")
+@create_strategy_process(
+    process_name="my_strategy_btc",
+    default_config={
+        "name": "my_strategy_btc",
+        "inputs": ["market.kraken.BTC-USD.candles.1h"],
+        "outputs": ["BTC-USD"],
+        "exchange": "paper",
+        "params": {
+            "threshold": 0.5,
+            "period": 14,
+        },
+    },
+)
+class MyStrategy(BaseStrategy):
+    """Strategy description in docstring."""
+
+    def __init__(self, config: StrategyConfig) -> None:
+        """Initialize strategy."""
+        super().__init__(config)
+        self.threshold = self.params.get("threshold", 0.5)
+        self.period = self.params.get("period", 14)
+
+    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+        """Process candle and generate signal."""
+        # Access candle buffer
+        candles = self.candle_buffer.get(instrument, [])
+        if len(candles) < self.period:
+            return None
+
+        # Strategy logic
+        closes = [c.close for c in candles]
+        current_price = closes[-1]
+
+        if self._should_buy(closes):
+            return Signal(
+                instrument=instrument,
+                side="buy",
+                strength=1.0,
+                price=current_price,
+                reason="Buy condition met",
+                metadata={"custom_field": "value"},
+            )
+
+        if self._should_sell(closes):
+            return Signal(
+                instrument=instrument,
+                side="sell",
+                strength=1.0,
+                price=current_price,
+                reason="Sell condition met",
+            )
+
+        return None
+
+    def _should_buy(self, closes: list[float]) -> bool:
+        """Buy condition logic."""
+        return False
+
+    def _should_sell(self, closes: list[float]) -> bool:
+        """Sell condition logic."""
+        return False
+
+    async def reset(self) -> None:
+        """Reset strategy state (for replay)."""
+        pass
+```
+
+## Decorators
+
+### `@register_strategy(name)`
+
+Registers strategy class in factory under given name.
+
+```python
+@register_strategy("RSIReversion")
+class RSIReversion(BaseStrategy):
+    ...
+```
+
+### `@create_strategy_process(process_name, default_config)`
+
+Creates process wrapper for strategy and registers in process manager.
+
+```python
+@create_strategy_process(
+    process_name="strategy_rsi_eth",
+    default_config={
+        "name": "rsi_eth_1h",
+        "inputs": ["market.kraken.ETH-USD.candles.1h"],
+        "outputs": ["ETH-USD"],
+        "exchange": "paper",
+        "params": {"period": 14, "upper": 70, "lower": 30},
+    },
+)
+class RSIReversion(BaseStrategy):
+    ...
+```
+
+## Strategy Configuration
+
+### StrategyConfig
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `name` | string | Unique strategy instance name |
+| `strategy_class` | string | Strategy class name |
+| `inputs` | list[str] | List of ZMQ topics to subscribe |
+| `outputs` | list[str] | List of instruments for signals |
+| `exchange` | string | Target exchange (`paper`, `kraken`, `zonda`, `walutomat`) |
+| `params` | dict | Strategy-specific parameters |
+
+### Input Topics
+
+Format: `market.{exchange}.{instrument}.{type}.{timeframe}`
+
+Examples:
+
+- `market.kraken.BTC-USD.candles.1h` — Hourly BTC/USD candles from Kraken
+- `market.kraken.ETH-USD.candles.15m` — 15-minute ETH/USD candles
+- `market.polygon.AAPL.candles.1d` — Daily AAPL candles from Polygon
+
+### Output Topics (Signals)
+
+Generated automatically:
+
+- Paper: `signals.paper.{instrument}.{strategy_name}`
+- Live: `signals.{exchange}.{instrument}.live`
+
+## Signal Structure
+
+```python
+@dataclass
+class Signal:
+    """Trading signal."""
+
+    instrument: str      # Instrument symbol
+    side: TradeSide      # "buy" or "sell"
+    strength: float      # Signal strength 0.0-1.0
+    reason: str          # Signal reason
+    price: float         # Price at generation
+    timestamp: float     # Unix timestamp (optional)
+    metadata: dict       # Additional data
+```
+
+## Built-in Strategies
+
+### RSIReversion
+
+Mean-reversion strategy based on RSI.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `period` | 14 | RSI period |
+| `upper` | 70.0 | Overbought threshold (sell) |
+| `lower` | 30.0 | Oversold threshold (buy) |
+| `cooldown` | 2 | Candles between signals |
+
+**Logic:**
+
+- Buy when RSI <= lower
+- Sell when RSI >= upper
+
+```python
+from snapper.strategies.rsi import RSIReversion
+```
+
+### MACDCrossover
+
+Trend-following strategy based on MACD.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `fast` | 12 | Fast EMA |
+| `slow` | 26 | Slow EMA |
+| `signal_period` | 9 | Signal line period |
+
+**Logic:**
+
+- Buy when MACD histogram crosses from negative to positive
+- Sell when histogram crosses from positive to negative
+
+```python
+from snapper.strategies.macd import MACDCrossover
+```
+
+### Cointegration
+
+Pairs trading strategy based on cointegration.
+
+```python
+from snapper.strategies.cointegration import CointegrationStrategy
+```
+
+## Data Access
+
+### Candle Buffer
+
+```python
+async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+    candles = self.candle_buffer.get(instrument, [])
+
+    # Last N candles
+    recent = candles[-20:]
+
+    # Close prices as pandas Series
+    import pandas as pd
+    closes = pd.Series([c.close for c in candles])
+```
+
+### BarEnvelope
+
+```python
+@dataclass
+class BarEnvelope:
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    timestamp: int
+    timeframe: str
+    instrument: str
+```
+
+## Technical Indicators
+
+### RSI
+
+```python
+from snapper.indicators.rsi import rsi
+import pandas as pd
+
+closes = pd.Series([c.close for c in candles])
+rsi_values = rsi(closes, period=14)
+current_rsi = rsi_values.iloc[-1]
+```
+
+### MACD
+
+```python
+from snapper.indicators.ta_lib_adapter import macd
+
+macd_line, signal_line, histogram = macd(closes, fast=12, slow=26, signal=9)
+```
+
+### TA-Lib (via adapter)
+
+```python
+from snapper.indicators.ta_lib_adapter import rsi, macd, sma, ema
+```
+
+## Configuration Validation
+
+Framework automatically validates:
+
+1.  **Strategy name** — cannot be empty
+2.  **Inputs** — at least one required
+3.  **Outputs** — at least one instrument must be defined
+4.  **Exchange** — must be one of: `paper`, `kraken`, `zonda`, `walutomat`
+5.  **Instruments** — must be available on selected exchange
+6.  **Paper/live mixing** — mixing paper inputs with live exchange not allowed
+
+## Strategy Lifecycle
+
+```mermaid
+flowchart TB
+    Init["__init__()"] --> Start["start()"]
+    Start --> Loop
+
+    subgraph Loop["Listen loop"]
+        Receive["Receive message"] --> Process["on_bar() / on_tick()"]
+        Process -->|Signal| SignalOut["Signal"]
+        Process --> Receive
+    end
+
+    Loop --> Stop["stop()"]
+    Stop --> Cleanup["cleanup()"]
+```
+
+## Running Strategies
+
+### Via Process Manager (recommended)
+
+Strategies are automatically managed by the server:
+
+```bash
+snapper server
+```
+
+Strategies can be enabled/disabled in the dashboard.
+
+### Standalone (for testing)
+
+```python
+import asyncio
+from snapper.strategies.factory import StrategyFactory
+from snapper.strategies.base import StrategyConfig
+
+config = StrategyConfig(
+    name="test_rsi",
+    strategy_class="RSIReversion",
+    inputs=["market.kraken.BTC-USD.candles.1h"],
+    outputs=["BTC-USD"],
+    exchange="paper",
+    params={"period": 14, "upper": 70, "lower": 30},
+)
+
+strategy = StrategyFactory.create("RSIReversion", config)
+
+async def main():
+    await strategy.start()
+
+asyncio.run(main())
+```
+
+## Testing Strategies
+
+### Unit Tests
+
+```python
+import pytest
+from snapper.strategies.rsi import RSIReversion
+from snapper.strategies.base import StrategyConfig
+from snapper.messaging.schemas.messages import BarEnvelope
+
+
+@pytest.fixture
+def rsi_strategy() -> RSIReversion:
+    config = StrategyConfig(
+        name="test_rsi",
+        strategy_class="RSIReversion",
+        inputs=["market.kraken.BTC-USD.candles.1h"],
+        outputs=["BTC-USD"],
+        exchange="paper",
+        params={"period": 14, "upper": 70, "lower": 30},
+    )
+    return RSIReversion(config)
+
+
+async def test_buy_signal_on_low_rsi(rsi_strategy: RSIReversion) -> None:
+    # Prepare data with low RSI
+    ...
+    signal = await rsi_strategy.on_bar("BTC-USD", bar)
+    assert signal is not None
+    assert signal.side == "buy"
+```
+
+### Backtesting
+
+Use replay data from paper topics:
+
+```python
+default_config={
+    "inputs": ["replay.BTC-USD.candles.1h"],
+    "exchange": "paper",
+    ...
+}
+```

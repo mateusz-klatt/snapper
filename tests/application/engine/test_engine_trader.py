@@ -1,0 +1,1520 @@
+"""Tests for TraderCoordinator and ZMQ trader functionality."""
+
+import asyncio
+import json
+import time
+from collections.abc import Callable
+from collections.abc import Coroutine
+from datetime import UTC
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Any
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import Mock
+from unittest.mock import patch
+
+import pytest
+
+import snapper.application.engine.trader as trader_module
+from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.engine.trader import run_zmq_trader
+from snapper.config.app import AppSettings
+from snapper.messaging.schemas.messages import SignalEnvelope
+
+
+class TestTraderCoverage:
+    """Tests for TraderCoordinator coverage and core functionality."""
+
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    def test_init(self, mock_get_settings: MagicMock, mock_get_repository: MagicMock) -> None:
+        """Verify TraderCoordinator initialization with custom signal topics.
+
+        Given: Mocked settings with instrument configuration,
+        When: TraderCoordinator is instantiated with signal topics,
+        Then: All attributes are properly initialized with expected defaults.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD", "ETH-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator(signal_topics=["signals.test"])
+        assert trader.signal_topics == ["signals.test"]
+        assert trader.zmq_context is None
+        assert trader.signal_subscriber is None
+        assert trader.execution_context is None
+        assert trader.execution_publisher is None
+        assert isinstance(trader.engines, dict)
+        assert isinstance(trader.last_signal_time, dict)
+
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    def test_init_default_values(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify TraderCoordinator uses default signal topic when none provided.
+
+        Given: Mocked settings with instrument configuration,
+        When: TraderCoordinator is instantiated without signal topics,
+        Then: Default signal topic 'signals.' is used.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD", "ETH-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        assert trader.signal_topics == ["signals."]
+
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    def test_repr(self, mock_get_settings: MagicMock, mock_get_repository: MagicMock) -> None:
+        """Verify string representation includes class name and topics.
+
+        Given: A TraderCoordinator with specific signal topics,
+        When: repr() is called on the coordinator,
+        Then: String includes class name and configured topics.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator(signal_topics=["signals.kraken.BTC-USD.live"])
+        repr_str = repr(trader)
+        assert "TraderCoordinator" in repr_str
+        assert "signals.kraken.BTC-USD.live" in repr_str
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.zmq.asyncio.Context")
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_stop_closes_sockets(
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+        mock_zmq_context_class: MagicMock,
+    ) -> None:
+        """Verify stop method properly closes all ZMQ resources.
+
+        Given: A TraderCoordinator with active sockets and contexts,
+        When: stop() is called,
+        Then: All sockets are closed and contexts terminated.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        mock_signal_sub = MagicMock()
+        mock_zmq_context = MagicMock()
+        mock_execution_socket = MagicMock()
+        mock_execution_context = MagicMock()
+        trader.signal_subscriber = mock_signal_sub
+        trader.zmq_context = mock_zmq_context
+        trader.execution_publisher = mock_execution_socket
+        trader.execution_context = mock_execution_context
+        await trader.stop()
+        mock_signal_sub.close.assert_called_once()
+        mock_zmq_context.term.assert_called_once()
+        mock_execution_socket.close.assert_called_once()
+        mock_execution_context.term.assert_called_once()
+        assert trader.signal_subscriber is None
+        assert trader.zmq_context is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_stop_when_not_started(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify stop is safe to call before start.
+
+        Given: A TraderCoordinator that was never started,
+        When: stop() is called,
+        Then: No errors occur and attributes remain None.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        await trader.stop()
+        assert trader.signal_subscriber is None
+        assert trader.zmq_context is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_setup_external_execution(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify external execution publisher setup.
+
+        Given: Settings with ZMQ broker configuration,
+        When: _setup_external_execution is called,
+        Then: Execution context and publisher are initialized.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7501"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        with patch(
+            "snapper.application.engine.trader.zmq.asyncio.Context"
+        ) as mock_zmq_context_class:
+            mock_context = MagicMock()
+            mock_socket = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            mock_zmq_context_class.return_value = mock_context
+            trader = TraderCoordinator()
+            await trader._setup_external_execution()
+            assert trader.execution_context is not None
+            assert trader.execution_publisher is not None
+            mock_context.socket.assert_called_once()
+            mock_socket.connect.assert_called_once_with("tcp://127.0.0.1:7501")
+
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_setup_signal_subscriber(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify signal subscriber setup creates ZMQ context and socket.
+
+        Given: TraderCoordinator with signal topics,
+        When: _setup_signal_subscriber is called,
+        Then: ZMQ context and signal subscriber socket are created.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        with patch(
+            "snapper.application.engine.trader.zmq.asyncio.Context"
+        ) as mock_zmq_context_class:
+            mock_context = MagicMock()
+            mock_socket = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            mock_zmq_context_class.return_value = mock_context
+            trader = TraderCoordinator(signal_topics=["signals.kraken.BTC-USD.live"])
+            await trader._setup_signal_subscriber()
+            assert trader.zmq_context is not None
+            assert trader.signal_subscriber is not None
+            mock_context.socket.assert_called_once()
+            mock_socket.connect.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_on_signal_processes_buy_signal(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify buy signal is processed and timestamp is updated.
+
+        Given: TraderCoordinator with mocked engine for BTC-USD,
+        When: Buy signal is received,
+        Then: Engine execute_desired_units is called and timestamp is recorded.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        trader.execution_publisher = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        signal_msg = SignalEnvelope(
+            strategy_name="test_strategy",
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.8,
+            price=50000.0,
+            exchange="kraken",
+            reason="test",
+        )
+        trader._current_topic = "signals.kraken.BTC-USD.live"
+        with patch("snapper.application.engine.trader.time.time", return_value=1234567890.0):
+            await trader._on_signal(signal_msg)
+        assert mock_engine.execute_desired_units.called
+        assert trader.last_signal_time["BTC-USD@kraken-live"] == 1234567890.0
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_on_signal_processes_sell_signal(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify sell signal triggers execution with zero units.
+
+        Given: TraderCoordinator with mocked engine for BTC-USD,
+        When: Sell signal is received,
+        Then: Engine execute_desired_units is called with 0.0 units.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        trader.execution_publisher = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        signal_msg = SignalEnvelope(
+            strategy_name="test_strategy",
+            instrument="BTC-USD",
+            side="sell",
+            strength=1.0,
+            price=50000.0,
+            exchange="kraken",
+            reason="test",
+        )
+        trader._current_topic = "signals.kraken.BTC-USD.live"
+        await trader._on_signal(signal_msg)
+        mock_engine.execute_desired_units.assert_called_once()
+        args = mock_engine.execute_desired_units.call_args[0]
+        assert args[0] == 0.0
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_on_signal_ignores_invalid_signal(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify signal without price is ignored.
+
+        Given: TraderCoordinator with mocked engine for BTC-USD,
+        When: Signal with price=None is received,
+        Then: Engine execute_desired_units is not called.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        signal_msg = SignalEnvelope(
+            strategy_name="test_strategy",
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.8,
+            price=None,
+            exchange="kraken",
+            reason="test",
+        )
+        trader._current_topic = "signals.kraken.BTC-USD.live"
+        await trader._on_signal(signal_msg)
+        assert not mock_engine.execute_desired_units.called
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_on_signal_unknown_instrument(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify signal for unknown instrument is handled gracefully.
+
+        Given: TraderCoordinator without engine for UNKNOWN-USD,
+        When: Signal for UNKNOWN-USD is received,
+        Then: No exception is raised.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        signal_msg = SignalEnvelope(
+            strategy_name="test_strategy",
+            instrument="UNKNOWN-USD",
+            side="buy",
+            strength=0.8,
+            price=100.0,
+            exchange="kraken",
+            reason="test",
+        )
+        trader._current_topic = "signals.kraken.UNKNOWN-USD"
+        await trader._on_signal(signal_msg)
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_signal_tracking_updates_timestamps(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify signal processing updates last_signal_time tracking.
+
+        Given: TraderCoordinator with mocked engine for BTC-USD,
+        When: Valid signal is processed,
+        Then: last_signal_time is updated with current timestamp.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        trader.execution_publisher = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        trader.last_signal_time["BTC-USD@kraken-live"] = 0.0
+        signal_msg = SignalEnvelope(
+            strategy_name="test_strategy",
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.8,
+            price=50000.0,
+            exchange="kraken",
+            reason="test",
+        )
+        trader._current_topic = "signals.kraken.BTC-USD.live"
+        with patch("snapper.application.engine.trader.time.time", return_value=1234567890.0):
+            await trader._on_signal(signal_msg)
+        assert trader.last_signal_time["BTC-USD@kraken-live"] == 1234567890.0
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_on_signal_unknown_exchange_in_topic(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify signal with unknown exchange is not processed.
+
+        Given: TraderCoordinator without engine for binance exchange,
+        When: Signal from binance exchange topic is received,
+        Then: No engine is created for the unknown exchange.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        trader.execution_publisher = MagicMock()
+        trader._current_topic = "signals.binance.BTC-USD.live"
+        signal_msg = SignalEnvelope(
+            strategy_name="test",
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.8,
+            price=50000.0,
+            exchange="binance",
+            reason="test",
+        )
+        await trader._on_signal(signal_msg)
+        assert "BTC-USD@binance-live" not in trader.engines
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    async def test_on_signal_no_execution_publisher(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify AssertionError is raised when execution_publisher is not set.
+
+        Given: TraderCoordinator without execution_publisher,
+        When: Signal is received,
+        Then: AssertionError is raised with descriptive message.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        trader = TraderCoordinator()
+        trader._current_topic = "signals.kraken.BTC-USD.live"
+        signal_msg = SignalEnvelope(
+            strategy_name="test",
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.8,
+            price=50000.0,
+            exchange="kraken",
+            reason="test",
+        )
+        with pytest.raises(AssertionError, match="execution_publisher not initialized"):
+            await trader._on_signal(signal_msg)
+
+
+class _RepositoryStub:
+    """Test stub for database repository."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def upsert_instrument(
+        self,
+        *,
+        symbol: str,
+        base: str,
+        quote: str,
+        tick_size: float,
+        lot_size: float,
+    ) -> None:
+        self.calls.append(
+            {
+                "symbol": symbol,
+                "base": base,
+                "quote": quote,
+                "tick_size": tick_size,
+                "lot_size": lot_size,
+            }
+        )
+
+
+class _SocketStub:
+    """Test stub for ZMQ socket."""
+
+    def __init__(self) -> None:
+        self.connected: list[str] = []
+        self.closed = False
+        self.options: list[tuple[int, str]] = []
+
+    def connect(self, address: str) -> None:
+        self.connected.append(address)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def setsockopt_string(self, option: int, value: str) -> None:
+        self.options.append((option, value))
+
+
+class _ContextStub:
+    """Test stub for ZMQ context."""
+
+    def __init__(self, factory: Callable[[int], _SocketStub]) -> None:
+        self._factory = factory
+        self.created: list[int] = []
+        self.terminated = False
+
+    def socket(self, socket_type: int) -> _SocketStub:
+        self.created.append(socket_type)
+        return self._factory(socket_type)
+
+    def term(self) -> None:
+        self.terminated = True
+
+
+class _PublisherStub:
+    """Test stub for ZMQ publisher."""
+
+    def __init__(self, socket: _SocketStub) -> None:
+        self._socket = socket
+
+    def setsockopt(self, _option: int, _value: int) -> None:
+        pass
+
+    def close(self) -> None:
+        self._socket.close()
+
+
+class _SubscriberStub:
+    """Test stub for ZMQ subscriber."""
+
+    def __init__(self, socket: _SocketStub) -> None:
+        self._socket = socket
+        self.topics: list[str] = []
+        self.messages: list[tuple[str, bytes]] = []
+
+    def subscribe(self, topic: str) -> None:
+        self.topics.append(topic)
+
+    def setsockopt(self, _option: int, _value: int) -> None:
+        pass
+
+    def close(self) -> None:
+        self._socket.close()
+
+    async def recv_multipart(self) -> tuple[str, bytes]:
+        if not self.messages:
+            raise asyncio.CancelledError()
+        return self.messages.pop(0)
+
+
+class _EngineStub:
+    """Test stub for trading engine."""
+
+    def __init__(
+        self,
+        instrument: str,
+        *,
+        execution_socket: Any,
+        risk: Any,
+        cfg: Any,
+        instrument_specs: dict[str, dict[str, float]],
+        exchange: str,
+    ) -> None:
+        self.instrument = instrument
+        self.execution_socket = execution_socket
+        self.risk = risk
+        self.cfg = cfg
+        self.instrument_specs = instrument_specs
+        self.exchange = exchange
+        self.execute_calls: list[dict[str, Any]] = []
+
+    async def execute_desired_units(
+        self,
+        desired_units: float,
+        price: float,
+        *,
+        signaled_at: Any,
+    ) -> None:
+        self.execute_calls.append(
+            {
+                "desired_units": desired_units,
+                "price": price,
+                "signaled_at": signaled_at,
+            }
+        )
+
+
+def test_get_default_kwargs_returns_default_signal_topic() -> None:
+    """Verify get_default_kwargs returns default signal topic.
+
+    Given empty AppSettings,
+    When get_default_kwargs is called,
+    Then default signal topics list with 'signals.' is returned.
+    """
+    defaults = TraderCoordinator.get_default_kwargs(cast(AppSettings, SimpleNamespace()))
+    assert defaults == {"signal_topics": ["signals."]}
+
+
+def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespace, _RepositoryStub]:
+    repository = _RepositoryStub()
+    settings = SimpleNamespace(
+        db_url="sqlite://",
+        zmq_broker_xsub="tcp://broker.xsub",
+        risk_r_per_trade=0.01,
+        risk_max_leverage=2.0,
+        risk_max_drawdown=0.15,
+    )
+
+    def _stub_get_settings() -> SimpleNamespace:
+        return settings
+
+    def _stub_get_repository(_db_url: str) -> _RepositoryStub:
+        return repository
+
+    monkeypatch.setattr(trader_module, "get_settings", _stub_get_settings, raising=True)
+    monkeypatch.setattr(trader_module, "get_repository", _stub_get_repository, raising=True)
+    return settings, repository
+
+
+@pytest.mark.asyncio
+async def test_trader_coordinator_start_calls_setup_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify start method calls setup methods in correct order.
+
+    Given a TraderCoordinator with mocked setup methods,
+    When start() is called,
+    Then setup methods are called in sequence: external, components, subscriber, loop.
+    """
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(
+        trader_module,
+        "_bootstrap_settings",
+        SimpleNamespace(zmq_broker_xpub="tcp://broker.xpub"),
+    )
+    coordinator = TraderCoordinator(signal_topics=["signals.paper."])
+    calls: list[str] = []
+
+    def _record(name: str) -> None:
+        calls.append(name)
+
+    coordinator_any = cast(Any, coordinator)
+    coordinator_any._setup_external_execution = AsyncMock(side_effect=lambda: _record("external"))
+    coordinator_any._setup_trading_components = AsyncMock(side_effect=lambda: _record("components"))
+    coordinator_any._setup_signal_subscriber = AsyncMock(side_effect=lambda: _record("subscriber"))
+    coordinator_any._run_trading_loop = AsyncMock(side_effect=lambda: _record("loop"))
+    await coordinator.start()
+    assert calls == ["external", "components", "subscriber", "loop"]
+
+
+def test_trader_coordinator_repr() -> None:
+    """Verify repr includes signal topics.
+
+    Given a TraderCoordinator with signal topics,
+    When repr() is called,
+    Then the string contains the configured signal topics.
+    """
+    coord = TraderCoordinator(signal_topics=["signals.foo."])
+    assert "signals.foo." in repr(coord)
+
+
+@pytest.mark.asyncio
+async def test_trader_coordinator_stop_closes_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify stop closes all ZMQ resources.
+
+    Given a TraderCoordinator with active sockets and contexts,
+    When stop() is called,
+    Then all sockets are closed and contexts are terminated.
+    """
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(
+        trader_module,
+        "_bootstrap_settings",
+        SimpleNamespace(zmq_broker_xpub="tcp://broker.xpub"),
+    )
+    coordinator = TraderCoordinator()
+    signal_socket = _SocketStub()
+    sub_stub = _SubscriberStub(signal_socket)
+    coordinator.signal_subscriber = cast(Any, sub_stub)
+    zmq_context = _ContextStub(lambda _t: signal_socket)
+    coordinator.zmq_context = cast(Any, zmq_context)
+    exec_socket = _SocketStub()
+    exec_pub = _PublisherStub(exec_socket)
+    coordinator.execution_publisher = cast(Any, exec_pub)
+    exec_context = _ContextStub(lambda _t: exec_socket)
+    coordinator.execution_context = cast(Any, exec_context)
+    await coordinator.stop()
+    assert signal_socket.closed is True
+    assert zmq_context.terminated is True
+    assert exec_socket.closed is True
+    assert exec_context.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_setup_trading_components_requires_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify setup raises when execution publisher is missing.
+
+    Given a TraderCoordinator without execution_publisher,
+    When _setup_trading_components is called,
+    Then RuntimeError is raised.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord_any = cast(Any, coord)
+    coord.execution_publisher = None
+    with pytest.raises(RuntimeError):
+        await coord_any._setup_trading_components()
+    coord.execution_publisher = cast(Any, _PublisherStub(_SocketStub()))
+    await coord_any._setup_trading_components()
+
+
+@pytest.mark.asyncio
+async def test_ensure_instrument_handles_delimiters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify instrument parsing handles dash and slash delimiters.
+
+    Given a TraderCoordinator with repository stub,
+    When _ensure_instrument is called with dash and slash delimited symbols,
+    Then base and quote currencies are correctly parsed and stored.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord_any = cast(Any, coord)
+    await coord_any._ensure_instrument("BTC-USD")
+    await coord_any._ensure_instrument("ETH/EUR")
+    repository_stub = cast(_RepositoryStub, coord.repository)
+    symbols = {call["symbol"]: call for call in repository_stub.calls}
+    assert symbols["BTC-USD"]["base"] == "BTC"
+    assert symbols["ETH/EUR"]["quote"] == "EUR"
+
+
+@pytest.mark.asyncio
+async def test_setup_external_execution_uses_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify external execution setup creates context and publisher.
+
+    Given a TraderCoordinator with broker configuration,
+    When _setup_external_execution is called,
+    Then ZMQ context and publisher are created and connected to broker.
+    """
+    _configure_settings(monkeypatch)
+    pub_socket = _SocketStub()
+    context = _ContextStub(lambda _t: pub_socket)
+    zmq_module = cast(Any, trader_module).zmq
+    monkeypatch.setattr(zmq_module.asyncio, "Context", lambda: context, raising=False)
+    monkeypatch.setattr(trader_module, "ValidatedPublisher", _PublisherStub, raising=True)
+    coord = TraderCoordinator()
+    coord_any = cast(Any, coord)
+    await coord_any._setup_external_execution()
+    assert pub_socket.connected == [coord.settings.zmq_broker_xsub]
+    assert isinstance(coord.execution_publisher, _PublisherStub)
+
+
+@pytest.mark.asyncio
+async def test_setup_signal_subscriber_subscribes_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify signal subscriber subscribes to all required topics.
+
+    Given a TraderCoordinator with multiple signal topics,
+    When _setup_signal_subscriber is called,
+    Then subscriber connects and subscribes to all configured topics plus system topics.
+    """
+    _configure_settings(monkeypatch)
+    broker_socket = _SocketStub()
+    context = _ContextStub(lambda _t: broker_socket)
+    zmq_module = cast(Any, trader_module).zmq
+    monkeypatch.setattr(zmq_module.asyncio, "Context", lambda: context, raising=False)
+    subscriber = _SubscriberStub(broker_socket)
+
+    def _make_subscriber(socket: Any) -> _SubscriberStub:
+        assert socket is broker_socket
+        return subscriber
+
+    monkeypatch.setattr(trader_module, "ValidatedSubscriber", _make_subscriber, raising=True)
+    monkeypatch.setattr(
+        trader_module,
+        "_bootstrap_settings",
+        SimpleNamespace(zmq_broker_xpub="tcp://broker.xpub"),
+    )
+    coord = TraderCoordinator(signal_topics=["signals.kraken.", "signals.paper."])
+    coord_any = cast(Any, coord)
+    await coord_any._setup_signal_subscriber()
+    assert broker_socket.connected == ["tcp://broker.xpub"]
+    assert subscriber.topics == [
+        "signals.kraken.",
+        "signals.paper.",
+        "system.symbol_mappings",
+        "system.settings",
+        "executions.",
+        "orders.",
+    ]
+    assert cast(Any, coord.signal_subscriber) is subscriber
+
+
+@pytest.mark.asyncio
+async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify signal handler validates topic format and payload data.
+
+    Given a TraderCoordinator with execution publisher,
+    When signals with various valid and invalid topics and payloads are received,
+    Then only valid signals create engines and execute trades.
+    """
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(
+        trader_module,
+        "_bootstrap_settings",
+        SimpleNamespace(zmq_broker_xpub="tcp://broker.xpub"),
+    )
+    publisher = _PublisherStub(_SocketStub())
+    coord = TraderCoordinator()
+    coord.execution_publisher = cast(Any, publisher)
+    repository = cast(_RepositoryStub, coord.repository)
+    monkeypatch.setattr(trader_module, "TradingEngineService", _EngineStub, raising=True)
+    coord_any = cast(Any, coord)
+    coord_any._current_topic = "signals.invalid"
+    signal_invalid_topic = SignalEnvelope(
+        instrument="BTC-USD", side="buy", strength=0.5, price=10.0, exchange="test", reason="test"
+    )
+    await coord_any._on_signal(signal_invalid_topic)
+    assert coord.engines == {}
+    coord_any._current_topic = "signals.kraken.BTC-USD.live"
+    signal_no_price = SignalEnvelope(
+        instrument="BTC-USD", side="buy", strength=0.5, exchange="kraken", reason="test"
+    )
+    await coord_any._on_signal(signal_no_price)
+    assert coord.engines == {}
+    signal_zero_price = SignalEnvelope(
+        instrument="BTC-USD", side="buy", strength=0.5, price=0.0, exchange="kraken", reason="test"
+    )
+    await coord_any._on_signal(signal_zero_price)
+    assert coord.engines == {}
+    signal_valid = SignalEnvelope(
+        instrument="BTC-USD",
+        side="buy",
+        price=10.0,
+        strength=0.5,
+        strategy_name="momentum",
+        exchange="kraken",
+        reason="test",
+    )
+    await coord_any._on_signal(signal_valid)
+    engine_key = "BTC-USD@kraken-live"
+    assert engine_key in coord.engines
+    engine = cast(_EngineStub, coord.engines[engine_key])
+    assert repository.calls[0]["symbol"] == "BTC-USD"
+    assert engine.execute_calls[0]["desired_units"] == 0.5
+    signal_sell = SignalEnvelope(
+        instrument="BTC-USD",
+        side="sell",
+        strength=1.0,
+        price=10.0,
+        exchange="kraken",
+        reason="test",
+    )
+    await coord_any._on_signal(signal_sell)
+    assert engine.execute_calls[1]["desired_units"] == 0.0
+    assert coord.last_signal_time[engine_key] <= time.time()
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_handles_missing_subscriber(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify listen_signals returns early when subscriber is None.
+
+    Given a TraderCoordinator with no signal subscriber,
+    When _listen_signals is called,
+    Then it returns immediately without errors.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord.signal_subscriber = None
+    coord_any = cast(Any, coord)
+    await coord_any._listen_signals()
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_processes_single_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify listen_signals processes and routes signal message.
+
+    Given a TraderCoordinator with a subscriber containing one message,
+    When _listen_signals is called,
+    Then the message is processed and _on_signal is invoked once.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    subscriber_socket = _SocketStub()
+    subscriber = _SubscriberStub(subscriber_socket)
+    message: dict[str, Any] = {
+        "type": "signal",
+        "instrument": "BTC-USD",
+        "side": "buy",
+        "price": 10.0,
+        "strength": 0.5,
+        "exchange": "kraken",
+        "reason": "test",
+    }
+    subscriber.messages.append(("signals.kraken.BTC-USD.live", json.dumps(message).encode("utf-8")))
+    coord.signal_subscriber = cast(Any, subscriber)
+    merchant = AsyncMock()
+    coord_any = cast(Any, coord)
+    coord_any._on_signal = cast(Any, merchant)
+    with pytest.raises(asyncio.CancelledError):
+        await coord_any._listen_signals()
+    assert merchant.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_handles_symbol_mappings_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify symbol mappings update triggers cache invalidation.
+
+    Given a TraderCoordinator with a subscriber containing symbol mappings message,
+    When _listen_signals processes the message,
+    Then SymbolMapperService cache invalidation is triggered.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    subscriber_socket = _SocketStub()
+    subscriber = _SubscriberStub(subscriber_socket)
+    subscriber.messages.append(
+        (
+            "system.symbol_mappings",
+            json.dumps({"event": "symbol_mappings_updated"}).encode("utf-8"),
+        )
+    )
+    coord.signal_subscriber = cast(Any, subscriber)
+    invalidation_calls: list[dict[str, Any]] = []
+
+    class MockMapperService:
+        @staticmethod
+        def get_instance() -> "MockMapperService":
+            return MockMapperService()
+
+        def trigger_cache_invalidation(self, *, fail_fast: bool = True) -> None:
+            invalidation_calls.append({"fail_fast": fail_fast})
+
+    monkeypatch.setattr(trader_module, "SymbolMapperService", MockMapperService)
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._listen_signals()
+    assert len(invalidation_calls) == 1
+    assert invalidation_calls[0]["fail_fast"] is False
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_handles_settings_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify settings update message triggers cache update.
+
+    Given a TraderCoordinator with a subscriber containing settings update message,
+    When _listen_signals processes the message,
+    Then SettingsService cache is updated with new value.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    subscriber_socket = _SocketStub()
+    subscriber = _SubscriberStub(subscriber_socket)
+    subscriber.messages.append(
+        (
+            "system.settings",
+            json.dumps(
+                {"type": "setting_changed", "key": "foo", "value": "bar", "category": "test"}
+            ).encode("utf-8"),
+        )
+    )
+    coord.signal_subscriber = cast(Any, subscriber)
+    cache_updates: list[dict[str, Any]] = []
+
+    class MockSettingsService:
+        _cache: dict[str, Any] = {}
+
+        @staticmethod
+        def get_instance() -> "MockSettingsService":
+            return MockSettingsService()
+
+        def _parse_value(self, value: str) -> Any:
+            cache_updates.append({"value": value})
+            return value
+
+    monkeypatch.setattr(trader_module, "SettingsService", MockSettingsService)
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._listen_signals()
+    assert len(cache_updates) == 1
+    assert cache_updates[0]["value"] == "bar"
+
+
+@pytest.mark.asyncio
+async def test_handle_settings_update_handles_invalid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify settings update gracefully handles invalid JSON.
+
+    Given a TraderCoordinator,
+    When _handle_settings_update is called with invalid JSON or non-setting_changed event,
+    Then no errors are raised.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord._handle_settings_update(b"not-json")
+    coord._handle_settings_update(json.dumps({"type": "other_event", "key": "foo"}).encode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_handle_settings_update_skips_when_no_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify settings update skips when SettingsService has no instance.
+
+    Given a TraderCoordinator with SettingsService returning None,
+    When _handle_settings_update is called with valid payload,
+    Then no errors are raised and update is skipped.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    monkeypatch.setattr(
+        "snapper.application.engine.trader.SettingsService.get_instance",
+        lambda: None,
+    )
+    payload = json.dumps(
+        {"type": "setting_changed", "key": "test_key", "value": "test_value", "category": "test"}
+    )
+    coord._handle_settings_update(payload.encode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_handle_execution_fill_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify execution fill handler processes valid fill message.
+
+    Given a TraderCoordinator,
+    When _handle_execution_fill is called with valid fill JSON,
+    Then the fill is processed without errors.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    fill_payload = json.dumps(
+        {
+            "type": "fill",
+            "id": "exec-456",
+            "order_id": "order-123",
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "side": "buy",
+            "size": 0.5,
+            "price": 50000.0,
+            "fee": 0.5,
+            "fee_asset": "USD",
+            "status": "filled",
+        }
+    )
+    coord._handle_execution_fill("executions.kraken.BTC-USD.fill", fill_payload.encode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_handle_execution_fill_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify execution fill handler handles invalid JSON gracefully.
+
+    Given a TraderCoordinator,
+    When _handle_execution_fill is called with invalid JSON,
+    Then no errors are raised.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord._handle_execution_fill("executions.kraken.BTC-USD.fill", b"not-json")
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_routes_execution_fill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify listen_signals routes execution fill messages.
+
+    Given a TraderCoordinator with subscriber containing execution fill message,
+    When _listen_signals processes the message,
+    Then the fill is routed to _handle_execution_fill.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    subscriber_socket = _SocketStub()
+    subscriber = _SubscriberStub(subscriber_socket)
+    subscriber.messages.append(
+        (
+            "executions.kraken.BTC-USD.fill",
+            json.dumps(
+                {
+                    "type": "fill",
+                    "id": "exec-1",
+                    "order_id": "order-123",
+                    "instrument": "BTC-USD",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                }
+            ).encode("utf-8"),
+        )
+    )
+    coord.signal_subscriber = cast(Any, subscriber)
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._listen_signals()
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_routes_order_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify listen_signals routes order status messages.
+
+    Given a TraderCoordinator with subscriber containing order status message,
+    When _listen_signals processes the message,
+    Then the status is routed to _handle_order_status.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    subscriber_socket = _SocketStub()
+    subscriber = _SubscriberStub(subscriber_socket)
+    subscriber.messages.append(
+        (
+            "orders.kraken.BTC-USD.status",
+            json.dumps({"id": "order-123", "status": "filled"}).encode("utf-8"),
+        )
+    )
+    coord.signal_subscriber = cast(Any, subscriber)
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._listen_signals()
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_skips_order_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify listen_signals skips orders.*.new messages.
+
+    Given a TraderCoordinator with subscriber containing orders.*.new message,
+    When _listen_signals processes the message,
+    Then the message is ignored without processing.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    subscriber_socket = _SocketStub()
+    subscriber = _SubscriberStub(subscriber_socket)
+    subscriber.messages.append(
+        (
+            "orders.kraken.BTC-USD.new",
+            json.dumps({"id": "order-123"}).encode("utf-8"),
+        )
+    )
+    coord.signal_subscriber = cast(Any, subscriber)
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._listen_signals()
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify order status handler processes valid status message.
+
+    Given a TraderCoordinator,
+    When _handle_order_status is called with valid status JSON,
+    Then the status is processed without errors.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    status_payload = json.dumps(
+        {
+            "id": "order-123",
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "side": "buy",
+            "size": 0.5,
+            "price": 50000.0,
+            "order_type": "market",
+            "status": "filled",
+            "filled_size": 0.5,
+        }
+    )
+    coord._handle_order_status("orders.kraken.BTC-USD.status", status_payload.encode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify order status handler handles invalid JSON gracefully.
+
+    Given a TraderCoordinator,
+    When _handle_order_status is called with invalid JSON,
+    Then no errors are raised.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord._handle_order_status("orders.kraken.BTC-USD.status", b"not-json")
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_handles_general_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify listen_signals handles and logs unexpected exceptions.
+
+    Given a TraderCoordinator with subscriber that raises RuntimeError,
+    When _listen_signals is called,
+    Then the exception is caught and logged without propagating.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+
+    class _FailingSubscriber:
+        def __init__(self) -> None:
+            self._socket = _SocketStub()
+
+        def close(self) -> None:
+            self._socket.close()
+
+        async def recv_multipart(self) -> tuple[str, bytes]:
+            raise RuntimeError("boom")
+
+    coord.signal_subscriber = cast(Any, _FailingSubscriber())
+    await cast(Any, coord)._listen_signals()
+
+
+@pytest.mark.asyncio
+async def test_signal_health_monitor_reports_stale_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify health monitor logs warning for stale signal times.
+
+    Given a TraderCoordinator with engine that has old last_signal_time,
+    When _signal_health_monitor runs,
+    Then warning is logged for stale engine.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord.engines["BTC-USD@kraken-live"] = cast(
+        Any,
+        _EngineStub(
+            "BTC-USD",
+            execution_socket=_PublisherStub(_SocketStub()),
+            risk=None,
+            cfg=None,
+            instrument_specs={},
+            exchange="kraken",
+        ),
+    )
+    coord.last_signal_time["BTC-USD@kraken-live"] = 0.0
+    call_count = {"value": 0}
+
+    async def _fake_sleep(_: float) -> None:
+        call_count["value"] += 1
+        if call_count["value"] >= 2:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep, raising=False)
+    monkeypatch.setattr(time, "time", lambda: 120.0, raising=False)
+    coord_any = cast(Any, coord)
+    with pytest.raises(asyncio.CancelledError):
+        await coord_any._signal_health_monitor()
+
+
+@pytest.mark.asyncio
+async def test_signal_health_monitor_skips_debug_for_recent_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify health monitor skips debug logging for recent signals.
+
+    Given a TraderCoordinator with engine that has recent last_signal_time,
+    When _signal_health_monitor runs,
+    Then debug logging is not called for healthy engine.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord.engines["BTC-USD@kraken-live"] = cast(
+        Any,
+        _EngineStub(
+            "BTC-USD",
+            execution_socket=_PublisherStub(_SocketStub()),
+            risk=None,
+            cfg=None,
+            instrument_specs={},
+            exchange="kraken",
+        ),
+    )
+    coord.last_signal_time["BTC-USD@kraken-live"] = 90.0
+    call_count = {"value": 0}
+
+    async def _fake_sleep(_: float) -> None:
+        call_count["value"] += 1
+        if call_count["value"] >= 2:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep, raising=False)
+    monkeypatch.setattr(time, "time", lambda: 100.0, raising=False)
+    mock_logger = SimpleNamespace(debug=Mock())
+    monkeypatch.setattr(trader_module, "logger", cast(Any, mock_logger), raising=False)
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._signal_health_monitor()
+    assert mock_logger.debug.called is False
+
+
+@pytest.mark.asyncio
+async def test_run_trading_loop_cancels_pending_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify trading loop cancels pending tasks on CancelledError.
+
+    Given a TraderCoordinator with pending listener and monitor tasks,
+    When _run_trading_loop is cancelled,
+    Then all pending tasks are cancelled.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+
+    async def _stub_listener() -> None:
+        await asyncio.Event().wait()
+
+    async def _stub_monitor() -> None:
+        await asyncio.Event().wait()
+
+    created_tasks: list[asyncio.Task[Any]] = []
+    original_create_task = asyncio.create_task
+    coord_any = cast(Any, coord)
+    coord_any._listen_signals = _stub_listener
+    coord_any._signal_health_monitor = _stub_monitor
+
+    def _fake_create_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    async def _fake_gather(*_tasks: Any) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "create_task", _fake_create_task, raising=False)
+    monkeypatch.setattr(asyncio, "gather", _fake_gather, raising=False)
+    await cast(Any, coord)._run_trading_loop()
+    assert [task.cancelled() for task in created_tasks] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_run_trading_loop_skips_cancelling_completed_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify trading loop does not cancel already completed tasks.
+
+    Given a TraderCoordinator with tasks that complete immediately,
+    When _run_trading_loop finishes,
+    Then completed tasks are not cancelled.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+
+    async def _stub_listener() -> None:
+        return None
+
+    async def _stub_monitor() -> None:
+        return None
+
+    created_tasks: list[asyncio.Task[Any]] = []
+    original_create_task = asyncio.create_task
+
+    def _tracking_create_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    coord_any = cast(Any, coord)
+    coord_any._listen_signals = _stub_listener
+    coord_any._signal_health_monitor = _stub_monitor
+    monkeypatch.setattr(asyncio, "create_task", _tracking_create_task, raising=False)
+    await cast(Any, coord)._run_trading_loop()
+    assert [task.done() for task in created_tasks] == [True, True]
+    assert [task.cancelled() for task in created_tasks] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_run_zmq_trader_handles_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify run_zmq_trader handles KeyboardInterrupt and stops cleanly.
+
+    Given a TraderCoordinator stub that raises KeyboardInterrupt on start,
+    When run_zmq_trader is called,
+    Then stop() is called to clean up resources.
+    """
+    start_called = {"value": False}
+    stop_called = {"value": False}
+
+    class _TraderStub:
+        def __init__(self, *, signal_topics: list[str] | None = None) -> None:
+            self.signal_topics = signal_topics
+
+        async def start(self) -> None:
+            start_called["value"] = True
+            raise KeyboardInterrupt()
+
+        async def stop(self) -> None:
+            stop_called["value"] = True
+
+    monkeypatch.setattr(trader_module, "TraderCoordinator", _TraderStub, raising=True)
+    await run_zmq_trader(signal_topics=["signals."])
+    assert start_called["value"] is True
+    assert stop_called["value"] is True
+
+
+class StubEngine:
+    """Stub trading engine that records execute_desired_units calls."""
+
+    def __init__(self, instrument: str, execution_socket: Any, **_kwargs: Any) -> None:
+        """Initialize the instance."""
+        self.instrument = instrument
+        self.execution_socket = execution_socket
+        self.calls: list[tuple[float, float | None]] = []
+
+    async def execute_desired_units(
+        self, desired_units: float, price: float, signaled_at: float | None = None
+    ) -> None:
+        """Record desired units and timestamp for verification."""
+        self.calls.append((desired_units, signaled_at))
+
+
+@pytest.mark.asyncio
+async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify signal handler converts ISO timestamp to float.
+
+    Given a TraderCoordinator with execution publisher,
+    When signal with ISO datetime timestamp is received,
+    Then timestamp is converted to float for execute_desired_units.
+    """
+    settings = SimpleNamespace(
+        risk_r_per_trade=0.01,
+        risk_max_leverage=1.0,
+        risk_max_drawdown=0.5,
+        db_url="sqlite://",
+        zmq_broker_xsub="inproc://broker",
+    )
+    monkeypatch.setattr(trader_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        trader_module,
+        "get_repository",
+        lambda _url: SimpleNamespace(upsert_instrument=AsyncMock()),
+    )
+    monkeypatch.setattr(trader_module, "TradingEngineService", StubEngine)
+    coordinator = TraderCoordinator()
+    coordinator.execution_publisher = cast(Any, SimpleNamespace())
+    coordinator._current_topic = "signals.paper.BTC-USD.live"
+    signal = SignalEnvelope(
+        instrument="BTC-USD",
+        side="buy",
+        strength=0.5,
+        price=10_000.0,
+        strategy_name="demo",
+        timestamp=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        exchange="kraken",
+        reason="test",
+    )
+    await coordinator._on_signal(signal)
+    engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-live"])
+    assert engine.calls
+    assert isinstance(engine.calls[0][1], float)

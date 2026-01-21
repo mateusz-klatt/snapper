@@ -1,0 +1,183 @@
+import { describe, it, expect } from 'vitest'
+import {
+  buildMarketTopic,
+  getMessageTopic,
+  shouldThrottle,
+  getAllTopics,
+  MARKET_TOPIC_PREFIX,
+  ORDERS_TOPIC_PREFIX,
+  EXECUTIONS_TOPIC_PREFIX,
+  SIGNALS_TOPIC_PREFIX,
+  STRATEGY_TOPIC_PREFIX,
+  HEARTBEATS_TOPIC_PREFIX,
+} from './topics'
+import {
+  createCandle,
+  createTick,
+  createSignal,
+  createOrder,
+  createExecution,
+  createHeartbeat,
+  createError,
+} from '@/test/wsMessageFactories'
+
+describe('topics', () => {
+  describe('buildMarketTopic', () => {
+    it('builds candles topic with all parameters', () => {
+      expect(buildMarketTopic('candles', 'BTC-USD', 'kraken', '1m')).toBe(
+        'market.kraken.BTC-USD.candles.1m'
+      )
+    })
+    it('builds candles topic with default exchange and timeframe', () => {
+      expect(buildMarketTopic('candles', 'ETH-USD')).toBe('market.kraken.ETH-USD.candles.1m')
+    })
+    it('converts instrument to uppercase', () => {
+      expect(buildMarketTopic('candles', 'btc-usd', 'kraken', '5m')).toBe(
+        'market.kraken.BTC-USD.candles.5m'
+      )
+    })
+    it('builds ticks topic (4 segments)', () => {
+      expect(buildMarketTopic('ticks', 'BTC-USD', 'kraken')).toBe('market.kraken.BTC-USD.ticks')
+    })
+    it('builds ticks topic with default exchange', () => {
+      expect(buildMarketTopic('ticks', 'ETH-EUR')).toBe('market.kraken.ETH-EUR.ticks')
+    })
+    it('trims whitespace from instrument', () => {
+      expect(buildMarketTopic('candles', '  BTC-USD  ', 'kraken', '1m')).toBe(
+        'market.kraken.BTC-USD.candles.1m'
+      )
+    })
+  })
+  describe('getMessageTopic', () => {
+    it('builds topic from candle message data', () => {
+      const message = createCandle({
+        instrument: 'BTC-USD',
+        exchange: 'KRAKEN',
+        timeframe: '1m',
+      })
+
+      expect(getMessageTopic(message)).toBe('market.kraken.BTC-USD.candles.1m')
+    })
+    it('returns fallback for candle with missing data', () => {
+      const message = createCandle({
+        instrument: '',
+        exchange: '',
+        timeframe: '',
+      })
+
+      expect(getMessageTopic(message)).toBe('market.')
+    })
+    it('builds topic from tick message data', () => {
+      const message = createTick({
+        instrument: 'ETH-EUR',
+        exchange: 'ZONDA',
+      })
+
+      expect(getMessageTopic(message)).toBe('market.zonda.ETH-EUR.ticks')
+    })
+    it('returns fallback for tick with missing data', () => {
+      const message = createTick({
+        instrument: '',
+        exchange: '',
+      })
+
+      expect(getMessageTopic(message)).toBe('market.')
+    })
+    it('returns orders prefix for order message', () => {
+      const message = createOrder()
+
+      expect(getMessageTopic(message)).toBe('orders.')
+    })
+    it('returns executions prefix for execution message', () => {
+      const message = createExecution()
+
+      expect(getMessageTopic(message)).toBe('executions.')
+    })
+    it('builds topic from signal message data', () => {
+      const message = createSignal({
+        exchange: 'KRAKEN',
+        instrument: 'BTC-USD',
+      })
+
+      expect(getMessageTopic(message)).toBe('signals.kraken.BTC-USD.live')
+    })
+    it('returns fallback for signal with missing data', () => {
+      const message = createSignal({
+        exchange: '',
+        instrument: '',
+      })
+
+      expect(getMessageTopic(message)).toBe('signals.')
+    })
+    it('returns heartbeats prefix for heartbeat message', () => {
+      const message = createHeartbeat()
+
+      expect(getMessageTopic(message)).toBe('system.heartbeats.')
+    })
+    it('returns message type for unknown types', () => {
+      const message = createError({ message: 'test' })
+
+      expect(getMessageTopic(message)).toBe('error')
+    })
+  })
+  describe('shouldThrottle', () => {
+    it('returns true for candle messages', () => {
+      expect(shouldThrottle('bar')).toBe(true)
+    })
+    it('returns true for order messages', () => {
+      expect(shouldThrottle('order_status')).toBe(true)
+    })
+    it('returns true for execution messages', () => {
+      expect(shouldThrottle('fill')).toBe(true)
+    })
+    it('returns true for position messages', () => {
+      expect(shouldThrottle('position')).toBe(true)
+    })
+    it('returns false for heartbeat messages', () => {
+      expect(shouldThrottle('heartbeat')).toBe(false)
+    })
+    it('returns false for signal messages', () => {
+      expect(shouldThrottle('signal')).toBe(false)
+    })
+    it('returns false for unknown message types', () => {
+      expect(shouldThrottle('unknown')).toBe(false)
+    })
+  })
+  describe('topic constants', () => {
+    it('exports MARKET_TOPIC_PREFIX', () => {
+      expect(MARKET_TOPIC_PREFIX).toBe('market.')
+    })
+    it('exports ORDERS_TOPIC_PREFIX', () => {
+      expect(ORDERS_TOPIC_PREFIX).toBe('orders.')
+    })
+    it('exports EXECUTIONS_TOPIC_PREFIX', () => {
+      expect(EXECUTIONS_TOPIC_PREFIX).toBe('executions.')
+    })
+    it('exports SIGNALS_TOPIC_PREFIX', () => {
+      expect(SIGNALS_TOPIC_PREFIX).toBe('signals.')
+    })
+    it('exports STRATEGY_TOPIC_PREFIX', () => {
+      expect(STRATEGY_TOPIC_PREFIX).toBe('strategy.')
+    })
+    it('exports HEARTBEATS_TOPIC_PREFIX', () => {
+      expect(HEARTBEATS_TOPIC_PREFIX).toBe('system.heartbeats.')
+    })
+  })
+  describe('getAllTopics', () => {
+    it('returns array of all topic prefixes', () => {
+      const topics = getAllTopics()
+
+      expect(topics).toEqual([
+        'market.',
+        'orders.',
+        'executions.',
+        'signals.',
+        'strategy.',
+        'system.heartbeats.',
+      ])
+    })
+    it('returns 6 topics', () => {
+      expect(getAllTopics()).toHaveLength(6)
+    })
+  })
+})

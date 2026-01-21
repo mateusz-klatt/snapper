@@ -1,0 +1,622 @@
+"""Paper trading simulation exchange client.
+
+This module provides PaperExchangeClient, a simulated exchange client
+for testing trading strategies without real money. It implements:
+
+Order Simulation:
+    - Create, cancel orders with simulated fills
+    - Configurable fill delay for realistic timing
+    - Support for market and limit orders
+
+Account Management:
+    - Simulated balances for multiple currencies
+    - Balance updates on order fills
+    - Initial balance configuration
+
+Features:
+    - No external dependencies (fully in-memory)
+    - Configurable time window for backtesting
+    - Execution queue for strategy callbacks
+    - Database logging for order/execution history
+
+The paper client is ideal for:
+    - Strategy backtesting
+    - Integration testing
+    - Development without exchange credentials
+    - Risk-free experimentation
+"""
+
+import asyncio
+import contextlib
+import time
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from typing import Any
+
+from loguru import logger
+
+from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.exchanges.contracts import AccountBalance
+from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
+from snapper.infrastructure.exchanges.contracts import TickerSnapshot
+from snapper.infrastructure.exchanges.contracts import TickerUpdate
+from snapper.infrastructure.exchanges.contracts import TradeUpdate
+
+
+class PaperExchangeClient(ExchangeClientBase):
+    """Simulated exchange client for paper trading and backtesting.
+
+    This client simulates exchange behavior without connecting to any
+    real exchange. Orders are filled after a configurable delay and
+    balances are tracked in-memory.
+
+    Useful for strategy development, testing, and backtesting without
+    risking real funds.
+
+    Attributes:
+        fill_delay: Delay in seconds before orders are filled.
+        initial_balance: Starting balance for each currency.
+        start_time: Optional start timestamp for backtesting window.
+        end_time: Optional end timestamp for backtesting window.
+    """
+
+    def __init__(
+        self,
+        repository: Repository | None = None,
+        fill_delay: float = 0.1,
+        initial_balance: float = 10000.0,
+        start_time: float | None = None,
+        end_time: float | None = None,
+    ) -> None:
+        """Initialize paper trading client.
+
+        Args:
+            repository: Database repository for order/execution logging.
+            fill_delay: Delay in seconds before simulating order fills.
+            initial_balance: Starting balance for each currency.
+            start_time: Start timestamp for backtesting (Unix seconds).
+            end_time: End timestamp for backtesting (Unix seconds).
+        """
+        super().__init__(repository=repository, exchange_name="paper")
+        self.fill_delay = fill_delay
+        self.initial_balance = initial_balance
+        self.start_time = start_time
+        self.end_time = end_time
+        self._running = False
+        self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue()
+        self._orders: dict[str, ExchangeOrderSnapshot] = {}
+        self._balances: dict[str, AccountBalance] = {}
+        self._fill_simulator_task: asyncio.Task[None] | None = None
+
+    async def connect(self) -> None:
+        """Initialize paper trading system with default balances."""
+        if self._running:
+            logger.warning("PaperExchangeClient already connected")
+            return
+        logger.info("Connecting to Paper Trading System...")
+        for currency in ["USD", "EUR", "PLN", "BTC", "ETH"]:
+            self._balances[currency] = AccountBalance(
+                currency=currency,
+                free=self.initial_balance,
+                used=0.0,
+                total=self.initial_balance,
+            )
+        self._running = True
+        logger.info("Paper Trading System connected")
+
+    async def disconnect(self) -> None:
+        """Stop paper trading and clean up resources."""
+        if not self._running:
+            return
+        logger.info("Disconnecting from Paper Trading System...")
+        self._running = False
+        if self._fill_simulator_task:
+            self._fill_simulator_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._fill_simulator_task
+            self._fill_simulator_task = None
+        logger.info("Paper Trading System disconnected")
+
+    async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
+        """Create a simulated order.
+
+        Args:
+            request: Order parameters.
+
+        Returns:
+            Created order snapshot with simulated fill pending.
+
+        Raises:
+            RuntimeError: If client not connected.
+        """
+        if not self._running:
+            raise RuntimeError("PaperExchangeClient not connected")
+        order_id = str(uuid.uuid4())
+        timestamp = request.signaled_at.timestamp() if request.signaled_at else time.time()
+        logger.info(
+            f"PAPER ORDER: {request.side.value} {request.amount} {request.symbol} @ {request.price}"
+        )
+        order = ExchangeOrderSnapshot(
+            id=order_id,
+            client_order_id=request.client_order_id,
+            symbol=request.symbol,
+            side=request.side,
+            type=request.type,
+            amount=request.amount,
+            price=request.price,
+            status=OrderStatusEnum.OPEN,
+            filled=0.0,
+            remaining=request.amount,
+            timestamp=timestamp,
+            fee=None,
+        )
+        self._orders[order_id] = order
+        db_order_id = await self._log_order_to_db(request, order)
+        if db_order_id is not None:
+            order.db_order_id = db_order_id
+        asyncio.create_task(self._simulate_fill(order))
+        return order
+
+    async def _simulate_fill(self, order: ExchangeOrderSnapshot) -> None:
+        try:
+            await asyncio.sleep(self.fill_delay)
+            if not self._running or order.id not in self._orders:
+                return
+            from datetime import datetime
+
+            execution = ExecutionUpdate(
+                order_id=order.id,
+                exec_type="trade",
+                symbol=order.symbol,
+                side=order.side,
+                order_type=order.type,
+                order_status=OrderStatusEnum.CLOSED,
+                timestamp=datetime.fromtimestamp(order.timestamp, tz=UTC),
+                order_qty=order.amount,
+                cum_qty=order.amount,
+                last_qty=order.amount,
+                average_price=order.price or 0.0,
+                last_price=order.price or 0.0,
+                fee_usd_equiv=0.0,
+            )
+            order.status = OrderStatusEnum.CLOSED
+            order.filled = order.amount
+            order.remaining = 0.0
+            if order.db_order_id is not None:
+                await self._log_order_update_to_db(
+                    db_order_id=order.db_order_id,
+                    status=OrderStatusEnum.CLOSED,
+                )
+                await self._log_execution_to_db(
+                    db_order_id=order.db_order_id,
+                    execution=execution,
+                )
+            await self._execution_queue.put(execution)
+            logger.info(f"PAPER FILL: {order.id} - {order.amount}@{order.price}")
+        except Exception as e:
+            logger.error(f"Error simulating fill for order {order.id}: {e}")
+
+    async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        """Cancel a simulated order.
+
+        Args:
+            order_id: Order ID to cancel.
+            symbol: Trading pair (optional).
+
+        Returns:
+            Snapshot of the cancelled order.
+
+        Raises:
+            RuntimeError: If client not connected.
+        """
+        if not self._running:
+            raise RuntimeError("PaperExchangeClient not connected")
+        logger.info(f"PAPER CANCEL: {order_id} ({symbol})")
+        if order_id in self._orders:
+            order = self._orders[order_id]
+            order.status = OrderStatusEnum.CANCELED
+            if order.db_order_id is not None:
+                await self._log_order_update_to_db(
+                    db_order_id=order.db_order_id,
+                    status=OrderStatusEnum.CANCELED,
+                )
+            return order
+        return ExchangeOrderSnapshot(
+            id=order_id,
+            client_order_id=None,
+            symbol=symbol or "UNKNOWN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=0.0,
+            price=None,
+            status=OrderStatusEnum.CANCELED,
+            filled=0.0,
+            remaining=0.0,
+            timestamp=time.time(),
+            fee=None,
+        )
+
+    async def get_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        """Get details of a simulated order.
+
+        Args:
+            order_id: Order ID to fetch.
+            symbol: Trading pair (optional).
+
+        Returns:
+            Order snapshot.
+
+        Raises:
+            RuntimeError: If client not connected.
+        """
+        if not self._running:
+            raise RuntimeError("PaperExchangeClient not connected")
+        if order_id in self._orders:
+            return self._orders[order_id]
+        return ExchangeOrderSnapshot(
+            id=order_id,
+            client_order_id=None,
+            symbol=symbol or "UNKNOWN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=0.0,
+            price=None,
+            status=OrderStatusEnum.OPEN,
+            filled=0.0,
+            remaining=0.0,
+            timestamp=time.time(),
+            fee=None,
+        )
+
+    async def get_orders(
+        self,
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        """Get list of simulated orders with optional filtering.
+
+        Args:
+            symbol: Filter by trading pair.
+            status: Filter by order status.
+            limit: Maximum orders to return.
+
+        Returns:
+            List of order snapshots.
+
+        Raises:
+            RuntimeError: If client not connected.
+        """
+        if not self._running:
+            raise RuntimeError("PaperExchangeClient not connected")
+        orders = list(self._orders.values())
+        if symbol:
+            orders = [o for o in orders if o.symbol == symbol]
+        if status:
+            orders = [o for o in orders if o.status == status]
+        if limit:
+            orders = orders[:limit]
+        logger.info(f"PAPER GET_ORDERS: {len(orders)} orders (symbol={symbol}, status={status})")
+        return orders
+
+    async def get_balance(self, currency: str | None = None) -> dict[str, AccountBalance]:
+        """Get simulated account balances.
+
+        Args:
+            currency: Filter by specific currency.
+
+        Returns:
+            Dictionary of currency to balance info.
+
+        Raises:
+            RuntimeError: If client not connected.
+        """
+        if not self._running:
+            raise RuntimeError("PaperExchangeClient not connected")
+        if currency:
+            if currency in self._balances:
+                return {currency: self._balances[currency]}
+            return {
+                currency: AccountBalance(
+                    currency=currency,
+                    free=0.0,
+                    used=0.0,
+                    total=0.0,
+                )
+            }
+        return self._balances.copy()
+
+    async def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
+        """Subscribe to simulated execution updates.
+
+        Yields:
+            ExecutionUpdate for each simulated order fill.
+
+        Raises:
+            RuntimeError: If client not connected.
+        """
+        if not self._running:
+            raise RuntimeError("PaperExchangeClient not connected")
+        logger.info("PAPER: Subscribed to execution updates (via queue)")
+        while self._running:
+            try:
+                execution = await asyncio.wait_for(self._execution_queue.get(), timeout=1.0)
+                yield execution
+            except TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"Error in paper execution subscription: {e}")
+                break
+
+    async def get_ticker(self, symbol: str) -> TickerSnapshot:
+        """Get ticker data from repository for backtesting.
+
+        Args:
+            symbol: Trading pair.
+
+        Returns:
+            Latest ticker snapshot from historical data.
+
+        Raises:
+            RuntimeError: If repository not configured.
+            ValueError: If no data found for symbol.
+        """
+        if not self.repository:
+            raise RuntimeError("Repository required for paper market data")
+        end_dt = datetime.now(tz=UTC)
+        start_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        snapshots = await self.repository.get_market_snapshots("paper", [symbol], start_dt, end_dt)
+        if not snapshots:
+            raise ValueError(f"No ticker data found for {symbol}")
+        latest = snapshots[-1]
+        return TickerSnapshot(
+            symbol=latest["symbol"],
+            bid=latest["bid"],
+            ask=latest["ask"],
+            last=latest["last"],
+            timestamp=latest["timestamp"].timestamp(),
+        )
+
+    async def get_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        since: int | None = None,
+        limit: int | None = None,
+    ) -> list[OhlcvSnapshot]:
+        """Get OHLCV data from repository for backtesting.
+
+        Args:
+            symbol: Trading pair.
+            timeframe: Candle interval.
+            since: Start timestamp (unused in paper mode).
+            limit: Maximum candles to return.
+
+        Returns:
+            List of historical OHLCV snapshots.
+
+        Raises:
+            RuntimeError: If repository not configured.
+        """
+        if not self.repository:
+            raise RuntimeError("Repository required for paper market data")
+        end_dt = datetime.now(tz=UTC)
+        if limit:
+            interval_minutes = self._parse_interval_to_minutes(timeframe)
+            lookback_minutes = interval_minutes * limit * 2
+            start_dt = end_dt - timedelta(minutes=lookback_minutes)
+        else:
+            start_dt = end_dt - timedelta(hours=24)
+        candles = await self.repository.get_candles(symbol, timeframe, start_dt, end_dt)
+        ohlcv_list = [
+            OhlcvSnapshot(
+                timestamp=c["timestamp"].timestamp(),
+                open=c["open"],
+                high=c["high"],
+                low=c["low"],
+                close=c["close"],
+                volume=c["volume"],
+            )
+            for c in candles
+        ]
+        if limit and len(ohlcv_list) > limit:
+            return ohlcv_list[-limit:]
+        return ohlcv_list
+
+    async def subscribe_ticker(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+        """Replay historical ticker data for backtesting.
+
+        Args:
+            symbols: List of trading pairs to replay.
+
+        Yields:
+            TickerUpdate from historical data in time order.
+
+        Raises:
+            RuntimeError: If repository not configured or not connected.
+            ValueError: If time range not specified.
+        """
+        if not self.repository:
+            raise RuntimeError("Repository required for paper market data")
+        if not self._running:
+            raise RuntimeError("Not connected - call connect() first")
+        if self.start_time is None or self.end_time is None:
+            raise ValueError(
+                "Time range (start_time, end_time) required for paper market data replay"
+            )
+        start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
+        end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
+        logger.info(f"Replaying ticker for {symbols} from {start_dt} to {end_dt}")
+        snapshots = await self.repository.get_market_snapshots("paper", symbols, start_dt, end_dt)
+        for snap in snapshots:
+            ticker = TickerUpdate(
+                symbol=snap["symbol"],
+                bid=snap["bid"],
+                bid_qty=snap["bid_volume"],
+                ask=snap["ask"],
+                ask_qty=snap["ask_volume"],
+                last=snap["last"],
+                volume=snap["volume"],
+                vwap=snap["vwap"],
+                low=snap["low"],
+                high=snap["high"],
+                change=0.0,
+                change_pct=0.0,
+            )
+            yield ticker
+
+    async def subscribe_candles(
+        self, symbols: list[str], timeframe: str = "1m"
+    ) -> AsyncIterator[CandleUpdate]:
+        """Replay historical candle data for backtesting.
+
+        Args:
+            symbols: List of trading pairs (uses first symbol).
+            timeframe: Candle interval.
+
+        Yields:
+            CandleUpdate from historical data.
+
+        Raises:
+            RuntimeError: If repository not configured or not connected.
+            ValueError: If time range not specified.
+        """
+        symbol = symbols[0] if symbols else None
+        if not symbol:
+            return
+        interval = timeframe
+        if not self.repository:
+            raise RuntimeError("Repository required for paper market data - call connect() first")
+        if not self._running:
+            raise RuntimeError("Not connected - call connect() first")
+        if self.start_time is None or self.end_time is None:
+            raise ValueError(
+                "Time range (start_time, end_time) required for paper market data replay"
+            )
+        start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
+        end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
+        logger.info(f"Replaying candles for {symbol}/{interval} from {start_dt} to {end_dt}")
+        interval_minutes = self._parse_interval_to_minutes(interval)
+        candles = await self.repository.get_candles(symbol, interval, start_dt, end_dt)
+        for candle_dict in candles:
+            candle = CandleUpdate(
+                symbol=symbol,
+                interval_begin=candle_dict["timestamp"],
+                interval=interval_minutes,
+                open=candle_dict["open"],
+                high=candle_dict["high"],
+                low=candle_dict["low"],
+                close=candle_dict["close"],
+                volume=candle_dict["volume"],
+                vwap=candle_dict.get("vwap", 0.0),
+                trades=candle_dict.get("trades", 0),
+            )
+            yield candle
+
+    @staticmethod
+    def _parse_interval_to_minutes(interval: str) -> int:
+        """Convert interval string to minutes.
+
+        Args:
+            interval: Interval like '1m', '1h', '1d'.
+
+        Returns:
+            Number of minutes.
+
+        Raises:
+            ValueError: If format is invalid.
+        """
+        if interval.endswith("m"):
+            return int(interval[:-1])
+        if interval.endswith("h"):
+            return int(interval[:-1]) * 60
+        if interval.endswith("d"):
+            return int(interval[:-1]) * 1440
+        raise ValueError(f"Invalid interval format: {interval}")
+
+    async def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+        """Replay historical trade data for backtesting.
+
+        Args:
+            symbols: List of trading pairs.
+
+        Yields:
+            TradeUpdate from historical data.
+
+        Raises:
+            RuntimeError: If repository not configured or not connected.
+            ValueError: If time range not specified.
+        """
+        if not self.repository:
+            raise RuntimeError("Repository required for paper market data")
+        if not self._running:
+            raise RuntimeError("Not connected - call connect() first")
+        if self.start_time is None or self.end_time is None:
+            raise ValueError(
+                "Time range (start_time, end_time) required for paper market data replay"
+            )
+        start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
+        end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
+        logger.info(f"Replaying trades for {symbols} from {start_dt} to {end_dt}")
+        for symbol in symbols:
+            trades = await self.repository.get_trades(symbol, start_dt, end_dt)
+            for trade_dict in trades:
+                trade = TradeUpdate(
+                    symbol=symbol,
+                    side=trade_dict["side"],
+                    quantity=trade_dict["size"],
+                    price=trade_dict["price"],
+                    ord_type="unknown",
+                    trade_id=trade_dict.get("trade_id", 0),
+                    timestamp=trade_dict["timestamp"],
+                )
+                yield trade
+
+    def get_supported_pairs(self) -> list[str]:
+        """Get list of supported trading pairs for paper trading.
+
+        Returns:
+            List of default supported pairs.
+        """
+        return [
+            "BTC/USD",
+            "ETH/USD",
+            "EUR/USD",
+            "EUR/PLN",
+            "USD/PLN",
+        ]
+
+    async def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+        """Subscribe to ticker updates (alias for subscribe_ticker).
+
+        Args:
+            symbols: List of trading pairs.
+
+        Yields:
+            TickerUpdate from historical data.
+        """
+        async for tick in self.subscribe_ticker(symbols):
+            yield tick
+
+    async def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Subscribe to instrument updates (not implemented for paper).
+
+        Args:
+            **kwargs: Ignored parameters.
+
+        Returns:
+            Empty async iterator.
+        """
+        return
+        yield

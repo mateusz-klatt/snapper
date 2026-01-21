@@ -1,0 +1,192 @@
+"""Tests for Walutomat symbol mapping updater service."""
+
+from collections.abc import Iterator
+from datetime import UTC
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from snapper.application.updaters.symbols.walutomat import WalutomatSymbolMappingUpdaterService
+from snapper.config.app import AppSettings
+from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import SymbolMapping
+from snapper.data.repository import DatabaseRepository
+from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
+
+
+class ExposedWalutomatSymbolMappingUpdater(WalutomatSymbolMappingUpdaterService):
+    """Exposed updater for testing protected methods."""
+
+    async def update_database_public(self, symbols: list[dict[str, Any]]) -> None:
+        """Expose _update_database for testing."""
+        await super()._update_database(symbols)
+
+    def create_exchange_client_public(self) -> WalutomatExchangeClient:
+        """Expose _create_exchange_client for testing."""
+        return super()._create_exchange_client()
+
+    def get_setting_key_public(self) -> str:
+        """Expose _get_setting_key for testing."""
+        return super()._get_setting_key()
+
+
+@pytest.fixture()
+def updater_with_repository(
+    tmp_path: Path,
+) -> Iterator[tuple[ExposedWalutomatSymbolMappingUpdater, DatabaseRepository]]:
+    """Provide Walutomat updater instance with test database."""
+    db_path = tmp_path / "walutomat_symbols.sqlite"
+    repository = DatabaseRepository(f"sqlite:///{db_path}")
+    repository.create_all()
+    updater = ExposedWalutomatSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater.repository = repository
+    yield updater, repository
+    repository.engine.dispose()
+
+
+@pytest.mark.asyncio()
+async def test_update_database_creates_and_updates_mappings(
+    updater_with_repository: tuple[ExposedWalutomatSymbolMappingUpdater, DatabaseRepository],
+) -> None:
+    """Verify update_database creates new and updates existing mappings.
+
+    Given: Existing EUR-PLN mapping with old walutomat_symbol,
+    When: Update database called with updated EUR and new USD,
+    Then: EUR updated with new symbols, USD inserted correctly.
+    """
+    updater, repository = updater_with_repository
+    original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolMapping(
+                native_symbol="EUR-PLN",
+                walutomat_symbol="EUR_PLN_OLD",
+                walutomat_rest_symbol="EURNOT",
+                base_currency="EUR",
+                quote_currency="PLN",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.commit()
+    symbols: list[dict[str, Any]] = [
+        {
+            "symbol": "EUR_PLN",
+            "walutomat_rest_symbol": "EURPLN",
+            "native_symbol": "EUR-PLN",
+            "base": "EUR",
+            "quote": "PLN",
+        },
+        {
+            "symbol": "USD_PLN",
+            "walutomat_rest_symbol": "USDPLN",
+            "native_symbol": "USD-PLN",
+            "base": "USD",
+            "quote": "PLN",
+        },
+    ]
+    await updater.update_database_public(symbols)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        eur_mapping = session.execute(
+            select(SymbolMapping).where(SymbolMapping.native_symbol == "EUR-PLN")
+        ).scalar_one()
+        usd_mapping = session.execute(
+            select(SymbolMapping).where(SymbolMapping.native_symbol == "USD-PLN")
+        ).scalar_one()
+    assert eur_mapping.walutomat_symbol == "EUR_PLN"
+    assert eur_mapping.walutomat_rest_symbol == "EURPLN"
+    assert eur_mapping.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert usd_mapping.walutomat_symbol == "USD_PLN"
+    assert usd_mapping.walutomat_rest_symbol == "USDPLN"
+    assert usd_mapping.base_currency == "USD"
+    assert usd_mapping.quote_currency == "PLN"
+    assert usd_mapping.created_at == usd_mapping.updated_at
+
+
+@pytest.mark.asyncio()
+async def test_update_database_skips_when_mapping_unchanged(
+    updater_with_repository: tuple[ExposedWalutomatSymbolMappingUpdater, DatabaseRepository],
+) -> None:
+    """Verify update_database skips update when mapping unchanged.
+
+    Given: Existing mapping with identical values to payload,
+    When: Update database called,
+    Then: updated_at timestamp preserved unchanged.
+    """
+    updater, repository = updater_with_repository
+    original_timestamp = datetime(2023, 1, 1, tzinfo=UTC)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolMapping(
+                native_symbol="EUR-PLN",
+                walutomat_symbol="EUR_PLN",
+                walutomat_rest_symbol="EURPLN",
+                base_currency="EUR",
+                quote_currency="PLN",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.commit()
+    symbols: list[dict[str, Any]] = [
+        {
+            "symbol": "EUR_PLN",
+            "walutomat_rest_symbol": "EURPLN",
+            "native_symbol": "EUR-PLN",
+            "base": "EUR",
+            "quote": "PLN",
+        }
+    ]
+    await updater.update_database_public(symbols)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        mapping = session.execute(
+            select(SymbolMapping).where(SymbolMapping.native_symbol == "EUR-PLN")
+        ).scalar_one()
+    assert mapping.walutomat_symbol == "EUR_PLN"
+    assert mapping.walutomat_rest_symbol == "EURPLN"
+    assert mapping.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
+
+
+def test_get_default_kwargs_uses_weekly_threshold() -> None:
+    """Verify get_default_kwargs returns weekly (168h) threshold.
+
+    Given: AppSettings instance,
+    When: get_default_kwargs called,
+    Then: 168-hour threshold and force=False returned.
+    """
+    settings = AppSettings(BootstrapSettingsLoader())
+    defaults = WalutomatSymbolMappingUpdaterService.get_default_kwargs(settings)
+    assert defaults == {"update_threshold_hours": 168, "force": False}
+
+
+def test_create_exchange_client_uses_expected_configuration() -> None:
+    """Verify _create_exchange_client uses correct config values.
+
+    Given: Walutomat updater instance,
+    When: _create_exchange_client called,
+    Then: Client has expected polling interval and timeout.
+    """
+    updater = ExposedWalutomatSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    client = updater.create_exchange_client_public()
+    assert isinstance(client, WalutomatExchangeClient)
+    assert client.polling_interval == 10.0
+    assert client.timeout == 5.0
+
+
+def test_get_setting_key_returns_expected_value() -> None:
+    """Verify _get_setting_key returns correct identifier.
+
+    Given: Walutomat updater instance,
+    When: _get_setting_key called,
+    Then: Expected setting key returned.
+    """
+    updater = ExposedWalutomatSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    assert updater.get_setting_key_public() == "walutomat_symbol_mapping_last_update"

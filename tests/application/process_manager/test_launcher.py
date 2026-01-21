@@ -1,0 +1,1846 @@
+"""Tests for ProcessLauncherService core functionality."""
+
+import asyncio
+import contextlib
+import json
+from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Any
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
+from uuid import uuid4
+
+import pytest
+
+from snapper.application.process_manager.enums import ProcessLifecycleEnum
+from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.enums import ProcessRunStatusEnum
+from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.models import ProcessConfigModel
+from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import RegisterableProcess
+from snapper.config.app import AppSettings
+from snapper.config.bootstrap import BootstrapSettingsLoader
+
+
+class DummySettings(SimpleNamespace):
+    """Simple namespace settings stub for testing."""
+
+    db_url: str = "sqlite:///test.db"
+
+
+class DummyProcess:
+    """Async process stub that returns immediately."""
+
+    async def start(self) -> str:
+        """Async start method that completes quickly."""
+        await asyncio.sleep(0)
+        return "done"
+
+
+@pytest.mark.asyncio
+async def test_import_class_prefers_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify import_class prefers registry over dynamic import.
+
+    Given: Process registered in process registry,
+    When: import_class is called with process name,
+    Then: Class from registry is returned.
+    """
+    launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+    monkeypatch.setattr(
+        "snapper.application.process_manager.launcher.get_registered_processes",
+        lambda: {"foo": {"class_ref": DummyProcess}},
+    )
+    cls = launcher.import_class("ignored.path.DummyProcess", process_name="foo")
+    assert cls is DummyProcess
+
+
+def test_import_class_raises_on_missing() -> None:
+    """Verify import_class raises ImportError for missing module.
+
+    Given: Non-existent module path,
+    When: import_class is called,
+    Then: ImportError is raised.
+    """
+    launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+    with pytest.raises(ImportError):
+        launcher.import_class("not_a_module.Class")
+
+
+@pytest.mark.asyncio
+async def test_start_process_handles_run_record_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify start_process continues when run record creation fails.
+
+    Given: _create_process_run_record raises ValueError,
+    When: start_process is called,
+    Then: Process starts successfully despite DB error.
+    """
+    launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+    launcher._create_process_run_record = AsyncMock(side_effect=ValueError("fail"))
+    launcher._update_process_run_record = AsyncMock()
+    launcher._finalize_process_run = AsyncMock()
+    launcher.import_class = lambda path, name=None: DummyProcess
+    launcher._register_task_completion = lambda name, task: None
+    config = ProcessConfigModel(
+        name="dummy",
+        enabled=True,
+        mode="thread",
+        class_path="dummy.path.DummyProcess",
+        method="start",
+        args=[],
+        kwargs={},
+        note=None,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_schema=None,
+    )
+    await launcher.start_process(config)
+    assert "dummy" in launcher.process_tasks
+    assert "dummy" in launcher.started_processes
+    assert launcher.process_lifecycles["dummy"] == ProcessLifecycleEnum.LONG_RUNNING
+
+
+class AsyncDummyProcess:
+    """Async process stub that returns None."""
+
+    async def start(self) -> None:
+        """Async start method that returns None."""
+        return None
+
+
+@pytest.mark.asyncio
+async def test_start_process_warns_on_async_non_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify start_process handles async method in worker mode.
+
+    Given: Async process with mode='worker',
+    When: start_process is called,
+    Then: Process is registered without errors.
+    """
+    launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+    launcher._create_process_run_record = AsyncMock()
+    launcher._update_process_run_record = AsyncMock()
+    launcher._finalize_process_run = AsyncMock()
+    launcher._register_task_completion = lambda name, task: None
+    launcher.import_class = lambda path, name=None: AsyncDummyProcess
+    config = ProcessConfigModel(
+        name="async_proc",
+        enabled=True,
+        mode="worker",
+        class_path="dummy.path.AsyncDummyProcess",
+        method="start",
+        args=[],
+        kwargs={},
+        note=None,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_schema=None,
+    )
+    await launcher.start_process(config)
+    assert "async_proc" in launcher.process_tasks
+    assert "async_proc" in launcher.started_processes
+
+
+class StopRaises:
+    """Process stub whose stop method raises RuntimeError."""
+
+    def stop(self) -> None:
+        """Raise RuntimeError when called."""
+        raise RuntimeError("stop failed")
+
+
+@pytest.mark.asyncio
+async def test_stop_all_processes_handles_stop_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify stop_all_processes continues when stop() raises error.
+
+    Given: Process with stop method that raises RuntimeError,
+    When: stop_all_processes is called,
+    Then: Process is cleaned up despite error.
+    """
+    launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+    launcher.started_processes["proc"] = StopRaises()
+    launcher.process_roles["proc"] = ProcessRoleEnum.CORE
+    launcher.process_lifecycles["proc"] = ProcessLifecycleEnum.LONG_RUNNING
+    launcher.process_tasks["task"] = asyncio.create_task(asyncio.sleep(0.1))
+    monkeypatch.setattr(
+        "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
+    )
+    await launcher.stop_all_processes()
+    assert launcher.started_processes == {}
+    assert launcher.process_tasks == {}
+    assert launcher.expected_terminations == set()
+
+
+@pytest.mark.asyncio
+async def test_register_task_completion_handles_closed_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _register_task_completion handles closed event loop.
+
+    Given: Event loop that raises RuntimeError on access,
+    When: _register_task_completion is called,
+    Then: No exception propagates.
+    """
+    launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+    task = asyncio.create_task(asyncio.sleep(0))
+    monkeypatch.setattr(
+        "snapper.application.process_manager.launcher.asyncio.get_running_loop",
+        lambda: (_ for _ in ()).throw(RuntimeError("loop closed")),
+    )
+    launcher._register_task_completion("dummy", task)
+    await task
+
+
+class TestStartProcessByNameNoSetting:
+    """Tests for start_process_by_name when setting is missing."""
+
+    @pytest.mark.asyncio
+    async def test_start_process_by_name_setting_deleted_before_update(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test process start when setting deleted mid-operation.
+
+        Given: Process config exists initially but deleted before update.
+        When: start_process_by_name is called.
+        Then: Process starts successfully, commit not called.
+        """
+        launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+        launcher.start_process = AsyncMock()
+        launcher._start_native_process_monitoring = MagicMock()
+        initial_config = {
+            "class": "dummy.path.DummyProcess",
+            "method": "start",
+            "enabled": True,
+            "mode": "thread",
+            "args": [],
+            "kwargs": {},
+            "lifecycle": "one_shot",
+            "role": "core",
+        }
+        call_count = [0]
+
+        def get_scalar_result() -> Any:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                mock_setting = MagicMock()
+                mock_setting.value = json.dumps(initial_config)
+                return mock_setting
+            else:
+                return None
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none = get_scalar_result
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_context
+        registry = {
+            "test_proc": {
+                "class_ref": DummyProcess,
+                "class_path": "dummy.path.DummyProcess",
+                "method": "start",
+                "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
+                "role": ProcessRoleEnum.CORE,
+            }
+        }
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: registry,
+        )
+        with patch(
+            "snapper.application.process_manager.launcher.get_repository",
+            return_value=mock_repo,
+        ):
+            result = await launcher.start_process_by_name("test_proc")
+        assert result["status"] == "success"
+        assert "executed successfully" in result["message"]
+        mock_session.commit.assert_not_called()
+
+
+class TestSyncRegistryTagsNotIterable:
+    """Tests for sync_registry with non-iterable tags."""
+
+    @pytest.mark.asyncio
+    async def test_sync_registry_tags_as_string_skips_tags_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test sync handles tags as string gracefully.
+
+        Given: Registry entry with tags as a single string (not iterable).
+        When: sync_registry_to_database is called.
+        Then: Tags block is skipped, no error raised.
+        """
+        launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+        existing_config = {
+            "name": "test_proc",
+            "lifecycle": "long_running",
+            "role": "core",
+            "kwargs": {"key": "value"},
+        }
+        mock_class = MagicMock()
+        mock_class.get_default_kwargs.return_value = {}
+        registry = {
+            "test_proc": {
+                "class_ref": mock_class,
+                "class_path": "test.TestProc",
+                "method": "start",
+                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
+                "role": ProcessRoleEnum.CORE,
+                "tags": "not_a_list",
+                "parameters_schema": None,
+            }
+        }
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: registry,
+        )
+        mock_setting = MagicMock()
+        mock_setting.value = json.dumps(existing_config)
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_setting
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_context
+        with patch(
+            "snapper.application.process_manager.launcher.get_repository",
+            return_value=mock_repo,
+        ):
+            await launcher.sync_registry_to_database()
+
+
+@dataclass
+class _DummySettingsService:
+    """Stub settings service that returns defaults."""
+
+    def get_setting(self, key: str, default: Any) -> Any:
+        """Return default value for any key."""
+        return default
+
+
+def _create_settings() -> AppSettings:
+    """Create AppSettings instance with stub dependencies."""
+    bootstrap = BootstrapSettingsLoader()
+    return AppSettings(bootstrap, _DummySettingsService())
+
+
+def _stub_run_tracking(launcher: ProcessLauncherService) -> None:
+    """Replace run tracking methods with async mocks."""
+    cast(Any, launcher)._create_process_run_record = AsyncMock(return_value="test-run-id")
+    cast(Any, launcher)._update_process_run_record = AsyncMock(return_value=None)
+    cast(Any, launcher)._finalize_process_run = AsyncMock(return_value=None)
+
+
+@pytest.fixture
+def settings() -> AppSettings:
+    """Provide AppSettings instance for process launcher tests."""
+    return _create_settings()
+
+
+@pytest.fixture
+def launcher(settings: AppSettings) -> ProcessLauncherService:
+    """Provide ProcessLauncherService instance for tests."""
+    return ProcessLauncherService(settings)
+
+
+class TestProcessLauncherServiceInit:
+    """Tests for ProcessLauncherService initialization."""
+
+    def test_init_creates_empty_tracking_dicts(self, settings: AppSettings) -> None:
+        """Verify init creates empty tracking dictionaries.
+
+        Given: Valid AppSettings,
+        When: ProcessLauncherService is instantiated,
+        Then: All tracking dicts are empty.
+        """
+        service = ProcessLauncherService(settings)
+        assert service.started_processes == {}
+        assert service.process_tasks == {}
+        assert service.process_lifecycles == {}
+        assert service.process_roles == {}
+        assert service.active_runs == {}
+        assert service.expected_terminations == set()
+
+    def test_init_creates_spawner(self, settings: AppSettings) -> None:
+        """Verify init creates ProcessSpawnerService instance.
+
+        Given: Valid AppSettings,
+        When: ProcessLauncherService is instantiated,
+        Then: Spawner attribute is initialized.
+        """
+        service = ProcessLauncherService(settings)
+        assert service.spawner is not None
+
+
+class TestImportClass:
+    """Tests for import_class method."""
+
+    def test_import_class_from_registry(self, launcher: ProcessLauncherService) -> None:
+        """Test class import from process registry.
+
+        Given: Process registered with class reference.
+        When: import_class is called with process name.
+        Then: Class from registry is returned.
+        """
+
+        class MockProcessClass:
+            pass
+
+        with patch(
+            "snapper.application.process_manager.launcher.get_registered_processes"
+        ) as mock_registry:
+            mock_registry.return_value = {"test_process": {"class_ref": MockProcessClass}}
+            result = launcher.import_class("some.module.MockProcessClass", "test_process")
+            assert result is MockProcessClass
+
+    def test_import_class_not_a_class_raises_type_error(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test TypeError raised for non-class registry entry.
+
+        Given: Registry entry with string instead of class.
+        When: import_class is called.
+        Then: TypeError is raised.
+        """
+        with patch(
+            "snapper.application.process_manager.launcher.get_registered_processes"
+        ) as mock_registry:
+            mock_registry.return_value = {"test_process": {"class_ref": "not_a_class"}}
+            with pytest.raises(TypeError, match="is not a class"):
+                launcher.import_class("some.path", "test_process")
+
+    def test_import_class_fallback_to_importlib(self, launcher: ProcessLauncherService) -> None:
+        """Test fallback to importlib when not in registry.
+
+        Given: Empty process registry.
+        When: import_class is called with valid module path.
+        Then: Class is imported via importlib.
+        """
+        with patch(
+            "snapper.application.process_manager.launcher.get_registered_processes"
+        ) as mock_registry:
+            mock_registry.return_value = {}
+            result = launcher.import_class(
+                "snapper.application.process_manager.launcher.ProcessLauncherService"
+            )
+            assert result is ProcessLauncherService
+
+    def test_import_class_invalid_path_raises_import_error(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test ImportError for nonexistent module.
+
+        Given: Invalid module path.
+        When: import_class is called.
+        Then: ImportError is raised.
+        """
+        with patch(
+            "snapper.application.process_manager.launcher.get_registered_processes"
+        ) as mock_registry:
+            mock_registry.return_value = {}
+            with pytest.raises(ImportError, match="Failed to import class"):
+                launcher.import_class("nonexistent.module.Class", "test")
+
+    def test_import_class_non_class_attribute_raises_type_error(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test TypeError for non-class module attribute.
+
+        Given: Module path pointing to non-class attribute.
+        When: import_class is called.
+        Then: TypeError is raised.
+        """
+        with patch(
+            "snapper.application.process_manager.launcher.get_registered_processes"
+        ) as mock_registry:
+            mock_registry.return_value = {}
+            with pytest.raises(TypeError, match="is not a class"):
+                launcher.import_class("snapper.application.process_manager.launcher.logger")
+
+
+class TestStartProcess:
+    """Tests for start_process method."""
+
+    @pytest.mark.asyncio
+    async def test_start_process_mode_process_spawns_subprocess(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test process mode spawns subprocess.
+
+        Given: Config with mode='process'.
+        When: start_process is called.
+        Then: Spawner creates subprocess and process is tracked.
+        """
+        config = ProcessConfigModel(
+            name="test_subprocess",
+            enabled=True,
+            mode="process",
+            class_path="some.module.TestClass",
+            method="run",
+            args=[],
+            kwargs={},
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+        )
+        mock_process_info = MagicMock(spec=ProcessInstanceInfo)
+        mock_process_info.pid = 12345
+        with (
+            patch.object(
+                launcher, "_create_process_run_record", new_callable=AsyncMock
+            ) as mock_create_run,
+            patch.object(launcher.spawner, "spawn") as mock_spawn,
+        ):
+            mock_create_run.return_value = str(uuid4())
+            mock_spawn.return_value = mock_process_info
+            await launcher.start_process(config)
+            mock_spawn.assert_called_once_with(
+                name="test_subprocess",
+                class_path="some.module.TestClass",
+                method="run",
+                args=[],
+                kwargs={},
+            )
+            assert launcher.started_processes["test_subprocess"] is mock_process_info
+
+    @pytest.mark.asyncio
+    async def test_start_process_async_method_creates_task(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test async method creates asyncio task.
+
+        Given: Config with async method in thread mode.
+        When: start_process is called.
+        Then: Asyncio task is created and process tracked.
+        """
+
+        class AsyncProcess:
+            async def start(self) -> None:
+                await asyncio.sleep(10)
+
+        config = ProcessConfigModel(
+            name="async_process",
+            enabled=True,
+            mode="thread",
+            class_path="test.AsyncProcess",
+            method="start",
+            args=[],
+            kwargs={},
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+        )
+        with (
+            patch.object(
+                launcher, "_create_process_run_record", new_callable=AsyncMock
+            ) as mock_create_run,
+            patch.object(launcher, "import_class") as mock_import,
+        ):
+            mock_create_run.return_value = str(uuid4())
+            mock_import.return_value = AsyncProcess
+            await launcher.start_process(config)
+            assert "async_process" in launcher.process_tasks
+            assert "async_process" in launcher.started_processes
+            task = launcher.process_tasks["async_process"]
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_start_process_sync_method_runs_in_executor(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test sync method runs in thread executor.
+
+        Given: Config with synchronous method.
+        When: start_process is called.
+        Then: Method executes in executor and completes.
+        """
+        executed = []
+
+        class SyncProcess:
+            def start(self) -> None:
+                executed.append(True)
+
+        config = ProcessConfigModel(
+            name="sync_process",
+            enabled=True,
+            mode="thread",
+            class_path="test.SyncProcess",
+            method="start",
+            args=[],
+            kwargs={},
+            lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+            role=ProcessRoleEnum.CORE,
+        )
+        with (
+            patch.object(
+                launcher, "_create_process_run_record", new_callable=AsyncMock
+            ) as mock_create_run,
+            patch.object(launcher, "import_class") as mock_import,
+            patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock),
+        ):
+            mock_create_run.return_value = str(uuid4())
+            mock_import.return_value = SyncProcess
+            await launcher.start_process(config)
+            assert executed == [True]
+
+    @pytest.mark.asyncio
+    async def test_start_process_exception_cleans_up_tracking(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test exception during start cleans up tracking.
+
+        Given: Config with module that fails to import.
+        When: start_process is called.
+        Then: ImportError raised and tracking dicts cleaned up.
+        """
+        config = ProcessConfigModel(
+            name="failing_process",
+            enabled=True,
+            mode="thread",
+            class_path="test.FailingProcess",
+            method="start",
+            args=[],
+            kwargs={},
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+        )
+        with (
+            patch.object(
+                launcher, "_create_process_run_record", new_callable=AsyncMock
+            ) as mock_create_run,
+            patch.object(launcher, "import_class") as mock_import,
+            patch.object(launcher, "_update_process_run_record", new_callable=AsyncMock),
+        ):
+            mock_create_run.return_value = str(uuid4())
+            mock_import.side_effect = ImportError("Module not found")
+            with pytest.raises(ImportError):
+                await launcher.start_process(config)
+            assert "failing_process" not in launcher.started_processes
+            assert "failing_process" not in launcher.process_tasks
+            assert "failing_process" not in launcher.process_lifecycles
+
+    @pytest.mark.asyncio
+    async def test_start_process_one_shot_cleans_up_after_completion(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test one-shot process cleans up after completion.
+
+        Given: Config with one-shot lifecycle.
+        When: start_process is called and completes.
+        Then: Process run is finalized.
+        """
+
+        class OneShotProcess:
+            def run(self) -> None:
+                pass
+
+        config = ProcessConfigModel(
+            name="oneshot",
+            enabled=True,
+            mode="thread",
+            class_path="test.OneShotProcess",
+            method="run",
+            args=[],
+            kwargs={},
+            lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+            role=ProcessRoleEnum.CORE,
+        )
+        with (
+            patch.object(
+                launcher, "_create_process_run_record", new_callable=AsyncMock
+            ) as mock_create_run,
+            patch.object(launcher, "import_class") as mock_import,
+            patch.object(
+                launcher, "_finalize_process_run", new_callable=AsyncMock
+            ) as mock_finalize,
+        ):
+            mock_create_run.return_value = str(uuid4())
+            mock_import.return_value = OneShotProcess
+            await launcher.start_process(config)
+            mock_finalize.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_start_process_run_record_creation_failure_continues(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test process starts even if run record creation fails.
+
+        Given: Run record creation raises exception.
+        When: start_process is called.
+        Then: Process starts despite DB error.
+        """
+
+        class SimpleProcess:
+            def start(self) -> None:
+                pass
+
+        config = ProcessConfigModel(
+            name="simple_process",
+            enabled=True,
+            mode="thread",
+            class_path="test.SimpleProcess",
+            method="start",
+            args=[],
+            kwargs={},
+            lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+            role=ProcessRoleEnum.CORE,
+        )
+        with (
+            patch.object(
+                launcher, "_create_process_run_record", new_callable=AsyncMock
+            ) as mock_create_run,
+            patch.object(launcher, "import_class") as mock_import,
+            patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock),
+        ):
+            mock_create_run.side_effect = Exception("DB error")
+            mock_import.return_value = SimpleProcess
+            await launcher.start_process(config)
+
+
+class TestStopAllProcesses:
+    """Tests for stop_all_processes method."""
+
+    @pytest.mark.asyncio
+    async def test_stop_all_processes_stops_native_processes(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test native processes are stopped.
+
+        Given: Native process in started_processes.
+        When: stop_all_processes is called.
+        Then: Process stop method is called.
+        """
+        mock_proc_info = MagicMock(spec=ProcessInstanceInfo)
+        mock_proc_info.pid = 1234
+        mock_proc_info.stop = AsyncMock()
+        launcher.started_processes["native_proc"] = mock_proc_info
+        launcher.process_lifecycles["native_proc"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.process_roles["native_proc"] = ProcessRoleEnum.CORE
+        await launcher.stop_all_processes()
+        mock_proc_info.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_all_processes_calls_stop_method(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test stop method is called on stoppable processes.
+
+        Given: Process with sync stop method.
+        When: stop_all_processes is called.
+        Then: Stop method called and process removed.
+        """
+
+        class StoppableProcess:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        process = StoppableProcess()
+        launcher.started_processes["stoppable"] = process
+        launcher.process_lifecycles["stoppable"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.process_roles["stoppable"] = ProcessRoleEnum.CORE
+        await launcher.stop_all_processes()
+        assert process.stopped is True
+        assert launcher.started_processes == {}
+
+    @pytest.mark.asyncio
+    async def test_stop_all_processes_async_stop_method(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test async stop method is awaited.
+
+        Given: Process with async stop method.
+        When: stop_all_processes is called.
+        Then: Stop method awaited and process stopped.
+        """
+
+        class AsyncStoppableProcess:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            async def stop(self) -> None:
+                self.stopped = True
+
+        process = AsyncStoppableProcess()
+        launcher.started_processes["async_stoppable"] = process
+        launcher.process_lifecycles["async_stoppable"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.process_roles["async_stoppable"] = ProcessRoleEnum.CORE
+        await launcher.stop_all_processes()
+        assert process.stopped is True
+
+    @pytest.mark.asyncio
+    async def test_stop_all_processes_error_handling(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test error during stop is handled gracefully.
+
+        Given: Process whose stop raises RuntimeError.
+        When: stop_all_processes is called.
+        Then: Error suppressed and process cleaned up.
+        """
+
+        class FailingStopProcess:
+            def stop(self) -> None:
+                raise RuntimeError("Stop failed")
+
+        process = FailingStopProcess()
+        launcher.started_processes["failing"] = process
+        launcher.process_lifecycles["failing"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.process_roles["failing"] = ProcessRoleEnum.CORE
+        await launcher.stop_all_processes()
+        assert launcher.started_processes == {}
+
+
+class TestGetProcessConfigs:
+    """Tests for get_process_configs method."""
+
+    @pytest.mark.asyncio
+    async def test_get_process_configs_parses_json(self, launcher: ProcessLauncherService) -> None:
+        """Test JSON settings are parsed to config models.
+
+        Given: Database with process setting as JSON.
+        When: get_process_configs is called.
+        Then: ProcessConfigModel created from JSON.
+        """
+        mock_setting = MagicMock()
+        mock_setting.key = "process_test"
+        mock_setting.value = json.dumps(
+            {
+                "enabled": True,
+                "mode": "thread",
+                "class": "test.TestClass",
+                "method": "start",
+                "args": [],
+                "kwargs": {},
+                "lifecycle": "long-running",
+                "role": "core",
+            }
+        )
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.all.return_value = [mock_setting]
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            with patch(
+                "snapper.application.process_manager.launcher.get_registered_processes"
+            ) as mock_registry:
+                mock_registry.return_value = {}
+                configs = await launcher.get_process_configs()
+                assert len(configs) == 1
+                assert configs[0].name == "test"
+                assert configs[0].enabled is True
+
+    @pytest.mark.asyncio
+    async def test_get_process_configs_invalid_json_logged(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test invalid JSON settings are skipped.
+
+        Given: Database with invalid JSON setting.
+        When: get_process_configs is called.
+        Then: Invalid config skipped, empty list returned.
+        """
+        mock_setting = MagicMock()
+        mock_setting.key = "process_invalid"
+        mock_setting.value = "not valid json {"
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.all.return_value = [mock_setting]
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            with patch(
+                "snapper.application.process_manager.launcher.get_registered_processes"
+            ) as mock_registry:
+                mock_registry.return_value = {}
+                configs = await launcher.get_process_configs()
+                assert len(configs) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_process_configs_unknown_lifecycle_defaults(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test unknown lifecycle defaults to LONG_RUNNING.
+
+        Given: Config with unrecognized lifecycle value.
+        When: get_process_configs is called.
+        Then: Lifecycle defaults to LONG_RUNNING.
+        """
+        mock_setting = MagicMock()
+        mock_setting.key = "process_test"
+        mock_setting.value = json.dumps(
+            {
+                "enabled": True,
+                "mode": "thread",
+                "class": "test.TestClass",
+                "method": "start",
+                "lifecycle": "unknown_lifecycle",
+                "role": "core",
+            }
+        )
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.all.return_value = [mock_setting]
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            with patch(
+                "snapper.application.process_manager.launcher.get_registered_processes"
+            ) as mock_registry:
+                mock_registry.return_value = {}
+                configs = await launcher.get_process_configs()
+                assert len(configs) == 1
+                assert configs[0].lifecycle == ProcessLifecycleEnum.LONG_RUNNING
+
+    @pytest.mark.asyncio
+    async def test_get_process_configs_unknown_role_defaults(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test unknown role defaults to CORE.
+
+        Given: Config with unrecognized role value.
+        When: get_process_configs is called.
+        Then: Role defaults to CORE.
+        """
+        mock_setting = MagicMock()
+        mock_setting.key = "process_test"
+        mock_setting.value = json.dumps(
+            {
+                "enabled": True,
+                "mode": "thread",
+                "class": "test.TestClass",
+                "method": "start",
+                "lifecycle": "long-running",
+                "role": "unknown_role",
+            }
+        )
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.all.return_value = [mock_setting]
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            with patch(
+                "snapper.application.process_manager.launcher.get_registered_processes"
+            ) as mock_registry:
+                mock_registry.return_value = {}
+                configs = await launcher.get_process_configs()
+                assert len(configs) == 1
+                assert configs[0].role == ProcessRoleEnum.CORE
+
+    @pytest.mark.asyncio
+    async def test_get_process_configs_uses_metadata_parameters_schema(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test parameters_schema from registry metadata is used.
+
+        Given: Config with non-iterable tags and registry metadata.
+        When: get_process_configs is called.
+        Then: Schema from metadata used, invalid tags ignored.
+        """
+        mock_setting = MagicMock()
+        mock_setting.key = "process_test"
+        mock_setting.value = json.dumps(
+            {
+                "enabled": True,
+                "mode": "thread",
+                "class": "test.TestClass",
+                "method": "start",
+                "lifecycle": "long-running",
+                "role": "core",
+                "tags": "oops-not-iterable",
+                "parameters_schema": None,
+            }
+        )
+        metadata = {
+            "test": {
+                "tags": ("meta_tag",),
+                "parameters_schema": {"type": "object"},
+                "priority": 1,
+            }
+        }
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.all.return_value = [mock_setting]
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            with patch(
+                "snapper.application.process_manager.launcher.get_registered_processes"
+            ) as mock_registry:
+                mock_registry.return_value = metadata
+                configs = await launcher.get_process_configs()
+                assert len(configs) == 1
+                assert configs[0].tags == ()
+                assert configs[0].parameters_schema == {"type": "object"}
+
+
+class TestProcessRunRecords:
+    """Tests for process run record management."""
+
+    @pytest.mark.asyncio
+    async def test_create_process_run_record(self, launcher: ProcessLauncherService) -> None:
+        """Test process run record is created in database.
+
+        Given: Valid process configuration.
+        When: _create_process_run_record is called.
+        Then: Record added to database and run_id returned.
+        """
+        config = ProcessConfigModel(
+            name="test_process",
+            enabled=True,
+            mode="thread",
+            class_path="test.TestClass",
+            method="start",
+            args=[],
+            kwargs={},
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("tag1", "tag2"),
+        )
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = MagicMock()
+            mock_session.commit = AsyncMock()
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            run_id = await launcher._create_process_run_record(config, {"mode": "thread"})
+            assert run_id is not None
+            mock_session.add.assert_called_once()
+            mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_process_run_record_not_found(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test update handles missing run record gracefully.
+
+        Given: Non-existent run_id.
+        When: _update_process_run_record is called.
+        Then: No exception raised, operation completes.
+        """
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalar_one_or_none.return_value = None
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            await launcher._update_process_run_record(
+                "nonexistent-run-id",
+                ProcessRunStatusEnum.FAILED,
+                error="Test error",
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_process_run_record_with_result(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test run record is updated with result.
+
+        Given: Existing run record in database.
+        When: _update_process_run_record is called with result.
+        Then: Status and result updated, committed.
+        """
+        mock_run = MagicMock()
+        mock_run.run_id = "test-run-id"
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalar_one_or_none.return_value = mock_run
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            await launcher._update_process_run_record(
+                "test-run-id",
+                ProcessRunStatusEnum.SUCCEEDED,
+                result={"output": "success"},
+            )
+            assert mock_run.status == ProcessRunStatusEnum.SUCCEEDED.value
+            assert mock_run.result == {"output": "success"}
+            mock_session.commit.assert_called_once()
+
+
+class TestStartProcessByName:
+    """Tests for start_process_by_name method."""
+
+    @pytest.mark.asyncio
+    async def test_start_process_by_name_already_running(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test starting already running process returns status.
+
+        Given: Process already in started_processes.
+        When: start_process_by_name is called.
+        Then: Returns already_running status.
+        """
+        launcher.started_processes["running_process"] = MagicMock()
+        result = await launcher.start_process_by_name("running_process")
+        assert result["status"] == "already_running"
+
+    @pytest.mark.asyncio
+    async def test_start_process_by_name_not_found(self, launcher: ProcessLauncherService) -> None:
+        """Test starting nonexistent process returns error.
+
+        Given: No process config in database.
+        When: start_process_by_name is called.
+        Then: Returns error status with not found message.
+        """
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalar_one_or_none.return_value = None
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            result = await launcher.start_process_by_name("nonexistent")
+            assert result["status"] == "error"
+            assert "not found" in result["message"]
+
+
+class TestStopProcessByName:
+    """Tests for stop_process_by_name method."""
+
+    @pytest.mark.asyncio
+    async def test_stop_process_by_name_not_running(self, launcher: ProcessLauncherService) -> None:
+        """Test stopping non-running process returns status.
+
+        Given: Process not in started_processes.
+        When: stop_process_by_name is called.
+        Then: Returns not_running status.
+        """
+        result = await launcher.stop_process_by_name("not_running")
+        assert result["status"] == "not_running"
+
+    @pytest.mark.asyncio
+    async def test_stop_process_by_name_cancels_task(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test stopping process cancels its asyncio task.
+
+        Given: Running process with associated task.
+        When: stop_process_by_name is called.
+        Then: Task cancelled, success status returned.
+        """
+
+        async def long_running() -> None:
+            await asyncio.sleep(100)
+
+        task = asyncio.create_task(long_running())
+        mock_instance = MagicMock()
+        mock_instance.stop = AsyncMock()
+        launcher.started_processes["task_process"] = mock_instance
+        launcher.process_tasks["task_process"] = task
+        launcher.process_lifecycles["task_process"] = ProcessLifecycleEnum.LONG_RUNNING
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_setting = MagicMock()
+            mock_setting.value = json.dumps({"enabled": True})
+            mock_result.scalar_one_or_none.return_value = mock_setting
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            with patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock):
+                result = await launcher.stop_process_by_name("task_process")
+            assert result["status"] == "success"
+            assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_stop_process_by_name_native_process(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test stopping native subprocess.
+
+        Given: Native process with ProcessInstanceInfo.
+        When: stop_process_by_name is called.
+        Then: Process stop method called, success returned.
+        """
+        mock_proc_info = MagicMock(spec=ProcessInstanceInfo)
+        mock_proc_info.pid = 1234
+        mock_proc_info.stop = AsyncMock()
+        launcher.started_processes["native"] = mock_proc_info
+        launcher.process_lifecycles["native"] = ProcessLifecycleEnum.LONG_RUNNING
+        with (
+            patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo,
+            patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock),
+        ):
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_setting = MagicMock()
+            mock_setting.value = json.dumps({"enabled": True})
+            mock_result.scalar_one_or_none.return_value = mock_setting
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            result = await launcher.stop_process_by_name("native")
+            assert result["status"] == "success"
+            mock_proc_info.stop.assert_called_once()
+
+
+class TestGetProcessStatus:
+    """Tests for get_process_status method."""
+
+    @pytest.mark.asyncio
+    async def test_get_process_status_running(self, launcher: ProcessLauncherService) -> None:
+        """Test status for running process.
+
+        Given: Process in started_processes dict.
+        When: get_process_status is called.
+        Then: Returns status with running=True and run_id.
+        """
+        launcher.started_processes["running"] = MagicMock()
+        launcher.process_roles["running"] = ProcessRoleEnum.CORE
+        launcher.process_lifecycles["running"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.active_runs["running"] = "test-run-id"
+        status = await launcher.get_process_status("running")
+        assert status["name"] == "running"
+        assert status["running"] is True
+        assert status["active_run_id"] == "test-run-id"
+
+    @pytest.mark.asyncio
+    async def test_get_process_status_not_running(self, launcher: ProcessLauncherService) -> None:
+        """Test status for non-running process.
+
+        Given: Process not in started_processes.
+        When: get_process_status is called.
+        Then: Returns status with running=False.
+        """
+        status = await launcher.get_process_status("not_running")
+        assert status["name"] == "not_running"
+        assert status["running"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_process_status_with_details(self, launcher: ProcessLauncherService) -> None:
+        """Test status includes process details.
+
+        Given: Process with get_status method.
+        When: get_process_status is called.
+        Then: Returns status with details from process.
+        """
+
+        class ProcessWithStatus:
+            def get_status(self) -> dict[str, Any]:
+                return {"connections": 5, "messages": 100}
+
+        process = ProcessWithStatus()
+        launcher.started_processes["with_status"] = process
+        launcher.process_roles["with_status"] = ProcessRoleEnum.CORE
+        launcher.process_lifecycles["with_status"] = ProcessLifecycleEnum.LONG_RUNNING
+        status = await launcher.get_process_status("with_status")
+        assert status["details"] == {"connections": 5, "messages": 100}
+
+    @pytest.mark.asyncio
+    async def test_get_process_status_details_error_handled(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test error in get_status is handled.
+
+        Given: Process with broken get_status method.
+        When: get_process_status is called.
+        Then: Returns status without details, no exception.
+        """
+
+        class ProcessWithBrokenStatus:
+            def get_status(self) -> dict[str, Any]:
+                raise RuntimeError("Status unavailable")
+
+        process = ProcessWithBrokenStatus()
+        launcher.started_processes["broken_status"] = process
+        launcher.process_roles["broken_status"] = ProcessRoleEnum.CORE
+        launcher.process_lifecycles["broken_status"] = ProcessLifecycleEnum.LONG_RUNNING
+        status = await launcher.get_process_status("broken_status")
+        assert status["running"] is True
+        assert "details" not in status
+
+
+class TestGetRecentRuns:
+    """Tests for get_recent_runs method."""
+
+    @pytest.mark.asyncio
+    async def test_get_recent_runs_returns_formatted_data(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test recent runs are returned with formatted data.
+
+        Given: Database with process run records.
+        When: get_recent_runs is called.
+        Then: Returns list of formatted run dictionaries.
+        """
+        mock_run = MagicMock()
+        mock_run.run_id = "run-123"
+        mock_run.process_name = "test_process"
+        mock_run.status = "succeeded"
+        mock_run.role = "core"
+        mock_run.lifecycle = "long-running"
+        mock_run.parameters = {"key": "value"}
+        mock_run.result = None
+        mock_run.error = None
+        mock_run.tags = ["tag1"]
+        mock_run.started_at = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        mock_run.completed_at = datetime(2024, 1, 1, 12, 5, 0, tzinfo=UTC)
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.all.return_value = [mock_run]
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            runs = await launcher.get_recent_runs(limit=10)
+            assert len(runs) == 1
+            assert runs[0]["run_id"] == "run-123"
+            assert runs[0]["process_name"] == "test_process"
+            assert runs[0]["tags"] == ["tag1"]
+
+
+class TestTaskCompletion:
+    """Tests for task completion handling."""
+
+    @pytest.mark.asyncio
+    async def test_handle_task_completion_success(self, launcher: ProcessLauncherService) -> None:
+        """Test successful task completion updates status.
+
+        Given: Task that completes successfully.
+        When: _handle_task_completion is called.
+        Then: Run finalized with SUCCEEDED status.
+        """
+
+        async def completing_task() -> str:
+            return "done"
+
+        task = asyncio.create_task(completing_task())
+        await task
+        launcher.process_tasks["completed_task"] = task
+        launcher.started_processes["completed_task"] = MagicMock()
+        launcher.process_lifecycles["completed_task"] = ProcessLifecycleEnum.ONE_SHOT
+        with patch.object(
+            launcher, "_finalize_process_run", new_callable=AsyncMock
+        ) as mock_finalize:
+            await launcher._handle_task_completion("completed_task", task)
+            mock_finalize.assert_called_once()
+            call_args = mock_finalize.call_args
+            assert call_args[0][1] == ProcessRunStatusEnum.SUCCEEDED
+        assert "completed_task" not in launcher.started_processes
+
+    @pytest.mark.asyncio
+    async def test_handle_task_completion_with_exception(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test task with exception sets failed status.
+
+        Given: Task that raises ValueError.
+        When: _handle_task_completion is called.
+        Then: Run finalized with FAILED status.
+        """
+
+        async def failing_task() -> None:
+            raise ValueError("Task failed")
+
+        task = asyncio.create_task(failing_task())
+        with contextlib.suppress(ValueError):
+            await task
+        launcher.process_tasks["failed_task"] = task
+        launcher.started_processes["failed_task"] = MagicMock()
+        launcher.process_lifecycles["failed_task"] = ProcessLifecycleEnum.LONG_RUNNING
+        with patch.object(
+            launcher, "_finalize_process_run", new_callable=AsyncMock
+        ) as mock_finalize:
+            await launcher._handle_task_completion("failed_task", task)
+            mock_finalize.assert_called_once()
+            call_args = mock_finalize.call_args
+            assert call_args[0][1] == ProcessRunStatusEnum.FAILED
+
+    @pytest.mark.asyncio
+    async def test_handle_task_completion_expected_termination(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test expected termination sets cancelled status.
+
+        Given: Task in expected_terminations set.
+        When: _handle_task_completion is called.
+        Then: Run finalized with CANCELLED status.
+        """
+
+        async def completing_task() -> None:
+            pass
+
+        task = asyncio.create_task(completing_task())
+        await task
+        launcher.process_tasks["expected_stop"] = task
+        launcher.started_processes["expected_stop"] = MagicMock()
+        launcher.process_lifecycles["expected_stop"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.expected_terminations.add("expected_stop")
+        with patch.object(
+            launcher, "_finalize_process_run", new_callable=AsyncMock
+        ) as mock_finalize:
+            await launcher._handle_task_completion("expected_stop", task)
+            mock_finalize.assert_called_once()
+            call_args = mock_finalize.call_args
+            assert call_args[0][1] == ProcessRunStatusEnum.CANCELLED
+
+
+class TestNativeProcessMonitoring:
+    """Tests for native process monitoring."""
+
+    @pytest.mark.asyncio
+    async def test_start_native_process_monitoring_no_native_processes(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test monitoring not started without native processes.
+
+        Given: No native processes in started_processes.
+        When: _start_native_process_monitoring is called.
+        Then: No monitor task created.
+        """
+        launcher._start_native_process_monitoring()
+        assert "_native_monitor" not in launcher.process_tasks
+
+    @pytest.mark.asyncio
+    async def test_start_native_process_monitoring_with_native_processes(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test monitoring started for native processes.
+
+        Given: ProcessInstanceInfo in started_processes.
+        When: _start_native_process_monitoring is called.
+        Then: Monitor task created.
+        """
+        proc_info = ProcessInstanceInfo(
+            name="native_proc",
+            pid=1234,
+            started_at=datetime.now(UTC),
+            config={},
+            process=MagicMock(),
+            spawner=launcher.spawner,
+        )
+        launcher.started_processes["native_proc"] = proc_info
+        launcher._start_native_process_monitoring()
+        assert "_native_monitor" in launcher.process_tasks
+        launcher.process_tasks["_native_monitor"].cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await launcher.process_tasks["_native_monitor"]
+
+    @pytest.mark.asyncio
+    async def test_start_native_process_monitoring_already_running(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test monitoring not duplicated if already running.
+
+        Given: Monitor task already exists.
+        When: _start_native_process_monitoring is called again.
+        Then: Same monitor task retained.
+        """
+        proc_info = ProcessInstanceInfo(
+            name="native_proc",
+            pid=1234,
+            started_at=datetime.now(UTC),
+            config={},
+            process=MagicMock(),
+            spawner=launcher.spawner,
+        )
+        launcher.started_processes["native_proc"] = proc_info
+        launcher._start_native_process_monitoring()
+        first_monitor = launcher.process_tasks["_native_monitor"]
+        launcher._start_native_process_monitoring()
+        assert launcher.process_tasks["_native_monitor"] is first_monitor
+        first_monitor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first_monitor
+
+
+class TestSyncRegistryToDatabase:
+    """Tests for sync_registry_to_database method."""
+
+    @pytest.mark.asyncio
+    async def test_sync_registry_creates_new_config(self, launcher: ProcessLauncherService) -> None:
+        """Test sync creates config for new registry entry.
+
+        Given: Registry with process not in database.
+        When: sync_registry_to_database is called.
+        Then: New config created in database.
+        """
+
+        class TestProcess(RegisterableProcess):
+            async def start(self) -> None:
+                pass
+
+        with (
+            patch(
+                "snapper.application.process_manager.launcher.get_registered_processes"
+            ) as mock_registry,
+            patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo,
+            patch.object(
+                launcher, "_create_process_config_in_db", new_callable=AsyncMock
+            ) as mock_create,
+        ):
+            mock_registry.return_value = {
+                "new_process": {
+                    "class_ref": TestProcess,
+                    "class_path": "test.TestProcess",
+                    "method": "start",
+                    "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
+                    "role": ProcessRoleEnum.CORE,
+                }
+            }
+            mock_repo = MagicMock()
+            mock_session = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.scalar_one_or_none.return_value = None
+            mock_session.execute.return_value = mock_result
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            await launcher.sync_registry_to_database()
+            mock_create.assert_called_once()
+
+
+class TestCreateProcessConfig:
+    """Tests for create_process_config method."""
+
+    @pytest.mark.asyncio
+    async def test_create_process_config_success(self, launcher: ProcessLauncherService) -> None:
+        """Test process config is created in database.
+
+        Given: Valid process configuration parameters.
+        When: create_process_config is called.
+        Then: Setting added to database and committed.
+        """
+        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_session = MagicMock()
+            mock_result = MagicMock()
+            mock_result.scalar_one_or_none.return_value = None
+            mock_session.execute = AsyncMock(return_value=mock_result)
+            mock_session.commit = AsyncMock()
+            mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_repo.session.return_value.__aexit__ = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            await launcher.create_process_config(
+                name="new_process",
+                class_path="test.NewProcess",
+                method="start",
+                enabled=True,
+                mode="thread",
+                args=[],
+                kwargs={},
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=["tag1"],
+                parameters_schema={"type": "object"},
+                note="Test note",
+            )
+            mock_session.add.assert_called_once()
+            mock_session.commit.assert_called_once()
+
+
+class TestHandleProcessCompletion:
+    """Tests for _handle_process_completion method."""
+
+    @pytest.mark.asyncio
+    async def test_handle_process_completion_success_exit_code(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test successful completion with exit code 0.
+
+        Given: Native process with returncode 0.
+        When: _handle_process_completion is called.
+        Then: Run finalized with SUCCEEDED status.
+        """
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_proc_info = MagicMock(spec=ProcessInstanceInfo)
+        mock_proc_info.process = mock_process
+        launcher.process_lifecycles["native"] = ProcessLifecycleEnum.ONE_SHOT
+        launcher.started_processes["native"] = mock_proc_info
+        with (
+            patch.object(launcher.spawner, "cleanup"),
+            patch.object(
+                launcher, "_finalize_process_run", new_callable=AsyncMock
+            ) as mock_finalize,
+        ):
+            await launcher._handle_process_completion("native", mock_proc_info)
+            mock_finalize.assert_called_once()
+            call_args = mock_finalize.call_args
+            assert call_args[0][1] == ProcessRunStatusEnum.SUCCEEDED
+
+    @pytest.mark.asyncio
+    async def test_handle_process_completion_failure_exit_code(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test completion with non-zero exit sets failed status.
+
+        Given: Native process with returncode 1.
+        When: _handle_process_completion is called.
+        Then: Run finalized with FAILED status.
+        """
+        mock_process = MagicMock()
+        mock_process.returncode = 1
+        mock_proc_info = MagicMock(spec=ProcessInstanceInfo)
+        mock_proc_info.process = mock_process
+        launcher.process_lifecycles["native"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.started_processes["native"] = mock_proc_info
+        with (
+            patch.object(launcher.spawner, "cleanup"),
+            patch.object(
+                launcher, "_finalize_process_run", new_callable=AsyncMock
+            ) as mock_finalize,
+        ):
+            await launcher._handle_process_completion("native", mock_proc_info)
+            mock_finalize.assert_called_once()
+            call_args = mock_finalize.call_args
+            assert call_args[0][1] == ProcessRunStatusEnum.FAILED
+
+    @pytest.mark.asyncio
+    async def test_handle_process_completion_expected_termination(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Test expected termination sets cancelled status.
+
+        Given: Process in expected_terminations set.
+        When: _handle_process_completion is called.
+        Then: Run finalized with CANCELLED status.
+        """
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_proc_info = MagicMock(spec=ProcessInstanceInfo)
+        mock_proc_info.process = mock_process
+        launcher.process_lifecycles["native"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.started_processes["native"] = mock_proc_info
+        launcher.expected_terminations.add("native")
+        with (
+            patch.object(launcher.spawner, "cleanup"),
+            patch.object(
+                launcher, "_finalize_process_run", new_callable=AsyncMock
+            ) as mock_finalize,
+        ):
+            await launcher._handle_process_completion("native", mock_proc_info)
+            mock_finalize.assert_called_once()
+            call_args = mock_finalize.call_args
+            assert call_args[0][1] == ProcessRunStatusEnum.CANCELLED
+
+
+class TestGetDefaultsFromMetadata:
+    """Tests for _get_defaults_from_metadata method."""
+
+    def test_get_defaults_from_metadata_with_values(self, launcher: ProcessLauncherService) -> None:
+        """Test metadata values are extracted correctly.
+
+        Given: Metadata dict with all fields.
+        When: _get_defaults_from_metadata is called.
+        Then: All values extracted to defaults dict.
+        """
+        metadata = {
+            "enabled": True,
+            "mode": "process",
+            "args": [1, 2, 3],
+            "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
+            "role": ProcessRoleEnum.TASK,
+            "tags": ("tag1", "tag2"),
+            "parameters_schema": {"type": "object"},
+        }
+        defaults = launcher._get_defaults_from_metadata(metadata)
+        assert defaults["enabled"] is True
+        assert defaults["mode"] == "process"
+        assert defaults["args"] == [1, 2, 3]
+        assert defaults["lifecycle"] == ProcessLifecycleEnum.ONE_SHOT
+        assert defaults["role"] == ProcessRoleEnum.TASK
+        assert defaults["tags"] == ("tag1", "tag2")
+        assert defaults["parameters_schema"] == {"type": "object"}
+
+    def test_get_defaults_from_metadata_empty(self, launcher: ProcessLauncherService) -> None:
+        """Test empty metadata returns default values.
+
+        Given: Empty metadata dict.
+        When: _get_defaults_from_metadata is called.
+        Then: Default values returned for all fields.
+        """
+        defaults = launcher._get_defaults_from_metadata({})
+        assert defaults["enabled"] is False
+        assert defaults["mode"] == "thread"
+        assert defaults["args"] == []
+        assert defaults["kwargs"] == {}
+        assert defaults["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING
+        assert defaults["role"] == ProcessRoleEnum.CORE
+        assert defaults["tags"] == ()
+        assert defaults["parameters_schema"] is None
+
+
+class _DummySettingsServiceV2:
+    """Alternative stub settings service."""
+
+    def get_setting(self, key: str, default: Any) -> Any:
+        """Return default value for any key."""
+        return default
+
+
+def _settings() -> AppSettings:
+    """Create AppSettings with stub dependencies."""
+    return AppSettings(BootstrapSettingsLoader(), _DummySettingsService())
+
+
+@pytest.mark.asyncio
+async def test_start_native_process_monitoring_skips_when_monitor_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native process monitoring skips task creation when monitor exists.
+
+    Given a ProcessLauncherService with an active _native_monitor task,
+    When _start_native_process_monitoring is called,
+    Then the existing monitor task is preserved and no new task is created.
+    """
+    launcher = ProcessLauncherService(_settings())
+    existing_task = MagicMock()
+    existing_task.done.return_value = False
+    launcher.process_tasks["_native_monitor"] = existing_task
+    launcher._start_native_process_monitoring()
+    assert launcher.process_tasks["_native_monitor"] is existing_task
+
+
+@pytest.mark.asyncio
+async def test_start_native_process_monitoring_creates_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native process monitoring creates task for active processes.
+
+    Given a ProcessLauncherService with native processes in started_processes,
+    When _start_native_process_monitoring is called,
+    Then a new monitor task is created and registered in process_tasks.
+    """
+    launcher = ProcessLauncherService(_settings())
+    proc = ProcessInstanceInfo(
+        name="native",
+        pid=1,
+        started_at=datetime.now(UTC),
+        config={},
+        process=MagicMock(),
+    )
+    launcher.started_processes["native"] = proc
+    monkeypatch.setattr(launcher, "_monitor_native_processes", AsyncMock(return_value=None))
+    created: list[asyncio.Task[None]] = []
+    original_create_task = asyncio.create_task
+
+    def fake_create_task(coro: Any) -> asyncio.Task[None]:
+        task = original_create_task(coro)
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+    launcher._start_native_process_monitoring()
+    await asyncio.sleep(0)
+    assert created, "monitor task should be scheduled"
+    assert launcher.process_tasks.get("_native_monitor") in created
+
+
+@pytest.mark.asyncio
+async def test_monitor_native_processes_triggers_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native process monitor triggers completion handler on exit.
+
+    Given a ProcessLauncherService with a running native process,
+    When the process exits and _monitor_native_processes detects it,
+    Then the completion handler is called and the process is removed.
+    """
+    launcher = ProcessLauncherService(_settings())
+    proc = ProcessInstanceInfo(
+        name="native",
+        pid=2,
+        started_at=datetime.now(UTC),
+        config={},
+        process=MagicMock(returncode=0),
+        spawner=launcher.spawner,
+    )
+    launcher.started_processes["native"] = proc
+
+    def mock_get_status(name: str) -> dict[str, Any]:
+        return {"running": False}
+
+    launcher.spawner.get_status = mock_get_status
+    called: list[str] = []
+
+    async def fake_handle(name: str, info: ProcessInstanceInfo) -> None:
+        called.append(name)
+        launcher.started_processes.pop(name, None)
+
+    monkeypatch.setattr(launcher, "_handle_process_completion", fake_handle)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    await launcher._monitor_native_processes()
+    assert called == ["native"]
+    assert "native" not in launcher.started_processes
+
+
+@pytest.mark.asyncio
+async def test_handle_process_completion_long_running_unexpected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify unexpected termination of long-running process triggers finalization.
+
+    Given a ProcessLauncherService with a long-running process,
+    When the process terminates unexpectedly with a non-zero return code,
+    Then the process is finalized and removed from active processes.
+    """
+    launcher = ProcessLauncherService(_settings())
+    process = MagicMock()
+    process.returncode = 5
+    proc_info = ProcessInstanceInfo(
+        name="worker",
+        pid=10,
+        started_at=datetime.now(UTC),
+        config={},
+        process=process,
+        spawner=launcher.spawner,
+    )
+    launcher.process_lifecycles["worker"] = ProcessLifecycleEnum.LONG_RUNNING
+    launcher.started_processes["worker"] = proc_info
+    finalize_calls: list[tuple[str, ProcessLifecycleEnum]] = []
+
+    async def fake_finalize(name: str, status: Any, error: str | None = None) -> None:
+        finalize_calls.append((name, status))
+
+    monkeypatch.setattr(launcher.spawner, "cleanup", lambda name: None)
+    monkeypatch.setattr(launcher, "_finalize_process_run", fake_finalize)
+    await launcher._handle_process_completion("worker", proc_info)
+    assert finalize_calls
+    assert finalize_calls[0][0] == "worker"

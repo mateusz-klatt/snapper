@@ -1,0 +1,54 @@
+"""Token schemas module.
+
+This module defines Pydantic schemas for JWT token claims
+and token pair responses.
+"""
+
+from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictWsSchema
+from snapper.auth.domain.roles import UserRole
+
+
+class TokenClaims(StrictWsSchema):
+    """JWT token claims schema.
+
+    Contains all claims embedded in access and refresh tokens.
+
+    Attributes:
+        sub: Subject (user ID).
+        username: User's username.
+        role: User's role.
+        permissions: List of permission strings (empty for refresh tokens).
+        exp: Expiration timestamp (Unix epoch).
+        iat: Issued at timestamp (Unix epoch).
+        jti: JWT ID (unique token identifier).
+        sid: Session ID for token rotation tracking.
+    """
+
+    sub: str
+    username: str
+    role: UserRole
+    permissions: list[str]
+    exp: int
+    iat: int
+    jti: str
+    sid: str
+
+
+class TokenPair(StrictApiSchema):
+    """Token pair response schema.
+
+    Returned after successful authentication containing both
+    access and refresh tokens.
+
+    Attributes:
+        access_token: Short-lived JWT for API access.
+        refresh_token: Long-lived JWT for token renewal.
+        token_type: Token type (always "bearer").
+        expires_in: Access token TTL in seconds.
+    """
+
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int

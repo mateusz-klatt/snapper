@@ -1,0 +1,635 @@
+"""Tests for PaperOrderExecutor and PaperExchangeClient."""
+
+import time
+from datetime import UTC
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+import pytest
+
+from snapper.config.app import AppSettings
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
+from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
+from snapper.messaging.executors.paper import PaperOrderExecutor
+
+
+async def fake_get_market_snapshots(
+    exchange: str, symbols: list[str], start_dt: datetime, end_dt: datetime
+) -> list[dict]:
+    """Return fake market snapshot data for testing."""
+    return [
+        {
+            "symbol": "BTC-USD",
+            "bid": 50000.0,
+            "ask": 50100.0,
+            "last": 50050.0,
+            "bid_volume": 1.0,
+            "ask_volume": 1.0,
+            "volume": 100.0,
+            "vwap": 50000.0,
+            "low": 49000.0,
+            "high": 51000.0,
+            "timestamp": datetime.now(tz=UTC),
+        }
+    ]
+
+
+async def fake_get_candles(
+    symbol: str, interval: str, start_dt: datetime, end_dt: datetime
+) -> list[dict]:
+    """Return fake candle data for testing."""
+    return [
+        {
+            "timestamp": datetime.now(tz=UTC),
+            "open": 50000.0,
+            "high": 51000.0,
+            "low": 49000.0,
+            "close": 50500.0,
+            "volume": 100.0,
+            "vwap": 50250.0,
+            "trades": 50,
+        }
+    ]
+
+
+async def fake_get_trades(symbol: str, start_dt: datetime, end_dt: datetime) -> list[dict]:
+    """Return fake trade data for testing."""
+    return [
+        {
+            "side": "buy",
+            "size": 0.5,
+            "price": 50000.0,
+            "trade_id": 12345,
+            "timestamp": datetime.now(tz=UTC),
+        }
+    ]
+
+
+class TestPaperOrderClientCoverage:
+    """Tests for PaperExchangeClient order functionality."""
+
+    @pytest.mark.asyncio
+    async def test_create_order_buy_market(self) -> None:
+        """Test creating a market buy order.
+
+        Given: A connected paper exchange client,
+        When: A market buy order is created,
+        Then: Order is created with correct symbol, side, amount and status.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.MARKET,
+            amount=0.5,
+            client_order_id="test_order_123",
+        )
+        result = await client.create_order(request)
+        assert result.symbol == "BTC-USD"
+        assert result.side == OrderSideEnum.BUY
+        assert result.amount == 0.5
+        assert result.status == OrderStatusEnum.OPEN
+        assert result.client_order_id == "test_order_123"
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_create_order_sell_limit(self) -> None:
+        """Test creating a limit sell order.
+
+        Given: A connected paper exchange client,
+        When: A limit sell order is created,
+        Then: Order is created with correct symbol, side, amount, and price.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        request = ExchangeOrderRequest(
+            symbol="ETH-USD",
+            side=OrderSideEnum.SELL,
+            type=OrderTypeEnum.LIMIT,
+            amount=2.0,
+            price=3500.50,
+            client_order_id="test_order_456",
+        )
+        result = await client.create_order(request)
+        assert result.symbol == "ETH-USD"
+        assert result.side == OrderSideEnum.SELL
+        assert result.amount == 2.0
+        assert result.status == OrderStatusEnum.OPEN
+        assert result.price == 3500.50
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_create_order_without_client_order_id(self) -> None:
+        """Test creating order without client order ID.
+
+        Given: A connected paper exchange client,
+        When: Order is created without client_order_id,
+        Then: Order is created successfully with OPEN status.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.MARKET,
+            amount=0.1,
+            client_order_id=None,
+        )
+        result = await client.create_order(request)
+        assert result.symbol == "BTC-USD"
+        assert result.status == OrderStatusEnum.OPEN
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_order(self) -> None:
+        """Test retrieving an order by ID.
+
+        Given: A connected paper exchange client,
+        When: get_order is called with order ID,
+        Then: Order details are returned with correct ID and symbol.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        result = await client.get_order("paper_order_123", symbol="BTC-USD")
+        assert result.id == "paper_order_123"
+        assert result.symbol == "BTC-USD"
+        assert result.status == OrderStatusEnum.OPEN
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_order_not_found(self) -> None:
+        """Test retrieving a non-existent order.
+
+        Given: A connected paper exchange client,
+        When: get_order is called with non-existent ID,
+        Then: Order snapshot with the ID is returned.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        result = await client.get_order("non_existent_id", symbol="ETH-USD")
+        assert result.id == "non_existent_id"
+        assert result.symbol == "ETH-USD"
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_cancel_order(self) -> None:
+        """Test canceling an order.
+
+        Given: A connected paper exchange client,
+        When: cancel_order is called,
+        Then: Order is returned with CANCELED status.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        result = await client.cancel_order("paper_order_789", symbol="BTC-USD")
+        assert result.id == "paper_order_789"
+        assert result.status == OrderStatusEnum.CANCELED
+        assert result.symbol == "BTC-USD"
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_orders_list(self) -> None:
+        """Test getting list of orders.
+
+        Given: A connected paper exchange client with no orders,
+        When: get_orders is called,
+        Then: Empty list is returned.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        results = await client.get_orders(symbol="BTC-USD", limit=10)
+        assert results == []
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_balance(self) -> None:
+        """Test getting balance for specific currency.
+
+        Given: A connected paper exchange client,
+        When: get_balance is called for USD,
+        Then: USD balance with default 10000.0 is returned.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        result = await client.get_balance("USD")
+        assert "USD" in result
+        assert result["USD"].currency == "USD"
+        assert result["USD"].total == 10000.0
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_balance_all_currencies(self) -> None:
+        """Test getting balance for all currencies.
+
+        Given: A connected paper exchange client,
+        When: get_balance is called without currency,
+        Then: Balances for USD, BTC, ETH are returned.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        result = await client.get_balance()
+        assert "USD" in result
+        assert "BTC" in result
+        assert "ETH" in result
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_balance_unknown_currency(self) -> None:
+        """Test getting balance for unknown currency.
+
+        Given: A connected paper exchange client,
+        When: get_balance is called for unknown currency,
+        Then: Zero balance is returned for that currency.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        result = await client.get_balance("XYZ")
+        assert "XYZ" in result
+        assert result["XYZ"].currency == "XYZ"
+        assert result["XYZ"].total == 0.0
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_orders_with_filters(self) -> None:
+        """Test getting orders with various filters.
+
+        Given: A connected paper exchange client with multiple orders,
+        When: get_orders is called with filters,
+        Then: Filtered orders are returned.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        await client.create_order(
+            ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.MARKET,
+                amount=0.1,
+                client_order_id="order1",
+            )
+        )
+        await client.create_order(
+            ExchangeOrderRequest(
+                symbol="ETH-USD",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.LIMIT,
+                amount=1.0,
+                price=3000.0,
+                client_order_id="order2",
+            )
+        )
+        orders = await client.get_orders(status=OrderStatusEnum.OPEN)
+        assert len(orders) == 2
+        btc_orders = await client.get_orders(symbol="BTC-USD")
+        assert len(btc_orders) == 1
+        assert btc_orders[0].symbol == "BTC-USD"
+        limited = await client.get_orders(limit=1)
+        assert len(limited) == 1
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_executions(self) -> None:
+        """Test subscribing to execution updates.
+
+        Given: A connected paper exchange client with fill delay,
+        When: Order is created and executions are subscribed,
+        Then: Execution update with CLOSED status is received.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo, fill_delay=0.01)
+        await client.connect()
+        await client.create_order(
+            ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.MARKET,
+                amount=0.1,
+                client_order_id="execution_test",
+            )
+        )
+        async for execution in client.subscribe_executions():
+            assert execution.symbol == "BTC-USD"
+            assert execution.order_status == OrderStatusEnum.CLOSED
+            assert execution.cum_qty == 0.1
+            break
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_supported_pairs(self) -> None:
+        """Test getting supported trading pairs.
+
+        Given: A paper exchange client,
+        When: get_supported_pairs is called,
+        Then: Common pairs like BTC/USD, ETH/USD are returned.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        pairs = client.get_supported_pairs()
+        assert "BTC/USD" in pairs
+        assert "ETH/USD" in pairs
+        assert "EUR/USD" in pairs
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_tasks(self) -> None:
+        """Test disconnect cancels pending tasks.
+
+        Given: A connected paper exchange client with pending order,
+        When: disconnect is called,
+        Then: Client is no longer running.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo, fill_delay=0.01)
+        await client.connect()
+        await client.create_order(
+            ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.MARKET,
+                amount=0.1,
+            )
+        )
+        await client.disconnect()
+        assert not client._running
+
+    @pytest.mark.asyncio
+    async def test_context_manager(self) -> None:
+        """Test async context manager protocol.
+
+        Given: A paper exchange client,
+        When: Used as async context manager,
+        Then: Client is connected inside context and disconnected after.
+        """
+        mock_repo = MagicMock()
+        async with PaperExchangeClient(repository=mock_repo) as client:
+            assert client._running
+            order = await client.create_order(
+                ExchangeOrderRequest(
+                    symbol="BTC-USD",
+                    side=OrderSideEnum.BUY,
+                    type=OrderTypeEnum.MARKET,
+                    amount=0.1,
+                )
+            )
+            assert order.status == OrderStatusEnum.OPEN
+        assert not client._running
+
+    @pytest.mark.asyncio
+    async def test_create_order_not_connected(self) -> None:
+        """Test creating order when not connected.
+
+        Given: A paper exchange client that is not connected,
+        When: create_order is called,
+        Then: RuntimeError is raised.
+        """
+        mock_repo = MagicMock()
+        client = PaperExchangeClient(repository=mock_repo)
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.MARKET,
+            amount=0.1,
+        )
+        with pytest.raises(RuntimeError, match="not connected"):
+            await client.create_order(request)
+
+
+class TestPaperMarketDataMethods:
+    """Tests for PaperExchangeClient market data methods."""
+
+    @pytest.mark.asyncio
+    async def test_get_ticker_from_repository(self) -> None:
+        """Test getting ticker from repository.
+
+        Given: A connected paper client with repository,
+        When: get_ticker is called,
+        Then: Ticker with bid, ask, last prices is returned.
+        """
+        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        ticker = await client.get_ticker("BTC-USD")
+        assert ticker.symbol == "BTC-USD"
+        assert ticker.bid == 50000.0
+        assert ticker.ask == 50100.0
+        assert ticker.last == 50050.0
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_ticker_no_repository(self) -> None:
+        """Test getting ticker without repository.
+
+        Given: A connected paper client without repository,
+        When: get_ticker is called,
+        Then: RuntimeError is raised.
+        """
+        client = PaperExchangeClient(repository=None)
+        await client.connect()
+        with pytest.raises(RuntimeError, match="Repository required"):
+            await client.get_ticker("BTC-USD")
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_ohlcv_from_repository(self) -> None:
+        """Test getting OHLCV data from repository.
+
+        Given: A connected paper client with repository,
+        When: get_ohlcv is called,
+        Then: Candle data with OHLCV values is returned.
+        """
+        mock_repo = SimpleNamespace(get_candles=fake_get_candles)
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        candles = await client.get_ohlcv("BTC-USD", "1m", limit=10)
+        assert len(candles) == 1
+        assert candles[0].open == 50000.0
+        assert candles[0].close == 50500.0
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_get_ohlcv_no_repository(self) -> None:
+        """Test getting OHLCV without repository.
+
+        Given: A connected paper client without repository,
+        When: get_ohlcv is called,
+        Then: RuntimeError is raised.
+        """
+        client = PaperExchangeClient(repository=None)
+        await client.connect()
+        with pytest.raises(RuntimeError, match="Repository required"):
+            await client.get_ohlcv("BTC-USD", "1m")
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticker_replay(self) -> None:
+        """Test subscribing to ticker replay.
+
+        Given: A connected paper client with time range,
+        When: subscribe_ticker is called,
+        Then: Ticker updates are yielded from repository.
+        """
+        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        start_ts = time.time() - 3600
+        end_ts = time.time()
+        client = PaperExchangeClient(
+            repository=mock_repo,
+            start_time=start_ts,
+            end_time=end_ts,
+        )
+        await client.connect()
+        async for ticker in client.subscribe_ticker(["BTC-USD"]):
+            assert ticker.symbol == "BTC-USD"
+            assert ticker.bid == 50000.0
+            break
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticker_no_time_range(self) -> None:
+        """Test subscribing to ticker without time range.
+
+        Given: A connected paper client without time range,
+        When: subscribe_ticker is called,
+        Then: ValueError is raised.
+        """
+        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        client = PaperExchangeClient(repository=mock_repo)
+        await client.connect()
+        with pytest.raises(ValueError, match="Time range"):
+            async for _ in client.subscribe_ticker(["BTC-USD"]):
+                break
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_candles_replay(self) -> None:
+        """Test subscribing to candles replay.
+
+        Given: A connected paper client with time range,
+        When: subscribe_candles is called,
+        Then: Candle updates are yielded from repository.
+        """
+        mock_repo = SimpleNamespace(get_candles=fake_get_candles)
+        start_ts = time.time() - 3600
+        end_ts = time.time()
+        client = PaperExchangeClient(
+            repository=mock_repo,
+            start_time=start_ts,
+            end_time=end_ts,
+        )
+        await client.connect()
+        async for candle in client.subscribe_candles(["BTC-USD"], "1m"):
+            assert candle.symbol == "BTC-USD"
+            assert candle.open == 50000.0
+            break
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_trades_replay(self) -> None:
+        """Test subscribing to trades replay.
+
+        Given: A connected paper client with time range,
+        When: subscribe_trades is called,
+        Then: Trade updates are yielded from repository.
+        """
+        mock_repo = SimpleNamespace(get_trades=fake_get_trades)
+        start_ts = time.time() - 3600
+        end_ts = time.time()
+        client = PaperExchangeClient(
+            repository=mock_repo,
+            start_time=start_ts,
+            end_time=end_ts,
+        )
+        await client.connect()
+        async for trade in client.subscribe_trades(["BTC-USD"]):
+            assert trade.symbol == "BTC-USD"
+            assert trade.price == 50000.0
+            break
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_parse_interval_to_minutes(self) -> None:
+        """Test parsing interval string to minutes.
+
+        Given: A paper exchange client,
+        When: Various interval formats are parsed,
+        Then: Correct minute values are returned.
+        """
+        client = PaperExchangeClient()
+        assert client._parse_interval_to_minutes("1m") == 1
+        assert client._parse_interval_to_minutes("5m") == 5
+        assert client._parse_interval_to_minutes("1h") == 60
+        assert client._parse_interval_to_minutes("2h") == 120
+        assert client._parse_interval_to_minutes("1d") == 1440
+        with pytest.raises(ValueError):
+            client._parse_interval_to_minutes("invalid")
+
+
+class TestPaperOrderExecutor:
+    """Tests for PaperOrderExecutor service."""
+
+    def test_get_default_kwargs_returns_empty_dict(self) -> None:
+        """Test get_default_kwargs returns empty dict.
+
+        Given: AppSettings instance,
+        When: get_default_kwargs is called,
+        Then: Empty dictionary is returned.
+        """
+        settings = MagicMock(spec=AppSettings)
+        assert PaperOrderExecutor.get_default_kwargs(settings) == {}
+
+    @patch("snapper.messaging.executors.paper.PaperExchangeClient")
+    @patch("snapper.messaging.executors.paper.get_repository")
+    @patch("snapper.messaging.executors.base.get_settings")
+    def test_create_exchange_client_uses_repository(
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+        mock_paper_client: MagicMock,
+    ) -> None:
+        """Test _create_exchange_client uses repository.
+
+        Given: PaperOrderExecutor with db_url in settings,
+        When: _create_exchange_client is called,
+        Then: PaperExchangeClient is created with repository.
+        """
+        settings = SimpleNamespace(db_url="sqlite://")
+        mock_get_settings.return_value = settings
+        repository = object()
+        mock_get_repository.return_value = repository
+        executor = PaperOrderExecutor()
+        client = executor._create_exchange_client()
+        mock_get_repository.assert_called_once_with("sqlite://")
+        mock_paper_client.assert_called_once_with(
+            repository=repository,
+            fill_delay=0.1,
+            initial_balance=10000.0,
+        )
+        assert client is mock_paper_client.return_value
+
+    @patch("snapper.messaging.executors.base.get_settings")
+    def test_get_exchange_name(self, mock_get_settings: MagicMock) -> None:
+        """Test _get_exchange_name returns paper.
+
+        Given: A PaperOrderExecutor instance,
+        When: _get_exchange_name is called,
+        Then: 'paper' is returned.
+        """
+        settings = SimpleNamespace()
+        mock_get_settings.return_value = settings
+        executor = PaperOrderExecutor()
+        assert executor._get_exchange_name() == "paper"

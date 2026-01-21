@@ -1,0 +1,120 @@
+"""Synchronize pre-commit hook versions with pyproject.toml.
+
+Reads dependency versions from pyproject.toml and updates the corresponding
+hook versions in .pre-commit-config.yaml to maintain consistency.
+"""
+
+import sys
+import tomllib
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+from typing import cast
+
+DEFAULT_PYPROJECT_PATH = Path("pyproject.toml")
+DEFAULT_CONFIG_PATH = Path(".pre-commit-config.yaml")
+
+
+def extract_version(raw_value: object, prefix: str = "") -> str:
+    """Extract version string from dependency specification.
+
+    Handles both string versions ("^1.0.0") and dict versions ({"version": "^1.0.0"}).
+
+    Args:
+        raw_value: Dependency value from pyproject.toml (string or mapping).
+        prefix: Optional prefix to prepend to the version string.
+
+    Returns:
+        Cleaned version string with optional prefix applied.
+    """
+    if isinstance(raw_value, Mapping):
+        mapping = cast(Mapping[str, Any], raw_value)
+        value = mapping.get("version", "")
+        if isinstance(value, str):
+            raw_value = value
+        elif value is None:
+            raw_value = ""
+        else:
+            raw_value = str(value)
+    if not isinstance(raw_value, str):
+        raise ValueError("Unsupported dependency version format")
+    version = raw_value.lstrip("^")
+    if prefix and not version.startswith(prefix):
+        return f"{prefix}{version}"
+    return version
+
+
+def load_versions(pyproject_path: Path = DEFAULT_PYPROJECT_PATH) -> dict[str, str]:
+    """Load tool versions from pyproject.toml.
+
+    Args:
+        pyproject_path: Path to the pyproject.toml file.
+
+    Returns:
+        Dictionary mapping tool names to their version strings.
+    """
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    dev_deps = data["tool"]["poetry"]["group"]["dev"]["dependencies"]
+    return {
+        "ruff": extract_version(dev_deps["ruff"], prefix="v"),
+        "black": extract_version(dev_deps["black"]),
+        "isort": extract_version(dev_deps["isort"]),
+    }
+
+
+def update_config(
+    expected_revs: dict[str, str],
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> None:
+    """Update pre-commit config with expected revisions.
+
+    Args:
+        expected_revs: Dictionary mapping tool names to expected revision strings.
+        config_path: Path to the .pre-commit-config.yaml file.
+    """
+    if not config_path.exists():
+        raise FileNotFoundError(".pre-commit-config.yaml not found")
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    updated_lines: list[str] = []
+    active_repo: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- repo:") or stripped.startswith("repo:"):
+            updated_lines.append(line)
+            if "ruff-pre-commit" in stripped:
+                active_repo = "ruff"
+            elif "psf/black" in stripped:
+                active_repo = "black"
+            elif "pycqa/isort" in stripped:
+                active_repo = "isort"
+            else:
+                active_repo = None
+        elif stripped.startswith("rev:") and active_repo:
+            indent = line.split("rev:", 1)[0]
+            updated_line = f"{indent}rev: {expected_revs[active_repo]}"
+            updated_lines.append(updated_line)
+            active_repo = None
+        else:
+            updated_lines.append(line)
+    config_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    """Entry point for sync_precommit script.
+
+    Returns:
+        Exit code: 0 on success, 1 on failure.
+    """
+    print("Synchronizing pre-commit hooks with pyproject.toml versions...")
+    try:
+        expected_revs = load_versions(DEFAULT_PYPROJECT_PATH)
+        update_config(expected_revs, DEFAULT_CONFIG_PATH)
+        print(f"Updated hooks: {', '.join(f'{k}={v}' for k, v in expected_revs.items())}")
+        return 0
+    except Exception as exc:
+        print(f"Failed to synchronize pre-commit hooks: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

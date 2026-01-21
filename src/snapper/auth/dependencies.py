@@ -1,0 +1,392 @@
+"""Authentication dependencies module.
+
+This module provides FastAPI dependencies for authentication,
+authorization, and CSRF protection.
+"""
+
+import hashlib
+import hmac
+import secrets
+from datetime import UTC
+from datetime import datetime
+from typing import Annotated
+from typing import Any
+
+from fastapi import Depends
+from fastapi import HTTPException
+from fastapi import Request
+from fastapi import status
+
+from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.schemas.user import UserProfile
+from snapper.auth.tokens import get_token_manager
+from snapper.config.settings import get_settings
+from snapper.config.settings import get_settings_with_service
+
+
+async def get_current_user(
+    request: Request,
+) -> UserProfile | None:
+    """Extract current user from access token cookie.
+
+    Args:
+        request: FastAPI request object.
+
+    Returns:
+        UserProfile if authenticated, None otherwise.
+    """
+    access_token = request.cookies.get("access_token")
+    if not access_token:
+        return None
+    token_manager = get_token_manager()
+    token_data: TokenClaims | None = token_manager.verify_token(access_token)
+    if not token_data:
+        return None
+    user = UserProfile(
+        id=token_data.sub,
+        username=token_data.username,
+        role=token_data.role,
+    )
+    request.state.user = user
+    request.state.token_data = token_data
+    return user
+
+
+async def require_authentication(
+    current_user: Annotated[UserProfile | None, Depends(get_current_user)],
+) -> UserProfile:
+    """Require authenticated user dependency.
+
+    Args:
+        current_user: Current user from get_current_user.
+
+    Returns:
+        UserProfile if authenticated.
+
+    Raises:
+        HTTPException: 401 if not authenticated.
+    """
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return current_user
+
+
+def require_permission(permission: Permission) -> Any:
+    """Create dependency that requires specific permission.
+
+    Args:
+        permission: Required permission.
+
+    Returns:
+        Dependency function that validates permission.
+    """
+
+    async def permission_checker(
+        current_user: Annotated[UserProfile, Depends(require_authentication)],
+    ) -> UserProfile:
+        user_permissions = ROLE_PERMISSIONS.get(current_user.role, set())
+        if permission not in user_permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission '{permission.value}' required",
+            )
+        return current_user
+
+    return permission_checker
+
+
+def require_role(role: UserRole) -> Any:
+    """Create dependency that requires minimum role level.
+
+    Args:
+        role: Minimum required role.
+
+    Returns:
+        Dependency function that validates role hierarchy.
+    """
+    role_hierarchy = {
+        UserRole.VIEWER: 0,
+        UserRole.OPERATOR: 1,
+        UserRole.ADMIN: 2,
+    }
+
+    async def role_checker(
+        current_user: Annotated[UserProfile, Depends(require_authentication)],
+    ) -> UserProfile:
+        if role_hierarchy[current_user.role] < role_hierarchy[role]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{role.value}' or higher required",
+            )
+        return current_user
+
+    return role_checker
+
+
+class CSRFManager:
+    """CSRF token manager singleton.
+
+    Generates and validates CSRF tokens using HMAC signatures
+    with timestamp-based expiration.
+    """
+
+    _instance: "CSRFManager | None" = None
+    _initialized: bool = False
+
+    def __new__(cls) -> "CSRFManager":
+        """Create or return singleton CSRF manager instance.
+
+        Returns:
+            Singleton CSRFManager instance.
+        """
+        if cls._instance is None:
+            instance = super().__new__(cls)
+            cls._instance = instance
+        return cls._instance
+
+    def __init__(self) -> None:
+        """Initialize the CSRF manager."""
+        if self._initialized:
+            return
+        self._initialized = True
+        self._settings: Any = None
+
+    def set_settings_service(self, settings_service: Any) -> None:
+        """Set settings service.
+
+        Args:
+            settings_service: Settings service instance.
+        """
+        self._settings = get_settings_with_service(settings_service)
+
+    @property
+    def settings(self) -> Any:
+        """Get application settings, lazy-loading if needed.
+
+        Returns:
+            Application settings object.
+        """
+        if self._settings is None:
+            self._settings = get_settings()
+        return self._settings
+
+    def _create_hmac_signature(self, nonce: str, timestamp: str) -> str:
+        """Create HMAC signature for token components.
+
+        Args:
+            nonce: Random nonce value.
+            timestamp: Unix timestamp string.
+
+        Returns:
+            Hex-encoded HMAC signature.
+        """
+        message = f"{nonce}:{timestamp}"
+        return hmac.new(
+            self.settings.auth_secret_key.encode(), message.encode(), hashlib.sha256
+        ).hexdigest()
+
+    def _verify_hmac_signature(self, nonce: str, timestamp: str, signature: str) -> bool:
+        """Verify HMAC signature matches expected value.
+
+        Args:
+            nonce: Token nonce.
+            timestamp: Token timestamp.
+            signature: Signature to verify.
+
+        Returns:
+            True if signature is valid.
+        """
+        expected_signature = self._create_hmac_signature(nonce, timestamp)
+        return hmac.compare_digest(expected_signature, signature)
+
+    def _get_current_timestamp(self) -> str:
+        """Get current Unix timestamp as string.
+
+        Returns:
+            Current timestamp string.
+        """
+        return str(int(datetime.now(UTC).timestamp()))
+
+    def _is_timestamp_valid(self, timestamp: str) -> bool:
+        """Check if timestamp is within valid age.
+
+        Args:
+            timestamp: Timestamp string to validate.
+
+        Returns:
+            True if timestamp is not expired.
+        """
+        try:
+            token_time = int(timestamp)
+            current_time = int(datetime.now(UTC).timestamp())
+            max_age_seconds = int(self.settings.csrf_token_expire_minutes) * 60
+            return (current_time - token_time) <= max_age_seconds
+        except (ValueError, TypeError):
+            return False
+
+    def generate_token(self) -> str:
+        """Generate a new CSRF token.
+
+        Token format: {nonce}.{timestamp}.{signature}
+
+        Returns:
+            CSRF token string.
+        """
+        nonce = secrets.token_urlsafe(24)
+        timestamp = self._get_current_timestamp()
+        signature = self._create_hmac_signature(nonce, timestamp)
+        return f"{nonce}.{timestamp}.{signature}"
+
+    def validate_token(self, token: str) -> bool:
+        """Validate a CSRF token.
+
+        Args:
+            token: CSRF token to validate.
+
+        Returns:
+            True if token is valid and not expired.
+        """
+        try:
+            parts = token.split(".")
+            if len(parts) != 3:
+                return False
+            nonce, timestamp, signature = parts
+            if not self._is_timestamp_valid(timestamp):
+                return False
+            return self._verify_hmac_signature(nonce, timestamp, signature)
+        except Exception:
+            return False
+
+    def invalidate_token(self, token: str) -> None:
+        """Invalidate a CSRF token (no-op for stateless tokens).
+
+        Args:
+            token: Token to invalidate.
+        """
+        pass
+
+    def cleanup_expired_tokens(self) -> None:
+        """Clean up expired tokens (no-op for stateless tokens)."""
+        pass
+
+    @classmethod
+    def get_instance(cls) -> "CSRFManager":
+        """Get singleton instance.
+
+        Returns:
+            CSRFManager singleton.
+        """
+        if cls._instance is None:
+            cls._instance = CSRFManager()
+        return cls._instance
+
+    @classmethod
+    def clear_instance(cls) -> None:
+        """Clear singleton for testing."""
+        cls._instance = None
+
+
+def get_csrf_manager() -> CSRFManager:
+    """Get CSRFManager singleton.
+
+    Returns:
+        CSRFManager instance.
+    """
+    return CSRFManager.get_instance()
+
+
+async def get_csrf_token(request: Request) -> str | None:
+    """Extract CSRF token from request.
+
+    Checks header first, then cookie.
+
+    Args:
+        request: FastAPI request.
+
+    Returns:
+        CSRF token or None.
+    """
+    csrf_token = request.headers.get("X-CSRF-Token")
+    if csrf_token:
+        return csrf_token
+    return request.cookies.get("csrf_token")
+
+
+async def validate_csrf_token(
+    request: Request,
+    csrf_token: Annotated[str | None, Depends(get_csrf_token)] = None,
+) -> None:
+    """Validate CSRF token for state-changing requests.
+
+    Validates origin, presence in both cookie and header,
+    and signature integrity.
+
+    Args:
+        request: FastAPI request.
+        csrf_token: Token from get_csrf_token dependency.
+
+    Raises:
+        HTTPException: 403 if CSRF validation fails.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    origin = request.headers.get("origin") or ""
+    referer = request.headers.get("referer") or ""
+    settings = get_settings()
+    allowed_origins = [
+        f"http://localhost:{settings.server_port}",
+        "http://localhost:8000",
+        "http://localhost:3000",
+        "https://holzera.klatt.ie",
+    ]
+    origin_valid = any(
+        origin.startswith(allowed_origin) or referer.startswith(allowed_origin)
+        for allowed_origin in allowed_origins
+    )
+    if not origin_valid and origin and referer:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Invalid origin: {origin}",
+        )
+    if not csrf_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token required",
+        )
+    csrf_cookie = request.cookies.get("csrf_token")
+    csrf_header = request.headers.get("X-CSRF-Token")
+    if not csrf_cookie or not csrf_header:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token must be present in both cookie and header",
+        )
+    if csrf_cookie != csrf_header:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token mismatch between cookie and header",
+        )
+    csrf_manager = get_csrf_manager()
+    if not csrf_manager.validate_token(csrf_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid or tampered CSRF token signature",
+        )
+
+
+AuthenticatedUser = Annotated[UserProfile, Depends(require_authentication)]
+OperatorUser = Annotated[UserProfile, Depends(require_role(UserRole.OPERATOR))]
+AdminUser = Annotated[UserProfile, Depends(require_role(UserRole.ADMIN))]
+ReadMarketDataUser = Annotated[
+    UserProfile, Depends(require_permission(Permission.READ_MARKET_DATA))
+]
+CreateOrdersUser = Annotated[UserProfile, Depends(require_permission(Permission.CREATE_ORDERS))]
+ManageProcessesUser = Annotated[
+    UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))
+]

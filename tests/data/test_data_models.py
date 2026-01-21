@@ -1,0 +1,608 @@
+"""Tests for SQLAlchemy ORM models in the data layer."""
+
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from unittest.mock import MagicMock
+
+import pytest
+
+from snapper.data.models import Candle
+from snapper.data.models import Execution
+from snapper.data.models import Instrument
+from snapper.data.models import OrderRecord
+from snapper.data.models import Position
+from snapper.data.models import SignalEvent
+from snapper.data.models import StrategyRun
+from snapper.data.models import Trade
+from snapper.data.models import TZDateTime
+
+
+class TestInstrumentModel:
+    """Tests for Instrument SQLAlchemy ORM model."""
+
+    def test_instrument_creation(self) -> None:
+        """Test Instrument model with all fields.
+
+        Given: Valid instrument parameters,
+        When: Instrument is created,
+        Then: All fields match provided values.
+        """
+        instrument = Instrument(
+            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        assert instrument.symbol == "BTCUSD"
+        assert instrument.base == "BTC"
+        assert instrument.quote == "USD"
+        assert instrument.tick_size == 0.01
+        assert instrument.lot_size == 0.001
+
+    def test_instrument_string_representation(self) -> None:
+        """Test Instrument has string representation.
+
+        Given: An Instrument instance,
+        When: Converted to string,
+        Then: Returns string representation.
+        """
+        instrument = Instrument(
+            symbol="ETHUSD", base="ETH", quote="USD", tick_size=0.01, lot_size=0.01
+        )
+        str_repr = str(instrument)
+        assert isinstance(str_repr, str)
+
+
+class TestCandleModel:
+    """Tests for Candle SQLAlchemy ORM model."""
+
+    def test_candle_creation(self) -> None:
+        """Test Candle model with OHLCV data.
+
+        Given: Valid candle parameters,
+        When: Candle is created,
+        Then: All OHLCV fields are set correctly.
+        """
+        now = datetime.now(UTC)
+        candle = Candle(
+            instrument_id=1,
+            timestamp=now,
+            timeframe="1h",
+            open=49000.0,
+            high=51000.0,
+            low=48500.0,
+            close=50500.0,
+            volume=150.5,
+        )
+        assert candle.instrument_id == 1
+        assert candle.timestamp == now
+        assert candle.timeframe == "1h"
+        assert candle.open == 49000.0
+        assert candle.high == 51000.0
+        assert candle.low == 48500.0
+        assert candle.close == 50500.0
+        assert candle.volume == 150.5
+
+    def test_candle_ohlc_validation(self) -> None:
+        """Test Candle OHLC relationship constraints.
+
+        Given: A valid candle with OHLC data,
+        When: Checking high/low relationships,
+        Then: High >= open,close,low and low <= all.
+        """
+        candle = Candle(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            timeframe="1h",
+            open=50000.0,
+            high=52000.0,
+            low=48000.0,
+            close=51000.0,
+            volume=100.0,
+        )
+        assert candle.high >= candle.open
+        assert candle.high >= candle.close
+        assert candle.high >= candle.low
+        assert candle.low <= candle.open
+        assert candle.low <= candle.close
+        assert candle.low <= candle.high
+
+
+class TestTradeModel:
+    """Tests for Trade SQLAlchemy ORM model."""
+
+    def test_trade_creation(self) -> None:
+        """Test Trade model with all fields.
+
+        Given: Valid trade parameters,
+        When: Trade is created,
+        Then: All fields match provided values.
+        """
+        trade = Trade(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            price=50000.0,
+            size=1.5,
+            side="buy",
+            trade_id="trade-123",
+        )
+        assert trade.instrument_id == 1
+        assert trade.price == 50000.0
+        assert trade.size == 1.5
+        assert trade.side == "buy"
+        assert trade.trade_id == "trade-123"
+        assert isinstance(trade.timestamp, datetime)
+
+    def test_trade_value_calculation(self) -> None:
+        """Test Trade value is size times price.
+
+        Given: A trade with price and size,
+        When: Calculating trade value,
+        Then: Value equals size * price.
+        """
+        trade = Trade(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            price=45000.0,
+            size=2.0,
+            side="buy",
+            trade_id="trade-123",
+        )
+        expected_value = 2.0 * 45000.0
+        assert trade.size * trade.price == expected_value
+
+    def test_trade_sides(self) -> None:
+        """Test Trade supports buy and sell sides.
+
+        Given: Two trades with different sides,
+        When: Checking side values,
+        Then: Both buy and sell are supported.
+        """
+        buy_trade = Trade(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            price=50000.0,
+            size=1.0,
+            side="buy",
+            trade_id="buy-trade",
+        )
+        sell_trade = Trade(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            price=50000.0,
+            size=1.0,
+            side="sell",
+            trade_id="sell-trade",
+        )
+        assert buy_trade.side == "buy"
+        assert sell_trade.side == "sell"
+
+
+class TestOrderModel:
+    """Tests for OrderRecord SQLAlchemy ORM model."""
+
+    def test_order_creation(self) -> None:
+        """Test OrderRecord model with all fields.
+
+        Given: Valid order parameters,
+        When: OrderRecord is created,
+        Then: All fields match provided values.
+        """
+        now = datetime.now(UTC)
+        order = OrderRecord(
+            instrument_id=1,
+            client_order_id="client-123",
+            exchange_order_id="exchange-456",
+            created_at=now,
+            side="buy",
+            type="limit",
+            price=50000.0,
+            size=1.0,
+            status="pending",
+        )
+        assert order.instrument_id == 1
+        assert order.client_order_id == "client-123"
+        assert order.exchange_order_id == "exchange-456"
+        assert order.side == "buy"
+        assert order.type == "limit"
+        assert order.price == 50000.0
+        assert order.size == 1.0
+        assert order.status == "pending"
+
+    def test_market_order(self) -> None:
+        """Test OrderRecord with market type has no price.
+
+        Given: Market order parameters,
+        When: OrderRecord is created,
+        Then: Price is None for market orders.
+        """
+        order = OrderRecord(
+            instrument_id=1,
+            created_at=datetime.now(UTC),
+            side="buy",
+            type="market",
+            price=None,
+            size=0.5,
+            status="pending",
+        )
+        assert order.type == "market"
+        assert order.price is None
+
+    def test_order_status_updates(self) -> None:
+        """Test OrderRecord status can be updated.
+
+        Given: An order with pending status,
+        When: Status is changed to filled,
+        Then: New status is reflected.
+        """
+        order = OrderRecord(
+            instrument_id=1,
+            created_at=datetime.now(UTC),
+            side="buy",
+            type="limit",
+            price=50000.0,
+            size=1.0,
+            status="pending",
+        )
+        assert order.status == "pending"
+        order.status = "filled"
+        assert order.status == "filled"
+
+
+class TestExecutionModel:
+    """Tests for Execution SQLAlchemy ORM model."""
+
+    def test_execution_creation(self) -> None:
+        """Test Execution model with all fields.
+
+        Given: Valid execution parameters,
+        When: Execution is created,
+        Then: All fields match provided values.
+        """
+        execution = Execution(
+            order_id=1,
+            timestamp=datetime.now(UTC),
+            price=50000.0,
+            size=1.0,
+            fee=5.0,
+            fee_asset="USD",
+        )
+        assert execution.order_id == 1
+        assert execution.price == 50000.0
+        assert execution.size == 1.0
+        assert execution.fee == 5.0
+        assert execution.fee_asset == "USD"
+
+    def test_execution_fee_calculation(self) -> None:
+        """Test Execution fee percentage is valid.
+
+        Given: An execution with fee,
+        When: Calculating fee percentage,
+        Then: Percentage is between 0 and 100.
+        """
+        execution = Execution(
+            order_id=1,
+            timestamp=datetime.now(UTC),
+            price=50000.0,
+            size=2.0,
+            fee=10.0,
+            fee_asset="USD",
+        )
+        trade_value = execution.price * execution.size
+        fee_percentage = (execution.fee / trade_value) * 100
+        assert fee_percentage >= 0.0
+        assert fee_percentage <= 100.0
+
+
+class TestPositionModel:
+    """Tests for Position SQLAlchemy ORM model."""
+
+    def test_position_creation(self) -> None:
+        """Test Position model with all fields.
+
+        Given: Valid position parameters,
+        When: Position is created,
+        Then: All fields match provided values.
+        """
+        position = Position(
+            instrument_id=1,
+            quantity=2.5,
+            average_price=48000.0,
+            unrealized_pnl=5000.0,
+            realized_pnl=1000.0,
+            updated_at=datetime.now(UTC),
+        )
+        assert position.instrument_id == 1
+        assert position.quantity == 2.5
+        assert position.average_price == 48000.0
+        assert position.unrealized_pnl == 5000.0
+        assert position.realized_pnl == 1000.0
+
+    def test_position_calculations(self) -> None:
+        """Test Position market value calculation.
+
+        Given: A position with quantity and price,
+        When: Calculating market value,
+        Then: Value equals quantity * average_price.
+        """
+        position = Position(
+            instrument_id=1,
+            quantity=1.0,
+            average_price=45000.0,
+            unrealized_pnl=0.0,
+            realized_pnl=0.0,
+            updated_at=datetime.now(UTC),
+        )
+        market_value = position.quantity * position.average_price
+        assert market_value == 45000.0
+
+    def test_position_pnl(self) -> None:
+        """Test Position total PnL calculation.
+
+        Given: A position with unrealized and realized PnL,
+        When: Calculating total PnL,
+        Then: Total equals sum of both.
+        """
+        position = Position(
+            instrument_id=1,
+            quantity=1.0,
+            average_price=50000.0,
+            unrealized_pnl=2000.0,
+            realized_pnl=500.0,
+            updated_at=datetime.now(UTC),
+        )
+        total_pnl = position.unrealized_pnl + position.realized_pnl
+        assert total_pnl == 2500.0
+
+
+class TestStrategyRunModel:
+    """Tests for StrategyRun SQLAlchemy ORM model."""
+
+    def test_strategy_run_creation(self) -> None:
+        """Test StrategyRun model with params and metrics.
+
+        Given: Strategy parameters and metrics,
+        When: StrategyRun is created,
+        Then: JSON fields stored correctly.
+        """
+        params = {"period": 14, "threshold": 70.0}
+        metrics = {"total_return": 0.15, "sharpe_ratio": 1.2}
+        run = StrategyRun(
+            name="RSIReversion",
+            params=params,
+            started_at=datetime.now(UTC),
+            metrics=metrics,
+        )
+        assert run.name == "RSIReversion"
+        assert run.params == params
+        assert run.metrics == metrics
+        assert isinstance(run.started_at, datetime)
+
+    def test_strategy_run_without_metrics(self) -> None:
+        """Test StrategyRun with null metrics.
+
+        Given: Strategy params but no metrics,
+        When: StrategyRun is created,
+        Then: Metrics field is None.
+        """
+        run = StrategyRun(
+            name="MACDCrossover",
+            params={"fast": 12, "slow": 26},
+            started_at=datetime.now(UTC),
+            metrics=None,
+        )
+        assert run.metrics is None
+
+
+class TestSignalEventModel:
+    """Tests for SignalEvent SQLAlchemy ORM model."""
+
+    def test_signal_event_creation(self) -> None:
+        """Test SignalEvent model with all fields.
+
+        Given: Valid signal parameters,
+        When: SignalEvent is created,
+        Then: All fields match provided values.
+        """
+        event = SignalEvent(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            side="buy",
+            strength=0.8,
+            reason="RSI oversold",
+            strategy_name="RSIReversion",
+            price=49000.0,
+        )
+        assert event.instrument_id == 1
+        assert event.side == "buy"
+        assert event.strength == 0.8
+        assert event.reason == "RSI oversold"
+        assert event.strategy_name == "RSIReversion"
+        assert event.price == 49000.0
+
+    def test_signal_event_strength_validation(self) -> None:
+        """Test SignalEvent strength is normalized 0-1.
+
+        Given: A signal with strength value,
+        When: Checking strength bounds,
+        Then: Strength is between 0 and 1.
+        """
+        event = SignalEvent(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            side="sell",
+            strength=0.9,
+            reason="MACD bearish cross",
+            strategy_name="MACDCrossover",
+        )
+        assert 0.0 <= event.strength <= 1.0
+
+    def test_signal_event_without_price(self) -> None:
+        """Test SignalEvent with null price.
+
+        Given: Signal parameters without price,
+        When: SignalEvent is created,
+        Then: Price field is None.
+        """
+        event = SignalEvent(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            side="buy",
+            strength=0.7,
+            reason="Custom signal",
+            price=None,
+        )
+        assert event.price is None
+
+
+class TestModelRelationships:
+    """Tests for SQLAlchemy model relationship definitions."""
+
+    def test_instrument_relationships(self) -> None:
+        """Test Instrument has candles and trades relations.
+
+        Given: An Instrument instance,
+        When: Checking relationship attributes,
+        Then: Has candles and trades attributes.
+        """
+        instrument = Instrument(
+            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        assert hasattr(instrument, "candles")
+        assert hasattr(instrument, "trades")
+
+    def test_candle_relationship(self) -> None:
+        """Test Candle has instrument relation.
+
+        Given: A Candle instance,
+        When: Checking relationship attributes,
+        Then: Has instrument attribute.
+        """
+        candle = Candle(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            timeframe="1h",
+            open=50000.0,
+            high=51000.0,
+            low=49000.0,
+            close=50500.0,
+            volume=100.0,
+        )
+        assert hasattr(candle, "instrument")
+
+    def test_trade_relationship(self) -> None:
+        """Test Trade has instrument relation.
+
+        Given: A Trade instance,
+        When: Checking relationship attributes,
+        Then: Has instrument attribute.
+        """
+        trade = Trade(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            price=50000.0,
+            size=1.0,
+            side="buy",
+            trade_id="trade-123",
+        )
+        assert hasattr(trade, "instrument")
+
+    def test_signal_event_relationship(self) -> None:
+        """Test SignalEvent has instrument relation.
+
+        Given: A SignalEvent instance,
+        When: Checking relationship attributes,
+        Then: Has instrument attribute.
+        """
+        event = SignalEvent(
+            instrument_id=1,
+            timestamp=datetime.now(UTC),
+            side="buy",
+            strength=0.8,
+            reason="Test signal",
+        )
+        assert hasattr(event, "instrument")
+
+
+class TestTZDateTime:
+    """Tests for TZDateTime custom SQLAlchemy type."""
+
+    def test_process_bind_param_none(self) -> None:
+        """Test TZDateTime passes through None.
+
+        Given: None value for bind param,
+        When: process_bind_param is called,
+        Then: Returns None.
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        result = tz_dt.process_bind_param(None, mock_dialect)
+        assert result is None
+
+    def test_process_bind_param_naive_datetime_raises(self) -> None:
+        """Test TZDateTime rejects naive datetimes.
+
+        Given: Naive datetime without tzinfo,
+        When: process_bind_param is called,
+        Then: Raises ValueError.
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        naive = datetime(2024, 1, 1, 12, 0, 0)
+        with pytest.raises(ValueError, match="Cannot save naive datetime"):
+            tz_dt.process_bind_param(naive, mock_dialect)
+
+    def test_process_bind_param_aware_datetime_converted_to_utc(self) -> None:
+        """Test TZDateTime converts non-UTC to UTC.
+
+        Given: Aware datetime in CET timezone,
+        When: process_bind_param is called,
+        Then: Converts to UTC with adjusted hour.
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        cet = timezone(offset=timedelta(hours=1))
+        aware = datetime(2024, 1, 1, 13, 0, 0, tzinfo=cet)
+        result = tz_dt.process_bind_param(aware, mock_dialect)
+        assert result is not None
+        assert result.tzinfo == UTC
+        assert result.hour == 12
+
+    def test_process_result_value_none(self) -> None:
+        """Test TZDateTime returns None for None result.
+
+        Given: None value from database,
+        When: process_result_value is called,
+        Then: Returns None.
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        result = tz_dt.process_result_value(None, mock_dialect)
+        assert result is None
+
+    def test_process_result_value_naive_adds_utc(self) -> None:
+        """Test TZDateTime adds UTC to naive result.
+
+        Given: Naive datetime from database,
+        When: process_result_value is called,
+        Then: Returns datetime with UTC tzinfo.
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        naive = datetime(2024, 1, 1, 12, 0, 0)
+        result = tz_dt.process_result_value(naive, mock_dialect)
+        assert result is not None
+        assert result.tzinfo == UTC
+
+    def test_process_result_value_aware_preserves_timezone(self) -> None:
+        """Test TZDateTime preserves aware datetime tzinfo.
+
+        Given: UTC-aware datetime from database,
+        When: process_result_value is called,
+        Then: Returns datetime with preserved UTC.
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        aware = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        result = tz_dt.process_result_value(aware, mock_dialect)
+        assert result is not None
+        assert result.tzinfo == UTC

@@ -1,0 +1,1 @@
+"""Authentication error types package."""

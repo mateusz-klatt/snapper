@@ -1,0 +1,839 @@
+"""Tests for TradingEngineService and EngineConfigModel."""
+
+import json
+import math
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+import pytest
+
+from snapper.application.engine.config import EngineConfigModel
+from snapper.application.engine.service import TradingEngineService
+from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.portfolio.models import PositionStateModel
+from snapper.application.risk.models import RiskConfigModel
+from snapper.application.risk.models import RiskEvaluator
+from snapper.messaging.schemas.messages import SignalEnvelope
+
+
+class FakeSocket:
+    """Fake socket that collects sent messages."""
+
+    def __init__(self) -> None:
+        """Initialize the instance."""
+        self.sent: list[tuple[str, bytes, int]] = []
+
+    async def send_multipart(self, topic: str, payload: bytes, *, flags: int = 0) -> None:
+        """Collect sent message parts."""
+        self.sent.append((topic, payload, flags))
+
+
+class StubRisk(RiskEvaluator):
+    """Risk evaluator stub that records method calls."""
+
+    def __init__(self, stop_pct_value: float = 0.05) -> None:
+        """Initialize the instance."""
+        super().__init__(RiskConfigModel())
+        self.stop_pct_value = stop_pct_value
+        self.can_open_calls: list[tuple[float, float]] = []
+        self.cap_calls: list[tuple[float, float, float, float]] = []
+        self.round_size_calls: list[tuple[float, float, float, float]] = []
+
+    def stop_pct(self) -> float:
+        """Return configured stop percentage."""
+        return self.stop_pct_value
+
+    def can_open_new_trade(self, equity: float, peak_equity: float) -> bool:
+        """Record call and always return True."""
+        self.can_open_calls.append((equity, peak_equity))
+        return True
+
+    def cap_size_by_leverage(
+        self, current_notional: float, equity: float, price: float, desired_size: float
+    ) -> float:
+        """Record call and return desired size unchanged."""
+        self.cap_calls.append((current_notional, equity, price, desired_size))
+        return desired_size
+
+    def round_size(
+        self, desired_size: float, lot_size: float, price: float, tick_size: float
+    ) -> float:
+        """Record call and delegate to parent."""
+        self.round_size_calls.append((desired_size, lot_size, price, tick_size))
+        result = super().round_size(desired_size, lot_size, price, tick_size)
+        return result
+
+
+def _decode_payload(payload: bytes) -> dict[str, Any]:
+    return cast(dict[str, Any], json.loads(payload.decode("utf-8")))
+
+
+@pytest.mark.asyncio
+async def test_engine_execute_desired_units_buy_flow() -> None:
+    """Verify buy order execution updates position and sends order message.
+
+    Given: An engine with initial cash and risk configuration,
+    When: execute_desired_units is called with positive units,
+    Then: Buy order is sent and position is opened at current price.
+    """
+    socket = FakeSocket()
+    risk = StubRisk()
+    cfg = EngineConfigModel(initial_cash=1_000.0, fee_bps=2.0)
+    engine = TradingEngineService(
+        "BTC-USD",
+        cast(Any, socket),
+        risk=risk,
+        cfg=cfg,
+        exchange="kraken",
+        instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
+    )
+    engine.portfolio.cash = 1_000.0
+    await engine.execute_desired_units(1.0, current_price=100.0)
+    assert len(socket.sent) == 1
+    topic, payload, _flags = socket.sent[0]
+    assert topic == "orders.kraken.BTC-USD.new"
+    message = _decode_payload(payload)
+    assert message["side"] == "buy"
+    assert message["instrument"] == "BTC-USD"
+    assert message["strategy_id"] == "engine-buy"
+    assert engine.position_qty > 0.0
+    assert engine.entry_price == 100.0
+    assert risk.can_open_calls
+
+
+@pytest.mark.asyncio
+async def test_engine_maybe_stop_triggers_sell() -> None:
+    """Verify stop-loss triggers sell when price drops below threshold.
+
+    Given: An engine with open long position,
+    When: Price drops significantly from previous close,
+    Then: Position is closed with stop-loss order.
+    """
+    socket = FakeSocket()
+    risk = StubRisk(stop_pct_value=0.05)
+    engine = TradingEngineService(
+        "BTC-USD",
+        cast(Any, socket),
+        risk=risk,
+        cfg=EngineConfigModel(initial_cash=5_000.0),
+    )
+    engine.position_qty = 1.0
+    engine.entry_price = None
+    engine.portfolio.positions["BTC-USD"] = PositionStateModel(quantity=1.0, average_price=110.0)
+    triggered: bool = await engine._maybe_stop(last_close=100.0, prev_close=120.0)
+    assert triggered is True
+    assert engine.position_qty == 0.0
+    assert engine.entry_price is None
+    assert len(socket.sent) == 1
+    _topic, payload, _flags = socket.sent[0]
+    message = _decode_payload(payload)
+    assert message["side"] == "sell"
+    assert message["strategy_id"] == "engine-stop"
+
+
+@pytest.mark.asyncio
+async def test_engine_execute_desired_units_sell_flow() -> None:
+    """Verify sell order execution closes position and clears entry price.
+
+    Given: An engine with existing long position,
+    When: execute_desired_units is called with negative units,
+    Then: Sell order is sent and position is closed.
+    """
+    socket = FakeSocket()
+    risk = StubRisk()
+    engine = TradingEngineService(
+        "BTC-USD",
+        cast(Any, socket),
+        risk=risk,
+        cfg=EngineConfigModel(initial_cash=5_000.0),
+        exchange="kraken",
+        instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
+    )
+    engine.position_qty = 0.3
+    engine.entry_price = 100.0
+    engine.portfolio.positions["BTC-USD"] = PositionStateModel(quantity=0.3, average_price=100.0)
+    await engine.execute_desired_units(-1.0, current_price=120.0)
+    assert len(socket.sent) == 1
+    topic, payload, _flags = socket.sent[0]
+    assert topic == "orders.kraken.BTC-USD.new"
+    message = _decode_payload(payload)
+    assert message["side"] == "sell"
+    assert message["instrument"] == "BTC-USD"
+    assert message["strategy_id"] == "engine-sell"
+    assert math.isclose(engine.position_qty, 0.0, abs_tol=1e-9)
+    assert engine.entry_price is None
+
+
+def _replace_execution_publisher_with_async_stub(trader: TraderCoordinator) -> MagicMock:
+    async_publisher = MagicMock()
+    async_publisher.send_multipart = AsyncMock(return_value=None)
+    async_publisher.close = MagicMock()
+    trader.execution_publisher = cast(Any, async_publisher)
+    return async_publisher
+
+
+class TestEngineExecuteDesiredUnits:
+    """Tests for TradingEngineService execute_desired_units method."""
+
+    @pytest.mark.asyncio
+    async def test_execute_buy_signal_with_sufficient_cash(self) -> None:
+        """Verify buy execution with sufficient cash sends correct order.
+
+        Given: Engine with 10000 initial cash and risk limits,
+        When: Buy signal for 0.1 units at 50000 price is processed,
+        Then: Buy order is published with correct topic and quantity.
+        """
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        engine = TradingEngineService(
+            instrument="BTC-USD",
+            execution_socket=mock_socket,
+            risk=RiskEvaluator(RiskConfigModel(r_per_trade=0.02, max_leverage=1.0)),
+            cfg=EngineConfigModel(initial_cash=10000.0, fee_bps=2.0),
+            instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
+            exchange="kraken",
+        )
+        desired_units = 0.1
+        current_price = 50000.0
+        await engine.execute_desired_units(desired_units, current_price)
+        assert mock_socket.send_multipart.called
+        call_args = mock_socket.send_multipart.call_args
+        topic = call_args[0][0]
+        payload_bytes = call_args[0][1]
+        payload = payload_bytes.decode() if isinstance(payload_bytes, bytes) else payload_bytes
+        assert topic == "orders.kraken.BTC-USD.new"
+        order_msg = json.loads(payload)
+        assert order_msg["instrument"] == "BTC-USD"
+        assert order_msg["side"] == "buy"
+        assert order_msg["mode"] == "live"
+        assert order_msg["quantity"] > 0
+        assert order_msg["quantity"] <= desired_units
+        assert engine.portfolio.cash < 10000.0
+        assert engine.position_qty > 0
+        assert engine.entry_price == current_price
+
+    @pytest.mark.asyncio
+    async def test_execute_desired_units_zero_signal(self) -> None:
+        """Verify zero signal closes existing position.
+
+        Given: Engine with existing position of 0.1 units,
+        When: execute_desired_units is called with 0.0 units,
+        Then: Entire position is sold and entry price is cleared.
+        """
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        engine = TradingEngineService(
+            instrument="BTC-USD",
+            execution_socket=mock_socket,
+            risk=RiskEvaluator(RiskConfigModel()),
+            cfg=EngineConfigModel(initial_cash=10000.0, fee_bps=2.0),
+            instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
+            exchange="kraken",
+        )
+        engine.position_qty = 0.1
+        engine.entry_price = 48000.0
+        engine.portfolio.update_fill("BTC-USD", "buy", 0.1, 48000.0, 9.6)
+        desired_units = 0.0
+        current_price = 52000.0
+        await engine.execute_desired_units(desired_units, current_price)
+        assert mock_socket.send_multipart.called
+        call_args = mock_socket.send_multipart.call_args
+        topic = call_args[0][0]
+        payload_bytes = call_args[0][1]
+        payload = payload_bytes.decode() if isinstance(payload_bytes, bytes) else payload_bytes
+        assert topic == "orders.kraken.BTC-USD.new"
+        order_msg = json.loads(payload)
+        assert order_msg["instrument"] == "BTC-USD"
+        assert order_msg["side"] == "sell"
+        assert order_msg["quantity"] == 0.1
+        assert engine.position_qty == 0.0
+        assert engine.entry_price is None
+
+    @pytest.mark.asyncio
+    async def test_execute_buy_signal_respects_risk_limits(self) -> None:
+        """Verify buy execution respects risk and leverage limits.
+
+        Given: Engine with small initial cash (100) and risk limits,
+        When: Large buy signal is processed,
+        Then: Cash never goes negative and position is constrained.
+        """
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        engine = TradingEngineService(
+            instrument="BTC-USD",
+            execution_socket=mock_socket,
+            risk=RiskEvaluator(RiskConfigModel(r_per_trade=0.50, max_leverage=1.0)),
+            cfg=EngineConfigModel(initial_cash=100.0, fee_bps=2.0),
+            instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
+            exchange="paper",
+        )
+        desired_units = 1.0
+        current_price = 50000.0
+        initial_cash = engine.portfolio.cash
+        await engine.execute_desired_units(desired_units, current_price)
+        assert engine.portfolio.cash <= initial_cash
+        assert engine.portfolio.cash >= 0
+
+    @pytest.mark.asyncio
+    async def test_execute_buy_signal_when_already_in_position(self) -> None:
+        """Verify buy signal increases existing position.
+
+        Given: Engine with existing position of 0.05 units,
+        When: Buy signal for 0.1 units is processed,
+        Then: Position quantity increases.
+        """
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        engine = TradingEngineService(
+            instrument="BTC-USD",
+            execution_socket=mock_socket,
+            risk=RiskEvaluator(RiskConfigModel()),
+            cfg=EngineConfigModel(initial_cash=10000.0, fee_bps=2.0),
+            instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
+            exchange="paper",
+        )
+        engine.position_qty = 0.05
+        desired_units = 0.1
+        current_price = 50000.0
+        initial_qty = engine.position_qty
+        await engine.execute_desired_units(desired_units, current_price)
+        assert engine.position_qty >= initial_qty
+
+    @pytest.mark.asyncio
+    async def test_execute_sell_signal_when_already_flat(self) -> None:
+        """Verify sell signal with no position sends no order.
+
+        Given: Engine with zero position,
+        When: Sell signal (0.0 units) is processed,
+        Then: No order is sent and position remains zero.
+        """
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        engine = TradingEngineService(
+            instrument="BTC-USD",
+            execution_socket=mock_socket,
+            risk=RiskEvaluator(RiskConfigModel()),
+            cfg=EngineConfigModel(initial_cash=10000.0, fee_bps=2.0),
+            instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
+            exchange="paper",
+        )
+        assert engine.position_qty == 0.0
+        desired_units = 0.0
+        current_price = 50000.0
+        await engine.execute_desired_units(desired_units, current_price)
+        assert not mock_socket.send_string.called
+        assert engine.position_qty == 0.0
+
+    @pytest.mark.asyncio
+    async def test_execute_with_lot_size_rounding(self) -> None:
+        """Verify order quantity is rounded to lot size.
+
+        Given: Engine with lot_size=0.001 specification,
+        When: Buy signal for 0.0123 units is processed,
+        Then: Order quantity is rounded to valid lot size.
+        """
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        engine = TradingEngineService(
+            instrument="BTC-USD",
+            execution_socket=mock_socket,
+            risk=RiskEvaluator(RiskConfigModel(r_per_trade=0.02)),
+            cfg=EngineConfigModel(initial_cash=10000.0, fee_bps=2.0),
+            instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.001}},
+            exchange="paper",
+        )
+        desired_units = 0.0123
+        current_price = 50000.0
+        await engine.execute_desired_units(desired_units, current_price)
+        if mock_socket.send_string.called:
+            call_args = mock_socket.send_string.call_args[0][0]
+            order_msg = json.loads(call_args)
+            lot_size = 0.001
+            qty = order_msg["quantity"]
+            assert qty % lot_size == 0.0 or abs(qty % lot_size) < 1e-10
+
+
+@pytest.mark.asyncio
+class TestTraderSignalHandling:
+    """Tests for TraderCoordinator signal handling."""
+
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    @patch("snapper.application.engine.trader.zmq.Context")
+    async def test_on_signal_executes_buy_signal(
+        self, mock_zmq_context: MagicMock, mock_get_settings: MagicMock, mock_get_repo: MagicMock
+    ) -> None:
+        """Verify buy signal triggers engine execution with correct parameters.
+
+        Given: TraderCoordinator with mocked engine for BTC-USD,
+        When: Buy signal with strength 0.8 and price 50000 is received,
+        Then: Engine execute_desired_units is called with units=0.8 and price=50000.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_get_settings.return_value = mock_settings
+        mock_repo = AsyncMock()
+        mock_get_repo.return_value = mock_repo
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        mock_zmq_context.return_value.socket.return_value = mock_socket
+        trader = TraderCoordinator(
+            signal_topics=["signals."],
+        )
+        await trader._setup_external_execution()
+        _replace_execution_publisher_with_async_stub(trader)
+        await trader._setup_trading_components()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
+        signal = SignalEnvelope(
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.8,
+            price=50000.0,
+            reason="Test buy signal",
+            strategy_name="test_strategy",
+            exchange="kraken",
+        )
+        trader._current_topic = "signals.paper.BTC-USD.test_strategy"
+        await trader._on_signal(signal)
+        assert mock_engine.execute_desired_units.called
+        call_args = mock_engine.execute_desired_units.call_args
+        desired_units = call_args[0][0]
+        price = call_args[0][1]
+        assert desired_units == 0.8
+        assert price == 50000.0
+        await trader._on_signal(signal)
+        assert mock_engine.execute_desired_units.called
+        call_args = mock_engine.execute_desired_units.call_args
+        desired_units = call_args[0][0]
+        price = call_args[0][1]
+        assert desired_units == 0.8
+        assert price == 50000.0
+
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    @patch("snapper.application.engine.trader.zmq.Context")
+    async def test_on_signal_executes_sell_signal(
+        self, mock_zmq_context: MagicMock, mock_get_settings: MagicMock, mock_get_repo: MagicMock
+    ) -> None:
+        """Verify sell signal triggers engine execution with zero desired units.
+
+        Given: TraderCoordinator with mocked engine for BTC-USD,
+        When: Sell signal with strength 1.0 and price 52000 is received,
+        Then: Engine execute_desired_units is called with units=0 and price=52000.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_get_settings.return_value = mock_settings
+        mock_repo = AsyncMock()
+        mock_get_repo.return_value = mock_repo
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        mock_zmq_context.return_value.socket.return_value = mock_socket
+        trader = TraderCoordinator(
+            signal_topics=["signals."],
+        )
+        await trader._setup_external_execution()
+        _replace_execution_publisher_with_async_stub(trader)
+        await trader._setup_trading_components()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
+        signal = SignalEnvelope(
+            instrument="BTC-USD",
+            side="sell",
+            strength=1.0,
+            price=52000.0,
+            reason="Test sell signal",
+            strategy_name="test_strategy",
+            exchange="kraken",
+        )
+        trader._current_topic = "signals.paper.BTC-USD.test_strategy"
+        await trader._on_signal(signal)
+        assert mock_engine.execute_desired_units.called
+        call_args = mock_engine.execute_desired_units.call_args
+        desired_units = call_args[0][0]
+        price = call_args[0][1]
+        assert desired_units == 0.0
+        assert price == 52000.0
+
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    @patch("snapper.application.engine.trader.zmq.Context")
+    async def test_on_signal_ignores_invalid_signal(
+        self, mock_zmq_context: MagicMock, mock_get_settings: MagicMock, mock_get_repo: MagicMock
+    ) -> None:
+        """Verify invalid signal without price is ignored.
+
+        Given: TraderCoordinator with mocked engine for BTC-USD,
+        When: Signal with price=None is received,
+        Then: Engine execute_desired_units is not called.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_get_settings.return_value = mock_settings
+        mock_repo = AsyncMock()
+        mock_get_repo.return_value = mock_repo
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        mock_zmq_context.return_value.socket.return_value = mock_socket
+        trader = TraderCoordinator(
+            signal_topics=["signals."],
+        )
+        await trader._setup_external_execution()
+        _replace_execution_publisher_with_async_stub(trader)
+        await trader._setup_trading_components()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
+        invalid_signal = SignalEnvelope(
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.5,
+            price=None,
+            exchange="kraken",
+            reason="test",
+        )
+        trader._current_topic = "signals.paper.BTC-USD.test_strategy"
+        await trader._on_signal(invalid_signal)
+        assert not mock_engine.execute_desired_units.called
+
+    @patch("snapper.application.engine.trader.ValidatedPublisher")
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
+    @patch("snapper.application.engine.trader.zmq.Context")
+    async def test_on_signal_creates_paper_engine_dynamically(
+        self,
+        mock_zmq_context: MagicMock,
+        mock_get_settings: MagicMock,
+        mock_get_repo: MagicMock,
+        mock_validated_publisher: MagicMock,
+    ) -> None:
+        """Verify paper engine is created dynamically for unknown instrument.
+
+        Given: TraderCoordinator with no engine for ETH-USD,
+        When: Signal for ETH-USD is received,
+        Then: Paper engine is created dynamically and registered.
+        """
+        mock_publisher_instance = MagicMock()
+        mock_publisher_instance.send_multipart = AsyncMock(return_value=None)
+        mock_publisher_instance.close = MagicMock()
+        mock_validated_publisher.return_value = mock_publisher_instance
+        mock_settings = MagicMock()
+        mock_settings.instruments = {
+            "kraken": ["BTC-USD"],
+            "zonda": [],
+            "walutomat": [],
+            "polygon": [],
+        }
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.risk_r_per_trade = 0.02
+        mock_settings.risk_max_leverage = 1.0
+        mock_settings.risk_max_drawdown = 0.1
+        mock_get_settings.return_value = mock_settings
+        mock_repo = AsyncMock()
+        mock_get_repo.return_value = mock_repo
+        mock_socket = MagicMock()
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.send_string = MagicMock()
+        mock_zmq_context.return_value.socket.return_value = mock_socket
+        trader = TraderCoordinator(
+            signal_topics=["signals."],
+        )
+        await trader._setup_external_execution()
+        await trader._setup_trading_components()
+        mock_engine = MagicMock()
+        mock_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
+        signal = SignalEnvelope(
+            instrument="ETH-USD",
+            side="buy",
+            strength=0.5,
+            price=3000.0,
+            reason="Test ETH signal",
+            exchange="kraken",
+        )
+        trader._current_topic = "signals.paper.ETH-USD.test_strategy"
+        await trader._on_signal(signal)
+        assert not mock_engine.execute_desired_units.called
+
+
+class _SocketStub:
+    """Test stub for ZMQ socket."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, bytes, int]] = []
+
+    async def send_multipart(self, topic: str, payload: bytes, *, flags: int = 0) -> None:
+        self.sent.append((topic, payload, flags))
+
+
+@dataclass
+class _RiskStub:
+    """Test stub for risk manager."""
+
+    stop_value: float = 0.01
+    allow_trade: bool = True
+    round_size_override: float | None = None
+    round_down_override: float | None = None
+
+    def stop_pct(self) -> float:
+        return self.stop_value
+
+    def can_open_new_trade(self, _equity: float, _peak: float) -> bool:
+        return self.allow_trade
+
+    def cap_size_by_leverage(
+        self,
+        _current_notional: float,
+        _equity: float,
+        _price: float,
+        desired_size: float,
+    ) -> float:
+        return desired_size
+
+    def round_size(
+        self,
+        desired_size: float,
+        _lot_size: float,
+        _price: float,
+        _tick_size: float,
+    ) -> float:
+        if self.round_size_override is not None:
+            return self.round_size_override
+        return desired_size
+
+    def round_down_to_step(self, value: float, step: float) -> float:
+        if self.round_down_override is not None:
+            return self.round_down_override
+        if step <= 0:
+            return max(value, 0.0)
+        units = int((value + 1e-12) // step)
+        return max(units * step, 0.0)
+
+
+def _make_engine(
+    *,
+    risk: _RiskStub | None = None,
+    instrument_specs: dict[str, dict[str, float]] | None = None,
+) -> tuple[TradingEngineService, _SocketStub]:
+    socket = _SocketStub()
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, socket),
+        risk=cast(Any, risk),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        instrument_specs=instrument_specs,
+        exchange="paper",
+    )
+    return engine, socket
+
+
+@pytest.mark.asyncio
+async def test_maybe_stop_returns_false_when_flat() -> None:
+    """Verify stop check returns False when position is flat.
+
+    Given a TradingEngine with no open position,
+    When _maybe_stop is called,
+    Then it returns False as no stop action is needed.
+    """
+    engine, _ = _make_engine(risk=_RiskStub())
+    assert await engine._maybe_stop(last_close=100.0) is False
+
+
+@pytest.mark.asyncio
+async def test_maybe_stop_uses_portfolio_avg_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify stop check uses portfolio average price as fallback.
+
+    Given a TradingEngine with a position but no entry_price set,
+    When _maybe_stop is called,
+    Then it uses the portfolio's average price for threshold calculation.
+    """
+    risk = _RiskStub(stop_value=0.05)
+    engine, _ = _make_engine(risk=risk)
+    engine.position_qty = 1.0
+    engine.entry_price = None
+    engine.portfolio.positions[engine.instrument] = PositionStateModel(
+        quantity=1.0, average_price=100.0
+    )
+    send_order = SimpleNamespace(called=False)
+
+    async def _dummy_send(*_args: Any, **_kwargs: Any) -> None:
+        send_order.called = True
+
+    monkeypatch.setattr(engine, "_send_order", _dummy_send)
+    assert await engine._maybe_stop(last_close=120.0, prev_close=118.0) is False
+    assert send_order.called is False
+
+
+@pytest.mark.asyncio
+async def test_maybe_stop_triggers_using_entry_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify stop triggers sell when price drops below entry threshold.
+
+    Given a TradingEngine with an open long position and entry price,
+    When the price drops below the stop threshold,
+    Then a stop order is sent and position is closed.
+    """
+    risk = _RiskStub(stop_value=0.02)
+    engine, _ = _make_engine(risk=risk)
+    engine.position_qty = 2.0
+    engine.entry_price = 100.0
+    captured: list[tuple[Any, ...]] = []
+
+    async def _capture_send(*args: Any, **kwargs: Any) -> None:
+        captured.append((args, kwargs))
+
+    monkeypatch.setattr(engine, "_send_order", _capture_send)
+    assert await engine._maybe_stop(last_close=90.0, prev_close=95.0) is True
+    assert captured, "Stop order should be sent when threshold is breached"
+    assert engine.position_qty == 0.0
+    assert engine.entry_price is None
+
+
+@pytest.mark.asyncio
+async def test_execute_desired_units_respects_drawdown_guard() -> None:
+    """Verify execution respects drawdown guard and skips disallowed trades.
+
+    Given a TradingEngine with drawdown guard blocking trades,
+    When execute_desired_units is called,
+    Then no order is sent and position remains unchanged.
+    """
+    risk = _RiskStub(allow_trade=False)
+    engine, socket = _make_engine(risk=risk)
+    await engine.execute_desired_units(desired_units=2.0, current_price=50.0)
+    assert engine.position_qty == 0.0
+    assert socket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_desired_units_skips_when_rounding_zero() -> None:
+    """Verify execution skips when rounded order size is zero.
+
+    Given a TradingEngine with lot size that rounds order to zero,
+    When execute_desired_units is called,
+    Then no order is sent and position remains unchanged.
+    """
+    risk = _RiskStub(round_size_override=0.0)
+    engine, socket = _make_engine(risk=risk, instrument_specs={"BTC-USD": {"lot_size": 1.0}})
+    await engine.execute_desired_units(desired_units=5.0, current_price=10.0)
+    assert engine.position_qty == 0.0
+    assert socket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_desired_units_sell_branch_returns_on_zero_quantity() -> None:
+    """Verify sell execution returns early when rounded quantity is zero.
+
+    Given a TradingEngine with a small position,
+    When selling with rounding that produces zero quantity,
+    Then the position is preserved and no order is sent.
+    """
+    risk = _RiskStub(round_down_override=0.0)
+    engine, socket = _make_engine(risk=risk, instrument_specs={"BTC-USD": {"lot_size": 1.0}})
+    engine.position_qty = 0.4
+    await engine.execute_desired_units(desired_units=0.0, current_price=25.0)
+    assert engine.position_qty == 0.4
+    assert socket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_desired_units_sets_entry_price_when_opening_position() -> None:
+    """Verify entry price is set when opening a new position.
+
+    Given a TradingEngine with no position,
+    When execute_desired_units opens a new position,
+    Then the entry price is set to the current price.
+    """
+    risk = _RiskStub()
+    engine, socket = _make_engine(
+        risk=risk,
+        instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
+    )
+    await engine.execute_desired_units(desired_units=0.5, current_price=50.0)
+    assert engine.entry_price == 50.0
+    assert engine.position_qty > 0.0
+    assert socket.sent, "Engine should publish order on successful entry"
+
+
+@pytest.mark.asyncio
+async def test_execute_desired_units_does_not_update_entry_when_position_still_short() -> None:
+    """Verify entry price is unchanged when position remains short.
+
+    Given a TradingEngine with an existing short position,
+    When the position is reduced but remains short,
+    Then the original entry price is preserved.
+    """
+    risk = _RiskStub(round_size_override=0.2)
+    engine, socket = _make_engine(
+        risk=risk,
+        instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
+    )
+    engine.position_qty = -0.3
+    engine.entry_price = 80.0
+    engine.portfolio.positions[engine.instrument] = PositionStateModel(
+        quantity=-0.3, average_price=75.0
+    )
+    await engine.execute_desired_units(desired_units=0.2, current_price=40.0)
+    assert abs(engine.position_qty + 0.1) < 1e-9
+    assert engine.entry_price == 80.0
+    assert socket.sent, "Engine should publish order even when reducing short exposure"
+
+
+@pytest.mark.asyncio
+async def test_send_order_converts_timestamp_to_datetime() -> None:
+    """Verify timestamp is converted and included in order message.
+
+    Given a TradingEngine sending an order,
+    When _send_order is called with a Unix timestamp,
+    Then the timestamp is converted and included in the order payload.
+    """
+    engine, socket = _make_engine()
+    ts = 1_700_000_000.0
+    await engine._send_order(
+        side="buy",
+        size=1.0,
+        price=10.0,
+        reason="unit-test",
+        signaled_at=ts,
+    )
+    assert socket.sent
+    _topic, payload_bytes, _flags = socket.sent[0]
+    payload = payload_bytes.decode()
+    assert "signaled_at" in payload

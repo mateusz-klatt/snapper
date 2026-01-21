@@ -1,0 +1,3584 @@
+"""Tests for ExchangeExecutorService base class."""
+
+import asyncio
+import contextlib
+import json
+from collections.abc import AsyncIterator
+from datetime import UTC
+from datetime import datetime
+from types import SimpleNamespace
+from types import TracebackType
+from typing import Any
+from typing import Literal
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import call
+from unittest.mock import patch
+
+import pytest
+import zmq
+
+import snapper.messaging.executors.base as base_module
+from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
+from snapper.messaging.executors.base import ExchangeExecutorService
+from snapper.messaging.executors.kraken import KrakenOrderExecutor
+from snapper.messaging.schemas.messages import FillEnvelope
+from snapper.messaging.schemas.messages import HeartbeatEnvelope
+from snapper.messaging.schemas.messages import OrderRequestEnvelope
+from snapper.messaging.schemas.messages import SettingChangedEnvelope
+
+
+def zmq_socket_stub(
+    track_calls: list[tuple[int, int]] | None = None, **kwargs: Any
+) -> SimpleNamespace:
+    """Create a stub ZMQ socket for testing."""
+
+    def _setsockopt(opt: int, val: int) -> None:
+        if track_calls is not None:
+            track_calls.append((opt, val))
+
+    return SimpleNamespace(setsockopt=_setsockopt, **kwargs)
+
+
+class DummyExecutor(ExchangeExecutorService[Any]):
+    """Test stub for ExchangeExecutorService."""
+
+    def __init__(self, client: Any) -> None:
+        """Initialize the instance."""
+        super().__init__()
+        self._client = client
+        self.settings = cast(
+            Any,
+            SimpleNamespace(
+                db_url="sqlite://",
+                zmq_broker_xpub="xpub",
+                zmq_broker_xsub="xsub",
+                master_password=None,
+                encryption_salt=None,
+            ),
+        )
+
+    def _create_exchange_client(self) -> Any:
+        return self._client
+
+    def _get_exchange_name(self) -> Literal["paper"]:
+        return "paper"
+
+
+@pytest.mark.asyncio
+async def test_start_with_websocket_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test executor start with websocket-enabled client.
+
+    Given: An executor with a websocket-supporting exchange client,
+    When: start() is called,
+    Then: The executor runs with order, execution, and heartbeat handlers.
+    """
+
+    class WebsocketClient:
+        supports_websocket_executions = True
+
+        async def __aenter__(self) -> "WebsocketClient":
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+    client = WebsocketClient()
+    executor = DummyExecutor(client)
+    cast(Any, executor)._order_handler = lambda: asyncio.sleep(0)
+    cast(Any, executor)._execution_handler = lambda: asyncio.sleep(0)
+    cast(Any, executor)._heartbeat_loop = lambda: asyncio.sleep(0)
+    monkeypatch.setattr(base_module, "get_repository", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(
+        base_module,
+        "get_settings_service",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(base_module, "get_settings_with_service", lambda _svc: executor.settings)
+
+    class DummySock(SimpleNamespace):
+        def __init__(self) -> None:
+            super().__init__(connect=lambda *_: None, close=lambda: None, term=lambda: None)
+
+    class DummyCtx:
+        def socket(self, *_args: Any) -> DummySock:
+            return DummySock()
+
+    monkeypatch.setattr("snapper.messaging.executors.base.zmq.asyncio.Context", lambda: DummyCtx())
+    monkeypatch.setattr(
+        base_module,
+        "ValidatedSubscriber",
+        lambda sock: SimpleNamespace(close=sock.close, subscribe=lambda *_: None),
+    )
+    monkeypatch.setattr(
+        base_module,
+        "ValidatedPublisher",
+        lambda sock: SimpleNamespace(close=sock.close),
+    )
+    monkeypatch.setattr(asyncio, "gather", AsyncMock(return_value=None))
+    await executor.start()
+
+
+@pytest.mark.asyncio
+async def test_start_without_websocket_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test executor start without websocket support.
+
+    Given: An executor with a non-websocket exchange client,
+    When: start() is called,
+    Then: The executor runs order and heartbeat handlers without execution handler.
+    """
+
+    class NoWebsocketClient:
+        supports_websocket_executions = False
+
+        async def __aenter__(self) -> "NoWebsocketClient":
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+    client = NoWebsocketClient()
+    executor = DummyExecutor(client)
+    cast(Any, executor)._order_handler = lambda: asyncio.sleep(0)
+    cast(Any, executor)._heartbeat_loop = lambda: asyncio.sleep(0)
+    monkeypatch.setattr(base_module, "get_repository", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(
+        base_module,
+        "get_settings_service",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(base_module, "get_settings_with_service", lambda _svc: executor.settings)
+
+    class DummySock(SimpleNamespace):
+        def __init__(self) -> None:
+            super().__init__(connect=lambda *_: None, close=lambda: None, term=lambda: None)
+
+    class DummyCtx:
+        def socket(self, *_args: Any) -> DummySock:
+            return DummySock()
+
+    monkeypatch.setattr("snapper.messaging.executors.base.zmq.asyncio.Context", lambda: DummyCtx())
+    monkeypatch.setattr(
+        base_module,
+        "ValidatedSubscriber",
+        lambda sock: SimpleNamespace(close=sock.close, subscribe=lambda *_: None),
+    )
+    monkeypatch.setattr(
+        base_module,
+        "ValidatedPublisher",
+        lambda sock: SimpleNamespace(close=sock.close),
+    )
+    monkeypatch.setattr(asyncio, "gather", AsyncMock(return_value=None))
+    await executor.start()
+
+
+class MergedDummyClient(SimpleNamespace):
+    """Test stub for exchange client with order methods."""
+
+    async def create_order(self, request: Any) -> SimpleNamespace:
+        """Create a test order."""
+        return SimpleNamespace(id="ex123")
+
+    async def subscribe_executions(self) -> AsyncIterator[Any]:
+        """Subscribe to execution updates."""
+        if False:
+            yield None
+
+
+class MergedDummyExecutor(ExchangeExecutorService[Any]):
+    """Test stub for merged exchange executor."""
+
+    def _create_exchange_client(self) -> MergedDummyClient:
+        return MergedDummyClient()
+
+    def _get_exchange_name(self) -> str:
+        return "dummy"
+
+
+def make_order(**overrides: Any) -> OrderRequestEnvelope:
+    """Create an OrderRequestEnvelope with optional overrides."""
+    return OrderRequestEnvelope(
+        type="order_req",
+        exchange="paper",
+        instrument=overrides.get("instrument", "BTC-USD"),
+        side=overrides.get("side", "buy"),
+        order_type=overrides.get("order_type", "limit"),
+        price=overrides.get("price", 1.0),
+        quantity=overrides.get("quantity", 1.0),
+        strategy_id=overrides.get("strategy_id", "s1"),
+        client_order_id=overrides.get("client_order_id", "c1"),
+        mode=overrides.get("mode", "paper"),
+        signaled_at=overrides.get("signaled_at", datetime.now(tz=UTC)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order rejection when execution fails.
+
+    Given: A running executor with mocked execute that raises error,
+    When: _process_order is called,
+    Then: A rejected fill and order status are published.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
+    ex.running = True
+    ex._publish_fill = AsyncMock()
+    ex._publish_order_status = AsyncMock()
+    ex._execute_live_order = AsyncMock(side_effect=RuntimeError("fail"))
+    order = make_order()
+    await ex._process_order(order)
+    ex._publish_fill.assert_awaited()
+    ex._publish_order_status.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_live_order_tracks_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that live order execution tracks pending orders.
+
+    Given: An executor with exchange client that returns order ID,
+    When: _execute_live_order is called,
+    Then: The order is added to pending_orders dict.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.exchange_client = MergedDummyClient()
+    order = make_order()
+    order_id = await ex._execute_live_order(order)
+    assert order_id == "ex123"
+    assert "ex123" in ex.pending_orders
+
+
+@pytest.mark.asyncio
+async def test_process_execution_unknown_order_logs_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that unknown order execution logs warning.
+
+    Given: An executor with no pending orders,
+    When: _process_execution receives unknown order ID,
+    Then: The execution is ignored and pending_orders remains empty.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
+    execution = SimpleNamespace(
+        order_id="unknown",
+        exec_type="trade",
+        order_status=None,
+        cum_qty=1.0,
+        average_price=1.0,
+        fee_usd_equiv=0.0,
+    )
+    await ex._process_execution(execution)
+    assert not ex.pending_orders
+
+
+@pytest.mark.asyncio
+async def test_publish_order_status_skips_when_not_running() -> None:
+    """Test that order status is not published when not running.
+
+    Given: An executor that is not running,
+    When: _publish_order_status is called,
+    Then: No message is sent via publisher.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
+    ex.running = False
+    await ex._publish_order_status(make_order(), "submitted")
+    ex.publisher.send_multipart.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_when_not_running() -> None:
+    """Test stop is no-op when executor not running.
+
+    Given: An executor that is not running,
+    When: stop() is called,
+    Then: Running state remains False.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = False
+    await ex.stop()
+    assert not ex.running
+
+
+@pytest.mark.asyncio
+async def test_stop_with_none_subscriber(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test stop handles None subscriber gracefully.
+
+    Given: A running executor with subscriber set to None,
+    When: stop() is called,
+    Then: Executor stops without error.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.subscriber = None
+    ex.publisher = zmq_socket_stub(close=lambda: None)
+    ex.context = SimpleNamespace(term=lambda: None)
+    await ex.stop()
+    assert not ex.running
+
+
+@pytest.mark.asyncio
+async def test_stop_with_none_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test stop handles None publisher gracefully.
+
+    Given: A running executor with publisher set to None,
+    When: stop() is called,
+    Then: Executor stops without error.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.subscriber = zmq_socket_stub(close=lambda: None)
+    ex.publisher = None
+    ex.context = SimpleNamespace(term=lambda: None)
+    await ex.stop()
+    assert not ex.running
+
+
+@pytest.mark.asyncio
+async def test_stop_with_none_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test stop handles None context gracefully.
+
+    Given: A running executor with context set to None,
+    When: stop() is called,
+    Then: Executor stops without error.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.subscriber = zmq_socket_stub(close=lambda: None)
+    ex.publisher = zmq_socket_stub(close=lambda: None)
+    ex.context = None
+    await ex.stop()
+    assert not ex.running
+
+
+@pytest.mark.asyncio
+async def test_handle_symbol_mapping_update_invalid_json() -> None:
+    """Test symbol mapping update handles invalid JSON.
+
+    Given: An executor instance,
+    When: _handle_symbol_mapping_update receives invalid JSON,
+    Then: The method handles the error gracefully.
+    """
+    ex: Any = MergedDummyExecutor()
+    await ex._handle_symbol_mapping_update("{bad json")
+
+
+@pytest.mark.asyncio
+async def test_order_handler_unexpected_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order handler ignores unexpected topics.
+
+    Given: A running executor with subscriber returning unexpected topic,
+    When: _order_handler processes messages,
+    Then: The unexpected topic is ignored.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    class OneShotSubscriber:
+        def __init__(self) -> None:
+            self.close = lambda: None
+
+        async def recv_multipart(self) -> tuple[str, bytes]:
+            ex.running = False
+            return ("unexpected.topic", b"{}")
+
+    ex.subscriber = OneShotSubscriber()
+    task = asyncio.create_task(ex._order_handler())
+    await task
+
+
+@pytest.mark.asyncio
+async def test_order_handler_settings_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order handler processes settings messages.
+
+    Given: A running executor with subscriber returning settings topic,
+    When: _order_handler receives system.settings message,
+    Then: Settings update handler is called.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    class OneShotSubscriber:
+        def __init__(self) -> None:
+            self.close = lambda: None
+
+        async def recv_multipart(self) -> tuple[str, bytes]:
+            ex.running = False
+            return (
+                "system.settings",
+                b'{"type":"setting_changed","key":"foo","value":"bar"}',
+            )
+
+    ex.subscriber = OneShotSubscriber()
+    handle_mock = AsyncMock()
+    ex._handle_settings_update = handle_mock
+    task = asyncio.create_task(ex._order_handler())
+    await task
+    handle_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_order_handler_wrong_exchange(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order handler skips orders for different exchange.
+
+    Given: A running executor configured for one exchange,
+    When: Order for different exchange is received,
+    Then: The order is not processed.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    order = cast(Any, make_order())
+    order.exchange = "other"
+
+    async def recv_multipart() -> tuple[str, bytes]:
+        ex.running = False
+        return ("orders.dummy.requests", b"{}")
+
+    ex.subscriber = SimpleNamespace(
+        recv_multipart=AsyncMock(side_effect=recv_multipart),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        "snapper.messaging.executors.base.parse_message",
+        lambda _payload: order,
+    )
+    ex._process_order = AsyncMock()
+    await ex._order_handler()
+    ex._process_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_order_handler_non_order_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order handler ignores non-order messages.
+
+    Given: A running executor with subscriber,
+    When: Non-order message type is received,
+    Then: The message is ignored.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    async def recv_multipart() -> tuple[str, bytes]:
+        ex.running = False
+        return ("orders.dummy.requests", b"{}")
+
+    ex.subscriber = SimpleNamespace(
+        recv_multipart=AsyncMock(side_effect=recv_multipart),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        "snapper.messaging.executors.base.parse_message",
+        lambda _payload: SimpleNamespace(type="other"),
+    )
+    await ex._order_handler()
+
+
+@pytest.mark.asyncio
+async def test_order_handler_logs_error_and_continues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order handler logs errors and continues.
+
+    Given: A running executor with subscriber that raises error,
+    When: _order_handler encounters an exception,
+    Then: Error is logged and handler stops.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    async def recv_multipart() -> tuple[str, bytes]:
+        raise ValueError("boom")
+
+    ex.subscriber = SimpleNamespace(
+        recv_multipart=AsyncMock(side_effect=recv_multipart),
+        close=lambda: None,
+    )
+
+    class DummyLogger:
+        def error(self, *_args: Any, **_kwargs: Any) -> None:
+            ex.running = False
+
+    monkeypatch.setattr("snapper.messaging.executors.base.logger", DummyLogger())
+    await ex._order_handler()
+
+
+@pytest.mark.asyncio
+async def test_order_handler_error_when_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test order handler suppresses errors when not running.
+
+    Given: An executor that becomes not running after error,
+    When: Error occurs during recv_multipart,
+    Then: Error is not logged when executor is stopping.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    call_count = 0
+
+    async def recv_multipart() -> tuple[str, bytes]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            ex.running = False
+            raise ValueError("exception after shutdown")
+        return ("", b"")
+
+    ex.subscriber = SimpleNamespace(
+        recv_multipart=AsyncMock(side_effect=recv_multipart),
+    )
+    logged_errors: list[str] = []
+
+    class DummyLogger:
+        def error(self, msg: str, *_args: Any, **_kwargs: Any) -> None:
+            logged_errors.append(msg)
+
+    monkeypatch.setattr("snapper.messaging.executors.base.logger", DummyLogger())
+    await ex._order_handler()
+    assert logged_errors == []
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_exchange_client_none() -> None:
+    """Test execution handler returns when client is None.
+
+    Given: A running executor with no exchange client,
+    When: _execution_handler is called,
+    Then: Handler returns immediately.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.exchange_client = None
+    await ex._execution_handler()
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_not_implemented() -> None:
+    """Test execution handler handles NotImplementedError.
+
+    Given: A running executor with client that raises NotImplementedError,
+    When: subscribe_executions raises NotImplementedError,
+    Then: Handler returns gracefully.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    class Client:
+        supports_websocket_executions = True
+
+        def subscribe_executions(self) -> AsyncIterator[Any]:
+            async def _gen() -> AsyncIterator[Any]:
+                raise NotImplementedError
+                yield None
+
+            return _gen()
+
+    ex.exchange_client = Client()
+    await ex._execution_handler()
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_runtime_error_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test execution handler logs runtime errors.
+
+    Given: A running executor with client that raises RuntimeError,
+    When: subscribe_executions raises RuntimeError,
+    Then: Error is logged and handler returns.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    class Client:
+        supports_websocket_executions = True
+
+        def subscribe_executions(self) -> AsyncIterator[Any]:
+            async def _gen() -> AsyncIterator[Any]:
+                raise RuntimeError("ws fail")
+                yield None
+
+            return _gen()
+
+    ex.exchange_client = Client()
+    await ex._execution_handler()
+
+
+@pytest.mark.asyncio
+async def test_process_execution_default_filled_and_removes_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test execution processing removes pending orders on fill.
+
+    Given: An executor with a pending order,
+    When: Execution update with default filled status is received,
+    Then: Fill is published and order is removed from pending.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    order = make_order()
+    ex.pending_orders["ex1"] = order
+    ex._publish_fill = AsyncMock()
+    execution = SimpleNamespace(
+        order_id="ex1",
+        exec_type="trade",
+        order_status=None,
+        cum_qty=None,
+        average_price=None,
+        fee_usd_equiv=None,
+    )
+    await ex._process_execution(execution)
+    assert "ex1" not in ex.pending_orders
+    ex._publish_fill.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_execution_exception_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test execution processing keeps order on publish error.
+
+    Given: An executor with pending order and failing _publish_fill,
+    When: Execution update is processed,
+    Then: Order remains in pending_orders after exception.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    order = make_order()
+    ex.pending_orders["ex1"] = order
+    ex._publish_fill = AsyncMock(side_effect=RuntimeError("fail"))
+    execution = SimpleNamespace(
+        order_id="ex1",
+        exec_type="trade",
+        order_status=None,
+        cum_qty=1.0,
+        average_price=1.0,
+        fee_usd_equiv=0.0,
+    )
+    await ex._process_execution(execution)
+    assert "ex1" in ex.pending_orders
+
+
+@pytest.mark.asyncio
+async def test_publish_heartbeat_skips_when_not_running() -> None:
+    """Test heartbeat is not published when not running.
+
+    Given: An executor that is not running,
+    When: _publish_heartbeat is called,
+    Then: No message is sent.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = False
+    ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
+    msg = SimpleNamespace(to_json=lambda: "{}", component="c")
+    await ex._publish_heartbeat("topic", cast(Any, msg))
+    ex.publisher.send_multipart.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_handles_publish_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test heartbeat loop handles publish errors.
+
+    Given: A running executor with failing _publish_heartbeat,
+    When: Heartbeat loop runs,
+    Then: Error is handled and loop continues until stopped.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.settings = SimpleNamespace(
+        zmq_heartbeat_interval_ms=0,
+        zmq_broker_xsub="xsub",
+        zmq_broker_xpub="xpub",
+    )
+    ex._publish_heartbeat = AsyncMock(side_effect=RuntimeError("send fail"))
+    task = asyncio.create_task(ex._heartbeat_loop())
+    await asyncio.sleep(0.02)
+    ex.running = False
+    await task
+
+
+def test_stop_closes_resources() -> None:
+    """Test stop properly closes all resources.
+
+    Given: A running executor with subscriber, publisher, and context,
+    When: stop() is called,
+    Then: All resources are closed and LINGER is set to 0.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    closed = {"sub": False, "pub": False, "ctx": False}
+    sub_setsockopt: list[tuple[int, int]] = []
+    pub_setsockopt: list[tuple[int, int]] = []
+    ex.subscriber = zmq_socket_stub(
+        track_calls=sub_setsockopt, close=lambda: closed.__setitem__("sub", True)
+    )
+    ex.publisher = zmq_socket_stub(
+        track_calls=pub_setsockopt, close=lambda: closed.__setitem__("pub", True)
+    )
+
+    class Ctx:
+        def term(self) -> None:
+            closed["ctx"] = True
+
+    ex.context = Ctx()
+    asyncio.run(ex.stop())
+    assert closed["sub"] and closed["pub"] and closed["ctx"]
+    assert sub_setsockopt == [(zmq.LINGER, 0)]
+    assert pub_setsockopt == [(zmq.LINGER, 0)]
+
+
+class TestExecutorNonWebSocketMode:
+    """Tests for executor without websocket support."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_without_websocket_support(self, mock_get_settings: MagicMock) -> None:
+        """Verify executor starts without websocket support.
+
+        Given: An executor with non-websocket client,
+        When: start is called,
+        Then: Executor runs with order handler only.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_exchange_client = AsyncMock()
+        mock_exchange_client.supports_websocket_executions = False
+        mock_exchange_client.__aenter__.return_value = mock_exchange_client
+        mock_exchange_client.__aexit__.return_value = None
+        start_called = asyncio.Event()
+
+        async def mock_order_handler() -> None:
+            start_called.set()
+            await asyncio.sleep(0.5)
+
+        with (
+            patch.object(service, "_order_handler", side_effect=mock_order_handler),
+            patch.object(service, "_heartbeat_loop", new=AsyncMock()),
+            patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
+            patch(
+                "snapper.application.services.settings.get_settings_service",
+                new=AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "snapper.config.settings.get_settings_with_service",
+                return_value=mock_settings,
+            ),
+            patch("zmq.asyncio.Context"),
+        ):
+            task = asyncio.create_task(service_any.start())
+            try:
+                await asyncio.wait_for(start_called.wait(), timeout=2.0)
+                assert service_any.running is True
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+
+class TestOrderHandlerEdgeCases:
+    """Tests for order handler edge cases."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_wrong_exchange(self, mock_get_settings: MagicMock) -> None:
+        """Verify order handler ignores wrong exchange.
+
+        Given: An order for different exchange,
+        When: Order handler processes it,
+        Then: Order is skipped.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_subscriber = AsyncMock()
+        recv_count = 0
+
+        async def mock_recv_multipart() -> tuple[str, bytes]:
+            nonlocal recv_count
+            recv_count += 1
+            if recv_count == 1:
+                return (
+                    "orders.kraken.requests",
+                    (
+                        b'{"type":"order_req","strategy_id":"test","exchange":"binance",'
+                        b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
+                        b'"quantity":0.1,"client_order_id":"test123"}'
+                    ),
+                )
+            service_any.running = False
+            await asyncio.sleep(0.1)
+            return ("", b"")
+
+        mock_subscriber.recv_multipart = mock_recv_multipart
+        service_any.subscriber = mock_subscriber
+        await service_any._order_handler()
+        assert recv_count >= 1
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_non_order_message(self, mock_get_settings: MagicMock) -> None:
+        """Verify order handler handles non-order messages.
+
+        Given: A non-order message type,
+        When: Order handler processes it,
+        Then: Message is skipped without error.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_subscriber = AsyncMock()
+        recv_count = 0
+
+        async def mock_recv_multipart() -> tuple[str, bytes]:
+            nonlocal recv_count
+            recv_count += 1
+            if recv_count == 1:
+                return (
+                    "orders.kraken.requests",
+                    b'{"type":"heartbeat","timestamp":"2024-01-01T00:00:00Z"}',
+                )
+            service_any.running = False
+            await asyncio.sleep(0.1)
+            return ("", b"")
+
+        mock_subscriber.recv_multipart = mock_recv_multipart
+        service_any.subscriber = mock_subscriber
+        await service_any._order_handler()
+        assert recv_count >= 1
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_unexpected_topic(self, mock_get_settings: MagicMock) -> None:
+        """Verify order handler ignores unexpected topics.
+
+        Given: Subscriber receiving messages with unknown topic,
+        When: Order handler processes the message,
+        Then: Handler continues without error.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_subscriber = AsyncMock()
+        recv_count = 0
+
+        async def mock_recv_multipart() -> tuple[str, bytes]:
+            nonlocal recv_count
+            recv_count += 1
+            if recv_count == 1:
+                return ("unknown.topic", b'{"type":"order_request"}')
+            service_any.running = False
+            await asyncio.sleep(0.1)
+            return ("", b"")
+
+        mock_subscriber.recv_multipart = mock_recv_multipart
+        service_any.subscriber = mock_subscriber
+        await service_any._order_handler()
+        assert recv_count >= 1
+
+
+class TestExecutionHandler:
+    """Tests for execution handler functionality."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_not_implemented(self, mock_get_settings: MagicMock) -> None:
+        """Verify execution handler handles NotImplementedError.
+
+        Given: Exchange client with unimplemented subscribe_executions,
+        When: Execution handler runs,
+        Then: NotImplementedError is caught gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_exchange_client = AsyncMock()
+
+        async def raise_not_implemented() -> Any:
+            raise NotImplementedError("subscribe_executions not supported")
+            yield
+
+        mock_exchange_client.subscribe_executions = raise_not_implemented
+        service_any.exchange_client = mock_exchange_client
+        await service_any._execution_handler()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_error(self, mock_get_settings: MagicMock) -> None:
+        """Verify execution handler handles connection errors.
+
+        Given: Exchange client that raises error,
+        When: Execution handler runs,
+        Then: Error is handled gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_exchange_client = AsyncMock()
+
+        async def raise_error() -> Any:
+            raise RuntimeError("Connection lost")
+            yield
+
+        mock_exchange_client.subscribe_executions = raise_error
+        service_any.exchange_client = mock_exchange_client
+        await service_any._execution_handler()
+
+
+class TestExecuteLiveOrderErrors:
+    """Tests for live order execution errors."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
+        base: dict[str, Any] = {
+            "strategy_id": "test_strategy",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.1,
+            "client_order_id": "test_order_123",
+        }
+        base.update(overrides)
+        return OrderRequestEnvelope(**base)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_exception(self, mock_get_settings: MagicMock) -> None:
+        """Verify live order execution handles API exception.
+
+        Given: Exchange client that raises exception,
+        When: _execute_live_order is called,
+        Then: Returns None without crashing.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_exchange_client = AsyncMock()
+        mock_exchange_client.create_order = AsyncMock(side_effect=Exception("API error"))
+        service_any.exchange_client = mock_exchange_client
+        order = self._create_order()
+        result = await service_any._execute_live_order(order)
+        assert result is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_no_order_id(self, mock_get_settings: MagicMock) -> None:
+        """Verify live order execution handles null order id.
+
+        Given: Exchange client that returns None,
+        When: _execute_live_order is called,
+        Then: Returns None.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_exchange_client = AsyncMock()
+        mock_exchange_client.create_order = AsyncMock(return_value=None)
+        service_any.exchange_client = mock_exchange_client
+        order = self._create_order()
+        result = await service_any._execute_live_order(order)
+        assert result is None
+
+
+class TestProcessOrder:
+    """Tests for order processing functionality."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
+        base: dict[str, Any] = {
+            "strategy_id": "test_strategy",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.1,
+            "client_order_id": "test_order_123",
+        }
+        base.update(overrides)
+        return OrderRequestEnvelope(**base)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_order_exception_publishes_rejection(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify order processing publishes rejection on exception.
+
+        Given: Order with failing execute_live_order call,
+        When: Order is processed,
+        Then: Rejection fill is published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        published_fills: list[Any] = []
+
+        async def track_publish_fill(fill: Any) -> None:
+            published_fills.append(fill)
+
+        async def track_publish_order_status(order: Any, status: str) -> None:
+            pass
+
+        service_any._publish_fill = track_publish_fill
+        service_any._publish_order_status = track_publish_order_status
+        service_any._execute_live_order = AsyncMock(side_effect=Exception("Order execution failed"))
+        order = self._create_order()
+        await service_any._process_order(order)
+        assert len(published_fills) >= 1
+        assert published_fills[0].status == "rejected"
+
+
+class TestProcessExecution:
+    """Tests for execution processing functionality."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_unknown_order(self, mock_get_settings: MagicMock) -> None:
+        """Verify execution processing handles unknown order.
+
+        Given: Execution for order not in pending orders,
+        When: _process_execution is called,
+        Then: Handles gracefully without error.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.pending_orders = {}
+        execution = ExecutionUpdate(
+            order_id="unknown_order_123",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.MARKET,
+            order_status=OrderStatusEnum.FILLED,
+            timestamp=datetime.now(UTC),
+        )
+        await service_any._process_execution(execution)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_cancelled(self, mock_get_settings: MagicMock) -> None:
+        """Verify cancelled execution is processed correctly.
+
+        Given: Pending order with cancellation execution update,
+        When: Execution is processed,
+        Then: Fill with cancelled status is published and order removed.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        order = OrderRequestEnvelope(
+            strategy_id="test",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="market",
+            quantity=0.1,
+            client_order_id="order_123",
+        )
+        service_any.pending_orders = {"exchange_order_456": order}
+        published_fills: list[Any] = []
+
+        async def track_publish_fill(fill: Any) -> None:
+            published_fills.append(fill)
+
+        service_any._publish_fill = track_publish_fill
+        execution = ExecutionUpdate(
+            order_id="exchange_order_456",
+            exec_type="canceled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.MARKET,
+            order_status=OrderStatusEnum.CANCELED,
+            timestamp=datetime.now(UTC),
+        )
+        await service_any._process_execution(execution)
+        assert len(published_fills) == 1
+        assert published_fills[0].status == "cancelled"
+        assert "exchange_order_456" not in service_any.pending_orders
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_partial(self, mock_get_settings: MagicMock) -> None:
+        """Verify partial execution is processed correctly.
+
+        Given: Pending order with partial fill execution update,
+        When: Execution is processed,
+        Then: Partial fill is published and order remains pending.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        order = OrderRequestEnvelope(
+            strategy_id="test",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="limit",
+            quantity=1.0,
+            price=50000.0,
+            client_order_id="order_123",
+        )
+        service_any.pending_orders = {"exchange_order_456": order}
+        published_fills: list[Any] = []
+
+        async def track_publish_fill(fill: Any) -> None:
+            published_fills.append(fill)
+
+        service_any._publish_fill = track_publish_fill
+        execution = ExecutionUpdate(
+            order_id="exchange_order_456",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.5,
+            average_price=50100.0,
+        )
+        await service_any._process_execution(execution)
+        assert len(published_fills) == 1
+        assert published_fills[0].status == "partial"
+        assert "exchange_order_456" in service_any.pending_orders
+
+
+class TestHeartbeat:
+    """Tests for heartbeat functionality."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_heartbeat_no_publisher(self, mock_get_settings: MagicMock) -> None:
+        """Verify heartbeat publishing handles missing publisher.
+
+        Given: Service with no publisher configured,
+        When: Heartbeat is published,
+        Then: No error is raised.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.publisher = None
+        service_any.running = True
+        hb = HeartbeatEnvelope(
+            component="test",
+            sequence=1,
+            status="healthy",
+            lag_ms=0,
+        )
+        await service_any._publish_heartbeat("system.heartbeats.test", hb)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_heartbeat_error_handling(self, mock_get_settings: MagicMock) -> None:
+        """Verify heartbeat publishing handles send errors.
+
+        Given: Publisher that raises exception on send,
+        When: Heartbeat is published,
+        Then: Error is caught and handled gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_publisher = MagicMock()
+        mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Send failed"))
+        service_any.publisher = mock_publisher
+        hb = HeartbeatEnvelope(
+            component="test",
+            sequence=1,
+            status="healthy",
+            lag_ms=0,
+        )
+        await service_any._publish_heartbeat("system.heartbeats.test", hb)
+
+
+class TestSymbolMappingUpdate:
+    """Tests for symbol mapping update handling."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_symbol_mapping_update_error(self, mock_get_settings: MagicMock) -> None:
+        """Verify symbol mapping update handles invalid JSON.
+
+        Given: Invalid JSON payload,
+        When: Symbol mapping update is handled,
+        Then: Error is caught gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        await service_any._handle_symbol_mapping_update("not valid json {{{")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_symbol_mapping_update_success(self, mock_get_settings: MagicMock) -> None:
+        """Verify symbol mapping update triggers cache invalidation.
+
+        Given: Valid symbol mapping update payload,
+        When: Update is handled,
+        Then: Cache invalidation is triggered on mapper service.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        payload = json.dumps(
+            {
+                "event": "symbol_mappings_updated",
+                "action": "clear_cache",
+            }
+        )
+        with patch(
+            "snapper.messaging.executors.base.SymbolMapperService.get_instance"
+        ) as mock_mapper:
+            mock_instance = MagicMock()
+            mock_mapper.return_value = mock_instance
+            await service_any._handle_symbol_mapping_update(payload)
+            mock_instance.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
+
+
+class TestSettingsUpdate:
+    """Tests for settings update handling."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_settings_update_error(self, mock_get_settings: MagicMock) -> None:
+        """Verify settings update handles invalid JSON.
+
+        Given: Invalid JSON payload,
+        When: Settings update is handled,
+        Then: Error is caught gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        await service_any._handle_settings_update("not valid json {{{")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_settings_update_success(self, mock_get_settings: MagicMock) -> None:
+        """Verify settings update updates cache correctly.
+
+        Given: Valid settings update payload,
+        When: Update is handled,
+        Then: Settings cache is updated with new value.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        envelope = SettingChangedEnvelope(
+            key="test_key",
+            value="test_value",
+            category="test",
+        )
+        payload = envelope.to_json()
+        with patch("snapper.messaging.executors.base.SettingsService.get_instance") as mock_service:
+            mock_instance = MagicMock()
+            mock_instance._parse_value.return_value = "test_value"
+            mock_instance._cache = {}
+            mock_service.return_value = mock_instance
+            await service_any._handle_settings_update(payload)
+            mock_instance._parse_value.assert_called_once_with("test_value")
+            assert mock_instance._cache["test_key"] == "test_value"
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_settings_update_no_instance(self, mock_get_settings: MagicMock) -> None:
+        """Verify settings update handles missing service instance.
+
+        Given: Settings service returning None for get_instance,
+        When: Update is handled,
+        Then: No error is raised.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        envelope = SettingChangedEnvelope(
+            key="test_key",
+            value="test_value",
+            category="test",
+        )
+        payload = envelope.to_json()
+        with patch("snapper.messaging.executors.base.SettingsService.get_instance") as mock_service:
+            mock_service.return_value = None
+            await service_any._handle_settings_update(payload)
+
+
+class TestPublishOrderStatus:
+    """Tests for order status publishing."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_order_status_no_publisher(self, mock_get_settings: MagicMock) -> None:
+        """Verify order status publishing handles missing publisher.
+
+        Given: Service with no publisher configured,
+        When: Order status is published,
+        Then: No error is raised.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.publisher = None
+        service_any.running = True
+        order = OrderRequestEnvelope(
+            strategy_id="test",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="market",
+            quantity=0.1,
+            client_order_id="order_123",
+        )
+        await service_any._publish_order_status(order, "submitted")
+
+
+class TestExecutionHandlerEdgeCases:
+    """Tests for execution handler edge cases."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_websocket_unsupported(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify execution handler handles unsupported websocket.
+
+        Given: Exchange client without websocket execution support,
+        When: Execution handler runs,
+        Then: Handler returns without error.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_client = MagicMock()
+        mock_client.supports_websocket_executions = False
+        service_any.exchange_client = mock_client
+        await service_any._execution_handler()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_not_implemented(self, mock_get_settings: MagicMock) -> None:
+        """Verify execution handler catches NotImplementedError.
+
+        Given: Exchange client with NotImplementedError in subscribe_executions,
+        When: Execution handler runs,
+        Then: Error is caught gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_client = MagicMock()
+        mock_client.supports_websocket_executions = True
+
+        async def raising_generator() -> Any:
+            raise NotImplementedError("subscribe_executions not supported")
+            yield
+
+        mock_client.subscribe_executions = raising_generator
+        service_any.exchange_client = mock_client
+        await service_any._execution_handler()
+
+
+class MockExchangeClientNoAenter:
+    """Test stub for exchange client without context manager."""
+
+    supports_websocket_executions = False
+
+    async def get_balance(self) -> dict[str, float]:
+        """Get balance stub.
+
+        Returns:
+            Test balance dictionary.
+        """
+        return {"USD": 10000.0}
+
+    async def create_order(self, request: Any) -> str:
+        """Create order stub.
+
+        Args:
+            request: Order request.
+
+        Returns:
+            Test order ID.
+        """
+        return "order_123"
+
+
+class MockExchangeClientWithAenter:
+    """Test stub for exchange client with context manager."""
+
+    supports_websocket_executions = True
+
+    def __init__(self) -> None:
+        """Initialize client stub."""
+        self._entered = False
+
+    async def __aenter__(self) -> "MockExchangeClientWithAenter":
+        """Enter async context manager.
+
+        Returns:
+            Self reference.
+        """
+        self._entered = True
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit async context manager.
+
+        Args:
+            exc_type: Exception type if raised.
+            exc_val: Exception value if raised.
+            exc_tb: Exception traceback if raised.
+        """
+        self._entered = False
+
+    async def get_balance(self) -> dict[str, float]:
+        """Get balance stub.
+
+        Returns:
+            Test balance dictionary.
+        """
+        return {"USD": 10000.0}
+
+    async def create_order(self, request: Any) -> str:
+        """Create order stub.
+
+        Args:
+            request: Order request.
+
+        Returns:
+            Test order ID.
+        """
+        return "order_123"
+
+    async def subscribe_executions(self) -> Any:
+        """Subscribe to executions stub.
+
+        Yields:
+            Nothing (stub generator).
+        """
+        if False:
+            yield
+
+
+class ConcreteTestExecutor(ExchangeExecutorService[ExchangeClientBase]):
+    """Test implementation of ExchangeExecutorService."""
+
+    def __init__(self, exchange_client: Any) -> None:
+        """Initialize test executor.
+
+        Args:
+            exchange_client: Mock exchange client to use.
+        """
+        super().__init__()
+        self._mock_client = exchange_client
+
+    def _create_exchange_client(self) -> ExchangeClientBase:
+        """Create exchange client.
+
+        Returns:
+            The mock client provided during initialization.
+        """
+        return cast(ExchangeClientBase, self._mock_client)
+
+    def _get_exchange_name(self) -> Literal["kraken", "zonda", "walutomat", "paper"]:
+        """Get exchange name.
+
+        Returns:
+            Exchange name string.
+        """
+        return "kraken"
+
+
+class TestStartWithAsyncContextManager:
+    """Tests for start with async context manager."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_with_aenter_client_cancelled(self, mock_get_settings: MagicMock) -> None:
+        """Verify start handles CancelledError with context manager.
+
+        Given: Exchange client with async context manager,
+        When: Order handler raises CancelledError,
+        Then: Context manager is properly exited.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        mock_client = MockExchangeClientWithAenter()
+        service = ConcreteTestExecutor(mock_client)
+        call_count = 0
+
+        async def mock_order_handler() -> None:
+            nonlocal call_count
+            call_count += 1
+            raise asyncio.CancelledError()
+
+        with (
+            patch.object(service, "_order_handler", side_effect=mock_order_handler),
+            patch.object(service, "_heartbeat_loop", new=AsyncMock()),
+            patch.object(service, "_execution_handler", new=AsyncMock()),
+            patch(
+                "snapper.messaging.executors.base.get_repository",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "snapper.messaging.executors.base.get_settings_service",
+                new=AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "snapper.messaging.executors.base.get_settings_with_service",
+                return_value=mock_settings,
+            ),
+            patch("zmq.asyncio.Context"),
+        ):
+            await service.start()
+            assert call_count == 1
+            assert mock_client._entered is False
+
+
+class TestOrderHandlerWrongExchange:
+    """Tests for order handler with wrong exchange."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_wrong_exchange_logs_warning(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify order handler warns on wrong exchange.
+
+        Given: Order destined for different exchange,
+        When: Order handler processes it,
+        Then: Order is ignored with warning.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        mock_client = MockExchangeClientNoAenter()
+        service = ConcreteTestExecutor(mock_client)
+        service_any = cast(Any, service)
+        service_any.running = True
+        recv_count = 0
+
+        async def mock_recv_multipart() -> tuple[str, bytes]:
+            nonlocal recv_count
+            recv_count += 1
+            if recv_count == 1:
+                return (
+                    "orders.kraken.requests",
+                    (
+                        b'{"type":"order_req","strategy_id":"test","exchange":"binance",'
+                        b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
+                        b'"quantity":0.1,"client_order_id":"test123"}'
+                    ),
+                )
+            service_any.running = False
+            await asyncio.sleep(0.01)
+            return ("", b"")
+
+        mock_subscriber = AsyncMock()
+        mock_subscriber.recv_multipart = mock_recv_multipart
+        service_any.subscriber = mock_subscriber
+        await service_any._order_handler()
+        assert recv_count >= 1
+
+
+class TestExecutionHandlerNotImplementedError:
+    """Tests for execution handler NotImplementedError."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_catches_not_implemented(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify execution handler catches NotImplementedError.
+
+        Given: Exchange not supporting execution streaming,
+        When: Execution handler runs,
+        Then: NotImplementedError is caught without crash.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        mock_client = MockExchangeClientNoAenter()
+        service = ConcreteTestExecutor(mock_client)
+        service_any = cast(Any, service)
+        service_any.running = True
+
+        async def subscribe_raises_not_implemented() -> Any:
+            raise NotImplementedError("Exchange doesn't support execution streaming")
+            yield
+
+        mock_exchange = MagicMock()
+        mock_exchange.supports_websocket_executions = True
+        mock_exchange.subscribe_executions = subscribe_raises_not_implemented
+        service_any.exchange_client = mock_exchange
+        await service_any._execution_handler()
+
+
+class TestExecutionHandlerGeneralException:
+    """Tests for execution handler general exceptions."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_logs_error_when_running(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify execution handler logs error when running.
+
+        Given: Service running with failing execution subscription,
+        When: RuntimeError is raised,
+        Then: Error is logged.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        mock_client = MockExchangeClientNoAenter()
+        service = ConcreteTestExecutor(mock_client)
+        service_any = cast(Any, service)
+        service_any.running = True
+
+        async def subscribe_raises_runtime_error() -> Any:
+            raise RuntimeError("Connection lost")
+            yield
+
+        mock_exchange = MagicMock()
+        mock_exchange.supports_websocket_executions = True
+        mock_exchange.subscribe_executions = subscribe_raises_runtime_error
+        service_any.exchange_client = mock_exchange
+        await service_any._execution_handler()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_silent_when_not_running(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify execution handler silent when not running.
+
+        Given: Service not running,
+        When: RuntimeError is raised,
+        Then: Error is silently ignored.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        mock_client = MockExchangeClientNoAenter()
+        service = ConcreteTestExecutor(mock_client)
+        service_any = cast(Any, service)
+        service_any.running = False
+
+        async def subscribe_raises_runtime_error() -> Any:
+            raise RuntimeError("Connection lost")
+            yield
+
+        mock_exchange = MagicMock()
+        mock_exchange.supports_websocket_executions = True
+        mock_exchange.subscribe_executions = subscribe_raises_runtime_error
+        service_any.exchange_client = mock_exchange
+        await service_any._execution_handler()
+
+
+class DummyExecutorSimple(ExchangeExecutorService[Any]):
+    """Simple test stub for exchange executor."""
+
+    def __init__(self) -> None:
+        """Initialize simple executor stub."""
+        super().__init__()
+
+    def _create_exchange_client(self) -> Any:
+        """Create simple exchange client.
+
+        Returns:
+            SimpleNamespace stub.
+        """
+        return SimpleNamespace()
+
+    def _get_exchange_name(self) -> Literal["paper"]:
+        """Get exchange name.
+
+        Returns:
+            Paper exchange name.
+        """
+        return "paper"
+
+
+class SocketStub:
+    """Test stub for ZMQ socket."""
+
+    def __init__(self) -> None:
+        """Initialize socket stub."""
+        self.closed = False
+
+    def close(self) -> None:
+        """Close the socket."""
+        self.closed = True
+
+
+class ContextStub:
+    """Test stub for ZMQ context."""
+
+    def __init__(self) -> None:
+        """Initialize context stub."""
+        self.terminated = False
+
+    def term(self) -> None:
+        """Terminate the context."""
+        self.terminated = True
+
+
+class SubscriberStub:
+    """Test stub for ZMQ subscriber."""
+
+    def __init__(self, topic: str, payload: bytes) -> None:
+        """Initialize subscriber stub.
+
+        Args:
+            topic: Topic to return.
+            payload: Payload to return.
+        """
+        self._topic = topic
+        self._payload = payload
+        self.calls = 0
+
+    async def recv_multipart(self) -> tuple[str, bytes]:
+        """Receive multipart message stub.
+
+        Returns:
+            Topic and payload tuple.
+        """
+        self.calls += 1
+        return self._topic, self._payload
+
+
+@pytest.mark.asyncio
+async def test_stop_returns_when_not_running() -> None:
+    """Test stop returns immediately when not running.
+
+    Given: An executor that is not running,
+    When: stop() is called,
+    Then: Running state remains False.
+    """
+    executor = DummyExecutorSimple()
+    await executor.stop()
+    assert executor.running is False
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_resources_simple() -> None:
+    """Test stop closes all resources properly.
+
+    Given: A running executor with sockets and context,
+    When: stop() is called,
+    Then: All sockets are closed and context is terminated.
+    """
+    executor = DummyExecutorSimple()
+    executor.running = True
+    sub_socket = SocketStub()
+    pub_socket = SocketStub()
+    ctx = ContextStub()
+    executor.subscriber = cast(Any, zmq_socket_stub(close=sub_socket.close))
+    executor.publisher = cast(Any, zmq_socket_stub(close=pub_socket.close))
+    executor.context = cast(Any, ctx)
+    await executor.stop()
+    assert sub_socket.closed is True
+    assert pub_socket.closed is True
+    assert ctx.terminated is True
+    assert executor.running is False
+
+
+@pytest.mark.asyncio
+async def test_order_handler_processes_order_and_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order handler processes orders correctly.
+
+    Given: A running executor with subscriber containing order message,
+    When: _order_handler processes the message,
+    Then: Order is passed to _process_order.
+    """
+    executor = DummyExecutorSimple()
+    executor.running = True
+    order = OrderRequestEnvelope(
+        strategy_id="s1",
+        exchange="paper",
+        instrument="BTC-USD",
+        mode="paper",
+        side="buy",
+        quantity=1.0,
+        client_order_id="c1",
+        order_type="market",
+    )
+    payload = order.to_json().encode("utf-8")
+    subscriber = SubscriberStub(
+        f"orders.{executor._get_exchange_name()}.requests",
+        payload,
+    )
+    executor.subscriber = cast(Any, subscriber)
+    processed: list[OrderRequestEnvelope] = []
+
+    async def fake_process(order_msg: OrderRequestEnvelope) -> None:
+        processed.append(order_msg)
+        executor.running = False
+
+    monkeypatch.setattr(executor, "_process_order", fake_process)
+    monkeypatch.setattr("snapper.messaging.executors.base.parse_message", lambda data: order)
+    await asyncio.wait_for(executor._order_handler(), timeout=0.1)
+    assert processed == [order]
+    assert subscriber.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_order_handler_logs_error_and_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order handler logs errors and exits.
+
+    Given: A running executor with failing subscriber,
+    When: recv_multipart raises error,
+    Then: Error is logged.
+    """
+    executor = DummyExecutorSimple()
+    executor.running = True
+
+    class FailingSubscriber:
+        async def recv_multipart(self) -> tuple[str, bytes]:
+            raise RuntimeError("boom")
+
+    executor.subscriber = cast(Any, FailingSubscriber())
+    errors: list[str] = []
+
+    def fake_error(message: str) -> None:
+        errors.append(message)
+        executor.running = False
+
+    monkeypatch.setattr("snapper.messaging.executors.base.logger.error", fake_error)
+    await asyncio.wait_for(executor._order_handler(), timeout=0.1)
+    assert errors
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_skips_when_ws_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test execution handler skips when websocket unsupported.
+
+    Given: An executor with client not supporting websocket executions,
+    When: _execution_handler is called,
+    Then: Warning is logged.
+    """
+    executor = DummyExecutorSimple()
+    executor.exchange_client = SimpleNamespace(supports_websocket_executions=False)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "snapper.messaging.executors.base.logger.warning", lambda message: warnings.append(message)
+    )
+    await executor._execution_handler()
+    assert warnings
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_breaks_when_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test execution handler breaks loop when not running.
+
+    Given: An executor that is not running,
+    When: Execution messages are yielded,
+    Then: Messages are not processed.
+    """
+    executor = DummyExecutorSimple()
+    executor.running = False
+
+    async def generator() -> Any:
+        yield "msg"
+
+    class Client:
+        supports_websocket_executions = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def subscribe_executions(self) -> Any:
+            async for item in generator():
+                self.calls += 1
+                yield item
+
+    client = Client()
+    executor.exchange_client = client
+    called: list[str] = []
+
+    async def fail_if_called(message: Any) -> None:
+        called.append("processed")
+
+    monkeypatch.setattr(executor, "_process_execution", fail_if_called)
+    await executor._execution_handler()
+    assert client.calls == 1
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_processes_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test execution handler processes messages.
+
+    Given: A running executor with websocket client,
+    When: Execution message is yielded,
+    Then: Message is passed to _process_execution.
+    """
+    executor = DummyExecutorSimple()
+    executor.running = True
+
+    class Client:
+        supports_websocket_executions = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def subscribe_executions(self) -> Any:
+            self.calls += 1
+            yield "msg"
+
+    client = Client()
+    executor.exchange_client = client
+    processed: list[Any] = []
+
+    async def record_execution(message: Any) -> None:
+        processed.append(message)
+        executor.running = False
+
+    monkeypatch.setattr(executor, "_process_execution", record_execution)
+    await executor._execution_handler()
+    assert processed == ["msg"]
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_logs_error_when_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test execution handler logs errors when running.
+
+    Given: A running executor with client raising error,
+    When: subscribe_executions raises ValueError,
+    Then: Error is logged.
+    """
+    executor = DummyExecutorSimple()
+    executor.running = True
+
+    class Client:
+        supports_websocket_executions = True
+
+        def subscribe_executions(self) -> Any:
+            class FailingGen:
+                def __aiter__(self) -> Any:
+                    return self
+
+                async def __anext__(self) -> Any:
+                    raise ValueError("ws error")
+
+            return FailingGen()
+
+    executor.exchange_client = Client()
+    errors: list[str] = []
+    monkeypatch.setattr(
+        "snapper.messaging.executors.base.logger.error",
+        lambda message: errors.append(message),
+    )
+    await executor._execution_handler()
+    assert errors
+
+
+class TestExecutorCoverage:
+    """Tests for executor coverage scenarios."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
+        base_payload: dict[str, Any] = {
+            "strategy_id": "test_strategy",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "paper",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.1,
+            "client_order_id": "test_order_123",
+        }
+        base_payload.update(overrides)
+        return OrderRequestEnvelope(**base_payload)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_success_paper(self, mock_get_settings: MagicMock) -> None:
+        """Verify live order execution success in paper mode.
+
+        Given: Valid order request in paper mode,
+        When: Order is executed,
+        Then: Exchange order ID is returned.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_exchange_client = AsyncMock()
+        service_any.exchange_client = mock_exchange_client
+        order = self._create_order(mode="paper")
+        exchange_order = ExchangeOrderSnapshot(
+            id="exchange_123",
+            client_order_id="test_order_123",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.MARKET,
+            amount=0.1,
+            price=None,
+            status=OrderStatusEnum.OPEN,
+            filled=0.0,
+            remaining=0.1,
+            timestamp=datetime.now(UTC).timestamp(),
+        )
+        mock_exchange_client.create_order = AsyncMock(return_value=exchange_order)
+        result = await service_any._execute_live_order(order)
+        mock_exchange_client.create_order.assert_awaited_once()
+        assert result == "exchange_123"
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_fill(self, mock_get_settings: MagicMock) -> None:
+        """Verify fill message is published successfully.
+
+        Given: Service running with publisher configured,
+        When: Fill message is published,
+        Then: Publisher sends multipart message.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_publisher = AsyncMock()
+        service_any.publisher = mock_publisher
+        service_any.running = True
+        fill_msg = FillEnvelope(
+            id="exchange_123",
+            order_id="test_order_123",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            size=0.1,
+            price=50000.0,
+            fee=5.0,
+            fee_asset="USD",
+            status="filled",
+        )
+        await service_any._publish_fill(fill_msg)
+        mock_publisher.send_multipart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_fill_not_running(self, mock_get_settings: MagicMock) -> None:
+        """Verify fill publishing skipped when not running.
+
+        Given: Service not running,
+        When: Fill message is published,
+        Then: No message is sent.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = False
+        fill_msg = FillEnvelope(
+            id="test_order_123",
+            order_id="test_order_123",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            size=0.1,
+            price=50000.0,
+            fee=0.0,
+            fee_asset="USD",
+            status="filled",
+        )
+        await service_any._publish_fill(fill_msg)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_get_status(self, mock_get_settings: MagicMock) -> None:
+        """Verify get_status returns correct state.
+
+        Given: Initialized executor service,
+        When: get_status is called,
+        Then: Status dict contains running and broker info.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        status = service.get_status()
+        assert "running" in status
+        assert status["running"] is False
+        assert "broker_xpub" in status
+
+    @pytest.mark.asyncio
+    @patch("snapper.data.repository.get_repository")
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_initializes_sockets(
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+    ) -> None:
+        """Verify start initializes ZMQ sockets.
+
+        Given: Valid configuration settings,
+        When: Service is started,
+        Then: SUB and PUB sockets are created.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        mock_settings_service = MagicMock()
+        mock_settings_with_db = self._create_mock_settings()
+        mock_settings_with_db.kraken_api_key = "test_api_key"
+        mock_settings_with_db.kraken_api_secret = "test_api_secret"
+        mock_exchange_client = AsyncMock()
+        mock_exchange_client.__aenter__.return_value = mock_exchange_client
+        mock_exchange_client.__aexit__.return_value = None
+        with (
+            patch.object(service, "_order_handler", new=AsyncMock(return_value=None)),
+            patch.object(service, "_execution_handler", new=AsyncMock(return_value=None)),
+            patch.object(service, "_heartbeat_loop", new=AsyncMock(return_value=None)),
+            patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
+            patch(
+                "snapper.application.services.settings.get_settings_service",
+                new=AsyncMock(return_value=mock_settings_service),
+            ),
+            patch(
+                "snapper.config.settings.get_settings_with_service",
+                return_value=mock_settings_with_db,
+            ),
+        ):
+            mock_context = MagicMock()
+            mock_socket = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            with (
+                patch(
+                    "snapper.messaging.executors.base.zmq.asyncio.Context",
+                    return_value=mock_context,
+                ),
+                patch(
+                    "snapper.application.services.settings.zmq.asyncio.Context",
+                    return_value=mock_context,
+                ),
+            ):
+                await service.start()
+        assert mock_context.socket.call_count >= 2
+        socket_calls = [call[0][0] for call in mock_context.socket.call_args_list]
+        assert zmq.SUB in socket_calls
+        assert zmq.PUB in socket_calls
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_stop_cleans_up(self, mock_get_settings: MagicMock) -> None:
+        """Verify stop cleans up resources.
+
+        Given: Running service with sockets and context,
+        When: stop() is called,
+        Then: Sockets closed and context terminated.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service.context = MagicMock()
+        mock_subscriber = MagicMock()
+        service.subscriber = mock_subscriber
+        mock_publisher = MagicMock()
+        service.publisher = mock_publisher
+        service.running = True
+        await service.stop()
+        assert service.running is False
+        mock_subscriber.close.assert_called_once()
+        mock_publisher.close.assert_called_once()
+        service.context.term.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_order_status(self, mock_get_settings: MagicMock) -> None:
+        """Verify order status is published.
+
+        Given: Running service with publisher,
+        When: Order status is published,
+        Then: Publisher sends multipart message.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.publisher = AsyncMock()
+        order = self._create_order()
+        await service_any._publish_order_status(order, "submitted")
+        service_any.publisher.send_multipart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_success(self, mock_get_settings: MagicMock) -> None:
+        """Verify live order execution success.
+
+        Given: Valid order request in live mode,
+        When: Order is executed,
+        Then: Order added to pending and ID returned.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_exchange_client = AsyncMock()
+        service_any.exchange_client = mock_exchange_client
+        order = self._create_order(mode="live")
+        mock_order_result = MagicMock()
+        mock_order_result.id = "abc123"
+        mock_exchange_client.create_order = AsyncMock(return_value=mock_order_result)
+        result = await service_any._execute_live_order(order)
+        assert result == "abc123"
+        assert "abc123" in service_any.pending_orders
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_error(self, mock_get_settings: MagicMock) -> None:
+        """Verify live order execution handles error.
+
+        Given: Exchange client that raises exception,
+        When: Order is executed,
+        Then: None is returned.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_exchange_client = MagicMock()
+        service_any.exchange_client = mock_exchange_client
+        order = self._create_order(mode="live")
+        mock_exchange_client.create_order = AsyncMock(side_effect=RuntimeError("boom"))
+        result = await service_any._execute_live_order(order)
+        assert result is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_order_live_success(self, mock_get_settings: MagicMock) -> None:
+        """Verify live order processing success.
+
+        Given: Valid live order request,
+        When: Order is processed,
+        Then: Order submitted status published and executed.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._publish_order_status = AsyncMock()
+        service_any._publish_fill = AsyncMock()
+        service_any._execute_live_order = AsyncMock(return_value="abc123")
+        order = self._create_order(mode="live")
+        await service_any._process_order(order)
+        service_any._publish_order_status.assert_any_await(order, "submitted")
+        assert service_any._publish_order_status.await_count == 1
+        service_any._publish_fill.assert_not_awaited()
+        service_any._execute_live_order.assert_awaited_once_with(order)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_order_paper_rejection(self, mock_get_settings: MagicMock) -> None:
+        """Verify paper order rejection.
+
+        Given: Paper order with failing execution,
+        When: Order is processed,
+        Then: Submitted and rejected statuses published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._publish_order_status = AsyncMock()
+        service_any._publish_fill = AsyncMock()
+        service_any._execute_paper_order = AsyncMock(return_value=None)
+        order = self._create_order()
+        await service_any._process_order(order)
+        service_any._publish_order_status.assert_any_await(order, "submitted")
+        service_any._publish_order_status.assert_any_await(order, "rejected")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_not_implemented(self, mock_get_settings: MagicMock) -> None:
+        """Verify execution handler handles NotImplementedError.
+
+        Given: Exchange client with unimplemented method,
+        When: Execution handler runs,
+        Then: Error is caught gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_exchange_client = MagicMock()
+        service_any.exchange_client = mock_exchange_client
+
+        async def execution_stream() -> AsyncIterator[Any]:
+            if False:
+                yield None
+            raise NotImplementedError()
+
+        mock_exchange_client.subscribe_executions = execution_stream
+        await service_any._execution_handler()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_updates_pending(self, mock_get_settings: MagicMock) -> None:
+        """Verify execution processing updates pending orders.
+
+        Given: Pending order with filled execution,
+        When: Execution is processed,
+        Then: Fill published and order removed from pending.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._publish_fill = AsyncMock()
+        order = self._create_order(mode="live")
+        service_any.pending_orders["ex123"] = order
+        execution = ExecutionUpdate(
+            order_id="ex123",
+            exec_type="filled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.FILLED,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.1,
+            cum_cost=10.0,
+            average_price=100.0,
+            fee_usd_equiv=0.5,
+        )
+        await service_any._process_execution(execution)
+        service_any._publish_fill.assert_awaited_once()
+        assert "ex123" not in service_any.pending_orders
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_heartbeat_loop_publishes(self, mock_get_settings: MagicMock) -> None:
+        """Verify heartbeat loop publishes heartbeats.
+
+        Given: Running service with configured heartbeat,
+        When: Heartbeat loop runs,
+        Then: Heartbeat is published with correct topic.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        publish_heartbeat_mock = AsyncMock()
+
+        async def publish_side_effect(topic: str, message: HeartbeatEnvelope) -> None:
+            assert topic == "system.heartbeats.executor.kraken"
+            assert message.component == "executor_kraken"
+            service_any.running = False
+
+        publish_heartbeat_mock.side_effect = publish_side_effect
+        service_any._publish_heartbeat = publish_heartbeat_mock
+        with patch(
+            "asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep:
+            mock_sleep.return_value = None
+            await service_any._heartbeat_loop()
+        publish_heartbeat_mock.assert_awaited_once()
+        assert service_any.heartbeat_seq == 1
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_heartbeat_when_running(self, mock_get_settings: MagicMock) -> None:
+        """Verify heartbeat published when service running.
+
+        Given: Running service with publisher,
+        When: Heartbeat is published,
+        Then: Publisher sends multipart message.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.publisher = AsyncMock()
+        hb = HeartbeatEnvelope(component="executor", sequence=1, status="healthy", lag_ms=0)
+        await service_any._publish_heartbeat("system.heartbeats", hb)
+        service_any.publisher.send_multipart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    @patch("snapper.infrastructure.symbols.mapper.SymbolMapperService.get_instance")
+    async def test_handle_symbol_mapping_update(
+        self,
+        mock_get_instance: MagicMock,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify symbol mapping update triggers cache invalidation.
+
+        Given: Symbol mapping update payload,
+        When: Update is handled,
+        Then: Cache invalidation is triggered.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        mock_db_mapper = MagicMock()
+        mock_get_instance.return_value = mock_db_mapper
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        payload = json.dumps({"event": "symbol_mappings_updated", "action": "clear_cache"})
+        await service_any._handle_symbol_mapping_update(payload)
+        mock_db_mapper.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_without_websocket_executions_support(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify start handles client without websocket support.
+
+        Given: Exchange client without websocket execution support,
+        When: Service starts,
+        Then: Service starts without execution handler.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        mock_settings_service = MagicMock()
+
+        class MockExchangeClient:
+            supports_websocket_executions = False
+
+            async def __aenter__(self) -> "MockExchangeClient":
+                return self
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: TracebackType | None,
+            ) -> None:
+                pass
+
+        mock_exchange_client = MockExchangeClient()
+        with (
+            patch("snapper.data.repository.get_repository", return_value=MagicMock()),
+            patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
+            patch.object(service, "_order_handler", new=AsyncMock(return_value=None)) as order_mock,
+            patch.object(
+                service, "_heartbeat_loop", new=AsyncMock(return_value=None)
+            ) as heartbeat_mock,
+            patch.object(
+                service, "_execution_handler", new=AsyncMock(return_value=None)
+            ) as execution_mock,
+            patch(
+                "snapper.application.services.settings.get_settings_service",
+                new=AsyncMock(return_value=mock_settings_service),
+            ),
+            patch(
+                "snapper.config.settings.get_settings_with_service",
+                return_value=mock_settings,
+            ),
+        ):
+            mock_context = MagicMock()
+            mock_socket = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            with patch(
+                "snapper.messaging.executors.base.zmq.asyncio.Context",
+                return_value=mock_context,
+            ):
+                await service.start()
+        assert service.running is True
+        order_mock.assert_awaited_once()
+        heartbeat_mock.assert_awaited_once()
+        execution_mock.assert_not_awaited()
+        await service.stop()
+        assert service.running is False
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_when_already_running(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify start returns early when already running.
+
+        Given: Service already running,
+        When: start() is called,
+        Then: No new client is created.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service.running = True
+        with (
+            patch.object(service, "_create_exchange_client") as create_mock,
+            patch(
+                "snapper.data.repository.get_repository",
+                side_effect=AssertionError("should not fetch repository"),
+            ),
+        ):
+            await service.start()
+        create_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_skips_mismatched_exchange(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order handler skips orders for other exchanges.
+
+        Given: Order for different exchange (zonda vs kraken),
+        When: Order handler processes message,
+        Then: Order is not processed.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.subscriber = AsyncMock()
+
+        async def fake_recv() -> tuple[str, bytes]:
+            service_any.running = False
+            return ("orders.kraken.requests", b"{}")
+
+        service_any.subscriber.recv_multipart = AsyncMock(side_effect=fake_recv)
+        wrong_order = self._create_order(exchange="zonda")
+        process_mock: AsyncMock = AsyncMock()
+        service_any._process_order = process_mock
+        with patch(
+            "snapper.messaging.executors.base.parse_message",
+            return_value=wrong_order,
+        ):
+            await service_any._order_handler()
+        process_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_handles_symbol_mapping_update(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order handler handles symbol mapping updates.
+
+        Given: Symbol mapping update message,
+        When: Order handler receives message,
+        Then: Symbol mapping update handler is called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.subscriber = AsyncMock()
+        service_any._handle_symbol_mapping_update = AsyncMock()
+        payload_bytes = json.dumps(
+            {"event": "symbol_mappings_updated", "action": "clear_cache"}
+        ).encode("utf-8")
+
+        async def fake_recv() -> tuple[str, bytes]:
+            service_any.running = False
+            return ("system.symbol_mappings", payload_bytes)
+
+        service_any.subscriber.recv_multipart = AsyncMock(side_effect=fake_recv)
+        await service_any._order_handler()
+        service_any._handle_symbol_mapping_update.assert_awaited_once_with(
+            payload_bytes.decode("utf-8")
+        )
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_unexpected_topic(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order handler ignores unexpected topics.
+
+        Given: Message with unrecognized topic,
+        When: Order handler processes message,
+        Then: No handlers are called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.subscriber = AsyncMock()
+        service_any._process_order = AsyncMock()
+        service_any._handle_symbol_mapping_update = AsyncMock()
+
+        async def fake_recv() -> tuple[str, bytes]:
+            service_any.running = False
+            return ("orders.kraken.invalid", b"{}")
+
+        service_any.subscriber.recv_multipart = AsyncMock(side_effect=fake_recv)
+        with patch(
+            "snapper.messaging.executors.base.parse_message",
+            side_effect=AssertionError("parse_message should not be called"),
+        ):
+            await service_any._order_handler()
+        service_any._process_order.assert_not_awaited()
+        service_any._handle_symbol_mapping_update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_waits_without_socket(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order handler waits when no socket available.
+
+        Given: Service without subscriber socket,
+        When: Order handler runs,
+        Then: Handler sleeps and retries.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.subscriber = None
+
+        async def sleep_side_effect(delay: float) -> None:
+            assert delay == 0.1
+            service_any.running = False
+
+        with patch(
+            "snapper.messaging.executors.base.asyncio.sleep",
+            new=AsyncMock(side_effect=sleep_side_effect),
+        ) as sleep_mock:
+            await service_any._order_handler()
+        sleep_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_order_status_handles_error(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order status publishing handles send error.
+
+        Given: Publisher that raises exception,
+        When: Order status is published,
+        Then: Error is handled gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.publisher = AsyncMock()
+        service_any.publisher.send_multipart.side_effect = RuntimeError("send failed")
+        order = self._create_order()
+        await service_any._publish_order_status(order, "submitted")
+        service_any.publisher.send_multipart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_fill_handles_error(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify fill publishing handles send error.
+
+        Given: Publisher that raises exception,
+        When: Fill is published,
+        Then: Error is handled gracefully.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.publisher = AsyncMock()
+        service_any.publisher.send_multipart.side_effect = RuntimeError("fill failed")
+        fill_msg = FillEnvelope(
+            id="one",
+            order_id="one",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            size=0.0,
+            price=0.0,
+            fee=0.0,
+            fee_asset="USD",
+            status="filled",
+        )
+        await service_any._publish_fill(fill_msg)
+        service_any.publisher.send_multipart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_logs_exception(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify execution handler logs exceptions.
+
+        Given: Exchange client that raises ValueError,
+        When: Execution handler runs,
+        Then: Exception is logged.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+
+        class FailingIterator:
+            def __aiter__(self) -> "FailingIterator":
+                return self
+
+            async def __anext__(self) -> ExecutionUpdate:
+                raise ValueError("boom")
+
+        class FailingClient:
+            supports_websocket_executions = True
+
+            def subscribe_executions(self) -> FailingIterator:
+                return FailingIterator()
+
+        service_any.exchange_client = FailingClient()
+        await service_any._execution_handler()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_unknown_order(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify execution processing handles unknown orders.
+
+        Given: Execution for non-existent order,
+        When: Execution is processed,
+        Then: No fill is published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._publish_fill = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="missing",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.MARKET,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.1,
+            cum_cost=10.0,
+        )
+        await service_any._process_execution(execution)
+        service_any._publish_fill.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_symbol_mapping_update_ignores_unexpected(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify symbol mapping update ignores unexpected events.
+
+        Given: Payload with unexpected event type,
+        When: Update is handled,
+        Then: Mapper is not called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        with patch(
+            "snapper.infrastructure.symbols.mapper.SymbolMapperService.get_instance",
+            side_effect=AssertionError("should not fetch mapper"),
+        ):
+            await service_any._handle_symbol_mapping_update(json.dumps({"event": "other"}))
+
+
+class TestExecutor:
+    """Tests for executor basic functionality."""
+
+    @patch("snapper.data.repository.get_repository")
+    @patch("snapper.config.settings.get_settings")
+    def test_initialization(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify executor initializes with default state.
+
+        Given: Valid settings configuration,
+        When: Executor is created,
+        Then: All attributes initialized to defaults.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        service = KrakenOrderExecutor()
+        assert service.running is False
+        assert service.heartbeat_seq == 0
+        assert service.context is None
+        assert service.subscriber is None
+        assert service.publisher is None
+
+    @patch("snapper.data.repository.get_repository")
+    @patch("snapper.config.settings.get_settings")
+    def test_get_status_initial(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify get_status returns initial state.
+
+        Given: Newly created executor,
+        When: get_status is called,
+        Then: Status shows not running with broker info.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        service = KrakenOrderExecutor()
+        status = service.get_status()
+        assert status["running"] is False
+        assert status["broker_xsub"] == "tcp://127.0.0.1:7500"
+        assert status["broker_xpub"] == "tcp://127.0.0.1:7501"
+        assert status["heartbeat_seq"] == 0
+
+    @patch("snapper.data.repository.get_repository")
+    @patch("snapper.config.settings.get_settings")
+    def test_get_status_running(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify get_status returns running state.
+
+        Given: Running executor with heartbeats sent,
+        When: get_status is called,
+        Then: Status shows running with current heartbeat seq.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_repository = MagicMock()
+        mock_get_repository.return_value = mock_repository
+        service = KrakenOrderExecutor()
+        service.running = True
+        service.heartbeat_seq = 42
+        status = service.get_status()
+        assert status["running"] is True
+        assert status["heartbeat_seq"] == 42
+
+
+class TestExecutorWebSocketExecutions:
+    """Tests for executor websocket executions."""
+
+    def _create_mock_settings(self, with_credentials: bool = True) -> MagicMock:
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        if with_credentials:
+            mock_settings.kraken_api_key = "test_api_key"
+            mock_settings.kraken_api_secret = "test_api_secret"
+        else:
+            mock_settings.kraken_api_key = None
+            mock_settings.kraken_api_secret = None
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.data.repository.get_repository")
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_subscribes_to_executions(
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+    ) -> None:
+        """Verify start subscribes to executions with websocket client.
+
+        Given: Exchange client with websocket execution support,
+        When: Service starts,
+        Then: Client context manager is entered.
+        """
+        mock_settings = self._create_mock_settings(with_credentials=True)
+        mock_get_settings.return_value = mock_settings
+        mock_exchange_client = AsyncMock()
+        mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
+        mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
+        service = KrakenOrderExecutor()
+        mock_settings_service = MagicMock()
+        mock_settings_with_db = self._create_mock_settings(with_credentials=True)
+        with (
+            patch("snapper.messaging.executors.base.zmq.asyncio.Context") as mock_context_class,
+            patch.object(service, "_order_handler", new_callable=AsyncMock),
+            patch.object(service, "_execution_handler", new_callable=AsyncMock),
+            patch.object(service, "_heartbeat_loop", new_callable=AsyncMock),
+            patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
+            patch(
+                "snapper.application.services.settings.get_settings_service",
+                new=AsyncMock(return_value=mock_settings_service),
+            ),
+            patch(
+                "snapper.config.settings.get_settings_with_service",
+                return_value=mock_settings_with_db,
+            ),
+        ):
+            mock_context = MagicMock()
+            mock_socket = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            mock_context_class.return_value = mock_context
+            with patch(
+                "snapper.application.services.settings.zmq.asyncio.Context",
+                return_value=mock_context,
+            ):
+                start_task = asyncio.create_task(service.start())
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    if mock_exchange_client.__aenter__.called:
+                        break
+                start_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await start_task
+            mock_exchange_client.__aenter__.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.data.repository.get_repository")
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_without_credentials_works(
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+    ) -> None:
+        """Verify start works without API credentials.
+
+        Given: Configuration without API credentials,
+        When: Service starts,
+        Then: Service starts successfully.
+        """
+        mock_settings = self._create_mock_settings(with_credentials=False)
+        mock_get_settings.return_value = mock_settings
+        mock_exchange_client = AsyncMock()
+        mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
+        mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
+        service = KrakenOrderExecutor()
+        mock_settings_service = MagicMock()
+        mock_settings_with_db = self._create_mock_settings(with_credentials=False)
+        with (
+            patch("snapper.messaging.executors.base.zmq.asyncio.Context") as mock_context_class,
+            patch.object(service, "_order_handler", new_callable=AsyncMock),
+            patch.object(service, "_execution_handler", new_callable=AsyncMock),
+            patch.object(service, "_heartbeat_loop", new_callable=AsyncMock),
+            patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
+            patch(
+                "snapper.application.services.settings.get_settings_service",
+                new=AsyncMock(return_value=mock_settings_service),
+            ),
+            patch(
+                "snapper.config.settings.get_settings_with_service",
+                return_value=mock_settings_with_db,
+            ),
+        ):
+            mock_context = MagicMock()
+            mock_socket = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            mock_context_class.return_value = mock_context
+            with patch(
+                "snapper.application.services.settings.zmq.asyncio.Context",
+                return_value=mock_context,
+            ):
+                start_task = asyncio.create_task(service.start())
+                await asyncio.sleep(0.1)
+                start_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await start_task
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_returns_order_id_not_fill(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify execute_live_order returns order ID.
+
+        Given: Valid order request,
+        When: Order is executed on exchange,
+        Then: Order ID string returned and order added to pending.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        mock_exchange_client = MagicMock()
+        service_any = cast(Any, service)
+        service_any.exchange_client = mock_exchange_client
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="market",
+            quantity=0.1,
+            client_order_id="test-order-123",
+            exchange="kraken",
+        )
+        mock_order_result = type("ExchangeOrderSnapshot", (), {"id": "KRAKEN-ORDER-ABC123"})()
+        mock_exchange_client.create_order = AsyncMock(return_value=mock_order_result)
+        result = await service._execute_live_order(order)
+        assert isinstance(result, str), "Should return order_id string, not FillEnvelope!"
+        assert result == "KRAKEN-ORDER-ABC123"
+        assert "KRAKEN-ORDER-ABC123" in service.pending_orders
+        assert service.pending_orders["KRAKEN-ORDER-ABC123"] == order
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_limit_order(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify limit order execution returns order ID.
+
+        Given: Valid limit order request,
+        When: Order is executed,
+        Then: Order ID returned.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        mock_exchange_client = MagicMock()
+        service_any = cast(Any, service)
+        service_any.exchange_client = mock_exchange_client
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="limit",
+            quantity=0.5,
+            price=44000.0,
+            client_order_id="test-limit-123",
+            exchange="kraken",
+        )
+        mock_order_result = type("ExchangeOrderSnapshot", (), {"id": "KRAKEN-LIMIT-XYZ"})()
+        mock_exchange_client.create_order = AsyncMock(return_value=mock_order_result)
+        result = await service._execute_live_order(order)
+        assert result == "KRAKEN-LIMIT-XYZ"
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_handles_error(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify live order execution handles exception.
+
+        Given: Exchange client that raises exception,
+        When: Order is executed,
+        Then: None returned and order not in pending.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        mock_exchange_client = MagicMock()
+        service_any = cast(Any, service)
+        service_any.exchange_client = mock_exchange_client
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="market",
+            quantity=0.1,
+            client_order_id="test-error-123",
+            exchange="kraken",
+        )
+        mock_exchange_client.create_order = AsyncMock(side_effect=Exception("Insufficient balance"))
+        result = await service._execute_live_order(order)
+        assert result is None
+        assert "test-error-123" not in service.pending_orders
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_creates_fill_from_websocket(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify websocket execution creates fill envelope.
+
+        Given: Pending order with filled execution from websocket,
+        When: Execution is processed,
+        Then: Fill envelope created with correct details.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="market",
+            quantity=0.1,
+            client_order_id="test-order-123",
+            exchange="kraken",
+        )
+        service.pending_orders["KRAKEN-ORDER-ABC123"] = order
+        execution = ExecutionUpdate(
+            order_id="KRAKEN-ORDER-ABC123",
+            exec_type="filled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.MARKET,
+            order_status=OrderStatusEnum.FILLED,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.1,
+            cum_cost=4512.35,
+            average_price=45123.50,
+            fee_usd_equiv=4.51,
+        )
+        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+            await service._process_execution(execution)
+            mock_publish.assert_called_once()
+            fill: FillEnvelope = mock_publish.call_args[0][0]
+            assert isinstance(fill, FillEnvelope)
+            assert fill.order_id == "test-order-123"
+            assert fill.id == "KRAKEN-ORDER-ABC123"
+            assert fill.instrument == "BTC-USD"
+            assert fill.size == 0.1
+            assert fill.price == 45123.50
+            assert fill.fee == 4.51
+            assert fill.fee_asset == "USD"
+            assert fill.status == "filled"
+            assert "KRAKEN-ORDER-ABC123" not in service.pending_orders
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_partial_fill(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify partial fill execution creates partial status.
+
+        Given: Pending order with partial fill execution,
+        When: Execution is processed,
+        Then: Partial fill published and order remains pending.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="limit",
+            quantity=1.0,
+            price=45000.0,
+            client_order_id="test-partial-123",
+            exchange="kraken",
+        )
+        service.pending_orders["KRAKEN-PARTIAL-XYZ"] = order
+        execution = ExecutionUpdate(
+            order_id="KRAKEN-PARTIAL-XYZ",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.PARTIALLY_FILLED,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.5,
+            cum_cost=22500.0,
+            average_price=45000.0,
+            fee_usd_equiv=22.50,
+        )
+        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+            await service._process_execution(execution)
+            fill: FillEnvelope = mock_publish.call_args[0][0]
+            assert fill.size == 0.5
+            assert fill.status == "partial"
+            assert "KRAKEN-PARTIAL-XYZ" in service.pending_orders
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_cancelled_order(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify cancelled order execution creates cancelled status.
+
+        Given: Pending order with cancellation execution,
+        When: Execution is processed,
+        Then: Cancelled fill published and order removed.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="limit",
+            quantity=1.0,
+            price=44000.0,
+            client_order_id="test-cancel-123",
+            exchange="kraken",
+        )
+        service.pending_orders["KRAKEN-CANCEL-ABC"] = order
+        execution = ExecutionUpdate(
+            order_id="KRAKEN-CANCEL-ABC",
+            exec_type="canceled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CANCELED,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.0,
+            cum_cost=0.0,
+            average_price=0.0,
+        )
+        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+            await service._process_execution(execution)
+            fill: FillEnvelope = mock_publish.call_args[0][0]
+            assert fill.size == 0.0
+            assert fill.status == "cancelled"
+            assert "KRAKEN-CANCEL-ABC" not in service.pending_orders
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_unknown_order(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify unknown order execution is ignored.
+
+        Given: Execution for order not in pending orders,
+        When: Execution is processed,
+        Then: No fill is published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        execution = ExecutionUpdate(
+            order_id="UNKNOWN-ORDER-123",
+            exec_type="filled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.FILLED,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.1,
+            cum_cost=4500.0,
+            average_price=45000.0,
+        )
+        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+            await service._process_execution(execution)
+            mock_publish.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_order_live_mode_waits_for_websocket(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify live mode order waits for websocket execution.
+
+        Given: Live order request,
+        When: Order is processed,
+        Then: Only submitted status published, no fill.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service.running = True
+        service.publisher = AsyncMock()
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="market",
+            quantity=0.1,
+            client_order_id="test-live-123",
+            exchange="kraken",
+        )
+        with (
+            patch.object(
+                service,
+                "_execute_live_order",
+                new_callable=AsyncMock,
+                return_value="KRAKEN-ORDER-XYZ",
+            ) as mock_execute_live,
+            patch.object(
+                service, "_publish_order_status", new_callable=AsyncMock
+            ) as mock_publish_status,
+            patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish_fill,
+        ):
+            await service._process_order(order)
+            mock_execute_live.assert_called_once_with(order)
+            assert mock_publish_status.call_args_list[0] == call(order, "submitted")
+            mock_publish_fill.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_order_live_mode_rejected(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify live mode order rejection publishes rejected fill.
+
+        Given: Live order that fails execution,
+        When: Order is processed,
+        Then: Rejected fill published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service.running = True
+        service.publisher = AsyncMock()
+        order = OrderRequestEnvelope(
+            strategy_id="test_strategy",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="market",
+            quantity=0.1,
+            client_order_id="test-rejected-123",
+            exchange="kraken",
+        )
+        with (
+            patch.object(
+                service,
+                "_execute_live_order",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                service, "_publish_order_status", new_callable=AsyncMock
+            ) as mock_publish_status,
+            patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish_fill,
+        ):
+            await service._process_order(order)
+            mock_publish_fill.assert_called_once()
+            fill: FillEnvelope = mock_publish_fill.call_args[0][0]
+            assert fill.status == "rejected"
+            assert fill.size == 0.0
+            assert mock_publish_status.call_args_list[1] == call(order, "rejected")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execution_handler_handles_unsupported_client(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify execution handler handles unsupported client.
+
+        Given: Client that raises NotImplementedError,
+        When: Execution handler runs,
+        Then: Handler handles gracefully.
+        """
+        mock_settings = self._create_mock_settings(with_credentials=False)
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_exchange_client = MagicMock()
+        service_any.exchange_client = mock_exchange_client
+
+        async def mock_subscribe_executions() -> AsyncIterator[Any]:
+            raise NotImplementedError("Client does not support execution streaming")
+            yield
+
+        mock_exchange_client.subscribe_executions = mock_subscribe_executions
+        handler_task = asyncio.create_task(service_any._execution_handler())
+        await asyncio.sleep(0.1)
+        handler_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler_task

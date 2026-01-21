@@ -1,0 +1,236 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "snapper"
+version = "0.1.0"
+description = "Kraken data collector, trading engine, and backtester"
+readme = "README.md"
+authors = ["Mateusz Klatt"]
+license = "MIT"
+keywords = ["trading", "kraken", "backtest", "rsi", "macd", "websocket"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+]
+packages = [{include = "snapper", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+aiohttp = "^3.13.3"
+httpx = {extras = ["http2"], version = "^0.28.1"}
+pydantic = "^2.12.5"
+pydantic-settings = "^2.12.0"
+sqlalchemy = {extras = ["asyncio"], version = "^2.0.46"}
+aiosqlite = "^0.22.1"
+pandas = "^3.0.0"
+numpy = "^2.4.1"
+scipy = "^1.17.0"
+typer = {extras = ["all"], version = "^0.21.1"}
+python-dotenv = "^1.2.1"
+loguru = "^0.7.3"
+jinja2 = "^3.1.6"
+alembic = "^1.18.1"
+fastapi = "^0.128.0"
+uvicorn = {extras = ["standard"], version = "^0.40.0"}
+pyzmq = "^27.1.0"
+tornado = "^6.5.4"
+pyjwt = "^2.10.1"
+TA-Lib = "^0.6.8"
+ccxt = "^4.5.34"
+python-kraken-sdk = "^3.2.7"
+polygon-api-client = "^1.16.3"
+pyopenssl = "^25.3.0"
+boto3 = "^1.42.32"
+
+[tool.poetry.group.cloud.dependencies]
+pyodbc = "^5.3.0"
+asyncpg = "^0.31.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.14.13"
+black = {extras = ["jupyter"], version = "^26.1.0"}
+isort = "^7.0.0"
+mypy = "^1.19.1"
+pytest = "^9.0.2"
+pytest-asyncio = "^1.3.0"
+pytest-timeout = "^2.4.0"
+freezegun = "^1.5.5"
+pytest-cov = "^7.0.0"
+pre-commit = "^4.5.1"
+pip = "^25.3"
+poetry = "^2.3.1"
+poetry-plugin-up = "^0.9.0"
+poetry-plugin-dotenv = "^3.1.0"
+py-spy = "^0.4.1"
+memory-profiler = "^0.61.0"
+ipdb = "^0.13.13"
+psutil = "^7.2.1"
+objgraph = "^3.6.2"
+pytest-xdist = "^3.8.0"
+markdown = "^3.10.1"
+weasyprint = "^68.0"
+plotly = "^6.5.2"
+kaleido = "^1.2.0"
+nbformat = "^5.10.4"
+ipykernel = "^7.1.0"
+matplotlib = "^3.10.8"
+statsmodels = "^0.14.6"
+scikit-learn = "^1.8.0"
+tqdm = "^4.67.1"
+types-markdown = "^3.10.0.20251106"
+
+[tool.poetry.scripts]
+snapper = "snapper.__main__:main"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    ".venv",
+    "build",
+    "dist",
+    "data/polygon",
+    "frontend/node_modules",
+    "frontend/dist",
+    "ios",
+    "notebooks",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM", "N", "PERF", "ISC", "PLW", "PLC", "A", "TID", "D"]
+ignore = [
+    "B008",     # Function call in default argument
+    "PERF203",  # try-except in loop
+    "E501",     # Line too long (handled by black)
+    "SIM102",   # Collapsible if
+    "PLC0415",  # Import outside top-level
+    "C408",     # Unnecessary dict call
+    "PLW1509",  # preexec_fn is unsafe with threads (intentional for process groups)
+    "PERF401",  # Use list comprehension (not possible with async for)
+    "PLC2801",  # Dunder calls (__str__, __eq__) - needed for explicit protocol testing
+    "PLC2701",  # Private member access - needed in tests
+    "PLW0108",  # Lambda may be unnecessary - often clearer than partial
+    "B903",     # Class could be dataclass - not always desired
+    "PLC1901",  # empty string comparison - explicit == "" is clearer in tests
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: allow private access, getattr literals
+"tests/**/*.py" = [
+    "B009",     # getattr with literal
+    "B901",     # return/yield in generator
+    "N802",     # Function name not lowercase (e.g., getMessage)
+]
+"proprietary/tests/**/*.py" = [
+    "B009",     # getattr with literal
+    "B901",     # return/yield in generator
+    "N802",     # Function name not lowercase
+]
+# External API field name 'l' (low price) - ambiguous but required by Zonda API
+"src/snapper/infrastructure/exchanges/schemas/zonda.py" = ["E741"]
+# Must mock weasyprint before importing - requires imports after sys.modules manipulation
+"tests/scripts/test_build_docs_pdf.py" = ["E402"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["snapper"]
+known-third-party = ["alembic", "sqlalchemy"]
+force-single-line = true
+
+[tool.black]
+line-length = 100
+extend-exclude = '''
+/(
+    # Virtual environment
+    \.venv
+  # Submodules
+  | data/polygon
+  # Node modules
+  | frontend/node_modules
+  | frontend/dist
+  # iOS
+  | ios
+  # Build artifacts
+  | build
+  | dist
+  | \.eggs
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["snapper"]
+known_third_party = ["alembic", "sqlalchemy"]
+force_single_line = true
+skip = [".venv", "build", "dist", "data/polygon", "frontend", "ios", "notebooks"]
+skip_glob = ["**/node_modules/*"]
+
+[tool.pytest.ini_options]
+addopts = "-q --tb=short --timeout=15 --timeout-method=thread"
+asyncio_mode = "auto"
+timeout = 15
+testpaths = ["tests", "proprietary/tests"]
+pythonpath = ["src", "proprietary/src"]
+markers = [
+    "real_settings: mark test to use real Settings instead of mocked version",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+pretty = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+check_untyped_defs = true
+exclude = [
+    '^\.venv/',
+    '^data/polygon/',
+    '^frontend/',
+    '^ios/',
+    '^build/',
+    '^dist/',
+]
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "proprietary.tests.*"]
+# Tests can mock methods and pass invalid types intentionally
+disable_error_code = [
+    "method-assign",
+    "arg-type",
+    "assignment",
+    "attr-defined",
+    "type-arg",
+    "comparison-overlap",
+    "override",
+    "no-untyped-call",
+    "misc",
+    "return-value",
+]
+
+[tool.pyright]
+include = ["src", "tests", "proprietary/src", "proprietary/tests"]
+exclude = ["**/__pycache__", "build", "dist", ".venv", "data", "frontend", "ios"]
+reportPrivateUsage = false  # Tests need to access private members
+reportUnknownVariableType = false  # Dynamic typing from external libraries
+reportUnknownArgumentType = false  # Dynamic typing from external libraries
+reportUnknownMemberType = false  # Dynamic typing from external libraries
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true

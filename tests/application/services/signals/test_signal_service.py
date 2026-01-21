@@ -1,0 +1,377 @@
+"""Unit tests for SignalReadService."""
+
+from collections.abc import AsyncGenerator
+from pathlib import Path
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+import pytest
+from sqlalchemy import select
+
+from snapper.application.services.signals.service import SignalReadService
+from snapper.data.models import Instrument
+from snapper.data.models import SignalEvent
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.strategies.base import Signal
+
+
+class TestSignalService:
+    """Test cases for SignalReadService basic functionality."""
+
+    @pytest.fixture
+    async def test_repository(self, tmp_path: Path) -> AsyncGenerator[SQLAlchemyRepository, None]:
+        """Create test SQLAlchemy repository with temporary database."""
+        db_path = tmp_path / "test.db"
+        url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
+        repo = SQLAlchemyRepository(url)
+        await repo.create_all()
+        yield repo
+
+    @pytest.fixture
+    def signal_service(self, test_repository: SQLAlchemyRepository) -> SignalReadService:
+        """Create SignalReadService with test repository."""
+        service = SignalReadService()
+        service.repo = test_repository
+        return service
+
+    @pytest.fixture
+    def sample_signal(self) -> Signal:
+        """Create sample Signal object for test assertions."""
+        return Signal(
+            instrument="BTCUSD",
+            side="buy",
+            strength=0.8,
+            reason="Test signal",
+            price=50000.0,
+        )
+
+    async def test_store_signal(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: Signal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify store_signal persists signal with all metadata.
+
+        Given: Repository with BTCUSD instrument,
+        When: store_signal called with signal,
+        Then: Signal stored with correct attributes.
+        """
+        await test_repository.upsert_instrument(
+            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal, strategy_name="test_strategy", price=50000.0
+        )
+        assert signal_id is not None
+        assert isinstance(signal_id, int)
+        async with test_repository.session() as session:
+            stored_signal = await session.get(SignalEvent, signal_id)
+            assert stored_signal is not None
+            assert stored_signal.side == "buy"
+            assert stored_signal.strength == 0.8
+            assert stored_signal.reason == "Test signal"
+            assert stored_signal.strategy_name == "test_strategy"
+            assert stored_signal.price == 50000.0
+
+    async def test_store_signal_without_price(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: Signal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify store_signal handles None price.
+
+        Given: Repository with BTCUSD instrument,
+        When: store_signal called with price=None,
+        Then: Signal stored with price=None.
+        """
+        await test_repository.upsert_instrument(
+            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal, strategy_name="test_strategy", price=None
+        )
+        assert signal_id is not None
+        async with test_repository.session() as session:
+            stored_signal = await session.get(SignalEvent, signal_id)
+            assert stored_signal is not None
+            assert stored_signal.price is None
+
+    async def test_get_recent_signals(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: Signal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify get_recent_signals returns ordered signals with limit.
+
+        Given: Three stored signals,
+        When: get_recent_signals called with limit=2,
+        Then: Two most recent signals returned.
+        """
+        await test_repository.upsert_instrument(
+            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        signal_ids = []
+        for i in range(3):
+            signal_id = await signal_service.store_signal(
+                signal=sample_signal, strategy_name=f"strategy_{i}", price=50000.0 + i * 100
+            )
+            signal_ids.append(signal_id)
+        recent_signals = await signal_service.get_recent_signals(limit=2)
+        assert len(recent_signals) == 2
+        assert recent_signals[0]["id"] == signal_ids[-1]
+        assert recent_signals[1]["id"] == signal_ids[-2]
+
+    async def test_get_recent_signals_by_strategy(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: Signal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify get_recent_signals filters by strategy name.
+
+        Given: Signals from strategy_a and strategy_b,
+        When: get_recent_signals called with strategy='strategy_b',
+        Then: Only strategy_b signals returned.
+        """
+        await test_repository.upsert_instrument(
+            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        await signal_service.store_signal(sample_signal, "strategy_a", 50000.0)
+        target_id = await signal_service.store_signal(sample_signal, "strategy_b", 51000.0)
+        await signal_service.store_signal(sample_signal, "strategy_a", 52000.0)
+        strategy_b_signals = await signal_service.get_recent_signals(
+            strategy="strategy_b", limit=10
+        )
+        assert len(strategy_b_signals) == 1
+        assert strategy_b_signals[0]["id"] == target_id
+        assert strategy_b_signals[0]["strategy_name"] == "strategy_b"
+
+    async def test_get_recent_signals_by_instrument(
+        self, signal_service: SignalReadService, test_repository: SQLAlchemyRepository
+    ) -> None:
+        """Verify get_recent_signals filters by instrument.
+
+        Given: Signals for BTCUSD and ETHUSD,
+        When: get_recent_signals called with instrument='BTCUSD',
+        Then: Only BTCUSD signals returned.
+        """
+        await test_repository.upsert_instrument(
+            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        await test_repository.upsert_instrument(
+            symbol="ETHUSD", base="ETH", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        btc_signal = Signal(
+            instrument="BTCUSD",
+            side="buy",
+            strength=0.8,
+            reason="BTC signal",
+            price=50000.0,
+        )
+        eth_signal = Signal(
+            instrument="ETHUSD",
+            side="sell",
+            strength=0.6,
+            reason="ETH signal",
+            price=3000.0,
+        )
+        btc_id = await signal_service.store_signal(btc_signal, "strategy_a", 50000.0)
+        await signal_service.store_signal(eth_signal, "strategy_a", 3000.0)
+        btc_signals = await signal_service.get_recent_signals(instrument="BTCUSD", limit=10)
+        assert len(btc_signals) == 1
+        assert btc_signals[0]["id"] == btc_id
+        assert btc_signals[0]["instrument"] == "BTCUSD"
+
+    async def test_get_recent_signals_empty(self, signal_service: SignalReadService) -> None:
+        """Verify get_recent_signals returns empty list when no signals.
+
+        Given: Empty database,
+        When: get_recent_signals called,
+        Then: Empty list returned.
+        """
+        signals = await signal_service.get_recent_signals()
+        assert signals == []
+
+    async def test_signal_service_initialization(self) -> None:
+        """Verify SignalReadService initializes with settings and repo.
+
+        Given: Default SignalReadService,
+        When: Instance created,
+        Then: settings and repo attributes set.
+        """
+        service = SignalReadService()
+        assert service.settings is not None
+        assert service.repo is not None
+
+
+class TestSignalServiceCoverage:
+    """Test cases for SignalReadService coverage scenarios."""
+
+    @pytest.fixture
+    async def test_repository(self, tmp_path: Path) -> SQLAlchemyRepository:
+        """Create test SQLAlchemy repository with in-memory database."""
+        db_path = tmp_path / "test.db"
+        url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
+        repo = SQLAlchemyRepository(url)
+        await repo.create_all()
+        return repo
+
+    @pytest.fixture
+    def signal_service(self, test_repository: SQLAlchemyRepository) -> SignalReadService:
+        """Create SignalReadService instance with test repository."""
+        service = SignalReadService()
+        service.repo = test_repository
+        return service
+
+    @pytest.fixture
+    def sample_signal(self) -> Signal:
+        """Create sample Signal object for testing."""
+        return Signal(
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.8,
+            reason="Test signal",
+            price=50000.0,
+        )
+
+    async def test_store_signal_creates_new_instrument(
+        self, signal_service: SignalReadService, sample_signal: Signal
+    ) -> None:
+        """Verify store_signal creates instrument if not exists.
+
+        Given: No existing instrument for BTC-USD,
+        When: store_signal called,
+        Then: Instrument created with correct symbol, base, quote.
+        """
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal, strategy_name="test_strategy", price=50000.0
+        )
+        assert signal_id > 0
+        async with signal_service.repo.session() as session:
+            inst_query = await session.execute(
+                select(Instrument).where(Instrument.symbol == "BTC-USD")
+            )
+            inst = inst_query.scalar_one_or_none()
+            assert inst is not None
+            assert inst.symbol == "BTC-USD"
+            assert inst.base == "BTC"
+            assert inst.quote == "USD"
+
+    async def test_store_signal_error_handling(
+        self, signal_service: SignalReadService, sample_signal: Signal
+    ) -> None:
+        """Verify store_signal returns -1 on error.
+
+        Given: Repository session that raises Exception,
+        When: store_signal called,
+        Then: Returns -1.
+        """
+        with patch.object(signal_service.repo, "session", side_effect=Exception("Database error")):
+            signal_id = await signal_service.store_signal(
+                signal=sample_signal, strategy_name="test_strategy", price=50000.0
+            )
+            assert signal_id == -1
+
+    async def test_store_signal_upsert_instrument_error(
+        self, signal_service: SignalReadService, sample_signal: Signal
+    ) -> None:
+        """Verify store_signal returns -1 on upsert error.
+
+        Given: Repository upsert_instrument that raises Exception,
+        When: store_signal called,
+        Then: Returns -1.
+        """
+        with patch.object(
+            signal_service.repo, "upsert_instrument", side_effect=Exception("Upsert error")
+        ):
+            signal_id = await signal_service.store_signal(
+                signal=sample_signal, strategy_name="test_strategy", price=50000.0
+            )
+            assert signal_id == -1
+
+    async def test_get_recent_signals_error_handling(
+        self, signal_service: SignalReadService
+    ) -> None:
+        """Verify get_recent_signals returns empty list on error.
+
+        Given: Repository session that raises Exception,
+        When: get_recent_signals called,
+        Then: Empty list returned.
+        """
+        with patch.object(signal_service.repo, "session", side_effect=Exception("Database error")):
+            signals = await signal_service.get_recent_signals(
+                instrument="BTC-USD", strategy="test_strategy", hours=24, limit=100
+            )
+            assert signals == []
+
+    async def test_get_recent_signals_session_error(
+        self, signal_service: SignalReadService
+    ) -> None:
+        """Verify get_recent_signals handles session execution error.
+
+        Given: Session execute that raises Exception,
+        When: get_recent_signals called,
+        Then: Empty list returned.
+        """
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = Exception("Session execution error")
+        with patch.object(signal_service.repo, "session") as mock_session_manager:
+            mock_session_manager.return_value.__aenter__.return_value = mock_session
+            signals = await signal_service.get_recent_signals()
+            assert signals == []
+
+    async def test_store_signal_session_add_error(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: Signal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify store_signal returns -1 when session.add fails.
+
+        Given: Session with add that raises Exception,
+        When: store_signal called,
+        Then: Returns -1.
+        """
+        await test_repository.upsert_instrument(
+            symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        mock_session = MagicMock()
+        mock_execute_result = MagicMock()
+        mock_execute_result.scalar_one_or_none.return_value = MagicMock(id=1)
+        mock_session.execute = AsyncMock(return_value=mock_execute_result)
+        mock_session.add.side_effect = Exception("Add error")
+        mock_session.commit = AsyncMock()
+        mock_session.refresh = AsyncMock()
+        with patch.object(signal_service.repo, "session") as mock_session_manager:
+            mock_session_manager.return_value.__aenter__.return_value = mock_session
+            signal_id = await signal_service.store_signal(
+                signal=sample_signal, strategy_name="test_strategy", price=50000.0
+            )
+            assert signal_id == -1
+
+    async def test_get_recent_signals_complex_query_error(
+        self, signal_service: SignalReadService, test_repository: SQLAlchemyRepository
+    ) -> None:
+        """Verify get_recent_signals handles result processing error.
+
+        Given: Result.all that raises Exception,
+        When: get_recent_signals called with filters,
+        Then: Empty list returned.
+        """
+        await test_repository.upsert_instrument(
+            symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+        )
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.all.side_effect = Exception("Result processing error")
+        mock_session.execute.return_value = mock_result
+        with patch.object(signal_service.repo, "session") as mock_session_manager:
+            mock_session_manager.return_value.__aenter__.return_value = mock_session
+            signals = await signal_service.get_recent_signals(
+                instrument="BTC-USD", strategy="test_strategy"
+            )
+            assert signals == []

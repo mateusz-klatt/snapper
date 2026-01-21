@@ -1,0 +1,12 @@
+node_modules
+dist
+build
+.next
+.nuxt
+coverage
+*.min.js
+*.min.css
+*.generated.ts
+package-lock.json
+pnpm-lock.yaml
+yarn.lock

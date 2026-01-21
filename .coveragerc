@@ -1,0 +1,38 @@
+[run]
+source = src/snapper,proprietary/src,scripts
+branch = True
+
+[report]
+skip_covered = True
+show_missing = True
+fail_under = 100
+exclude_lines =
+    # Don't require coverage for main block guards
+    if __name__ == .__main__.:
+    # Don't require coverage for abstract methods
+    raise NotImplementedError
+    # Don't require coverage for defensive type narrowing
+    raise AssertionError
+    # Protocol methods and abstract methods use ellipsis
+    ^\s*\.\.\.$
+    # WebSocket disconnect is raised by Starlette, hard to trigger in tests
+    except WebSocketDisconnect:
+    # Optional dependency imports
+    except ImportError:
+    # Async generator yield placeholders
+    ^\s*yield\s*$
+    ^\s*yield\s+#
+    # Abstract methods marked with ellipsis have no exit branch
+    @abstractmethod
+    # Defensive cleanup checks that are never None in practice
+    if self\.repository is not None:
+    if self\._candle_aggregator_task and not self\._candle_aggregator_task\.done\(\):
+partial_branches =
+    # Defensive branches that are only hit under specific runtime conditions
+    if USE_TALIB:
+    # Finally blocks report partial branch when exception path isn't tested
+    # These are false-positives as finally always runs
+    finally:
+    # Defensive type guards for always-true conditions in generate_types
+    if isinstance\(definitions, dict\):
+    if isinstance\(one_of, list\):

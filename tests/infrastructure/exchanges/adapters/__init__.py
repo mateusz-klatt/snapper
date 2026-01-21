@@ -1,0 +1,1 @@
+"""Exchange adapter tests package."""

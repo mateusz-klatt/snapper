@@ -1,0 +1,48 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "src/App.tsx",
+    "src/types/api.ts",
+    "src/types/api.generated.ts",
+    "src/types/ws.generated.ts",
+    "src/types/ws.ts",
+    "src/types/ui.ts",
+    "src/types/entities.generated.ts",
+    "src/lib/websocket/client.ts",
+    "src/lib/websocket/instance.ts",
+    "src/lib/websocket/types.ts",
+    "src/lib/transforms.ts",
+    "src/lib/schemas/ws.ts"
+  ],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignore": [
+    "src/**/*.test.{ts,tsx}",
+    "src/**/*.spec.{ts,tsx}",
+    "src/test/**",
+    "**/*.d.ts",
+    "src/types/api.generated.ts",
+    "src/types/ws.generated.ts",
+    "src/types/entities.ts",
+    "src/types/entities.generated.ts",
+    "src/lib/schemas/ws.generated.zod.ts",
+    "src/lib/schemas/api.generated.zod.ts"
+  ],
+  "ignoreDependencies": ["tailwindcss", "@mermaid-js/mermaid-cli", "json-schema-to-zod"],
+  "rules": {
+    "files": "error",
+    "dependencies": "error",
+    "devDependencies": "error",
+    "unlisted": "error",
+    "exports": "error",
+    "nsExports": "error",
+    "classMembers": "error",
+    "types": "error",
+    "nsTypes": "error",
+    "enumMembers": "error",
+    "duplicates": "error"
+  },
+  "vite": {
+    "config": "vite.config.ts",
+    "entry": ["src/main.tsx"]
+  }
+}

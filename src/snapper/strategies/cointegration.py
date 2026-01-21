@@ -1,0 +1,226 @@
+"""Cointegration pairs trading strategy.
+
+This module implements a statistical arbitrage strategy based on
+cointegration between two correlated instruments.
+"""
+
+import pandas as pd
+from loguru import logger
+
+from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.strategies.base import BaseStrategy
+from snapper.strategies.base import Signal
+from snapper.strategies.base import StrategyConfig
+from snapper.strategies.decorators import create_strategy_process
+from snapper.strategies.decorators import register_strategy
+
+
+@register_strategy("CointegrationPairs")
+@create_strategy_process(
+    process_name="strategy_cointegration_btc_eth",
+    default_config={
+        "name": "cointegration_btc_eth",
+        "inputs": [
+            "market.paper.BTC-USD.candles.1h",
+            "market.paper.ETH-USD.candles.1h",
+        ],
+        "outputs": ["BTC-USD", "ETH-USD"],
+        "exchange": "paper",
+        "params": {
+            "beta": 0.05,
+            "entry_threshold": 2.0,
+            "exit_threshold": 0.5,
+            "lookback_window": 50,
+            "min_data_points": 30,
+        },
+    },
+)
+class CointegrationPairs(BaseStrategy):
+    """Pairs trading strategy based on cointegration.
+
+    Trades the spread between two cointegrated instruments,
+    entering when spread deviates from mean and exiting on reversion.
+
+    Attributes:
+        beta: Hedge ratio between instruments.
+        entry_threshold: Z-score threshold for entry (in standard deviations).
+        exit_threshold: Z-score threshold for exit.
+        lookback_window: Window for spread statistics.
+        min_data_points: Minimum data points required.
+        instrument1: First instrument symbol.
+        instrument2: Second instrument symbol.
+    """
+
+    def __init__(self, config: StrategyConfig) -> None:
+        """Initialize cointegration strategy.
+
+        Args:
+            config: Strategy configuration.
+
+        Raises:
+            ValueError: If not exactly 2 inputs provided.
+        """
+        super().__init__(config)
+        self.beta = float(self.params.get("beta", 0.05))
+        self.entry_threshold = float(self.params.get("entry_threshold", 2.0))
+        self.exit_threshold = float(self.params.get("exit_threshold", 0.5))
+        self.lookback_window = int(self.params.get("lookback_window", 50))
+        self.min_data_points = int(self.params.get("min_data_points", 30))
+        self._position: str | None = None
+        if len(self.inputs) != 2:
+            raise ValueError(
+                f"CointegrationPairs requires exactly 2 inputs, got {len(self.inputs)}"
+            )
+        self.instrument1 = self._extract_instrument(self.inputs[0])
+        self.instrument2 = self._extract_instrument(self.inputs[1])
+        logger.info(
+            f"CointegrationPairs initialized: {self.instrument1} vs {self.instrument2}, "
+            f"beta={self.beta}, entry_threshold={self.entry_threshold}sigma"
+        )
+
+    @staticmethod
+    def _extract_instrument(topic: str) -> str:
+        """Extract instrument symbol from topic string.
+
+        Args:
+            topic: The ZMQ topic string.
+
+        Returns:
+            Extracted instrument symbol.
+        """
+        parts = topic.split(".")
+        if len(parts) >= 3:
+            return parts[2]
+        return topic
+
+    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+        """Process incoming bar and generate spread trading signal.
+
+        Args:
+            instrument: The instrument symbol.
+            bar: The bar envelope with OHLCV data.
+
+        Returns:
+            Signal based on spread z-score, or None.
+        """
+        if instrument not in [self.instrument1, self.instrument2]:
+            return None
+        bars = self.candle_buffer.get(instrument, [])
+        if not bars:
+            logger.warning(f"No candle data for {instrument}")
+            return None
+        current_price = bars[-1].close
+        prices1_list = [b.close for b in self.candle_buffer.get(self.instrument1, [])]
+        prices2_list = [b.close for b in self.candle_buffer.get(self.instrument2, [])]
+        if len(prices1_list) < self.min_data_points or len(prices2_list) < self.min_data_points:
+            return None
+        prices1 = pd.Series(prices1_list[-self.lookback_window :])
+        prices2 = pd.Series(prices2_list[-self.lookback_window :])
+        spread = prices1 - self.beta * prices2
+        spread_mean = spread.mean()
+        spread_std = spread.std()
+        if spread_std == 0:
+            return None
+        current_spread = prices1.iloc[-1] - self.beta * prices2.iloc[-1]
+        z_score = (current_spread - spread_mean) / spread_std
+        logger.debug(
+            f"Spread z-score: {z_score:.2f}, position: {self._position}, "
+            f"spread: {current_spread:.2f}, mean: {spread_mean:.2f}, std: {spread_std:.2f}"
+        )
+        signal = self._generate_signal_from_zscore(z_score, instrument, current_price)
+        return signal
+
+    def _generate_signal_from_zscore(
+        self, z_score: float, instrument: str, price: float
+    ) -> Signal | None:
+        """Generate signal based on spread z-score.
+
+        Args:
+            z_score: Current spread z-score.
+            instrument: The instrument for the signal.
+            price: Current price.
+
+        Returns:
+            Entry or exit signal based on z-score thresholds.
+        """
+        if self._position is None:
+            if z_score > self.entry_threshold:
+                self._position = "short_spread"
+                if instrument == self.instrument1:
+                    return Signal(
+                        instrument=instrument,
+                        side="sell",
+                        strength=min(abs(z_score) / self.entry_threshold, 1.0),
+                        price=price,
+                        reason=f"Cointegration: Enter short spread (z={z_score:.2f}sigma)",
+                    )
+                else:
+                    return Signal(
+                        instrument=instrument,
+                        side="buy",
+                        strength=min(abs(z_score) / self.entry_threshold, 1.0) * self.beta,
+                        price=price,
+                        reason=f"Cointegration: Enter short spread hedge (z={z_score:.2f}sigma)",
+                    )
+            if z_score < -self.entry_threshold:
+                self._position = "long_spread"
+                if instrument == self.instrument1:
+                    return Signal(
+                        instrument=instrument,
+                        side="buy",
+                        strength=min(abs(z_score) / self.entry_threshold, 1.0),
+                        price=price,
+                        reason=f"Cointegration: Enter long spread (z={z_score:.2f}sigma)",
+                    )
+                else:
+                    return Signal(
+                        instrument=instrument,
+                        side="sell",
+                        strength=min(abs(z_score) / self.entry_threshold, 1.0) * self.beta,
+                        price=price,
+                        reason=f"Cointegration: Enter long spread hedge (z={z_score:.2f}sigma)",
+                    )
+        elif self._position == "short_spread":
+            if z_score < self.exit_threshold:
+                self._position = None
+                if instrument == self.instrument1:
+                    return Signal(
+                        instrument=instrument,
+                        side="buy",
+                        strength=0.0,
+                        price=price,
+                        reason=f"Cointegration: Exit short spread (z={z_score:.2f}sigma)",
+                    )
+                else:
+                    return Signal(
+                        instrument=instrument,
+                        side="sell",
+                        strength=0.0,
+                        price=price,
+                        reason=f"Cointegration: Exit short spread hedge (z={z_score:.2f}sigma)",
+                    )
+        elif self._position == "long_spread":
+            if z_score > -self.exit_threshold:
+                self._position = None
+                if instrument == self.instrument1:
+                    return Signal(
+                        instrument=instrument,
+                        side="sell",
+                        strength=0.0,
+                        price=price,
+                        reason=f"Cointegration: Exit long spread (z={z_score:.2f}sigma)",
+                    )
+                else:
+                    return Signal(
+                        instrument=instrument,
+                        side="buy",
+                        strength=0.0,
+                        price=price,
+                        reason=f"Cointegration: Exit long spread hedge (z={z_score:.2f}sigma)",
+                    )
+        return None
+
+    async def reset(self) -> None:
+        """Reset strategy state for replay."""
+        self._position = None
+        logger.info(f"Strategy {self.name} reset")

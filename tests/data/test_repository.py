@@ -1,0 +1,2037 @@
+"""Tests for Repository pattern implementations."""
+
+import asyncio
+from collections.abc import AsyncIterator
+from collections.abc import Callable
+from collections.abc import Generator
+from contextlib import AbstractAsyncContextManager
+from contextlib import asynccontextmanager
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from types import TracebackType
+from typing import Any
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import Mock
+from unittest.mock import patch
+from urllib.parse import urlencode
+
+import pytest
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+import snapper.data.repository
+import snapper.data.repository as repo
+import snapper.data.repository as repository
+from snapper.data import repository as repo_module
+from snapper.data.models import MarketSnapshot
+from snapper.data.repository import CloudRepository
+from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import MSSQLRepository
+from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import SQLiteRepository
+from snapper.data.repository import clear_repository_cache
+from snapper.data.repository import dispose_repositories
+from snapper.data.repository import get_repository
+
+
+class _DummyAsyncSession:
+    def __init__(self, fail_on: int = 0) -> None:
+        self.fail_on = fail_on
+        self.calls = 0
+        self.rollback_called = False
+        self.commit_called = False
+
+    async def __aenter__(self) -> "_DummyAsyncSession":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        return False
+
+    async def execute(self, stmt: Any) -> Any:
+        self.calls += 1
+        if self.fail_on and self.calls == self.fail_on:
+            raise IntegrityError("stmt", {}, Exception("fail"))
+        return SimpleNamespace(rowcount=1)
+
+    async def commit(self) -> None:
+        self.commit_called = True
+
+    async def rollback(self) -> None:
+        self.rollback_called = True
+
+
+@asynccontextmanager
+async def _session_factory(session: _DummyAsyncSession) -> AsyncIterator[_DummyAsyncSession]:
+    yield session
+
+
+def _make_repo(session_factory: Callable[[], Any], dialect: str = "other") -> SQLAlchemyRepository:
+    repo = SQLAlchemyRepository.__new__(SQLAlchemyRepository)
+    repo.db_url = "test"
+    repo.engine = cast(
+        AsyncEngine,
+        SimpleNamespace(url=SimpleNamespace(get_dialect=lambda: SimpleNamespace(name=dialect))),
+    )
+    repo.session_factory = cast(async_sessionmaker[AsyncSession], session_factory)
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_session_rolls_back_on_exception() -> None:
+    """Test session rolls back on exception.
+
+    Given: A session context manager,
+    When: Exception is raised inside session,
+    Then: Session rollback is called.
+    """
+    session = _DummyAsyncSession()
+    repo = _make_repo(lambda: _session_factory(session))
+    with pytest.raises(ValueError):
+        async with repo.session():
+            raise ValueError("boom")
+    assert session.rollback_called is True
+
+
+@pytest.mark.asyncio
+async def test_session_skips_generator_exit_without_rollback() -> None:
+    """Test session skips rollback on GeneratorExit.
+
+    Given: A session context manager,
+    When: GeneratorExit is raised,
+    Then: Session rollback is not called.
+    """
+    session = _DummyAsyncSession()
+    repo = _make_repo(lambda: _session_factory(session))
+    async with repo.session():
+        raise GeneratorExit
+    assert session.rollback_called is False
+
+
+class _DummyInsert:
+    def __init__(self) -> None:
+        self.values_kwargs: dict[str, Any] | None = None
+
+    def values(self, **kwargs: Any) -> "_DummyInsert":
+        self.values_kwargs = kwargs
+        return self
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_other_dialect_skips_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test upsert_candles skips duplicates in other dialects.
+
+    Given: Session that fails on second execute,
+    When: upsert_candles is called with two rows,
+    Then: Returns 1 and rolls back failed row.
+    """
+    session = _DummyAsyncSession(fail_on=2)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
+    rows = [{"instrument_id": 1}, {"instrument_id": 2}]
+    inserted = await repo.upsert_candles(rows)
+    assert inserted == 1
+    assert session.rollback_called is True
+    assert session.commit_called is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_trades_other_dialect_skips_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test upsert_trades skips duplicates in other dialects.
+
+    Given: Session that fails on second execute,
+    When: upsert_trades is called with two rows,
+    Then: Returns 1 and rolls back failed row.
+    """
+    session = _DummyAsyncSession(fail_on=2)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
+    rows = [{"trade_id": "t1"}, {"trade_id": "t2"}]
+    inserted = await repo.upsert_trades(rows)
+    assert inserted == 1
+    assert session.rollback_called is True
+    assert session.commit_called is True
+
+
+def test_get_repository_caches_and_handles_mssql(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test get_repository caches instances and handles MSSQL.
+
+    Given: Repository factory,
+    When: Called twice with same URL,
+    Then: Returns same cached instance.
+    """
+    clear_repository_cache()
+    first = get_repository("sqlite+aiosqlite:///:memory:")
+    second = get_repository("sqlite+aiosqlite:///:memory:")
+    assert first is second
+    clear_repository_cache()
+
+    class _DummyMSSQL:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+    monkeypatch.setattr(repository, "MSSQLRepository", _DummyMSSQL)
+    repo = get_repository("mssql+pyodbc://server/db")
+    assert isinstance(repo, _DummyMSSQL)
+    assert repo.url.startswith("mssql+pyodbc://server/db")
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_awaits_and_clears_cache() -> None:
+    """Test dispose_repositories awaits dispose and clears cache.
+
+    Given: Repository cache with mock repository,
+    When: dispose_repositories is called,
+    Then: Engine dispose is awaited and cache cleared.
+    """
+    clear_repository_cache()
+
+    class _Repo:
+        def __init__(self) -> None:
+            self.called = False
+            self.awaited = False
+            self.engine = SimpleNamespace(dispose=self._dispose)
+
+        async def _dispose(self) -> None:
+            self.called = True
+            self.awaited = True
+
+    repo_instance = _Repo()
+    repository._repository_cache["db"] = cast(repository.Repository, repo_instance)
+    await dispose_repositories()
+    assert repo_instance.called is True
+    assert repo_instance.awaited is True
+    assert repository._repository_cache == {}
+
+
+def test_mssql_ensure_driver_adds_defaults() -> None:
+    """Test MSSQL _ensure_driver adds default connection params.
+
+    Given: MSSQL URL without driver params,
+    When: _ensure_driver is called,
+    Then: Adds driver, Encrypt, and TrustServerCertificate.
+    """
+    base = "mssql+pyodbc://host/db"
+    enriched = MSSQLRepository._ensure_driver(base)
+    assert "driver=ODBC+Driver+18+for+SQL+Server" in enriched
+    assert "Encrypt=yes" in enriched
+    assert "TrustServerCertificate=yes" in enriched
+    existing = "mssql+pyodbc://host/db?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=no"
+    updated = MSSQLRepository._ensure_driver(existing)
+    assert "Encrypt=no" in updated
+    assert "TrustServerCertificate=yes" in updated
+
+
+def test_database_repository_convert_to_sync_urls() -> None:
+    """Test DatabaseRepository converts async URLs to sync.
+
+    Given: Async database URLs,
+    When: _convert_to_sync_url is called,
+    Then: Returns sync driver equivalents.
+    """
+    sqlite_url = DatabaseRepository._convert_to_sync_url("sqlite+aiosqlite:///tmp/db")
+    postgres_url = DatabaseRepository._convert_to_sync_url("postgresql+asyncpg://host/db")
+    mssql_url = DatabaseRepository._convert_to_sync_url("mssql+pyodbc://host/db")
+    passthrough = DatabaseRepository._convert_to_sync_url("postgresql://host/db")
+    assert sqlite_url == "sqlite:///tmp/db"
+    assert postgres_url == "postgresql+psycopg2://host/db"
+    assert mssql_url == "mssql+pyodbc://host/db"
+    assert passthrough == "postgresql://host/db"
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
+    """Test SQLAlchemyRepository full CRUD operations on SQLite.
+
+    Given: SQLite repository,
+    When: All CRUD operations are executed,
+    Then: Data is persisted and retrieved correctly.
+    """
+    db_path = tmp_path / "repo.db"
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await repo.create_all()
+    instrument_payload = {
+        "symbol": "BTC-USD",
+        "base": "BTC",
+        "quote": "USD",
+        "tick_size": 0.01,
+        "lot_size": 0.001,
+    }
+    instrument_id = await repo.upsert_instrument(**instrument_payload)
+    duplicate_id = await repo.upsert_instrument(**instrument_payload)
+    assert duplicate_id == instrument_id
+    base_ts = datetime.now(UTC)
+    candle_rows = [
+        {
+            "instrument_id": instrument_id,
+            "timeframe": "1m",
+            "timestamp": base_ts,
+            "open": 10.0,
+            "high": 12.0,
+            "low": 9.5,
+            "close": 11.0,
+            "volume": 100.0,
+            "vwap": 10.5,
+            "trades": 4,
+        },
+        {
+            "instrument_id": instrument_id,
+            "timeframe": "1m",
+            "timestamp": base_ts + timedelta(minutes=1),
+            "open": 11.0,
+            "high": 12.5,
+            "low": 10.5,
+            "close": 12.0,
+            "volume": 80.0,
+            "vwap": 11.8,
+            "trades": 3,
+        },
+    ]
+    inserted_candles = await repo.upsert_candles(candle_rows)
+    assert inserted_candles == 2
+    trade_rows = [
+        {
+            "instrument_id": instrument_id,
+            "timestamp": base_ts,
+            "price": 10.5,
+            "size": 0.25,
+            "side": "buy",
+            "trade_id": "t1",
+        },
+        {
+            "instrument_id": instrument_id,
+            "timestamp": base_ts + timedelta(minutes=1),
+            "price": 11.5,
+            "size": 0.5,
+            "side": "sell",
+            "trade_id": "t2",
+        },
+    ]
+    inserted_trades = await repo.upsert_trades(trade_rows)
+    assert inserted_trades == 2
+    candle_results = await repo.get_candles(
+        "BTC-USD",
+        "1m",
+        base_ts - timedelta(minutes=1),
+        base_ts + timedelta(minutes=2),
+    )
+    assert len(candle_results) == 2
+    trade_results = await repo.get_trades(
+        "BTC-USD",
+        base_ts - timedelta(minutes=1),
+        base_ts + timedelta(minutes=2),
+    )
+    assert len(trade_results) == 2
+    order_id = await repo.insert_order(
+        instrument_id=instrument_id,
+        client_order_id="client-1",
+        exchange_order_id=None,
+        created_at=base_ts,
+        side="buy",
+        order_type="limit",
+        price=10.5,
+        size=0.75,
+        status="new",
+    )
+    await repo.update_order(
+        order_id=order_id,
+        status="filled",
+        updated_at=base_ts + timedelta(minutes=2),
+        exchange_order_id="ex-1",
+        error=None,
+    )
+    execution_id = await repo.insert_execution(
+        order_id=order_id,
+        timestamp=base_ts + timedelta(minutes=2, seconds=30),
+        price=10.6,
+        size=0.5,
+        fee=0.01,
+        fee_asset="USD",
+    )
+    assert isinstance(execution_id, int)
+    async with repo.session() as session:
+        stored_snapshot = MarketSnapshot(
+            exchange="kraken",
+            symbol="BTC-USD",
+            bid=10.4,
+            bid_volume=1.0,
+            ask=10.6,
+            ask_volume=1.5,
+            last_price=10.5,
+            volume_24h=5000.0,
+            vwap_24h=10.3,
+            low_24h=9.0,
+            high_24h=11.5,
+            change_24h=1.5,
+            spread=0.2,
+            spread_pct=0.018,
+            updated_at=base_ts,
+        )
+        session.add(stored_snapshot)
+        await session.commit()
+    snapshots = await repo.get_market_snapshots(
+        "kraken",
+        ["BTC-USD"],
+        base_ts - timedelta(seconds=1),
+        base_ts + timedelta(seconds=1),
+    )
+    assert len(snapshots) == 1
+    result_snapshot = snapshots[0]
+    normalized_ts = (
+        result_snapshot["ts"]
+        if result_snapshot["ts"].tzinfo
+        else result_snapshot["ts"].replace(tzinfo=UTC)
+    )
+    assert normalized_ts == base_ts
+    assert result_snapshot["symbol"] == "BTC-USD"
+    assert result_snapshot["exchange"] == "kraken"
+    assert result_snapshot["bid"] == 10.4
+    assert result_snapshot["bid_volume"] == 1.0
+    assert result_snapshot["ask"] == 10.6
+    assert result_snapshot["ask_volume"] == 1.5
+    assert result_snapshot["last"] == 10.5
+    assert result_snapshot["volume"] == 5000.0
+    assert result_snapshot["vwap"] == 10.3
+    assert result_snapshot["low"] == 9.0
+    assert result_snapshot["high"] == 11.5
+
+
+class DummyEngine(SimpleNamespace):
+    """Dummy async engine for testing repository disposal."""
+
+    def __init__(self) -> None:
+        """Initialize the instance."""
+        super().__init__()
+        self.dispose = asyncio.create_task
+
+
+class DummyRepo(SimpleNamespace):
+    """Dummy repository for testing cache operations."""
+
+    def __init__(self) -> None:
+        """Initialize the instance."""
+        super().__init__()
+        self.engine = DummyEngine()
+
+
+def teardown_function() -> None:
+    """Clear repository cache after each test function."""
+    repo.clear_repository_cache()
+
+
+def test_get_repository_uses_mssql_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test get_repository uses MSSQLRepository for mssql URLs.
+
+    Given: MSSQL URL,
+    When: get_repository is called,
+    Then: Returns MSSQLRepository instance.
+    """
+    created = {}
+
+    class FakeMSSQL(repo.MSSQLRepository):
+        def __init__(self, db_url: str) -> None:
+            created["url"] = self._ensure_driver(db_url)
+            self.engine: Any = None
+
+    monkeypatch.setattr(repo, "MSSQLRepository", FakeMSSQL)
+    repo.clear_repository_cache()
+    inst = repo.get_repository("mssql+pyodbc://user:pass@host/db")
+    assert isinstance(inst, FakeMSSQL)
+    assert "driver" in created["url"]
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_awaits_dispose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test dispose_repositories awaits engine dispose.
+
+    Given: Repository cache with dummy repo,
+    When: dispose_repositories is called,
+    Then: Cache is cleared after disposal.
+    """
+    dummy = DummyRepo()
+    repo._repository_cache["test"] = cast(Any, dummy)
+    await repo.dispose_repositories()
+    assert not repo._repository_cache
+
+
+def test_clear_repository_cache_clears() -> None:
+    """Test clear_repository_cache empties the cache.
+
+    Given: Repository cache with entry,
+    When: clear_repository_cache is called,
+    Then: Cache is empty.
+    """
+    repo._repository_cache["x"] = cast(Any, DummyRepo())
+    repo.clear_repository_cache()
+    assert not repo._repository_cache
+
+
+def test_mssql_repository_ensure_driver_adds_param() -> None:
+    """Test MSSQLRepository adds driver parameter.
+
+    Given: MSSQL URL without driver,
+    When: MSSQLRepository is instantiated,
+    Then: URL contains driver parameter.
+    """
+    ms_repo = repo.MSSQLRepository("mssql+pyodbc://server/db")
+    assert "driver=" in ms_repo.db_url
+
+
+def test_sqlalchemy_repository_pool_setup_sqlite_memory() -> None:
+    """Test SQLAlchemyRepository handles SQLite memory URL.
+
+    Given: SQLite memory URL,
+    When: SQLAlchemyRepository is instantiated,
+    Then: URL is preserved.
+    """
+    sa_repo = repo.SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    assert "sqlite" in sa_repo.db_url
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_session_rolls_back_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test SQLAlchemyRepository session rolls back on exception.
+
+    Given: Mocked session factory,
+    When: RuntimeError raised in session context,
+    Then: Session rollback is called.
+    """
+    sa_repo = repo.SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+
+    class DummySession:
+        def __init__(self) -> None:
+            self.committed = False
+            self.rolled = False
+
+        async def __aenter__(self) -> "DummySession":
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            self.rolled = True
+
+    dummy = DummySession()
+
+    class DummyCtx:
+        async def __aenter__(self) -> DummySession:
+            return dummy
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            await dummy.rollback()
+
+    monkeypatch.setattr(sa_repo, "session_factory", lambda: DummyCtx())
+    with pytest.raises(RuntimeError):
+        async with sa_repo.session():
+            raise RuntimeError("boom")
+    assert dummy.rolled
+
+
+class DummyRepository(Repository):
+    """Dummy repository implementing Repository interface for testing."""
+
+    def session(self) -> AbstractAsyncContextManager[AsyncSession]:
+        """Raise NotImplementedError as session is not implemented."""
+        raise NotImplementedError
+
+    async def create_all(self) -> None:
+        """Create all tables - no-op for dummy."""
+        return None
+
+    @property
+    def dialect_name(self) -> str:
+        """Return dummy dialect name."""
+        return "dummy"
+
+    async def upsert_instrument(self, **kwargs: Any) -> int:
+        """Upsert instrument - no-op returning 0."""
+        return 0
+
+    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
+        """Upsert candles - no-op returning 0."""
+        return 0
+
+    async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
+        """Upsert trades - no-op returning 0."""
+        return 0
+
+    async def insert_order(
+        self,
+        instrument_id: int,
+        client_order_id: str | None,
+        exchange_order_id: str | None,
+        created_at: datetime,
+        side: str,
+        order_type: str,
+        price: float | None,
+        size: float,
+        status: str,
+        time_in_force: str | None = None,
+    ) -> int:
+        """Insert order - no-op returning 0."""
+        return 0
+
+    async def update_order(
+        self,
+        order_id: int,
+        status: str,
+        updated_at: datetime,
+        exchange_order_id: str | None = None,
+        err: str | None = None,
+    ) -> None:
+        """Update order - no-op."""
+        pass
+
+    async def insert_execution(
+        self,
+        order_id: int,
+        ts: datetime,
+        price: float,
+        size: float,
+        fee: float,
+        fee_asset: str,
+    ) -> int:
+        """Insert execution - no-op returning 0."""
+        return 0
+
+    async def get_candles(
+        self, instrument: str, timeframe: str, start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        """Get candles - returns empty list."""
+        return []
+
+    async def get_trades(
+        self, instrument: str, start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        """Get trades - returns empty list."""
+        return []
+
+    async def get_market_snapshots(
+        self, exchange: str, symbols: list[str], start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        """Get market snapshots - returns empty list."""
+        return []
+
+
+def test_sqlite_and_cloud_repository_initialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test SQLite and Cloud repository initialization.
+
+    Given: Mocked async engine creation,
+    When: SQLiteRepository and CloudRepository created,
+    Then: URLs are preserved and engines created.
+    """
+    created_urls: list[str] = []
+
+    class DummyAsyncEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "dummy"
+
+                return _Dialect()
+
+        def __init__(self, url: str) -> None:
+            self.url = self._URL()
+            self._db_url = url
+
+    def fake_create_async_engine(
+        db_url: str,
+        future: bool = True,
+        connect_args: dict[str, Any] | None = None,
+        poolclass: Any = None,
+    ) -> DummyAsyncEngine:
+        created_urls.append(db_url)
+        return DummyAsyncEngine(db_url)
+
+    def fake_async_sessionmaker(
+        engine: Any, expire_on_commit: bool = False, class_: type[AsyncSession] | None = None
+    ) -> Callable[[], Any]:
+        def factory() -> Any:
+            return object()
+
+        return factory
+
+    monkeypatch.setattr(snapper.data.repository, "create_async_engine", fake_create_async_engine)
+    monkeypatch.setattr(snapper.data.repository, "async_sessionmaker", fake_async_sessionmaker)
+    sqlite_repo = SQLiteRepository("sqlite+aiosqlite:///tmp/test.db")
+    cloud_repo = CloudRepository("postgresql+asyncpg://user:pass@host/db")
+    assert sqlite_repo.db_url == "sqlite+aiosqlite:///tmp/test.db"
+    assert cloud_repo.db_url == "postgresql+asyncpg://user:pass@host/db"
+    assert created_urls == [
+        "sqlite+aiosqlite:///tmp/test.db",
+        "postgresql+asyncpg://user:pass@host/db",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("input_url", "expected"),
+    [
+        ("sqlite+aiosqlite:///tmp/test.db", "sqlite:///tmp/test.db"),
+        ("postgresql+asyncpg://user:pass@host/db", "postgresql+psycopg2://user:pass@host/db"),
+        ("mssql+pyodbc://user:pass@host/db", "mssql+pyodbc://user:pass@host/db"),
+        ("mysql://user:pass@host/db", "mysql://user:pass@host/db"),
+    ],
+)
+def test_database_repository_converts_urls(
+    monkeypatch: pytest.MonkeyPatch, input_url: str, expected: str
+) -> None:
+    """Verify DatabaseRepository converts async URLs to sync equivalents."""
+    created_urls: list[str] = []
+
+    class DummySyncEngine:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+    def fake_create_sync_engine(db_url: str, future: bool = True) -> DummySyncEngine:
+        created_urls.append(db_url)
+        return DummySyncEngine(db_url)
+
+    def fake_sync_sessionmaker(
+        engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], Any]:
+        def factory() -> Any:
+            return object()
+
+        return factory
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", fake_sync_sessionmaker)
+    repo = DatabaseRepository(input_url)
+    assert repo.db_url == expected
+    assert created_urls[-1] == expected
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_instrument_integrity_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_instrument handles integrity errors correctly."""
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class ExistingInstrument:
+        def __init__(self) -> None:
+            self.id = 99
+
+    class IntegrityInstrumentSession:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.rollback_calls = 0
+            self._commit_failed = False
+
+        def __enter__(self) -> "IntegrityInstrumentSession":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+
+                class FirstResult:
+                    def scalar_one_or_none(self) -> None:
+                        return None
+
+                return FirstResult()
+
+            class SecondResult:
+                def scalar_one(self) -> ExistingInstrument:
+                    return ExistingInstrument()
+
+            return SecondResult()
+
+        def add(self, _obj: Any) -> None:
+            return None
+
+        def commit(self) -> None:
+            if not self._commit_failed:
+                self._commit_failed = True
+                raise IntegrityError("duplicate", {}, Exception())
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+
+        def refresh(self, _obj: Any) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    created_sessions: list[IntegrityInstrumentSession] = []
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], IntegrityInstrumentSession]:
+        def factory() -> IntegrityInstrumentSession:
+            session = IntegrityInstrumentSession()
+            created_sessions.append(session)
+            return session
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    result = await repo.upsert_instrument(
+        symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.1, lot_size=0.001
+    )
+    assert result == 99
+    assert created_sessions[0].rollback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_instrument returns existing instrument ID."""
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class ExistingInstrument:
+        def __init__(self) -> None:
+            self.id = 42
+
+    class ExistingInstrumentSession:
+        def __enter__(self) -> "ExistingInstrumentSession":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            class Result:
+                def scalar_one_or_none(self) -> ExistingInstrument:
+                    return ExistingInstrument()
+
+            return Result()
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], ExistingInstrumentSession]:
+        def factory() -> ExistingInstrumentSession:
+            return ExistingInstrumentSession()
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    result = await repo.upsert_instrument(
+        symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.1, lot_size=0.001
+    )
+    assert result == 42
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_candles handles integrity errors correctly."""
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class IntegrityLoopSession:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.rollback_calls = 0
+
+        def __enter__(self) -> "IntegrityLoopSession":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                raise IntegrityError("duplicate", {}, Exception())
+            return object()
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+
+        def commit(self) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    created_sessions: list[IntegrityLoopSession] = []
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], IntegrityLoopSession]:
+        def factory() -> IntegrityLoopSession:
+            session = IntegrityLoopSession()
+            created_sessions.append(session)
+            return session
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 1.5,
+            "low": 0.5,
+            "close": 1.2,
+            "volume": 10.0,
+            "vwap": None,
+            "trades": 5,
+        },
+        {
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.2,
+            "high": 1.6,
+            "low": 0.8,
+            "close": 1.4,
+            "volume": 12.0,
+            "vwap": None,
+            "trades": 6,
+        },
+    ]
+    result = await repo.upsert_candles(rows)
+    assert result == 1
+    assert created_sessions[0].rollback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_trades_integrity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_trades handles integrity errors correctly."""
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class IntegrityTradeSession:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.rollback_calls = 0
+
+        def __enter__(self) -> "IntegrityTradeSession":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                raise IntegrityError("duplicate", {}, Exception())
+            return object()
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+
+        def commit(self) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    created_sessions: list[IntegrityTradeSession] = []
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], IntegrityTradeSession]:
+        def factory() -> IntegrityTradeSession:
+            session = IntegrityTradeSession()
+            created_sessions.append(session)
+            return session
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    rows: list[dict[str, Any]] = [
+        {
+            "trade_id": "t1",
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "side": "buy",
+            "size": 1.0,
+            "price": 1.5,
+        },
+        {
+            "trade_id": "t2",
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            "side": "sell",
+            "size": 1.2,
+            "price": 1.4,
+        },
+    ]
+    result = await repo.upsert_trades(rows)
+    assert result == 1
+    assert created_sessions[0].rollback_calls == 1
+
+
+def test_database_repository_get_session_and_create_all(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Test DatabaseRepository get_session and create_all.
+
+    Given: SQLite database path,
+    When: create_all and get_session are called,
+    Then: Database file created and session returned.
+    """
+    db_file = tmp_path / "test.db"
+    repo = DatabaseRepository(f"sqlite:///{db_file}")
+    repo.create_all()
+    assert db_file.exists()
+    session = repo.get_session()
+    assert session is not None
+    session.close()
+
+
+def test_get_repository_caches_by_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test get_repository caches instances by URL.
+
+    Given: Mocked repository classes,
+    When: Called with same URL twice,
+    Then: Returns same cached instance.
+    """
+    clear_repository_cache()
+
+    class _StubRepo:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+    monkeypatch.setattr(SQLAlchemyRepository, "__call__", None, raising=False)
+    monkeypatch.setattr("snapper.data.repository.SQLAlchemyRepository", lambda url: _StubRepo(url))
+    monkeypatch.setattr("snapper.data.repository.MSSQLRepository", lambda url: _StubRepo(url))
+    repo1 = get_repository("sqlite:///tmp.db")
+    repo2 = get_repository("sqlite:///tmp.db")
+    repo3 = get_repository("mssql+pyodbc://server/db")
+    assert repo1 is repo2
+    assert repo3 is not repo1
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_handles_mock_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test dispose_repositories handles mock engines.
+
+    Given: Repository with MagicMock engine,
+    When: dispose_repositories is called,
+    Then: Cache is cleared.
+    """
+    clear_repository_cache()
+
+    class _StubRepo:
+        def __init__(self, url: str) -> None:
+            self.url = url
+            self.engine = MagicMock()
+
+    monkeypatch.setattr("snapper.data.repository.SQLAlchemyRepository", lambda url: _StubRepo(url))
+    monkeypatch.setattr("snapper.data.repository.MSSQLRepository", lambda url: _StubRepo(url))
+    get_repository("sqlite:///tmp.db")
+    await dispose_repositories()
+    assert repo_module._repository_cache == {}
+
+
+def test_mssql_ensure_driver_adds_params() -> None:
+    """Test MSSQL _ensure_driver adds required params.
+
+    Given: Base MSSQL URL,
+    When: _ensure_driver is called,
+    Then: Adds driver, Encrypt, TrustServerCertificate.
+    """
+    url = "mssql+pyodbc://server/db"
+    normalized = MSSQLRepository._ensure_driver(url)
+    assert "driver=ODBC+Driver+18+for+SQL+Server" in normalized
+    assert "Encrypt=yes" in normalized
+    assert "TrustServerCertificate=yes" in normalized
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_with_sync_dispose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test dispose_repositories with synchronous dispose.
+
+    Given: Repository with sync dispose method,
+    When: dispose_repositories is called,
+    Then: Dispose is called and cache cleared.
+    """
+    clear_repository_cache()
+    dispose_called = {"value": False}
+
+    class _SyncEngine:
+        def dispose(self) -> None:
+            dispose_called["value"] = True
+            return None
+
+    class _StubRepo:
+        def __init__(self) -> None:
+            self.engine = _SyncEngine()
+
+    repo_module._repository_cache["test_sync"] = _StubRepo()
+    await dispose_repositories()
+    assert dispose_called["value"] is True
+    assert repo_module._repository_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_engine_no_dispose() -> None:
+    """Test dispose_repositories logs warning for engine without dispose.
+
+    Given: Repository with engine lacking dispose method,
+    When: dispose_repositories is called,
+    Then: Logs warning and clears cache.
+    """
+    clear_repository_cache()
+
+    class _EngineNoDispose:
+        pass
+
+    class _StubRepo:
+        def __init__(self) -> None:
+            self.engine = _EngineNoDispose()
+
+    repo_module._repository_cache["test_no_dispose"] = _StubRepo()
+    with patch.object(repo_module, "logger") as mock_logger:
+        await dispose_repositories()
+    assert repo_module._repository_cache == {}
+    mock_logger.warning.assert_called_once()
+    assert "Failed to dispose repository engine" in mock_logger.warning.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_engine_dispose_not_callable() -> None:
+    """Test dispose_repositories handles non-callable dispose.
+
+    Given: Repository with dispose as non-callable,
+    When: dispose_repositories is called,
+    Then: Logs warning and clears cache.
+    """
+    clear_repository_cache()
+
+    class _EngineDisposeNotCallable:
+        dispose = "not_callable"
+
+    class _StubRepo:
+        def __init__(self) -> None:
+            self.engine = _EngineDisposeNotCallable()
+
+    repo_module._repository_cache["test_not_callable"] = _StubRepo()
+    with patch.object(repo_module, "logger") as mock_logger:
+        await dispose_repositories()
+    assert repo_module._repository_cache == {}
+    mock_logger.warning.assert_called_once()
+    assert "Failed to dispose repository engine" in mock_logger.warning.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_engine_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test dispose_repositories handles None engine.
+
+    Given: Repository with engine set to None,
+    When: dispose_repositories is called,
+    Then: Cache is cleared without error.
+    """
+    clear_repository_cache()
+
+    class _StubRepo:
+        def __init__(self) -> None:
+            self.engine = None
+
+    repo_module._repository_cache["test_engine_none"] = _StubRepo()
+    await dispose_repositories()
+    assert repo_module._repository_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_no_engine_attr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test dispose_repositories handles missing engine attribute.
+
+    Given: Repository without engine attribute,
+    When: dispose_repositories is called,
+    Then: Cache is cleared without error.
+    """
+    clear_repository_cache()
+
+    class _StubRepo:
+        pass
+
+    repo_module._repository_cache["test_no_engine"] = _StubRepo()
+    await dispose_repositories()
+    assert repo_module._repository_cache == {}
+
+
+def test_get_repository_mssql() -> None:
+    """Test get_repository returns MSSQLRepository for MSSQL URL.
+
+    Given: MSSQL connection URL,
+    When: get_repository is called,
+    Then: Returns MSSQLRepository instance.
+    """
+    mssql_url = "mssql+pyodbc://user:pass@server/db"
+    repo = get_repository(mssql_url)
+    assert isinstance(repo, MSSQLRepository)
+
+
+def test_get_repository_sqlite() -> None:
+    """Test get_repository returns SQLAlchemyRepository for SQLite URL.
+
+    Given: SQLite connection URL,
+    When: get_repository is called,
+    Then: Returns SQLAlchemyRepository instance.
+    """
+    with patch("snapper.data.repository.create_async_engine"):
+        sqlite_url = "sqlite+aiosqlite:///test.db"
+        repo = get_repository(sqlite_url)
+        assert isinstance(repo, SQLAlchemyRepository)
+
+
+class TestSQLAlchemyRepositoryDialects:
+    """Tests for SQLAlchemy repository dialect-specific behaviors."""
+
+    @pytest.fixture
+    def mock_postgres_repo(self) -> Generator[SQLAlchemyRepository, None, None]:
+        """Create mocked PostgreSQL repository for testing."""
+        with patch("snapper.data.repository.create_async_engine") as mock_engine:
+            mock_engine.return_value = Mock()
+            repo = SQLAlchemyRepository("postgresql+asyncpg://user:pass@localhost/test")
+            with patch.object(type(repo), "dialect_name", new_callable=lambda: "postgresql"):
+                yield repo
+
+    @pytest.fixture
+    def mock_other_repo(self) -> Generator[SQLAlchemyRepository, None, None]:
+        """Create mocked non-PostgreSQL repository for testing."""
+        with patch("snapper.data.repository.create_async_engine") as mock_engine:
+            mock_engine.return_value = Mock()
+            repo = SQLAlchemyRepository("mysql+aiomysql://user:pass@localhost/test")
+            with patch.object(type(repo), "dialect_name", new_callable=lambda: "mysql"):
+                yield repo
+
+    @pytest.mark.asyncio
+    async def test_upsert_candles_postgres_dialect(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_candles uses PostgreSQL ON CONFLICT syntax.
+
+        Given: PostgreSQL repository,
+        When: upsert_candles is called,
+        Then: Uses bulk insert with rowcount.
+        """
+        mock_session = AsyncMock()
+        mock_result = Mock()
+        mock_result.rowcount = 5
+        mock_session.execute.return_value = mock_result
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            rows: list[dict[str, Any]] = [
+                {
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000.0,
+                    "vwap": None,
+                    "trades": 10,
+                }
+            ]
+            result = await mock_postgres_repo.upsert_candles(rows)
+            assert result == 5
+            mock_session.execute.assert_called_once()
+            mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_candles_other_dialect(
+        self, mock_other_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_candles uses row-by-row insert for non-PostgreSQL.
+
+        Given: MySQL repository,
+        When: upsert_candles is called,
+        Then: Inserts rows individually.
+        """
+        mock_session = AsyncMock()
+        with patch.object(mock_other_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            rows: list[dict[str, Any]] = [
+                {
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000.0,
+                    "vwap": None,
+                    "trades": 10,
+                },
+                {
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.5,
+                    "high": 101.5,
+                    "low": 99.5,
+                    "close": 101.0,
+                    "volume": 1200.0,
+                    "vwap": None,
+                    "trades": 12,
+                },
+            ]
+            result = await mock_other_repo.upsert_candles(rows)
+            assert result == 2
+            assert mock_session.execute.call_count == 2
+            mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_candles_other_dialect_with_integrity_error(
+        self, mock_other_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_candles handles integrity errors gracefully.
+
+        Given: MySQL repository with duplicate key,
+        When: upsert_candles is called,
+        Then: Rolls back and continues.
+        """
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            IntegrityError("duplicate", "params", Exception()),
+            None,
+        ]
+        with patch.object(mock_other_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            rows: list[dict[str, Any]] = [
+                {
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000.0,
+                    "vwap": None,
+                    "trades": 10,
+                },
+                {
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.5,
+                    "high": 101.5,
+                    "low": 99.5,
+                    "close": 101.0,
+                    "volume": 1200.0,
+                    "vwap": None,
+                    "trades": 12,
+                },
+            ]
+            result = await mock_other_repo.upsert_candles(rows)
+            assert result == 1
+            assert mock_session.execute.call_count == 2
+            mock_session.rollback.assert_called_once()
+            mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_trades_postgres_dialect(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_trades uses PostgreSQL ON CONFLICT syntax.
+
+        Given: PostgreSQL repository,
+        When: upsert_trades is called,
+        Then: Uses bulk insert with rowcount.
+        """
+        mock_session = AsyncMock()
+        mock_result = Mock()
+        mock_result.rowcount = 3
+        mock_session.execute.return_value = mock_result
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            rows: list[dict[str, Any]] = [
+                {
+                    "trade_id": "trade_1",
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "side": "buy",
+                    "size": 100.0,
+                    "price": 100.5,
+                }
+            ]
+            result = await mock_postgres_repo.upsert_trades(rows)
+            assert result == 3
+            mock_session.execute.assert_called_once()
+            mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_trades_other_dialect(self, mock_other_repo: SQLAlchemyRepository) -> None:
+        """Verify upsert_trades uses row-by-row insert for non-PostgreSQL.
+
+        Given: MySQL repository,
+        When: upsert_trades is called,
+        Then: Inserts rows individually.
+        """
+        mock_session = AsyncMock()
+        with patch.object(mock_other_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            rows: list[dict[str, Any]] = [
+                {
+                    "trade_id": "trade_1",
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "side": "buy",
+                    "size": 100.0,
+                    "price": 100.5,
+                }
+            ]
+            result = await mock_other_repo.upsert_trades(rows)
+            assert result == 1
+            mock_session.execute.assert_called_once()
+            mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_empty_rows(self, mock_postgres_repo: SQLAlchemyRepository) -> None:
+        """Verify upsert methods return 0 for empty input.
+
+        Given: Empty row list,
+        When: upsert_candles/upsert_trades is called,
+        Then: Returns 0 without database operation.
+        """
+        result_candles = await mock_postgres_repo.upsert_candles([])
+        assert result_candles == 0
+        result_trades = await mock_postgres_repo.upsert_trades([])
+        assert result_trades == 0
+
+    @pytest.mark.asyncio
+    async def test_upsert_instrument_with_integrity_error(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_instrument handles duplicate key gracefully.
+
+        Given: Instrument already exists,
+        When: upsert_instrument is called,
+        Then: Returns existing instrument ID.
+        """
+        mock_session = AsyncMock()
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        mock_instrument = Mock()
+        mock_instrument.id = 123
+        mock_session.add = Mock()
+        mock_session.commit.side_effect = [IntegrityError("duplicate", "params", Exception()), None]
+        mock_result2 = Mock()
+        mock_result2.scalar_one.return_value = mock_instrument
+        mock_session.execute.side_effect = [mock_result, mock_result2]
+        mock_session.refresh = AsyncMock()
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            result = await mock_postgres_repo.upsert_instrument(
+                symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+            )
+            assert result == 123
+            mock_session.rollback.assert_called_once()
+            mock_session.refresh.assert_called_once_with(mock_instrument)
+
+    @pytest.mark.asyncio
+    async def test_upsert_instrument_existing(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_instrument returns existing ID without insert.
+
+        Given: Instrument already exists,
+        When: upsert_instrument is called,
+        Then: Returns existing ID, skips add.
+        """
+        mock_session = AsyncMock()
+        mock_result = Mock()
+        mock_instrument = Mock()
+        mock_instrument.id = 456
+        mock_result.scalar_one_or_none.return_value = mock_instrument
+        mock_session.execute.return_value = mock_result
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            result = await mock_postgres_repo.upsert_instrument(
+                symbol="ETH-USD", base="ETH", quote="USD", tick_size=0.01, lot_size=0.001
+            )
+            assert result == 456
+            mock_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_candles_instrument_not_found(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify get_candles returns empty list for unknown instrument.
+
+        Given: Non-existent instrument,
+        When: get_candles is called,
+        Then: Returns empty list.
+        """
+        mock_session = AsyncMock()
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            start = datetime(2024, 1, 1, tzinfo=UTC)
+            end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
+            result = await mock_postgres_repo.get_candles("NONEXISTENT", "1m", start, end)
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_candles_success(self, mock_postgres_repo: SQLAlchemyRepository) -> None:
+        """Verify get_candles returns candle data as dictionaries.
+
+        Given: Instrument with candles,
+        When: get_candles is called,
+        Then: Returns list of candle dicts.
+        """
+        mock_session = AsyncMock()
+        mock_inst_result = Mock()
+        mock_instrument = Mock()
+        mock_instrument.id = 1
+        mock_inst_result.scalar_one_or_none.return_value = mock_instrument
+        mock_candles_result = Mock()
+        mock_row = Mock()
+        mock_row.timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+        mock_row.timeframe = "1m"
+        mock_row.open = 100.0
+        mock_row.high = 101.0
+        mock_row.low = 99.0
+        mock_row.close = 100.5
+        mock_row.volume = 1000.0
+        mock_row.vwap = None
+        mock_row.trades = 10
+        mock_candles_result.all.return_value = [mock_row]
+        mock_session.execute.side_effect = [mock_inst_result, mock_candles_result]
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            start = datetime(2024, 1, 1, tzinfo=UTC)
+            end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
+            result = await mock_postgres_repo.get_candles("BTC-USD", "1m", start, end)
+            expected: list[dict[str, Any]] = [
+                {
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000.0,
+                    "vwap": None,
+                    "trades": 10,
+                }
+            ]
+            assert result == expected
+
+    def test_dialect_name_property(self, mock_postgres_repo: SQLAlchemyRepository) -> None:
+        """Verify dialect_name returns correct database dialect.
+
+        Given: PostgreSQL repository,
+        When: dialect_name is accessed,
+        Then: Returns 'postgresql'.
+        """
+        assert mock_postgres_repo.dialect_name == "postgresql"
+
+
+class TestMSSQLRepository:
+    """Tests for MSSQL repository synchronous operations."""
+
+    def test_ensure_driver_with_params(self) -> None:
+        """Verify _ensure_driver preserves existing URL params.
+
+        Given: MSSQL URL with Timeout param,
+        When: _ensure_driver is called,
+        Then: Adds driver and keeps existing params.
+        """
+        url_with_params = "mssql+pyodbc://user:pass@server/db?Timeout=30"
+        ensure_driver = MSSQLRepository._ensure_driver
+        result = ensure_driver(url_with_params)
+        assert "driver=ODBC+Driver+18+for+SQL+Server" in result
+        assert "Encrypt=yes" in result
+        assert "TrustServerCertificate=yes" in result
+        assert "Timeout=30" in result
+
+    def test_ensure_driver_no_params(self) -> None:
+        """Verify _ensure_driver adds all required params.
+
+        Given: MSSQL URL without params,
+        When: _ensure_driver is called,
+        Then: Adds driver, Encrypt, TrustServerCertificate.
+        """
+        url_no_params = "mssql+pyodbc://user:pass@server/db"
+        ensure_driver = MSSQLRepository._ensure_driver
+        result = ensure_driver(url_no_params)
+        expected_params = urlencode(
+            {
+                "driver": "ODBC Driver 18 for SQL Server",
+                "Encrypt": "yes",
+                "TrustServerCertificate": "yes",
+            }
+        )
+        assert result == url_no_params + "?" + expected_params
+
+    def test_ensure_driver_non_mssql(self) -> None:
+        """Verify _ensure_driver ignores non-MSSQL URLs.
+
+        Given: PostgreSQL URL,
+        When: _ensure_driver is called,
+        Then: Returns URL unchanged.
+        """
+        url = "postgresql://user:pass@server/db"
+        ensure_driver = MSSQLRepository._ensure_driver
+        result = ensure_driver(url)
+        assert result == url
+
+    def test_ensure_driver_with_existing_driver(self) -> None:
+        """Verify _ensure_driver preserves custom driver in URL.
+
+        Given: MSSQL URL with custom driver,
+        When: _ensure_driver is called,
+        Then: Keeps custom driver, adds Encrypt params.
+        """
+        url = "mssql+pyodbc://user:pass@server/db?driver=Custom+Driver"
+        ensure_driver = MSSQLRepository._ensure_driver
+        result = ensure_driver(url)
+        assert "driver=Custom+Driver" in result
+        assert "Encrypt=yes" in result
+        assert "TrustServerCertificate=yes" in result
+
+    @pytest.mark.asyncio
+    async def test_mssql_session_not_implemented(self) -> None:
+        """Verify MSSQLRepository.session raises NotImplementedError.
+
+        Given: MSSQL repository,
+        When: session context is entered,
+        Then: Raises NotImplementedError.
+        """
+        repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+        with pytest.raises(NotImplementedError, match="MSSQLRepository session"):
+            async with repo.session():
+                pass
+
+    @pytest.mark.asyncio
+    async def test_mssql_create_all(self) -> None:
+        """Verify MSSQL create_all uses thread pool.
+
+        Given: MSSQL repository,
+        When: create_all is called,
+        Then: Calls asyncio.to_thread.
+        """
+        with patch("snapper.data.repository.asyncio.to_thread") as mock_to_thread:
+            mock_to_thread.return_value = None
+            repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+            await repo.create_all()
+            mock_to_thread.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mssql_upsert_instrument(self) -> None:
+        """Verify MSSQL upsert_instrument returns instrument ID.
+
+        Given: MSSQL repository,
+        When: upsert_instrument is called,
+        Then: Returns instrument ID from thread.
+        """
+        with patch("snapper.data.repository.asyncio.to_thread") as mock_to_thread:
+            mock_to_thread.return_value = 123
+            repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+            result = await repo.upsert_instrument(
+                symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+            )
+            assert result == 123
+            mock_to_thread.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mssql_upsert_candles(self) -> None:
+        """Verify MSSQL upsert_candles returns row count.
+
+        Given: MSSQL repository,
+        When: upsert_candles is called,
+        Then: Returns count from thread.
+        """
+        with patch("snapper.data.repository.asyncio.to_thread") as mock_to_thread:
+            mock_to_thread.return_value = 5
+            repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+            rows: list[dict[str, Any]] = [
+                {
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000.0,
+                    "vwap": None,
+                    "trades": 10,
+                }
+            ]
+            result = await repo.upsert_candles(rows)
+            assert result == 5
+            mock_to_thread.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mssql_upsert_trades(self) -> None:
+        """Verify MSSQL upsert_trades returns row count.
+
+        Given: MSSQL repository,
+        When: upsert_trades is called,
+        Then: Returns count from thread.
+        """
+        with patch("snapper.data.repository.asyncio.to_thread") as mock_to_thread:
+            mock_to_thread.return_value = 3
+            repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+            rows: list[dict[str, Any]] = [
+                {
+                    "trade_id": "trade_1",
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "side": "buy",
+                    "size": 100.0,
+                    "price": 100.5,
+                }
+            ]
+            result = await repo.upsert_trades(rows)
+            assert result == 3
+            mock_to_thread.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mssql_get_candles(self) -> None:
+        """Verify MSSQL get_candles returns candle data.
+
+        Given: MSSQL repository,
+        When: get_candles is called,
+        Then: Returns candles from thread.
+        """
+        expected_candles: list[dict[str, Any]] = [
+            {
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "timeframe": "1m",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "volume": 1000.0,
+                "vwap": None,
+                "trades": 10,
+            }
+        ]
+        with patch("snapper.data.repository.asyncio.to_thread") as mock_to_thread:
+            mock_to_thread.return_value = expected_candles
+            repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+            start = datetime(2024, 1, 1, tzinfo=UTC)
+            end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
+            result = await repo.get_candles("BTC-USD", "1m", start, end)
+            assert result == expected_candles
+            mock_to_thread.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mssql_empty_rows(self) -> None:
+        """Verify MSSQL upsert methods return 0 for empty input.
+
+        Given: MSSQL repository with empty rows,
+        When: upsert_candles/upsert_trades is called,
+        Then: Returns 0 without database call.
+        """
+        repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+        result_candles = await repo.upsert_candles([])
+        assert result_candles == 0
+        result_trades = await repo.upsert_trades([])
+        assert result_trades == 0
+
+    def test_mssql_dialect_name(self) -> None:
+        """Verify MSSQL dialect_name returns 'mssql'.
+
+        Given: MSSQL repository,
+        When: dialect_name is accessed,
+        Then: Returns 'mssql'.
+        """
+        with patch("snapper.data.repository.create_sync_engine") as mock_engine:
+            mock_url = Mock()
+            mock_dialect = Mock()
+            mock_dialect.name = "mssql"
+            mock_url.get_dialect.return_value = mock_dialect
+            mock_engine.return_value.url = mock_url
+            repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+            assert repo.dialect_name == "mssql"
+
+
+@pytest.mark.asyncio()
+async def test_dispose_repositories_awaits_coroutine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify dispose_repositories awaits async dispose methods."""
+    clear_repository_cache()
+    disposed: list[bool] = []
+
+    async def _async_dispose() -> None:
+        disposed.append(True)
+
+    class _Repo:
+        def __init__(self) -> None:
+            self.engine = SimpleNamespace(dispose=_async_dispose)
+
+    repo_module._repository_cache["sqlite:///tmp.db"] = cast(repo_module.Repository, _Repo())
+    await dispose_repositories()
+    assert disposed == [True]
+    assert repo_module._repository_cache == {}
+
+
+@pytest.mark.asyncio()
+async def test_get_trades_returns_empty_when_instrument_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_trades returns empty list when instrument is not found."""
+    with patch("snapper.data.repository.create_async_engine"):
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///tmp.db")
+    mock_execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    async def _execute(*_: object, **__: object) -> SimpleNamespace:
+        return mock_execute_result
+
+    mock_session = AsyncMock()
+    mock_session.execute.side_effect = _execute
+
+    class _Ctx:
+        async def __aenter__(self) -> Any:
+            return mock_session
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(repo, "session", lambda: _Ctx())
+    result = await repo.get_trades(
+        "MISSING",
+        datetime.now(UTC),
+        datetime.now(UTC),
+    )
+    assert result == []
+
+
+@pytest.mark.asyncio()
+async def test_mssql_insert_order_uses_sync_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify MSSQL insert_order uses synchronous session for inserts."""
+    monkeypatch.setattr("snapper.data.repository.create_sync_engine", lambda *_, **__: Mock())
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+
+    class _DummyOrder:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.id = 0
+
+    class _Session:
+        def __init__(self) -> None:
+            self.added: _DummyOrder | None = None
+            self.commit_called = False
+            self.refreshed: _DummyOrder | None = None
+
+        def __enter__(self) -> "_Session":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def add(self, obj: _DummyOrder) -> None:
+            self.added = obj
+
+        def commit(self) -> None:
+            self.commit_called = True
+            if self.added is not None:
+                self.added.id = 7
+
+        def refresh(self, obj: _DummyOrder) -> None:
+            self.refreshed = obj
+
+    monkeypatch.setattr("snapper.data.repository.OrderRecord", _DummyOrder)
+    repo.session_factory = cast(Any, lambda: _Session())
+    result = await repo.insert_order(
+        instrument_id=1,
+        client_order_id="c1",
+        exchange_order_id="e1",
+        created_at=datetime.now(UTC),
+        side="buy",
+        order_type="limit",
+        price=10.0,
+        size=1.0,
+        status="open",
+    )
+    assert result == 7
+
+
+class _MinimalRepository(Repository):
+    def session(self) -> Any:
+        raise NotImplementedError
+
+    async def create_all(self) -> None:
+        pass
+
+    @property
+    def dialect_name(self) -> str:
+        return "sqlite"
+
+    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
+        return 0
+
+    async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
+        return 0
+
+    async def upsert_instrument(self, **kwargs: Any) -> int:
+        return 0
+
+    async def insert_order(
+        self,
+        instrument_id: int,
+        client_order_id: str | None,
+        exchange_order_id: str | None,
+        created_at: datetime,
+        side: str,
+        order_type: str,
+        price: float | None,
+        size: float,
+        status: str,
+        time_in_force: str | None = None,
+    ) -> int:
+        return 0
+
+    async def update_order(
+        self,
+        order_id: int,
+        status: str,
+        updated_at: datetime,
+        exchange_order_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        pass
+
+    async def insert_execution(
+        self,
+        order_id: int,
+        timestamp: datetime,
+        price: float,
+        size: float,
+        fee: float,
+        fee_asset: str,
+    ) -> int:
+        return 0
+
+    async def get_candles(
+        self,
+        instrument: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def get_trades(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def get_market_snapshots(
+        self,
+        exchange: str,
+        symbols: list[str],
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        return []

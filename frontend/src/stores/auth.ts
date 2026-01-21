@@ -1,0 +1,277 @@
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import type { components } from '../types/api.generated'
+import type { LoginRequest } from '../types/api'
+import { apiClient } from '../lib/apiClient'
+import { storeWsTicket } from '../lib/wsTicketCache'
+
+type User = components['schemas']['UserProfile']
+type UserRole = components['schemas']['UserRole']
+type WindowWithCallbacks = typeof globalThis & {
+  authLogoutCallback?: () => void
+  wsDisconnectCallback?: () => void
+}
+interface AuthState {
+  user: User | null
+  isAuthenticated: boolean
+  isLoading: boolean
+  error: string | null
+  csrfToken: string | null
+  login: (credentials: LoginRequest) => Promise<void>
+  logout: () => Promise<void>
+  silentLogout: () => void
+  refreshToken: () => Promise<void>
+  clearError: () => void
+  setLoading: (loading: boolean) => void
+  hasRole: (role: UserRole) => boolean
+  hasPermission: (permission: string) => boolean
+  canAccess: (resource: string) => boolean
+}
+const ROLE_HIERARCHY: Record<UserRole, number> = {
+  viewer: 1,
+  operator: 2,
+  admin: 3,
+}
+const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
+  viewer: [
+    'read:market_data',
+    'read:orders',
+    'read:positions',
+    'read:strategies',
+    'read:system_status',
+  ],
+  operator: [
+    'read:market_data',
+    'read:orders',
+    'create:orders',
+    'cancel:orders',
+    'read:positions',
+    'manage:positions',
+    'read:strategies',
+    'start:strategies',
+    'stop:strategies',
+    'read:system_status',
+    'manage:processes',
+  ],
+  admin: [],
+}
+const RESOURCE_ACCESS: Record<string, UserRole[]> = {
+  overview: ['viewer', 'operator', 'admin'],
+  market: ['viewer', 'operator', 'admin'],
+  processes: ['operator', 'admin'],
+  strategies: ['operator', 'admin'],
+  orders: ['operator', 'admin'],
+  signals: ['operator', 'admin'],
+  health: ['operator', 'admin'],
+  admin: ['admin'],
+  charts: ['viewer', 'operator', 'admin'],
+  settings: ['admin'],
+}
+
+export const useAuthStore = create<AuthState>()(
+  persist(
+    (set, get) => {
+      const win = globalThis as WindowWithCallbacks
+
+      win.authLogoutCallback = () => {
+        get().logout()
+      }
+
+      return {
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+        error: null,
+        csrfToken: null,
+        login: async (credentials: LoginRequest) => {
+          try {
+            set({ isLoading: true, error: null })
+            const response = await apiClient.post('/snapper/api/auth/login', credentials, {
+              skipCSRF: true,
+            })
+
+            if (!response.ok) {
+              const errorData = await response.json()
+
+              throw new Error(errorData.detail || 'Login failed')
+            }
+
+            const data: { user: User; csrf_token?: string } = await response.json()
+
+            apiClient.setCsrfToken(data.csrf_token ?? null)
+            set({
+              user: data.user,
+              isAuthenticated: true,
+              csrfToken: data.csrf_token ?? null,
+              isLoading: false,
+              error: null,
+            })
+            localStorage.setItem('auth_user_id', data.user.id)
+          } catch (error) {
+            set({
+              isLoading: false,
+              error: error instanceof Error ? error.message : 'Login failed',
+              isAuthenticated: false,
+              user: null,
+              csrfToken: null,
+            })
+            localStorage.removeItem('auth_token')
+            localStorage.removeItem('auth_user_id')
+            throw error
+          }
+        },
+        logout: async () => {
+          try {
+            set({ isLoading: true })
+            set({ isAuthenticated: false })
+            const win = globalThis as WindowWithCallbacks
+
+            if (win.wsDisconnectCallback) {
+              win.wsDisconnectCallback()
+            }
+
+            await apiClient.post('/snapper/api/auth/logout', undefined, {
+              skipRetry: true,
+              skipCSRF: true,
+            })
+          } catch (error) {
+            console.error('Logout request failed:', error)
+          } finally {
+            apiClient.clearCSRFToken()
+            storeWsTicket(null)
+            set({
+              user: null,
+              isAuthenticated: false,
+              csrfToken: null,
+              isLoading: false,
+              error: null,
+            })
+            localStorage.removeItem('auth_token')
+            localStorage.removeItem('auth_user_id')
+          }
+        },
+        silentLogout: () => {
+          set({ isAuthenticated: false })
+          const win = globalThis as WindowWithCallbacks
+
+          if (win.wsDisconnectCallback) {
+            win.wsDisconnectCallback()
+          }
+
+          apiClient.clearCSRFToken()
+          storeWsTicket(null)
+          set({
+            user: null,
+            isAuthenticated: false,
+            csrfToken: null,
+            isLoading: false,
+            error: null,
+          })
+          localStorage.removeItem('auth_token')
+          localStorage.removeItem('auth_user_id')
+        },
+        refreshToken: async () => {
+          try {
+            const data: {
+              message?: string
+              ws_token?: string
+              ws_token_exp?: string
+              csrf_token?: string
+              user?: User
+            } = await apiClient.postJSON('/snapper/api/auth/refresh')
+
+            if (typeof data.ws_token === 'string' && typeof data.ws_token_exp === 'string') {
+              const expSeconds = Math.floor(new Date(data.ws_token_exp).getTime() / 1000)
+
+              storeWsTicket({ token: data.ws_token, exp: expSeconds })
+            } else {
+              storeWsTicket(null)
+            }
+
+            apiClient.setCsrfToken(data.csrf_token ?? null)
+            let userData = data.user ?? get().user
+
+            if (!userData) {
+              const userResponse = await apiClient.get('/snapper/api/auth/me')
+
+              if (!userResponse.ok) {
+                throw new Error('Failed to get user info')
+              }
+
+              userData = await userResponse.json()
+            }
+
+            set({
+              user: userData,
+              isAuthenticated: true,
+              csrfToken: data.csrf_token ?? null,
+            })
+
+            if (userData) {
+              localStorage.setItem('auth_user_id', userData.id)
+            }
+          } catch (error) {
+            console.error('Token refresh failed:', error)
+            get().logout()
+            throw error
+          }
+        },
+        clearError: () => set({ error: null }),
+        setLoading: (loading: boolean) => set({ isLoading: loading }),
+        hasRole: (role: UserRole) => {
+          const { user } = get()
+
+          if (!user) return false
+
+          return ROLE_HIERARCHY[user.role] >= ROLE_HIERARCHY[role]
+        },
+        hasPermission: (permission: string) => {
+          const { user } = get()
+
+          if (!user) return false
+
+          if (user.role === 'admin') {
+            return true
+          }
+
+          const userPermissions = ROLE_PERMISSIONS[user.role] || []
+
+          return userPermissions.includes(permission)
+        },
+        canAccess: (resource: string) => {
+          const { user } = get()
+
+          if (!user) return false
+          const allowedRoles = RESOURCE_ACCESS[resource] || []
+
+          return allowedRoles.includes(user.role)
+        },
+      }
+    },
+    {
+      name: 'snapper-auth',
+      partialize: (state: AuthState) => ({
+        user: state.user,
+      }),
+    }
+  )
+)
+
+export const useAuth = () => {
+  const authStore = useAuthStore()
+
+  return {
+    user: authStore.user,
+    isAuthenticated: authStore.isAuthenticated,
+    isLoading: authStore.isLoading,
+    error: authStore.error,
+    login: authStore.login,
+    logout: authStore.logout,
+    silentLogout: authStore.silentLogout,
+    refreshToken: authStore.refreshToken,
+    clearError: authStore.clearError,
+    hasRole: authStore.hasRole,
+    hasPermission: authStore.hasPermission,
+    canAccess: authStore.canAccess,
+  }
+}

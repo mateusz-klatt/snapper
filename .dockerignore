@@ -1,0 +1,63 @@
+# Development files and caches
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+dist/
+
+# Python development artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+wheels/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+nul
+
+# Git
+.git/
+.gitignore
+
+# Documentation and development
+*.md
+!README.md
+.env
+.env.example
+.pre-commit-config.yaml
+
+# Test and development scripts
+test-*.sh
+scripts/
+tests/
+coverage.xml
+junit*.xml
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/

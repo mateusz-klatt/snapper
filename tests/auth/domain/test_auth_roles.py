@@ -1,0 +1,641 @@
+"""Tests for authentication roles and permissions."""
+
+from datetime import UTC
+from datetime import datetime
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.routes import get_current_user_info
+from snapper.auth.routes import router
+from snapper.auth.schemas.user import UserProfile
+from snapper.auth.user_service import UserService
+from snapper.auth.user_service import get_user_service
+from snapper.data.models import User
+
+
+@pytest.mark.asyncio
+async def test_get_current_user_info_returns_user_directly() -> None:
+    """Test get_current_user_info returns the user object directly.
+
+    Given: A mock UserProfile with test data.
+    When: get_current_user_info is called with the mock user.
+    Then: The same user object is returned unchanged.
+    """
+    mock_user = UserProfile(
+        id="test-user-id",
+        username="testuser",
+        role=UserRole.VIEWER,
+        is_active=True,
+    )
+    result = await get_current_user_info(current_user=mock_user)
+    assert result is mock_user
+    assert result.username == "testuser"
+    assert result.role == UserRole.VIEWER
+
+
+app = FastAPI()
+app.include_router(router)
+client = TestClient(app)
+
+
+class TestUserManagementBasic:
+    """Test suite for user management API authorization."""
+
+    def test_get_users_unauthorized(self) -> None:
+        """Test GET /auth/users returns 401 without authentication.
+
+        Given: An unauthenticated HTTP client.
+        When: A GET request is made to /auth/users.
+        Then: The response status code is 401 Unauthorized.
+        """
+        response = client.get("/auth/users")
+        assert response.status_code == 401
+
+    def test_create_user_unauthorized(self) -> None:
+        """Test POST /auth/users returns 401 without authentication.
+
+        Given: An unauthenticated HTTP client and user creation data.
+        When: A POST request is made to /auth/users with user data.
+        Then: The response status code is 401 Unauthorized.
+        """
+        user_data = {
+            "username": "newuser",
+            "password": "testpassword123",
+            "email": "newuser@example.com",
+            "role": "operator",
+            "is_active": True,
+        }
+        response = client.post("/auth/users", json=user_data)
+        assert response.status_code == 401
+
+    def test_update_user_unauthorized(self) -> None:
+        """Test PUT /auth/users/{id} returns 401 without authentication.
+
+        Given: An unauthenticated HTTP client and user update data.
+        When: A PUT request is made to /auth/users/some-id.
+        Then: The response status code is 401 Unauthorized.
+        """
+        update_data = {
+            "email": "new@example.com",
+            "role": "operator",
+            "is_active": False,
+        }
+        response = client.put("/auth/users/some-id", json=update_data)
+        assert response.status_code == 401
+
+    def test_delete_user_unauthorized(self) -> None:
+        """Test DELETE /auth/users/{id} returns 401 without authentication.
+
+        Given: An unauthenticated HTTP client.
+        When: A DELETE request is made to /auth/users/some-id.
+        Then: The response status code is 401 Unauthorized.
+        """
+        response = client.delete("/auth/users/some-id")
+        assert response.status_code == 401
+
+    def test_change_password_unauthorized(self) -> None:
+        """Test POST /auth/users/{id}/change-password returns 401 without authentication.
+
+        Given: An unauthenticated HTTP client and password change data.
+        When: A POST request is made to /auth/users/some-id/change-password.
+        Then: The response status code is 401 Unauthorized.
+        """
+        password_data = {
+            "current_password": "oldpass",
+            "new_password": "newpass",
+        }
+        response = client.post("/auth/users/some-id/change-password", json=password_data)
+        assert response.status_code == 401
+
+    @patch("snapper.auth.routes.require_permission")
+    @patch("snapper.auth.routes.get_user_service")
+    def test_get_users_admin_success(
+        self, mock_get_service: MagicMock, mock_require_permission: MagicMock
+    ) -> None:
+        """Test GET /auth/users route exists and is accessible for admin.
+
+        Given: Mocked user service and admin permission dependencies.
+        When: Router routes are inspected.
+        Then: The /auth/users endpoint exists in the router.
+        """
+        mock_user_service = AsyncMock()
+        mock_user_service.get_all_users.return_value = [
+            UserProfile(
+                id="test-id",
+                username="testuser",
+                role=UserRole.VIEWER,
+                is_active=True,
+            )
+        ]
+        mock_get_service.return_value = mock_user_service
+        mock_admin_user = UserProfile(
+            id="admin-id",
+            username="admin",
+            role=UserRole.ADMIN,
+            is_active=True,
+        )
+        mock_require_permission.return_value = lambda: mock_admin_user
+        with patch("snapper.auth.routes.Depends") as mock_depends:
+            mock_depends.return_value = mock_admin_user
+            assert hasattr(router, "routes")
+            routes = [route.path for route in router.routes if hasattr(route, "path")]
+            assert "/auth/users" in routes
+
+
+class TestUserService:
+    """Test suite for UserService class methods."""
+
+    @pytest.fixture
+    def mock_db_user(self) -> User:
+        """Create a mock database User object for testing."""
+        db_user = MagicMock(spec=User)
+        db_user.id = "test_user"
+        db_user.username = "testuser"
+        db_user.email = "test@example.com"
+        db_user.password_hash = "hashed_password"
+        db_user.salt = "test_salt"
+        db_user.role = "viewer"
+        db_user.is_active = True
+        db_user.created_at = datetime.now(UTC)
+        db_user.last_login = None
+        return db_user
+
+    @pytest.fixture
+    def user_service(self) -> UserService:
+        """Create a UserService instance with mocked repository."""
+        with patch("snapper.auth.user_service.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_get_repo.return_value = mock_repo
+            return UserService()
+
+    def test_hash_password_with_salt(self, user_service: UserService) -> None:
+        """Test password hashing generates unique hash and salt each time.
+
+        Given: A UserService instance and a plain text password.
+        When: hash_password_with_salt is called twice with the same password.
+        Then: Different hashes and salts are generated, each salt being 32 chars.
+        """
+        password = "testpassword123"
+        hash1, salt1 = user_service.hash_password_with_salt(password)
+        hash2, salt2 = user_service.hash_password_with_salt(password)
+        assert hash1 != hash2
+        assert salt1 != salt2
+        assert len(salt1) == 32
+        assert len(salt2) == 32
+
+    @pytest.mark.asyncio
+    async def test_authenticate_user_success(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test successful user authentication with valid credentials.
+
+        Given: A user exists in the database and password verification succeeds.
+        When: authenticate_user is called with correct username and password.
+        Then: The authenticated user profile is returned and last_login is updated.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with patch.object(user_service, "_verify_password", return_value=True):
+            auth_user = await user_service.authenticate_user("testuser", "testpassword")
+        assert auth_user is not None
+        assert auth_user.username == "testuser"
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_authenticate_user_not_found(self, user_service: UserService) -> None:
+        """Test authentication fails when user does not exist.
+
+        Given: No user exists with the given username.
+        When: authenticate_user is called with a nonexistent username.
+        Then: None is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.authenticate_user("nonexistent", "password")
+        assert auth_user is None
+
+    @pytest.mark.asyncio
+    async def test_authenticate_user_wrong_password(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test authentication fails with incorrect password.
+
+        Given: A user exists but password verification fails.
+        When: authenticate_user is called with wrong password.
+        Then: None is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with patch.object(user_service, "_verify_password", return_value=False):
+            auth_user = await user_service.authenticate_user("testuser", "wrongpassword")
+        assert auth_user is None
+
+    @pytest.mark.asyncio
+    async def test_get_user_by_id_success(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test successful user retrieval by ID.
+
+        Given: A user exists in the database with the given ID.
+        When: get_user_by_id is called with an existing user ID.
+        Then: The user profile is returned with correct ID.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.get_user_by_id("test_user")
+        assert auth_user is not None
+        assert auth_user.id == "test_user"
+
+    @pytest.mark.asyncio
+    async def test_get_user_by_id_not_found(self, user_service: UserService) -> None:
+        """Test get_user_by_id returns None for nonexistent ID.
+
+        Given: No user exists with the given ID.
+        When: get_user_by_id is called with a nonexistent ID.
+        Then: None is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.get_user_by_id("nonexistent")
+        assert auth_user is None
+
+    @pytest.mark.asyncio
+    async def test_get_user_by_username_success(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test successful user retrieval by username.
+
+        Given: A user exists in the database with the given username.
+        When: get_user_by_username is called with an existing username.
+        Then: The user profile is returned with correct username.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.get_user_by_username("testuser")
+        assert auth_user is not None
+        assert auth_user.username == "testuser"
+
+    @pytest.mark.asyncio
+    async def test_get_user_by_username_not_found(self, user_service: UserService) -> None:
+        """Test get_user_by_username returns None for nonexistent username.
+
+        Given: No user exists with the given username.
+        When: get_user_by_username is called with a nonexistent username.
+        Then: None is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.get_user_by_username("nonexistent")
+        assert auth_user is None
+
+    @pytest.mark.asyncio
+    async def test_get_all_users(self, user_service: UserService, mock_db_user: User) -> None:
+        """Test get_all_users returns list of active users.
+
+        Given: Users exist in the database.
+        When: get_all_users is called without parameters.
+        Then: A list of user profiles is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_db_user]
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        users = await user_service.get_all_users()
+        assert len(users) == 1
+        assert users[0].username == "testuser"
+
+    @pytest.mark.asyncio
+    async def test_get_all_users_include_inactive(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test get_all_users can include inactive users.
+
+        Given: Users exist in the database including inactive ones.
+        When: get_all_users is called with include_inactive=True.
+        Then: All users including inactive ones are returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_db_user]
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        users = await user_service.get_all_users(include_inactive=True)
+        assert len(users) == 1
+
+    @pytest.mark.asyncio
+    async def test_create_user_success(self, user_service: UserService) -> None:
+        """Test successful user creation with full parameters.
+
+        Given: No user with the given username exists.
+        When: create_user is called with username, password, email, and role.
+        Then: A new user is added to the database and committed.
+        """
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        created_user = MagicMock(spec=User)
+        created_user.id = "newuser"
+        created_user.username = "newuser"
+        created_user.email = "new@example.com"
+        created_user.role = "viewer"
+        created_user.is_active = True
+        created_user.created_at = datetime.now(UTC)
+        created_user.last_login = None
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with patch.object(user_service, "hash_password_with_salt", return_value=("hash", "salt")):
+            await user_service.create_user(
+                username="newuser",
+                password="password",
+                email="new@example.com",
+                role=UserRole.VIEWER,
+            )
+        assert mock_session.add.called
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_create_user_already_exists(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test create_user raises error when username already exists.
+
+        Given: A user with the given username already exists.
+        When: create_user is called with the same username.
+        Then: ValueError is raised with appropriate message.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with pytest.raises(ValueError, match="User with username 'testuser' already exists"):
+            await user_service.create_user(
+                username="testuser", password="password", email="test@example.com"
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_user_minimal_params(self, user_service: UserService) -> None:
+        """Test user creation with only required parameters.
+
+        Given: No user with the given username exists.
+        When: create_user is called with only username and password.
+        Then: A new user is created with default values.
+        """
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with patch.object(user_service, "hash_password_with_salt", return_value=("hash", "salt")):
+            await user_service.create_user("newuser", "password")
+        assert mock_session.add.called
+
+    @pytest.mark.asyncio
+    async def test_update_user_success(self, user_service: UserService, mock_db_user: User) -> None:
+        """Test successful user update with email and role changes.
+
+        Given: A user exists with the given ID.
+        When: update_user is called with new email and role.
+        Then: The user is updated, committed, and refreshed.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.update_user(
+            user_id="test_user", email="updated@example.com", role=UserRole.OPERATOR
+        )
+        assert auth_user is not None
+        assert mock_session.commit.called
+        assert mock_session.refresh.called
+
+    @pytest.mark.asyncio
+    async def test_update_user_not_found(self, user_service: UserService) -> None:
+        """Test update_user returns None for nonexistent user.
+
+        Given: No user exists with the given ID.
+        When: update_user is called with a nonexistent user ID.
+        Then: None is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.update_user(
+            user_id="nonexistent", email="updated@example.com"
+        )
+        assert auth_user is None
+
+    @pytest.mark.asyncio
+    async def test_update_user_deactivate(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test user can be deactivated via update_user.
+
+        Given: A user exists with the given ID.
+        When: update_user is called with is_active=False.
+        Then: The user is updated successfully.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.update_user(user_id="test_user", is_active=False)
+        assert auth_user is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_user_success(self, user_service: UserService, mock_db_user: User) -> None:
+        """Test successful user deletion.
+
+        Given: A user exists with the given ID.
+        When: delete_user is called with the user ID.
+        Then: True is returned and changes are committed.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        result = await user_service.delete_user("test_user")
+        assert result is True
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_delete_user_not_found(self, user_service: UserService) -> None:
+        """Test delete_user returns False for nonexistent user.
+
+        Given: No user exists with the given ID.
+        When: delete_user is called with a nonexistent ID.
+        Then: False is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        result = await user_service.delete_user("nonexistent")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_change_password_success(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test successful password change with correct old password.
+
+        Given: A user exists and the old password is correct.
+        When: change_password is called with correct old password.
+        Then: True is returned and new password hash is committed.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with (
+            patch.object(user_service, "_verify_password", return_value=True),
+            patch.object(
+                user_service, "hash_password_with_salt", return_value=("new_hash", "new_salt")
+            ),
+        ):
+            result = await user_service.change_password("test_user", "old_password", "new_password")
+        assert result is True
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_change_password_wrong_old_password(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test change_password fails with incorrect old password.
+
+        Given: A user exists but old password verification fails.
+        When: change_password is called with wrong old password.
+        Then: False is returned and password is not changed.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with patch.object(user_service, "_verify_password", return_value=False):
+            result = await user_service.change_password(
+                "test_user", "wrong_password", "new_password"
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_change_password_user_not_found(self, user_service: UserService) -> None:
+        """Test change_password returns False for nonexistent user.
+
+        Given: No user exists with the given ID.
+        When: change_password is called with a nonexistent user ID.
+        Then: False is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        result = await user_service.change_password("nonexistent", "old_password", "new_password")
+        assert result is False
+
+    def test_get_user_service_singleton(self) -> None:
+        """Test get_user_service returns the same singleton instance.
+
+        Given: The get_user_service function.
+        When: get_user_service is called multiple times.
+        Then: The same instance is returned each time.
+        """
+        service1 = get_user_service()
+        service2 = get_user_service()
+        assert service1 is service2
+
+    def test_singleton_returns_existing_instance(self) -> None:
+        """Test UserService singleton pattern returns existing instance.
+
+        Given: UserService _instance is reset to None.
+        When: UserService is instantiated multiple times.
+        Then: The same singleton instance is returned and stored.
+        """
+        with patch("snapper.auth.user_service.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_get_repo.return_value = mock_repo
+            UserService._instance = None
+            service1 = UserService()
+            assert UserService._instance is service1
+            service2 = UserService()
+            assert service2 is service1
+            assert UserService._instance is service1
+            UserService._instance = None

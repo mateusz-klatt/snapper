@@ -1,0 +1,109 @@
+"""Paper trading order executor.
+
+This module provides a simulated order execution service for paper trading.
+It receives order requests via ZMQ and simulates execution with configurable
+fill delays, providing a safe environment for strategy testing.
+
+The paper executor maintains a simulated balance and tracks positions without
+connecting to real exchange APIs.
+
+Classes
+-------
+PaperOrderExecutor
+    RegisterableProcess for paper trading execution.
+
+Configuration
+-------------
+Configurable via constructor:
+- fill_delay: Simulated execution delay (default: 0.1s)
+- initial_balance: Starting paper balance (default: $10,000)
+
+Example:
+-------
+Register and run via process manager::
+
+    executor = PaperOrderExecutor()
+    await executor.start()
+"""
+
+from typing import Any
+
+from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.registry import register_process
+from snapper.config.settings import AppSettings
+from snapper.data.repository import get_repository
+from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
+from snapper.infrastructure.symbols.functions import TradingExchange
+from snapper.messaging.executors.base import ExchangeExecutorService
+
+
+@register_process(
+    "executor_paper",
+    description="Paper trading execution service for simulated orders",
+    priority=30,
+    role=ProcessRoleEnum.CORE,
+    tags=("execution", "orders", "paper", "simulation"),
+    enabled=True,
+    mode="thread",
+    args=[],
+)
+class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
+    """Paper trading order execution service.
+
+    Simulates order execution without connecting to real exchanges.
+    Useful for strategy backtesting and development. Supports immediate
+    simulated fills with configurable delay.
+
+    Topics Subscribed:
+        - orders.paper.requests
+        - orders.paper.{instrument}.new
+        - system.symbol_mappings
+        - system.settings
+
+    Topics Published:
+        - executions.paper.{instrument}.fill
+        - orders.paper.{instrument}.status
+        - system.heartbeats.executor.paper
+
+    Attributes:
+        Inherits all attributes from ExchangeExecutorService.
+
+    Example:
+        ::
+
+            executor = PaperOrderExecutor()
+            await executor.start()  # Simulates order execution
+    """
+
+    @staticmethod
+    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
+        """Get default kwargs from settings.
+
+        Args:
+            settings: Application settings (not used).
+
+        Returns:
+            Empty dictionary.
+        """
+        return {}
+
+    def _create_exchange_client(self) -> PaperExchangeClient:
+        """Create paper trading client.
+
+        Returns:
+            PaperExchangeClient with simulated balance.
+        """
+        repository = get_repository(self.settings.db_url)
+        return PaperExchangeClient(
+            repository=repository,
+            fill_delay=0.1,
+            initial_balance=10000.0,
+        )
+
+    def _get_exchange_name(self) -> TradingExchange:
+        """Get exchange identifier.
+
+        Returns:
+            "paper" as TradingExchange literal.
+        """
+        return "paper"

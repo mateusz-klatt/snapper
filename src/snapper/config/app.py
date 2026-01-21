@@ -1,0 +1,489 @@
+"""Application settings facade with two-tier configuration.
+
+This module provides the AppSettings class which unifies configuration from
+two sources:
+
+1. **Bootstrap settings** - Environment variables and .env file (via BootstrapSettingsLoader)
+   - Database connection URL
+   - Master password and encryption salt
+   - Server host/port configuration
+   - ZMQ broker endpoints
+
+2. **Database settings** - Runtime configuration stored in DB (via SettingsService)
+   - API keys for exchanges (Kraken, Polygon, Walutomat, Zonda)
+   - Trading parameters (instruments, timeframes, risk limits)
+   - Authentication settings (token expiry, CSRF configuration)
+
+The two-tier approach allows safe storage of secrets in DB with encryption,
+while keeping infrastructure config in environment variables.
+
+Example:
+    Basic usage (bootstrap only)::
+
+        settings = get_settings()
+        db_url = settings.db_url  # From env/bootstrap
+
+    With database access::
+
+        settings_service = await get_settings_service(db_url, ...)
+        settings = get_settings_with_service(settings_service)
+        api_key = settings.kraken_api_key  # From encrypted DB
+"""
+
+from typing import Any
+from typing import TypeVar
+
+from snapper.config.bootstrap import BootstrapSettingsLoader
+
+__all__ = ["AppSettings"]
+T = TypeVar("T")
+
+
+class AppSettings:
+    """Unified application settings facade.
+
+    Provides a single interface to access configuration from both bootstrap
+    (environment) and database sources. Database settings are accessed through
+    an optional SettingsService which provides caching and ZMQ synchronization.
+
+    Attributes:
+        _bootstrap: Bootstrap settings from environment variables.
+        _settings_service: Optional service for database-backed settings.
+    """
+
+    def __init__(
+        self, bootstrap_settings: BootstrapSettingsLoader, settings_service: Any | None = None
+    ) -> None:
+        """Initialize AppSettings with bootstrap and optional database access.
+
+        Args:
+            bootstrap_settings: Loader for environment-based configuration.
+            settings_service: Optional service for database settings. If None,
+                attempting to access database-backed settings will raise RuntimeError.
+        """
+        self._bootstrap = bootstrap_settings
+        self._settings_service = settings_service
+
+    @property
+    def db_url(self) -> str:
+        """Return database connection URL from bootstrap settings.
+
+        Returns:
+            Database connection URL string.
+        """
+        return self._bootstrap.db_url
+
+    @property
+    def master_password(self) -> str:
+        """Return master password for encryption from bootstrap settings.
+
+        Returns:
+            Master password string for encryption operations.
+        """
+        return self._bootstrap.master_password
+
+    @property
+    def encryption_salt(self) -> str:
+        """Return encryption salt from bootstrap settings.
+
+        Returns:
+            Encryption salt string.
+        """
+        return self._bootstrap.encryption_salt
+
+    @property
+    def server_host(self) -> str:
+        """Return server host address from bootstrap settings.
+
+        Returns:
+            Server host address string.
+        """
+        return self._bootstrap.server_host
+
+    @property
+    def server_port(self) -> int:
+        """Return server port number from bootstrap settings.
+
+        Returns:
+            Server port number.
+        """
+        return self._bootstrap.server_port
+
+    @property
+    def server_reload(self) -> bool:
+        """Return whether server auto-reload is enabled.
+
+        Returns:
+            True if auto-reload is enabled, False otherwise.
+        """
+        return self._bootstrap.server_reload
+
+    @property
+    def zmq_broker_xsub(self) -> str:
+        """Return ZMQ broker XSUB endpoint from bootstrap settings.
+
+        Returns:
+            ZMQ XSUB endpoint URL.
+        """
+        return self._bootstrap.zmq_broker_xsub
+
+    @property
+    def zmq_broker_xpub(self) -> str:
+        """Return ZMQ broker XPUB endpoint from bootstrap settings.
+
+        Returns:
+            ZMQ XPUB endpoint URL.
+        """
+        return self._bootstrap.zmq_broker_xpub
+
+    def _get_db_setting(self, key: str, default: T) -> T:
+        """Retrieve a setting value from database with fallback to default.
+
+        Args:
+            key: The setting key to look up in the database.
+            default: Value to return if setting is not found or is None.
+
+        Returns:
+            The setting value from database, or default if not found.
+
+        Raises:
+            RuntimeError: If SettingsService was not initialized.
+        """
+        if self._settings_service is None:
+            raise RuntimeError(
+                f"Cannot access database setting '{key}' - SettingsService not initialized. "
+                f"This AppSettings instance was created without database access "
+                f"(via get_settings()). "
+                f"Use get_settings_with_service(service) instead, or ensure your component "
+                f"has called start()/initialize() to set up database access."
+            )
+        result = self._settings_service.get_setting(key, default)
+        return result if result is not None else default
+
+    @property
+    def kraken_api_key(self) -> str:
+        """Return Kraken exchange API key from database settings.
+
+        Returns:
+            Kraken API key string, empty if not configured.
+        """
+        return self._get_db_setting("kraken_api_key", "")
+
+    @property
+    def kraken_api_secret(self) -> str:
+        """Return Kraken exchange API secret from database settings.
+
+        Returns:
+            Kraken API secret string, empty if not configured.
+        """
+        return self._get_db_setting("kraken_api_secret", "")
+
+    @property
+    def polygon_api_key(self) -> str:
+        """Return Polygon.io API key from database settings.
+
+        Returns:
+            Polygon API key string, empty if not configured.
+        """
+        return self._get_db_setting("polygon_api_key", "")
+
+    @property
+    def walutomat_api_key(self) -> str:
+        """Return Walutomat API key from database settings.
+
+        Returns:
+            Walutomat API key string, empty if not configured.
+        """
+        return self._get_db_setting("walutomat_api_key", "")
+
+    @property
+    def walutomat_private_key(self) -> str:
+        """Return Walutomat private key from database settings.
+
+        Returns:
+            Walutomat private key string, empty if not configured.
+        """
+        return self._get_db_setting("walutomat_private_key", "")
+
+    @property
+    def zonda_api_key(self) -> str:
+        """Return Zonda exchange API key from database settings.
+
+        Returns:
+            Zonda API key string, empty if not configured.
+        """
+        return self._get_db_setting("zonda_api_key", "")
+
+    @property
+    def zonda_api_secret(self) -> str:
+        """Return Zonda exchange API secret from database settings.
+
+        Returns:
+            Zonda API secret string, empty if not configured.
+        """
+        return self._get_db_setting("zonda_api_secret", "")
+
+    @property
+    def auth_secret_key(self) -> str:
+        """Return JWT authentication secret key from database settings.
+
+        Returns:
+            JWT secret key string for token signing.
+        """
+        return self._get_db_setting(
+            "auth_secret_key", "change-me-in-production-use-openssl-rand-hex-32"
+        )
+
+    @property
+    def csrf_secret_key(self) -> str:
+        """Return CSRF protection secret key from database settings.
+
+        Returns:
+            CSRF secret key string for token generation.
+        """
+        return self._get_db_setting("csrf_secret_key", "change-me-in-production-csrf-key")
+
+    @property
+    def ws_token_ttl_seconds(self) -> int:
+        """Return WebSocket token time-to-live in seconds.
+
+        Returns:
+            Token TTL in seconds.
+        """
+        return self._get_db_setting("ws_token_ttl_seconds", 900)
+
+    @property
+    def instruments(self) -> dict[str, list[str]]:
+        """Return configured trading instruments per exchange.
+
+        Returns:
+            Dictionary mapping exchange names to lists of instrument symbols.
+        """
+        return self._get_db_setting(
+            "instruments",
+            {
+                "kraken": ["BTC-USD", "EUR-USD", "BTC-EUR"],
+                "zonda": [],
+                "walutomat": [],
+                "polygon": [],
+            },
+        )
+
+    @property
+    def timeframes(self) -> list[str]:
+        """Return configured trading timeframes.
+
+        Returns:
+            List of timeframe strings.
+        """
+        return self._get_db_setting("timeframes", ["1m"])
+
+    @property
+    def backfill_days(self) -> int:
+        """Return number of days for historical data backfill.
+
+        Returns:
+            Number of days to backfill.
+        """
+        return self._get_db_setting("backfill_days", 30)
+
+    @property
+    def risk_max_leverage(self) -> float:
+        """Return maximum allowed trading leverage.
+
+        Returns:
+            Maximum leverage multiplier.
+        """
+        return self._get_db_setting("risk_max_leverage", 1.0)
+
+    @property
+    def risk_max_drawdown(self) -> float:
+        """Return maximum allowed portfolio drawdown as decimal fraction.
+
+        Returns:
+            Maximum drawdown as decimal (e.g., 0.15 for 15%).
+        """
+        return self._get_db_setting("risk_max_drawdown", 0.15)
+
+    @property
+    def risk_r_per_trade(self) -> float:
+        """Return risk per trade as decimal fraction of portfolio.
+
+        Returns:
+            Risk per trade as decimal (e.g., 0.005 for 0.5%).
+        """
+        return self._get_db_setting("risk_r_per_trade", 0.005)
+
+    @property
+    def log_level(self) -> str:
+        """Return application logging level.
+
+        Returns:
+            Logging level string (e.g., INFO, DEBUG).
+        """
+        return self._get_db_setting("log_level", "INFO")
+
+    @property
+    def log_json(self) -> bool:
+        """Return whether JSON logging format is enabled.
+
+        Returns:
+            True if JSON logging enabled, False otherwise.
+        """
+        return self._get_db_setting("log_json", False)
+
+    @property
+    def ws_reconnect_max_delay(self) -> int:
+        """Return maximum WebSocket reconnection delay in seconds.
+
+        Returns:
+            Maximum reconnection delay in seconds.
+        """
+        return self._get_db_setting("ws_reconnect_max_delay", 10)
+
+    @property
+    def rest_retry_max_attempts(self) -> int:
+        """Return maximum REST API retry attempts.
+
+        Returns:
+            Maximum number of retry attempts.
+        """
+        return self._get_db_setting("rest_retry_max_attempts", 5)
+
+    @property
+    def rest_retry_backoff_base(self) -> float:
+        """Return REST API retry backoff base delay in seconds.
+
+        Returns:
+            Base delay in seconds for exponential backoff.
+        """
+        return self._get_db_setting("rest_retry_backoff_base", 0.2)
+
+    @property
+    def rest_retry_max_delay(self) -> float:
+        """Return maximum REST API retry delay in seconds.
+
+        Returns:
+            Maximum retry delay in seconds.
+        """
+        return self._get_db_setting("rest_retry_max_delay", 2.0)
+
+    @property
+    def rest_circuit_failure_threshold(self) -> int:
+        """Return circuit breaker failure threshold count.
+
+        Returns:
+            Number of failures before circuit opens.
+        """
+        return self._get_db_setting("rest_circuit_failure_threshold", 5)
+
+    @property
+    def rest_circuit_reset_timeout(self) -> int:
+        """Return circuit breaker reset timeout in seconds.
+
+        Returns:
+            Timeout in seconds before circuit attempts reset.
+        """
+        return self._get_db_setting("rest_circuit_reset_timeout", 30)
+
+    @property
+    def zmq_heartbeat_interval_ms(self) -> int:
+        """Return ZMQ heartbeat interval in milliseconds.
+
+        Returns:
+            Heartbeat interval in milliseconds.
+        """
+        return self._get_db_setting("zmq_heartbeat_interval_ms", 1000)
+
+    @property
+    def auth_algorithm(self) -> str:
+        """Return JWT signing algorithm.
+
+        Returns:
+            Algorithm name string (e.g., HS256).
+        """
+        return self._get_db_setting("auth_algorithm", "HS256")
+
+    @property
+    def auth_access_token_expire_minutes(self) -> int:
+        """Return access token expiration time in minutes.
+
+        Returns:
+            Token expiration time in minutes.
+        """
+        return self._get_db_setting("auth_access_token_expire_minutes", 15)
+
+    @property
+    def auth_refresh_token_expire_days(self) -> int:
+        """Return refresh token expiration time in days.
+
+        Returns:
+            Token expiration time in days.
+        """
+        return self._get_db_setting("auth_refresh_token_expire_days", 7)
+
+    @property
+    def auth_refresh_token_expire_days_extended(self) -> int:
+        """Return extended refresh token expiration time in days.
+
+        Returns:
+            Extended token expiration time in days.
+        """
+        return self._get_db_setting("auth_refresh_token_expire_days_extended", 30)
+
+    @property
+    def csrf_token_expire_minutes(self) -> int:
+        """Return CSRF token expiration time in minutes.
+
+        Returns:
+            Token expiration time in minutes.
+        """
+        return self._get_db_setting("csrf_token_expire_minutes", 60)
+
+    @property
+    def session_secure(self) -> bool:
+        """Return whether session cookies require HTTPS.
+
+        Returns:
+            True if HTTPS required, False otherwise.
+        """
+        return self._get_db_setting("session_secure", False)
+
+    @property
+    def ui_origin(self) -> str:
+        """Return allowed UI origin for CORS configuration.
+
+        Returns:
+            Allowed origin URL string, empty if not configured.
+        """
+        return self._get_db_setting("ui_origin", "")
+
+    @property
+    def session_same_site(self) -> str:
+        """Return session cookie SameSite attribute value.
+
+        Returns:
+            SameSite attribute value (strict, lax, or none).
+        """
+        return self._get_db_setting("session_same_site", "lax")
+
+    @property
+    def session_domain(self) -> str:
+        """Return session cookie domain.
+
+        Returns:
+            Cookie domain string, empty if not configured.
+        """
+        return self._get_db_setting("session_domain", "")
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        """Retrieve a setting value from database by key.
+
+        Args:
+            key: The setting key to look up.
+            default: Value to return if setting is not found.
+
+        Returns:
+            The setting value or default if not found.
+        """
+        return self._get_db_setting(key, default)
