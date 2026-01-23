@@ -3,6 +3,21 @@
 Trading platform with market data collection, trading engine, and backtester.
 Supports Kraken, Zonda, Walutomat exchanges and Polygon.io data.
 
+## Quick Steps
+
+```bash
+# Initialize database and build static assets
+make migrate run-static
+
+# Start the server
+make run-server
+```
+
+Open <http://localhost:8000/snapper/> and log in:
+
+- **Username:** `admin`
+- **Password:** `AdminSnapper2026!`
+
 ## Features
 
 - **Market data collection** — WebSocket and REST API from Kraken, Zonda,

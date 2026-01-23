@@ -253,7 +253,7 @@ run-static:
 	$(PYRUN) snapper update-kraken-symbols --force
 	$(PYRUN) snapper update-zonda-symbols --force
 	$(PYRUN) snapper update-walutomat-symbols --force
-	$(PYRUN) snapper update-polygon-symbols --force
+	$(PYRUN) snapper update-polygon-symbols --force || true
 	$(PYRUN) snapper update-kraken-market-snapshot
 	$(PYRUN) snapper update-zonda-market-snapshot
 	$(PYRUN) snapper update-walutomat-market-snapshot
