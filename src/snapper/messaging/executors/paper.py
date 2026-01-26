@@ -55,14 +55,15 @@ class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
     simulated fills with configurable delay.
 
     Topics Subscribed:
-        - orders.paper.requests
-        - orders.paper.{instrument}.new
+        - orders.commands.paper.{instrument}.submit
+        - orders.commands.paper.{instrument}.cancel
         - system.symbol_mappings
         - system.settings
 
     Topics Published:
-        - executions.paper.{instrument}.fill
-        - orders.paper.{instrument}.status
+        - orders.events.paper.{instrument}.accepted
+        - orders.events.paper.{instrument}.fill
+        - orders.events.paper.{instrument}.rejected
         - system.heartbeats.executor.paper
 
     Attributes:

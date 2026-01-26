@@ -35,8 +35,9 @@ export const FillEnvelopeSchema = z
     type: z.literal('fill'),
     timestamp: z.string().datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
-    id: z.string(),
-    order_id: z.string(),
+    trade_id: z.string().nullable(),
+    exchange_order_id: z.string().nullable(),
+    client_order_id: z.string(),
     instrument: z.string(),
     exchange: z.string(),
     side: z.enum(['buy', 'sell']),
@@ -58,6 +59,46 @@ export const HeartbeatEnvelopeSchema = z
     sequence: z.number().int(),
     status: z.enum(['healthy', 'warning', 'error']),
     lag_ms: z.number().int(),
+  })
+  .strict()
+
+export const OrderCancelEnvelopeSchema = z
+  .object({
+    type: z.literal('order_cancel'),
+    timestamp: z.string().datetime().optional(),
+    meta: z.record(z.string(), z.unknown()).optional(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
+    instrument: z.string(),
+    exchange_order_id: z.string(),
+    client_order_id: z.string(),
+  })
+  .strict()
+
+export const OrderEventEnvelopeSchema = z
+  .object({
+    type: z.literal('order_event'),
+    timestamp: z.string().datetime().optional(),
+    meta: z.record(z.string(), z.unknown()).optional(),
+    exchange_order_id: z.string(),
+    client_order_id: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
+    instrument: z.string(),
+    event: z.enum(['submitted', 'accepted', 'rejected', 'cancelled', 'expired', 'replaced']),
+    reason: z.string().nullable(),
+  })
+  .strict()
+
+export const OrderReplaceEnvelopeSchema = z
+  .object({
+    type: z.literal('order_replace'),
+    timestamp: z.string().datetime().optional(),
+    meta: z.record(z.string(), z.unknown()).optional(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
+    instrument: z.string(),
+    exchange_order_id: z.string(),
+    client_order_id: z.string(),
+    new_quantity: z.number().nullable(),
+    new_price: z.number().nullable(),
   })
   .strict()
 
@@ -84,16 +125,18 @@ export const OrderStatusEnvelopeSchema = z
     type: z.literal('order_status'),
     timestamp: z.string().datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
-    id: z.string(),
+    exchange_order_id: z.string().nullable(),
+    client_order_id: z.string(),
     instrument: z.string(),
     exchange: z.string(),
     side: z.enum(['buy', 'sell']),
-    status: z.string(),
+    status: z.enum(['submitted', 'accepted', 'rejected', 'cancelled', 'expired', 'replaced']),
     order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
     size: z.number(),
     filled_size: z.number(),
     price: z.number().nullable(),
     average_price: z.number().nullable(),
+    reason: z.string().nullable(),
     created_at: z.string().datetime().optional(),
     updated_at: z.string().datetime().nullable(),
   })

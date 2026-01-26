@@ -54,14 +54,15 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
     execution streaming for real-time fill notifications.
 
     Topics Subscribed:
-        - orders.kraken.requests
-        - orders.kraken.{instrument}.new
+        - orders.commands.kraken.{instrument}.submit
+        - orders.commands.kraken.{instrument}.cancel
         - system.symbol_mappings
         - system.settings
 
     Topics Published:
-        - executions.kraken.{instrument}.fill
-        - orders.kraken.{instrument}.status
+        - orders.events.kraken.{instrument}.submitted
+        - orders.events.kraken.{instrument}.fill
+        - orders.events.kraken.{instrument}.rejected
         - system.heartbeats.executor.kraken
 
     Attributes:

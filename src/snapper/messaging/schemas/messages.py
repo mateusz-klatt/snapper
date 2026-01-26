@@ -36,6 +36,7 @@ from typing import Self
 from pydantic import BaseModel
 from pydantic import Field
 
+from snapper.core.types import OrderEventType
 from snapper.infrastructure.symbols.functions import TradingExchange
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import HealthStatus
@@ -157,6 +158,7 @@ class OrderRequestEnvelope(MessageEnvelopeBase):
 
     Sent by strategies to request order placement on an exchange.
     Contains all information needed for order creation.
+    Published on: orders.commands.{exchange}.{instrument}.submit
 
     Attributes:
         type: Fixed as 'order_req' for message routing.
@@ -183,6 +185,89 @@ class OrderRequestEnvelope(MessageEnvelopeBase):
     price: float | None = None
     client_order_id: str
     signaled_at: datetime | None = None
+
+
+class OrderCancelEnvelope(MessageEnvelopeBase):
+    """Order cancel request message from strategy to executor.
+
+    Sent to request cancellation of an existing order.
+    Published on: orders.commands.{exchange}.{instrument}.cancel
+
+    Cancel commands only carry identifying information since
+    the executor already has order context from when the order was placed.
+
+    Attributes:
+        type: Fixed as 'order_cancel' for message routing.
+        exchange: Target exchange for the cancel.
+        instrument: Trading pair symbol.
+        exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
+        client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+    """
+
+    type: Literal["order_cancel"] = "order_cancel"
+    exchange: TradingExchange
+    instrument: str
+    exchange_order_id: str
+    client_order_id: str
+
+
+class OrderReplaceEnvelope(MessageEnvelopeBase):
+    """Order replace/modify request message from strategy to executor.
+
+    Sent to request modification of an existing order (price/quantity).
+    Published on: orders.commands.{exchange}.{instrument}.replace
+
+    Replace commands carry only the fields needed for modification
+    (exchange_order_id + new values). The executor has full order context.
+
+    Attributes:
+        type: Fixed as 'order_replace' for message routing.
+        exchange: Target exchange for the replace.
+        instrument: Trading pair symbol.
+        exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
+        client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+        new_quantity: New order quantity (optional).
+        new_price: New limit price (optional).
+    """
+
+    type: Literal["order_replace"] = "order_replace"
+    exchange: TradingExchange
+    instrument: str
+    exchange_order_id: str
+    client_order_id: str
+    new_quantity: float | None = None
+    new_price: float | None = None
+
+
+class OrderEventEnvelope(MessageEnvelopeBase):
+    """Lightweight order event envelope for cancel/replace confirmations.
+
+    Used for publishing order lifecycle events that don't require full order
+    details. This is the preferred envelope for cancel/replace results because
+    those commands don't carry side/order_type information.
+
+    Published on: orders.events.{exchange}.{instrument}.{event}
+    where event is 'cancelled', 'rejected', 'replaced', etc.
+
+    INVARIANT: The 'event' field MUST match the topic suffix.
+
+    Attributes:
+        type: Fixed as 'order_event' for message routing.
+        exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
+        client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+        exchange: Exchange where the order exists.
+        instrument: Trading pair symbol.
+        event: Event type matching topic suffix (OrderEventType).
+        reason: Optional rejection/cancellation reason.
+    """
+
+    type: Literal["order_event"] = "order_event"
+    exchange_order_id: str
+    client_order_id: str
+    exchange: TradingExchange
+    instrument: str
+    event: OrderEventType
+    reason: str | None = None
 
 
 class FillEnvelope(FillData, MessageEnvelopeBase):
@@ -318,6 +403,9 @@ MESSAGE_TYPE_MAP: dict[str, type[MessageEnvelopeBase]] = {
     "trade": TradeEnvelope,
     "signal": SignalEnvelope,
     "order_req": OrderRequestEnvelope,
+    "order_cancel": OrderCancelEnvelope,
+    "order_replace": OrderReplaceEnvelope,
+    "order_event": OrderEventEnvelope,
     "fill": FillEnvelope,
     "heartbeat": HeartbeatEnvelope,
     "setting_changed": SettingChangedEnvelope,

@@ -33,7 +33,7 @@ from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
 from snapper.messaging.schemas.messages import TradeEnvelope
 from snapper.messaging.topics.validation import _validate_admin_topic
-from snapper.messaging.topics.validation import _validate_orders_topic
+from snapper.messaging.topics.validation import _validate_orders_commands_topic
 from snapper.messaging.topics.validation import _validate_signal_topic
 from snapper.messaging.topics.validation import _validate_system_topic
 from snapper.messaging.topics.validation import validate_topic
@@ -3253,16 +3253,16 @@ class TestTopicValidationPhase4:
         assert not valid
         assert "must have exactly 2 segments" in err
 
-    def test_validate_orders_topic_invalid_order_type(self) -> None:
-        """Verify invalid order type fails validation.
+    def test_validate_orders_commands_topic_invalid_command(self) -> None:
+        """Verify invalid order command fails validation.
 
-        Given: orders topic with cancel type,
-        When: _validate_orders_topic called,
-        Then: Error mentions 'Invalid order type'.
+        Given: orders.commands topic with invalid command type,
+        When: _validate_orders_commands_topic called,
+        Then: Error mentions 'Invalid order command'.
         """
-        valid, err = _validate_orders_topic("orders.kraken.BTC-USD.cancel")
+        valid, err = _validate_orders_commands_topic("orders.commands.kraken.BTC-USD.invalid")
         assert not valid
-        assert "Invalid order type" in err
+        assert "Invalid order command" in err
 
     def test_validate_admin_topic_empty_resource(self) -> None:
         """Verify admin topic with empty resource fails.

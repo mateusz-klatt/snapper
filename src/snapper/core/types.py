@@ -33,6 +33,33 @@ OrderStatus = Literal[
 FillStatus = Literal["filled", "partial", "rejected", "cancelled"]
 """Result of an order execution attempt."""
 
+OrderEventType = Literal["submitted", "accepted", "rejected", "cancelled", "expired", "replaced"]
+"""Order event type for ZMQ topic suffix (non-fill events).
+
+This type MUST match the suffix of the orders.events.{exchange}.{instrument}.{event}
+topic for non-fill events. Used by:
+- OrderStatusEnvelope.status: Full order lifecycle events (submit flow).
+- OrderEventEnvelope.event: Lightweight cancel/replace confirmations.
+
+Note: 'fill' is NOT in this type. Fill events use FillEnvelope (with FillStatus),
+not OrderStatusEnvelope. This separation ensures clear payload types:
+- orders.events.*.*.fill -> FillEnvelope
+- orders.events.*.*.{submitted|accepted|rejected|expired} -> OrderStatusEnvelope
+- orders.events.*.*.{cancelled|replaced|rejected} -> OrderEventEnvelope
+
+The 'rejected' event may come from either envelope type:
+- OrderStatusEnvelope: Submit rejected by executor validation or exchange.
+- OrderEventEnvelope: Cancel/replace rejected.
+
+Events:
+    submitted: Executor accepted command, order sent to exchange (local event).
+    accepted: Exchange confirmed order receipt (exchange ACK).
+    rejected: Order/cancel/replace was rejected by executor or exchange.
+    cancelled: Order was successfully cancelled.
+    expired: Order expired due to time-in-force constraint.
+    replaced: Order was modified/replaced (cancel + new order).
+"""
+
 ExecutionMode = Literal["live", "paper"]
 """Trading mode: 'live' for real money, 'paper' for simulation."""
 
@@ -54,6 +81,7 @@ __all__ = [
     "TradeSide",
     "OrderType",
     "OrderStatus",
+    "OrderEventType",
     "FillStatus",
     "ExecutionMode",
     "TradingExchange",

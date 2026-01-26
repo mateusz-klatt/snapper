@@ -18,6 +18,7 @@ from datetime import datetime
 from pydantic import BaseModel
 from pydantic import Field
 
+from snapper.core.types import OrderEventType
 from snapper.interface.websocket.schemas import FillStatus
 from snapper.interface.websocket.schemas import OrderType
 from snapper.interface.websocket.schemas import TradeSide
@@ -122,8 +123,11 @@ class FillData(BaseModel):
     Contains all information needed for trade tracking and P&L calculation.
 
     Attributes:
-        id: Unique fill identifier from the exchange.
-        order_id: Parent order identifier.
+        trade_id: Unique fill/trade ID from exchange (e.g., Kraken exec_id).
+            May be None for exchanges that don't provide it.
+        exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
+            May be None if exchange hasn't assigned an ID yet.
+        client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
         instrument: Trading pair symbol.
         exchange: Exchange where the fill occurred.
         side: Trade direction ('buy' or 'sell').
@@ -135,8 +139,9 @@ class FillData(BaseModel):
         executed_at: Timestamp of the fill.
     """
 
-    id: str
-    order_id: str
+    trade_id: str | None = None
+    exchange_order_id: str | None = None
+    client_order_id: str
     instrument: str
     exchange: str
     side: TradeSide
@@ -149,35 +154,49 @@ class FillData(BaseModel):
 
 
 class OrderStatusData(BaseModel):
-    """Current state of an order in the exchange.
+    """Current state of an order for ZMQ event publishing (non-fill events).
 
-    Tracks order lifecycle from creation through fill or cancellation.
-    Published when order state changes for portfolio tracking.
+    Published on orders.events.{exchange}.{instrument}.{status} topics.
+    Note: Fill events use FillEnvelope, NOT this class.
+
+    INVARIANT: The 'status' field MUST match the topic suffix.
+    For example, if published to orders.events.kraken.BTC-USD.submitted,
+    then status MUST be 'submitted'. This ensures consistency between
+    topic-based routing and payload-based processing.
+
+    Payload separation:
+        - orders.events.*.*.fill -> FillEnvelope (FillStatus)
+        - orders.events.*.*.{other} -> OrderStatusEnvelope (OrderEventType)
 
     Attributes:
-        id: Unique order identifier.
+        exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
+            May be None before exchange ACK (e.g., for 'submitted' event).
+        client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
         instrument: Trading pair symbol.
         exchange: Exchange where the order is placed.
         side: Order direction ('buy' or 'sell').
-        status: Current order status.
+        status: Event type matching topic suffix (OrderEventType, excludes 'fill').
         order_type: Type of order ('market', 'limit', etc.).
         size: Total order size.
         filled_size: Amount filled so far.
         price: Limit price (for limit orders).
         average_price: Average fill price (for partial fills).
+        reason: Optional rejection/failure reason (for 'rejected' status).
         created_at: Order creation timestamp.
         updated_at: Last status update timestamp.
     """
 
-    id: str
+    exchange_order_id: str | None = None
+    client_order_id: str
     instrument: str
     exchange: str
     side: TradeSide
-    status: str
+    status: OrderEventType
     order_type: OrderType
     size: float
     filled_size: float
     price: float | None = None
     average_price: float | None = None
+    reason: str | None = None
     created_at: datetime
     updated_at: datetime | None = None

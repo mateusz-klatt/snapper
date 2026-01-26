@@ -19,6 +19,7 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import OrderEventType
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -33,11 +34,16 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.messages import FillEnvelope
 from snapper.messaging.schemas.messages import HeartbeatEnvelope
+from snapper.messaging.schemas.messages import MessageParseError
+from snapper.messaging.schemas.messages import OrderCancelEnvelope
+from snapper.messaging.schemas.messages import OrderEventEnvelope
+from snapper.messaging.schemas.messages import OrderReplaceEnvelope
 from snapper.messaging.schemas.messages import OrderRequestEnvelope
 from snapper.messaging.schemas.messages import OrderStatusEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import SymbolMappingUpdateEnvelope
 from snapper.messaging.schemas.messages import parse_message
+from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.utils.logging import set_log_context
 
 
@@ -108,12 +114,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         raw_sub_socket = self.context.socket(zmq.SUB)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
-        orders_prefix = f"orders.{exchange_name}."
-        self.subscriber.subscribe(orders_prefix)
+        commands_prefix = f"orders.commands.{exchange_name}."
+        self.subscriber.subscribe(commands_prefix)
         self.subscriber.subscribe("system.symbol_mappings")
         self.subscriber.subscribe("system.settings")
         logger.info(
-            f"ExchangeExecutorService[{exchange_name}]: Subscribed to {orders_prefix}, "
+            f"ExchangeExecutorService[{exchange_name}]: Subscribed to {commands_prefix}, "
             f"system.symbol_mappings, system.settings from {self.settings.zmq_broker_xpub}"
         )
         raw_pub_socket = self.context.socket(zmq.PUB)
@@ -158,26 +164,41 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         logger.info(f"ExchangeExecutorService[{exchange_name}] stopped")
 
     async def _order_handler(self) -> None:
-        """Process incoming order requests from ZMQ subscription."""
+        """Process incoming order commands from ZMQ subscription.
+
+        Dispatches to appropriate handler based on command suffix:
+        - .submit -> _process_order (OrderRequestEnvelope)
+        - .cancel -> _process_cancel (OrderCancelEnvelope)
+        - .replace -> _process_replace (OrderReplaceEnvelope)
+
+        Topic invariant enforced: topic parts must match payload fields.
+        """
         exchange_name = self._get_exchange_name()
-        orders_topic = f"orders.{exchange_name}.requests"
+        commands_prefix = f"orders.commands.{exchange_name}."
         while self.running:
             try:
                 if self.subscriber:
                     topic_str, payload_bytes = await self.subscriber.recv_multipart()
                     payload_str = payload_bytes.decode("utf-8")
-                    if topic_str == orders_topic:
-                        order_msg = parse_message(payload_str)
-                        if isinstance(order_msg, OrderRequestEnvelope):
-                            if order_msg.exchange != exchange_name:
-                                logger.warning(
-                                    f"Received order for wrong exchange: {order_msg.exchange} "
-                                    f"(expected {exchange_name})"
-                                )
-                                continue
-                            await self._process_order(order_msg)
+                    if topic_str.startswith(commands_prefix):
+                        parsed = parse_order_command_topic(topic_str)
+                        if parsed is None:
+                            logger.warning(f"Malformed command topic: {topic_str}")
+                            continue
+                        if parsed.suffix == "submit":
+                            await self._handle_submit_command(
+                                payload_str, exchange_name, parsed.instrument
+                            )
+                        elif parsed.suffix == "cancel":
+                            await self._handle_cancel_command(
+                                payload_str, exchange_name, parsed.instrument
+                            )
+                        elif parsed.suffix == "replace":
+                            await self._handle_replace_command(
+                                payload_str, exchange_name, parsed.instrument
+                            )
                         else:
-                            logger.warning(f"Received non-order message: {order_msg.type}")
+                            logger.debug(f"Ignoring unknown command: {topic_str}")
                     elif topic_str == "system.symbol_mappings":
                         await self._handle_symbol_mapping_update(payload_str)
                     elif topic_str == "system.settings":
@@ -190,8 +211,126 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 if self.running:
                     logger.error(f"Error handling order: {e}")
 
+    async def _handle_submit_command(
+        self, payload_str: str, exchange_name: str, topic_instrument: str
+    ) -> None:
+        """Handle submit command from orders.commands.*.*.submit topic.
+
+        Validates topic/payload invariants:
+        - payload.exchange == topic exchange (via subscription prefix)
+        - payload.instrument == topic instrument
+
+        Args:
+            payload_str: JSON payload string.
+            exchange_name: Expected exchange name from topic.
+            topic_instrument: Instrument from topic for invariant check.
+        """
+        try:
+            order_msg = parse_message(payload_str)
+        except MessageParseError as e:
+            logger.warning(f"[{exchange_name}] Invalid submit command payload: {e}")
+            return
+        if isinstance(order_msg, OrderRequestEnvelope):
+            if order_msg.exchange != exchange_name:
+                logger.warning(
+                    f"Invariant violation: payload exchange '{order_msg.exchange}' "
+                    f"!= topic exchange '{exchange_name}'"
+                )
+                return
+            if order_msg.instrument != topic_instrument:
+                logger.warning(
+                    f"Invariant violation: payload instrument '{order_msg.instrument}' "
+                    f"!= topic instrument '{topic_instrument}'"
+                )
+                return
+            await self._process_order(order_msg)
+        else:
+            logger.warning(f"Received non-order message on submit topic: {order_msg.type}")
+
+    async def _handle_cancel_command(
+        self, payload_str: str, exchange_name: str, topic_instrument: str
+    ) -> None:
+        """Handle cancel command from orders.commands.*.*.cancel topic.
+
+        Validates topic/payload invariants:
+        - payload.exchange == topic exchange (via subscription prefix)
+        - payload.instrument == topic instrument
+
+        Args:
+            payload_str: JSON payload string.
+            exchange_name: Expected exchange name from topic.
+            topic_instrument: Instrument from topic for invariant check.
+        """
+        try:
+            cancel_msg = parse_message(payload_str)
+        except MessageParseError as e:
+            logger.warning(f"[{exchange_name}] Invalid cancel command payload: {e}")
+            return
+        if isinstance(cancel_msg, OrderCancelEnvelope):
+            if cancel_msg.exchange != exchange_name:
+                logger.warning(
+                    f"Invariant violation: payload exchange '{cancel_msg.exchange}' "
+                    f"!= topic exchange '{exchange_name}'"
+                )
+                return
+            if cancel_msg.instrument != topic_instrument:
+                logger.warning(
+                    f"Invariant violation: payload instrument '{cancel_msg.instrument}' "
+                    f"!= topic instrument '{topic_instrument}'"
+                )
+                return
+            await self._process_cancel(cancel_msg)
+        else:
+            logger.warning(f"Received non-cancel message on cancel topic: {cancel_msg.type}")
+
+    async def _handle_replace_command(
+        self, payload_str: str, exchange_name: str, topic_instrument: str
+    ) -> None:
+        """Handle replace command from orders.commands.*.*.replace topic.
+
+        Validates topic/payload invariants:
+        - payload.exchange == topic exchange (via subscription prefix)
+        - payload.instrument == topic instrument
+
+        Args:
+            payload_str: JSON payload string.
+            exchange_name: Expected exchange name from topic.
+            topic_instrument: Instrument from topic for invariant check.
+        """
+        try:
+            replace_msg = parse_message(payload_str)
+        except MessageParseError as e:
+            logger.warning(f"[{exchange_name}] Invalid replace command payload: {e}")
+            return
+        if isinstance(replace_msg, OrderReplaceEnvelope):
+            if replace_msg.exchange != exchange_name:
+                logger.warning(
+                    f"Invariant violation: payload exchange '{replace_msg.exchange}' "
+                    f"!= topic exchange '{exchange_name}'"
+                )
+                return
+            if replace_msg.instrument != topic_instrument:
+                logger.warning(
+                    f"Invariant violation: payload instrument '{replace_msg.instrument}' "
+                    f"!= topic instrument '{topic_instrument}'"
+                )
+                return
+            await self._process_replace(replace_msg)
+        else:
+            logger.warning(f"Received non-replace message on replace topic: {replace_msg.type}")
+
     async def _process_order(self, order: OrderRequestEnvelope) -> None:
         """Submit an order to the exchange and handle the response.
+
+        Publishes order events to orders.events.{exchange}.{instrument}.{event}:
+        - submitted: Executor accepted command, sending to exchange
+        - accepted: Exchange ACK returned order_id (sync REST response)
+        - rejected: Exchange rejected order or validation failed
+        - fill: Order execution (see _execution_handler for WebSocket fills)
+
+        Note: 'accepted' is published when the exchange REST API returns an order_id,
+        confirming the order was received and queued. This is a synchronous response.
+        Actual fills come asynchronously via WebSocket execution updates.
 
         Args:
             order: Order request envelope containing order details.
@@ -201,42 +340,125 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._publish_order_status(order, "submitted")
             exchange_order_id = await self._execute_live_order(order)
             if exchange_order_id:
+                await self._publish_order_status(order, "accepted", exchange_order_id)
                 logger.info(
                     f"[{exchange_name}] Order {order.client_order_id} "
-                    f"submitted as {exchange_order_id}, waiting for execution"
+                    f"accepted as {exchange_order_id}, waiting for execution"
                 )
             else:
-                rejection = FillEnvelope(
-                    id=order.client_order_id,
-                    order_id=order.client_order_id,
-                    instrument=order.instrument,
-                    exchange=exchange_name,
-                    side=order.side,
-                    size=0.0,
-                    price=0.0,
-                    fee=0.0,
-                    fee_asset="",
-                    status="rejected",
+                logger.warning(
+                    f"[{exchange_name}] Order {order.client_order_id} rejected by exchange"
                 )
-                await self._publish_fill(rejection)
                 await self._publish_order_status(order, "rejected")
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing order {order.client_order_id}: {e}")
-            rejection = FillEnvelope(
-                id=order.client_order_id,
-                order_id=order.client_order_id,
-                instrument=order.instrument,
-                exchange=exchange_name,
-                side=order.side,
-                size=0.0,
-                price=0.0,
-                fee=0.0,
-                fee_asset="",
-                status="rejected",
+            await self._publish_order_status(order, "rejected")
+
+    async def _process_cancel(self, cancel: OrderCancelEnvelope) -> None:
+        """Cancel an existing order on the exchange.
+
+        Args:
+            cancel: Cancel request envelope containing order ID to cancel.
+        """
+        exchange_name = self._get_exchange_name()
+        try:
+            assert self.exchange_client is not None, "Exchange client not initialized"
+            result = await self.exchange_client.cancel_order(
+                cancel.exchange_order_id, cancel.instrument
             )
-            await self._publish_fill(rejection)
-            await self._publish_order_status(order, "rejected")
-            await self._publish_order_status(order, "rejected")
+            if result and result.status == OrderStatusEnum.CANCELED:
+                await self._publish_cancel_event(cancel, "cancelled")
+                logger.info(
+                    f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
+                )
+            else:
+                await self._publish_cancel_event(cancel, "rejected")
+                logger.warning(
+                    f"[{exchange_name}] Cancel request for {cancel.exchange_order_id} failed"
+                )
+        except Exception as e:
+            logger.error(
+                f"[{exchange_name}] Error cancelling order {cancel.exchange_order_id}: {e}"
+            )
+            await self._publish_cancel_event(cancel, "rejected")
+
+    async def _process_replace(self, replace: OrderReplaceEnvelope) -> None:
+        """Replace/modify an existing order on the exchange.
+
+        Note: Many exchanges don't support atomic replace, so this may
+        cancel and re-submit the order.
+
+        Args:
+            replace: Replace request envelope containing new order parameters.
+        """
+        exchange_name = self._get_exchange_name()
+        logger.warning(
+            f"[{exchange_name}] Order replace not yet implemented for {replace.exchange_order_id}. "
+            f"Consider cancel + new order workflow."
+        )
+        await self._publish_replace_event(replace, "rejected")
+
+    async def _publish_cancel_event(
+        self, cancel: OrderCancelEnvelope, event: OrderEventType
+    ) -> None:
+        """Publish cancel event to orders.events.*.*.cancelled or rejected.
+
+        Uses lightweight OrderEventEnvelope since cancel commands don't carry
+        full order details (side/order_type are not needed).
+
+        Args:
+            cancel: Original cancel request.
+            event: Event type (must be 'cancelled' or 'rejected').
+        """
+        if not self.publisher or not self.running:
+            return
+        exchange_name = self._get_exchange_name()
+        try:
+            topic = f"orders.events.{exchange_name}.{cancel.instrument}.{event}"
+            order_event = OrderEventEnvelope(
+                exchange_order_id=cancel.exchange_order_id,
+                client_order_id=cancel.client_order_id,
+                exchange=exchange_name,
+                instrument=cancel.instrument,
+                event=event,
+            )
+            await self.publisher.send_multipart(topic, order_event.to_json().encode("utf-8"))
+            logger.info(
+                f"[{exchange_name}] Published cancel event: {cancel.exchange_order_id} - {event}"
+            )
+        except Exception as e:
+            logger.error(f"[{exchange_name}] Error publishing cancel event: {e}")
+
+    async def _publish_replace_event(
+        self, replace: OrderReplaceEnvelope, event: OrderEventType
+    ) -> None:
+        """Publish replace event to orders.events.*.*.replaced or rejected.
+
+        Uses lightweight OrderEventEnvelope since replace commands don't carry
+        full order details (only identifiers and new values).
+
+        Args:
+            replace: Original replace request.
+            event: Event type (must be 'replaced' or 'rejected').
+        """
+        if not self.publisher or not self.running:
+            return
+        exchange_name = self._get_exchange_name()
+        try:
+            topic = f"orders.events.{exchange_name}.{replace.instrument}.{event}"
+            order_event = OrderEventEnvelope(
+                exchange_order_id=replace.exchange_order_id,
+                client_order_id=replace.client_order_id,
+                exchange=exchange_name,
+                instrument=replace.instrument,
+                event=event,
+            )
+            await self.publisher.send_multipart(topic, order_event.to_json().encode("utf-8"))
+            logger.info(
+                f"[{exchange_name}] Published replace event: {replace.exchange_order_id} - {event}"
+            )
+        except Exception as e:
+            logger.error(f"[{exchange_name}] Error publishing replace event: {e}")
 
     async def _execute_live_order(self, order: OrderRequestEnvelope) -> str | None:
         """Execute an order on the exchange and return the exchange order ID.
@@ -282,10 +504,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         exchange_name = self._get_exchange_name()
         try:
-            topic = f"executions.{exchange_name}.{fill.instrument}.fill"
+            topic = f"orders.events.{exchange_name}.{fill.instrument}.fill"
             await self.publisher.send_multipart(topic, fill.to_json().encode("utf-8"))
             logger.info(
-                f"[{exchange_name}] Published fill: {fill.order_id} - {fill.size}@{fill.price}"
+                f"[{exchange_name}] Published fill: {fill.client_order_id} - "
+                f"{fill.size}@{fill.price}"
             )
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing fill: {e}")
@@ -344,8 +567,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             total_fee = execution.fee_usd_equiv or 0.0
             fee_asset = "USD" if total_fee > 0 else ""
             fill = FillEnvelope(
-                id=exchange_order_id or original_order.client_order_id,
-                order_id=original_order.client_order_id,
+                trade_id=execution.exec_id,
+                exchange_order_id=exchange_order_id,
+                client_order_id=original_order.client_order_id,
                 instrument=original_order.instrument,
                 exchange=exchange_name,
                 side=original_order.side,
@@ -365,21 +589,31 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing execution: {e}")
 
-    async def _publish_order_status(self, order: OrderRequestEnvelope, status: str) -> None:
-        """Publish order status update to the ZMQ topic.
+    async def _publish_order_status(
+        self,
+        order: OrderRequestEnvelope,
+        status: OrderEventType,
+        exchange_order_id: str | None = None,
+    ) -> None:
+        """Publish order status event to the ZMQ topic.
+
+        The status value is used both as the topic suffix and the payload
+        status field, ensuring consistency between routing and content.
 
         Args:
             order: Order request envelope containing order details.
-            status: Current status string for the order.
+            status: Event type for topic suffix and payload status field.
+            exchange_order_id: Exchange-assigned order ID (if known).
         """
         if not self.publisher or not self.running:
             return
         exchange_name = self._get_exchange_name()
         try:
             instrument = order.instrument
-            topic = f"orders.{exchange_name}.{instrument}.status"
+            topic = f"orders.events.{exchange_name}.{instrument}.{status}"
             order_status = OrderStatusEnvelope(
-                id=order.client_order_id,
+                exchange_order_id=exchange_order_id,
+                client_order_id=order.client_order_id,
                 instrument=order.instrument,
                 exchange=exchange_name,
                 side=order.side,
@@ -391,10 +625,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             await self.publisher.send_multipart(topic, order_status.to_json().encode("utf-8"))
             logger.info(
-                f"[{exchange_name}] Published order status: {order.client_order_id} - {status}"
+                f"[{exchange_name}] Published order event: {order.client_order_id} - {status}"
             )
         except Exception as e:
-            logger.error(f"[{exchange_name}] Error publishing order status: {e}")
+            logger.error(f"[{exchange_name}] Error publishing order event: {e}")
 
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat messages."""

@@ -1,13 +1,13 @@
 """Order execution services.
 
-This package provides execution services that receive order requests from
+This package provides execution services that receive order commands from
 the ZMQ messaging bus, execute them on exchanges, and publish execution
-results back to the bus.
+events back to the bus.
 
 Architecture
 ------------
 Each executor:
-1. Subscribes to orders.{exchange}.* topics
+1. Subscribes to orders.commands.{exchange}.* topics
 2. Receives OrderRequestEnvelope messages
 3. Executes orders via exchange API (authenticated)
 4. Publishes FillEnvelope and OrderStatusEnvelope results
@@ -28,26 +28,29 @@ Message Flow
 ------------
 ::
 
-    Strategy ──> ZMQ [orders.{exchange}.requests]
+    Strategy ──> ZMQ [orders.commands.{exchange}.{instrument}.submit]
                       │
                       v
                   Executor ──> Exchange API
                       │
                       v
-    Strategy <── ZMQ [executions.{exchange}.{instrument}.fill]
-                     [orders.{exchange}.{instrument}.status]
+    Strategy <── ZMQ [orders.events.{exchange}.{instrument}.fill]
+                     [orders.events.{exchange}.{instrument}.submitted]
 
 Topics Subscribed
 -----------------
-- orders.{exchange}.requests
-- orders.{exchange}.{instrument}.new
+- orders.commands.{exchange}.{instrument}.submit
+- orders.commands.{exchange}.{instrument}.cancel
 - system.symbol_mappings
 - system.settings
 
 Topics Published
 ----------------
-- executions.{exchange}.{instrument}.fill
-- orders.{exchange}.{instrument}.status
+- orders.events.{exchange}.{instrument}.submitted
+- orders.events.{exchange}.{instrument}.rejected
+- orders.events.{exchange}.{instrument}.fill
+- orders.events.{exchange}.{instrument}.cancelled
+- orders.events.{exchange}.{instrument}.expired
 - system.heartbeats.executor.{exchange}
 
 Example:

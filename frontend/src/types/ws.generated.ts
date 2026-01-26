@@ -13,6 +13,9 @@ export type WebSocketMessages =
   | BarEnvelope
   | FillEnvelope
   | HeartbeatEnvelope
+  | OrderCancelEnvelope
+  | OrderEventEnvelope
+  | OrderReplaceEnvelope
   | OrderRequestEnvelope
   | OrderStatusEnvelope
   | ReplayEndEnvelope
@@ -57,8 +60,9 @@ export type Trades = number | null;
 export type Exchange = string;
 export type Type2 = "fill";
 export type Timestamp2 = string;
-export type Id = string;
-export type OrderId = string;
+export type TradeId = string | null;
+export type ExchangeOrderId = string | null;
+export type ClientOrderId = string;
 export type Instrument1 = string;
 export type Exchange1 = string;
 export type Side = "buy" | "sell";
@@ -74,77 +78,101 @@ export type Component = string;
 export type Sequence = number;
 export type Status1 = "healthy" | "warning" | "error";
 export type LagMs = number;
-export type Type4 = "order_req";
+export type Type4 = "order_cancel";
 export type Timestamp4 = string;
-export type StrategyId = string;
 export type Exchange2 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Instrument2 = string;
+export type ExchangeOrderId1 = string;
+export type ClientOrderId1 = string;
+export type Type5 = "order_event";
+export type Timestamp5 = string;
+export type ExchangeOrderId2 = string;
+export type ClientOrderId2 = string;
+export type Exchange3 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Instrument3 = string;
+export type Event = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
+export type Reason = string | null;
+export type Type6 = "order_replace";
+export type Timestamp6 = string;
+export type Exchange4 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Instrument4 = string;
+export type ExchangeOrderId3 = string;
+export type ClientOrderId3 = string;
+export type NewQuantity = number | null;
+export type NewPrice = number | null;
+export type Type7 = "order_req";
+export type Timestamp7 = string;
+export type StrategyId = string;
+export type Exchange5 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Instrument5 = string;
 export type Mode = "live" | "paper";
 export type Side1 = "buy" | "sell";
 export type OrderType = "market" | "limit" | "stop" | "stop_limit";
 export type Quantity = number;
 export type Price1 = number | null;
-export type ClientOrderId = string;
+export type ClientOrderId4 = string;
 export type SignaledAt = string | null;
-export type Type5 = "order_status";
-export type Timestamp5 = string;
-export type Id1 = string;
-export type Instrument3 = string;
-export type Exchange3 = string;
+export type Type8 = "order_status";
+export type Timestamp8 = string;
+export type ExchangeOrderId4 = string | null;
+export type ClientOrderId5 = string;
+export type Instrument6 = string;
+export type Exchange6 = string;
 export type Side2 = "buy" | "sell";
-export type Status2 = string;
+export type Status2 = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
 export type OrderType1 = "market" | "limit" | "stop" | "stop_limit";
 export type Size1 = number;
 export type FilledSize = number;
 export type Price2 = number | null;
 export type AveragePrice = number | null;
+export type Reason1 = string | null;
 export type CreatedAt = string;
 export type UpdatedAt = string | null;
-export type Type6 = "replay_end";
-export type Timestamp6 = string;
-export type Type7 = "replay_start";
-export type Timestamp7 = string;
+export type Type9 = "replay_end";
+export type Timestamp9 = string;
+export type Type10 = "replay_start";
+export type Timestamp10 = string;
 export type StartedAt = string | null;
-export type Type8 = "setting_changed";
-export type Timestamp8 = string;
+export type Type11 = "setting_changed";
+export type Timestamp11 = string;
 export type Key = string;
 export type Value = string;
 export type Category = string;
 export type UpdatedBy = string | null;
-export type Type9 = "signal";
-export type Timestamp9 = string;
-export type Instrument4 = string;
+export type Type12 = "signal";
+export type Timestamp12 = string;
+export type Instrument7 = string;
 export type Side3 = "buy" | "sell";
 export type Strength = number;
-export type Reason = string;
+export type Reason2 = string;
 export type Price3 = number | null;
 export type StrategyName = string | null;
-export type Id2 = string | null;
-export type Exchange4 = string;
-export type Type10 = "symbol_mapping_update";
-export type Timestamp10 = string;
-export type Event = "symbol_mappings_updated";
+export type Id = string | null;
+export type Exchange7 = string;
+export type Type13 = "symbol_mapping_update";
+export type Timestamp13 = string;
+export type Event1 = "symbol_mappings_updated";
 export type Action = "clear_cache";
-export type Type11 = "tick";
-export type Timestamp11 = string;
-export type Instrument5 = string;
+export type Type14 = "tick";
+export type Timestamp14 = string;
+export type Instrument8 = string;
 export type Volume1 = number;
 export type Bid = number | null;
 export type Ask = number | null;
 export type Last = number | null;
-export type Exchange5 = string;
-export type Type12 = "trade";
-export type Timestamp12 = string;
-export type Instrument6 = string;
+export type Exchange8 = string;
+export type Type15 = "trade";
+export type Timestamp15 = string;
+export type Instrument9 = string;
 export type Price4 = number;
 export type Volume2 = number;
 export type Side4 = string | null;
-export type Exchange6 = string;
+export type Exchange9 = string;
 /**
  * Message type discriminator
  */
-export type Type13 = "auth_complete";
-export type Timestamp13 = string;
+export type Type16 = "auth_complete";
+export type Timestamp16 = string;
 /**
  * Topics available for subscription
  */
@@ -164,22 +192,22 @@ export type WsTokenExp = string;
 /**
  * Message type discriminator
  */
-export type Type14 = "auth_expired";
-export type Timestamp14 = string;
+export type Type17 = "auth_expired";
+export type Timestamp17 = string;
 /**
  * Message type discriminator
  */
-export type Type15 = "auth_failed";
-export type Timestamp15 = string;
+export type Type18 = "auth_failed";
+export type Timestamp18 = string;
 /**
  * Failure reason
  */
-export type Reason1 = string | null;
+export type Reason3 = string | null;
 /**
  * Message type discriminator
  */
-export type Type16 = "auth_ok";
-export type Timestamp16 = string;
+export type Type19 = "auth_ok";
+export type Timestamp19 = string;
 /**
  * Token expiration (ISO 8601)
  */
@@ -187,8 +215,8 @@ export type Exp = string;
 /**
  * Message type discriminator
  */
-export type Type17 = "auth_required";
-export type Timestamp17 = string;
+export type Type20 = "auth_required";
+export type Timestamp20 = string;
 /**
  * Authentication timeout in seconds
  */
@@ -196,8 +224,8 @@ export type Timeout = number;
 /**
  * Message type discriminator
  */
-export type Type18 = "authenticate";
-export type Timestamp18 = string;
+export type Type21 = "authenticate";
+export type Timestamp21 = string;
 /**
  * WebSocket authentication token
  */
@@ -205,8 +233,8 @@ export type WsToken = string;
 /**
  * Message type discriminator
  */
-export type Type19 = "error";
-export type Timestamp19 = string;
+export type Type22 = "error";
+export type Timestamp22 = string;
 /**
  * Error description
  */
@@ -214,13 +242,13 @@ export type Message = string;
 /**
  * Message type discriminator
  */
-export type Type20 = "get_subscriptions";
-export type Timestamp20 = string;
+export type Type23 = "get_subscriptions";
+export type Timestamp23 = string;
 /**
  * Message type discriminator
  */
-export type Type21 = "get_topic_suggestions";
-export type Timestamp21 = string;
+export type Type24 = "get_topic_suggestions";
+export type Timestamp24 = string;
 /**
  * Search prefix for topics
  */
@@ -228,16 +256,16 @@ export type Prefix = string;
 /**
  * Message type discriminator
  */
-export type Type22 = "ping";
-export type Timestamp22 = string;
+export type Type25 = "ping";
+export type Timestamp25 = string;
 /**
  * Message type discriminator
  */
-export type Type23 = "pong";
+export type Type26 = "pong";
 /**
  * Server timestamp (ISO 8601)
  */
-export type Timestamp23 = string;
+export type Timestamp26 = string;
 /**
  * Number of active WebSocket connections
  */
@@ -245,8 +273,8 @@ export type ActiveConnections = number;
 /**
  * Message type discriminator
  */
-export type Type24 = "reauth_ok";
-export type Timestamp24 = string;
+export type Type27 = "reauth_ok";
+export type Timestamp27 = string;
 /**
  * New token expiration (ISO 8601)
  */
@@ -254,8 +282,8 @@ export type Exp1 = string;
 /**
  * Message type discriminator
  */
-export type Type25 = "reauth";
-export type Timestamp25 = string;
+export type Type28 = "reauth";
+export type Timestamp28 = string;
 /**
  * New WebSocket authentication token
  */
@@ -263,8 +291,8 @@ export type WsToken1 = string;
 /**
  * Message type discriminator
  */
-export type Type26 = "reauth_required";
-export type Timestamp26 = string;
+export type Type29 = "reauth_required";
+export type Timestamp29 = string;
 /**
  * Deadline for reauthentication (ISO 8601)
  */
@@ -272,8 +300,8 @@ export type Deadline = string;
 /**
  * Message type discriminator
  */
-export type Type27 = "subscribe";
-export type Timestamp27 = string;
+export type Type30 = "subscribe";
+export type Timestamp30 = string;
 /**
  * Topics to subscribe to
  */
@@ -281,8 +309,8 @@ export type Topics = string[];
 /**
  * Message type discriminator
  */
-export type Type28 = "subscription_success";
-export type Timestamp28 = string;
+export type Type31 = "subscription_success";
+export type Timestamp31 = string;
 /**
  * The subscription action performed
  */
@@ -314,8 +342,8 @@ export type Message1 = string | null;
 /**
  * Message type discriminator
  */
-export type Type29 = "subscriptions_list";
-export type Timestamp29 = string;
+export type Type32 = "subscriptions_list";
+export type Timestamp32 = string;
 /**
  * Current active subscriptions
  */
@@ -331,8 +359,8 @@ export type TotalAvailable = number;
 /**
  * Message type discriminator
  */
-export type Type30 = "topic_suggestions";
-export type Timestamp30 = string;
+export type Type33 = "topic_suggestions";
+export type Timestamp33 = string;
 /**
  * Search prefix that was used
  */
@@ -344,8 +372,8 @@ export type Suggestions = string[];
 /**
  * Message type discriminator
  */
-export type Type31 = "unsubscribe";
-export type Timestamp31 = string;
+export type Type34 = "unsubscribe";
+export type Timestamp34 = string;
 /**
  * Topics to unsubscribe from
  */
@@ -407,8 +435,9 @@ export interface FillEnvelope {
   type: Type2;
   timestamp?: Timestamp2;
   meta?: Meta1;
-  id: Id;
-  order_id: OrderId;
+  trade_id?: TradeId;
+  exchange_order_id?: ExchangeOrderId;
+  client_order_id: ClientOrderId;
   instrument: Instrument1;
   exchange: Exchange1;
   side: Side;
@@ -448,10 +477,106 @@ export interface Meta2 {
   [k: string]: unknown;
 }
 /**
+ * Order cancel request message from strategy to executor.
+ *
+ * Sent to request cancellation of an existing order.
+ * Published on: orders.commands.{exchange}.{instrument}.cancel
+ *
+ * Cancel commands only carry identifying information since
+ * the executor already has order context from when the order was placed.
+ *
+ * Attributes:
+ *     type: Fixed as 'order_cancel' for message routing.
+ *     exchange: Target exchange for the cancel.
+ *     instrument: Trading pair symbol.
+ *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
+ *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ */
+export interface OrderCancelEnvelope {
+  type: Type4;
+  timestamp?: Timestamp4;
+  meta?: Meta3;
+  exchange: Exchange2;
+  instrument: Instrument2;
+  exchange_order_id: ExchangeOrderId1;
+  client_order_id: ClientOrderId1;
+}
+export interface Meta3 {
+  [k: string]: unknown;
+}
+/**
+ * Lightweight order event envelope for cancel/replace confirmations.
+ *
+ * Used for publishing order lifecycle events that don't require full order
+ * details. This is the preferred envelope for cancel/replace results because
+ * those commands don't carry side/order_type information.
+ *
+ * Published on: orders.events.{exchange}.{instrument}.{event}
+ * where event is 'cancelled', 'rejected', 'replaced', etc.
+ *
+ * INVARIANT: The 'event' field MUST match the topic suffix.
+ *
+ * Attributes:
+ *     type: Fixed as 'order_event' for message routing.
+ *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
+ *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ *     exchange: Exchange where the order exists.
+ *     instrument: Trading pair symbol.
+ *     event: Event type matching topic suffix (OrderEventType).
+ *     reason: Optional rejection/cancellation reason.
+ */
+export interface OrderEventEnvelope {
+  type: Type5;
+  timestamp?: Timestamp5;
+  meta?: Meta4;
+  exchange_order_id: ExchangeOrderId2;
+  client_order_id: ClientOrderId2;
+  exchange: Exchange3;
+  instrument: Instrument3;
+  event: Event;
+  reason?: Reason;
+}
+export interface Meta4 {
+  [k: string]: unknown;
+}
+/**
+ * Order replace/modify request message from strategy to executor.
+ *
+ * Sent to request modification of an existing order (price/quantity).
+ * Published on: orders.commands.{exchange}.{instrument}.replace
+ *
+ * Replace commands carry only the fields needed for modification
+ * (exchange_order_id + new values). The executor has full order context.
+ *
+ * Attributes:
+ *     type: Fixed as 'order_replace' for message routing.
+ *     exchange: Target exchange for the replace.
+ *     instrument: Trading pair symbol.
+ *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
+ *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ *     new_quantity: New order quantity (optional).
+ *     new_price: New limit price (optional).
+ */
+export interface OrderReplaceEnvelope {
+  type: Type6;
+  timestamp?: Timestamp6;
+  meta?: Meta5;
+  exchange: Exchange4;
+  instrument: Instrument4;
+  exchange_order_id: ExchangeOrderId3;
+  client_order_id: ClientOrderId3;
+  new_quantity?: NewQuantity;
+  new_price?: NewPrice;
+}
+export interface Meta5 {
+  [k: string]: unknown;
+}
+/**
  * Order request message from strategy to executor.
  *
  * Sent by strategies to request order placement on an exchange.
  * Contains all information needed for order creation.
+ * Published on: orders.commands.{exchange}.{instrument}.submit
  *
  * Attributes:
  *     type: Fixed as 'order_req' for message routing.
@@ -467,21 +592,21 @@ export interface Meta2 {
  *     signaled_at: Original signal timestamp (optional).
  */
 export interface OrderRequestEnvelope {
-  type: Type4;
-  timestamp?: Timestamp4;
-  meta?: Meta3;
+  type: Type7;
+  timestamp?: Timestamp7;
+  meta?: Meta6;
   strategy_id: StrategyId;
-  exchange: Exchange2;
-  instrument: Instrument2;
+  exchange: Exchange5;
+  instrument: Instrument5;
   mode: Mode;
   side: Side1;
   order_type: OrderType;
   quantity: Quantity;
   price?: Price1;
-  client_order_id: ClientOrderId;
+  client_order_id: ClientOrderId4;
   signaled_at?: SignaledAt;
 }
-export interface Meta3 {
+export interface Meta6 {
   [k: string]: unknown;
 }
 /**
@@ -495,12 +620,13 @@ export interface Meta3 {
  *     created_at: Order creation timestamp.
  */
 export interface OrderStatusEnvelope {
-  type: Type5;
-  timestamp?: Timestamp5;
-  meta?: Meta4;
-  id: Id1;
-  instrument: Instrument3;
-  exchange: Exchange3;
+  type: Type8;
+  timestamp?: Timestamp8;
+  meta?: Meta7;
+  exchange_order_id?: ExchangeOrderId4;
+  client_order_id: ClientOrderId5;
+  instrument: Instrument6;
+  exchange: Exchange6;
   side: Side2;
   status: Status2;
   order_type: OrderType1;
@@ -508,10 +634,11 @@ export interface OrderStatusEnvelope {
   filled_size: FilledSize;
   price?: Price2;
   average_price?: AveragePrice;
+  reason?: Reason1;
   created_at?: CreatedAt;
   updated_at?: UpdatedAt;
 }
-export interface Meta4 {
+export interface Meta7 {
   [k: string]: unknown;
 }
 /**
@@ -524,11 +651,11 @@ export interface Meta4 {
  *     type: Fixed as 'replay_end' for message routing.
  */
 export interface ReplayEndEnvelope {
-  type: Type6;
-  timestamp?: Timestamp6;
-  meta?: Meta5;
+  type: Type9;
+  timestamp?: Timestamp9;
+  meta?: Meta8;
 }
-export interface Meta5 {
+export interface Meta8 {
   [k: string]: unknown;
 }
 /**
@@ -542,12 +669,12 @@ export interface Meta5 {
  *     started_at: Replay start timestamp (optional).
  */
 export interface ReplayStartEnvelope {
-  type: Type7;
-  timestamp?: Timestamp7;
-  meta?: Meta6;
+  type: Type10;
+  timestamp?: Timestamp10;
+  meta?: Meta9;
   started_at?: StartedAt;
 }
-export interface Meta6 {
+export interface Meta9 {
   [k: string]: unknown;
 }
 /**
@@ -564,15 +691,15 @@ export interface Meta6 {
  *     updated_by: User who made the change (optional).
  */
 export interface SettingChangedEnvelope {
-  type: Type8;
-  timestamp?: Timestamp8;
-  meta?: Meta7;
+  type: Type11;
+  timestamp?: Timestamp11;
+  meta?: Meta10;
   key: Key;
   value: Value;
   category: Category;
   updated_by?: UpdatedBy;
 }
-export interface Meta7 {
+export interface Meta10 {
   [k: string]: unknown;
 }
 /**
@@ -587,19 +714,19 @@ export interface Meta7 {
  *     exchange: Target exchange for execution.
  */
 export interface SignalEnvelope {
-  type: Type9;
-  timestamp?: Timestamp9;
-  meta?: Meta8;
-  instrument: Instrument4;
+  type: Type12;
+  timestamp?: Timestamp12;
+  meta?: Meta11;
+  instrument: Instrument7;
   side: Side3;
   strength: Strength;
-  reason: Reason;
+  reason: Reason2;
   price?: Price3;
   strategy_name?: StrategyName;
-  id?: Id2;
-  exchange: Exchange4;
+  id?: Id;
+  exchange: Exchange7;
 }
-export interface Meta8 {
+export interface Meta11 {
   [k: string]: unknown;
 }
 /**
@@ -614,13 +741,13 @@ export interface Meta8 {
  *     action: Required action (always 'clear_cache').
  */
 export interface SymbolMappingUpdateEnvelope {
-  type: Type10;
-  timestamp?: Timestamp10;
-  meta?: Meta9;
-  event: Event;
+  type: Type13;
+  timestamp?: Timestamp13;
+  meta?: Meta12;
+  event: Event1;
   action: Action;
 }
-export interface Meta9 {
+export interface Meta12 {
   [k: string]: unknown;
 }
 /**
@@ -634,17 +761,17 @@ export interface Meta9 {
  *     exchange: Source exchange name.
  */
 export interface TickEnvelope {
-  type: Type11;
-  timestamp?: Timestamp11;
-  meta?: Meta10;
-  instrument: Instrument5;
+  type: Type14;
+  timestamp?: Timestamp14;
+  meta?: Meta13;
+  instrument: Instrument8;
   volume: Volume1;
   bid?: Bid;
   ask?: Ask;
   last?: Last;
-  exchange: Exchange5;
+  exchange: Exchange8;
 }
-export interface Meta10 {
+export interface Meta13 {
   [k: string]: unknown;
 }
 /**
@@ -658,16 +785,16 @@ export interface Meta10 {
  *     exchange: Source exchange name.
  */
 export interface TradeEnvelope {
-  type: Type12;
-  timestamp?: Timestamp12;
-  meta?: Meta11;
-  instrument: Instrument6;
+  type: Type15;
+  timestamp?: Timestamp15;
+  meta?: Meta14;
+  instrument: Instrument9;
   price: Price4;
   volume: Volume2;
   side?: Side4;
-  exchange: Exchange6;
+  exchange: Exchange9;
 }
-export interface Meta11 {
+export interface Meta14 {
   [k: string]: unknown;
 }
 /**
@@ -683,8 +810,8 @@ export interface Meta11 {
  *     ws_token_exp: WebSocket token expiration (ISO 8601).
  */
 export interface WSAuthCompleteResponse {
-  type: Type13;
-  timestamp?: Timestamp13;
+  type: Type16;
+  timestamp?: Timestamp16;
   available_topics: AvailableTopics;
   user_role: UserRole;
   session_expires_at?: SessionExpiresAt;
@@ -699,8 +826,8 @@ export interface WSAuthCompleteResponse {
  *     type: Message type discriminator ('auth_expired').
  */
 export interface WSAuthExpiredResponse {
-  type: Type14;
-  timestamp?: Timestamp14;
+  type: Type17;
+  timestamp?: Timestamp17;
 }
 /**
  * Authentication failure message.
@@ -712,9 +839,9 @@ export interface WSAuthExpiredResponse {
  *     reason: Optional failure reason code.
  */
 export interface WSAuthFailedResponse {
-  type: Type15;
-  timestamp?: Timestamp15;
-  reason?: Reason1;
+  type: Type18;
+  timestamp?: Timestamp18;
+  reason?: Reason3;
 }
 /**
  * Authentication success acknowledgment.
@@ -726,8 +853,8 @@ export interface WSAuthFailedResponse {
  *     exp: Token expiration timestamp (ISO 8601).
  */
 export interface WSAuthOkResponse {
-  type: Type16;
-  timestamp?: Timestamp16;
+  type: Type19;
+  timestamp?: Timestamp19;
   exp: Exp;
 }
 /**
@@ -740,8 +867,8 @@ export interface WSAuthOkResponse {
  *     timeout: Seconds until authentication timeout.
  */
 export interface WSAuthRequiredResponse {
-  type: Type17;
-  timestamp?: Timestamp17;
+  type: Type20;
+  timestamp?: Timestamp20;
   timeout?: Timeout;
 }
 /**
@@ -754,8 +881,8 @@ export interface WSAuthRequiredResponse {
  *     ws_token: WebSocket authentication token.
  */
 export interface WSAuthenticateRequest {
-  type: Type18;
-  timestamp?: Timestamp18;
+  type: Type21;
+  timestamp?: Timestamp21;
   ws_token: WsToken;
 }
 /**
@@ -768,8 +895,8 @@ export interface WSAuthenticateRequest {
  *     message: Human-readable error description.
  */
 export interface WSErrorResponse {
-  type: Type19;
-  timestamp?: Timestamp19;
+  type: Type22;
+  timestamp?: Timestamp22;
   message: Message;
 }
 /**
@@ -779,8 +906,8 @@ export interface WSErrorResponse {
  *     type: Message type discriminator ('get_subscriptions').
  */
 export interface WSGetSubscriptionsRequest {
-  type: Type20;
-  timestamp?: Timestamp20;
+  type: Type23;
+  timestamp?: Timestamp23;
 }
 /**
  * Request topic name suggestions for autocomplete.
@@ -790,8 +917,8 @@ export interface WSGetSubscriptionsRequest {
  *     prefix: Search prefix for filtering topics.
  */
 export interface WSGetTopicSuggestionsRequest {
-  type: Type21;
-  timestamp?: Timestamp21;
+  type: Type24;
+  timestamp?: Timestamp24;
   prefix?: Prefix;
 }
 /**
@@ -803,8 +930,8 @@ export interface WSGetTopicSuggestionsRequest {
  *     type: Message type discriminator ('ping').
  */
 export interface WSPingRequest {
-  type: Type22;
-  timestamp?: Timestamp22;
+  type: Type25;
+  timestamp?: Timestamp25;
 }
 /**
  * Pong response to ping request.
@@ -817,8 +944,8 @@ export interface WSPingRequest {
  *     active_connections: Number of active WebSocket connections.
  */
 export interface WSPongResponse {
-  type: Type23;
-  timestamp: Timestamp23;
+  type: Type26;
+  timestamp: Timestamp26;
   active_connections: ActiveConnections;
 }
 /**
@@ -831,8 +958,8 @@ export interface WSPongResponse {
  *     exp: New token expiration timestamp (ISO 8601).
  */
 export interface WSReauthOkResponse {
-  type: Type24;
-  timestamp?: Timestamp24;
+  type: Type27;
+  timestamp?: Timestamp27;
   exp: Exp1;
 }
 /**
@@ -845,8 +972,8 @@ export interface WSReauthOkResponse {
  *     ws_token: New WebSocket authentication token.
  */
 export interface WSReauthRequest {
-  type: Type25;
-  timestamp?: Timestamp25;
+  type: Type28;
+  timestamp?: Timestamp28;
   ws_token: WsToken1;
 }
 /**
@@ -859,8 +986,8 @@ export interface WSReauthRequest {
  *     deadline: Deadline for reauthentication (ISO 8601).
  */
 export interface WSReauthRequiredResponse {
-  type: Type26;
-  timestamp?: Timestamp26;
+  type: Type29;
+  timestamp?: Timestamp29;
   deadline: Deadline;
 }
 /**
@@ -871,8 +998,8 @@ export interface WSReauthRequiredResponse {
  *     topics: List of topics to subscribe to.
  */
 export interface WSSubscribeRequest {
-  type: Type27;
-  timestamp?: Timestamp27;
+  type: Type30;
+  timestamp?: Timestamp30;
   topics: Topics;
 }
 /**
@@ -891,8 +1018,8 @@ export interface WSSubscribeRequest {
  *     message: Optional additional details.
  */
 export interface WSSubscriptionSuccessResponse {
-  type: Type28;
-  timestamp?: Timestamp28;
+  type: Type31;
+  timestamp?: Timestamp31;
   action: Action1;
   status: Status3;
   topics: Topics1;
@@ -913,8 +1040,8 @@ export interface WSSubscriptionSuccessResponse {
  *     total_available: Total number of available topics.
  */
 export interface WSSubscriptionsListResponse {
-  type: Type29;
-  timestamp?: Timestamp29;
+  type: Type32;
+  timestamp?: Timestamp32;
   subscriptions: Subscriptions;
   available_topics: AvailableTopics1;
   total_available: TotalAvailable;
@@ -930,8 +1057,8 @@ export interface WSSubscriptionsListResponse {
  *     suggestions: Matching topic names.
  */
 export interface WSTopicSuggestionsResponse {
-  type: Type30;
-  timestamp?: Timestamp30;
+  type: Type33;
+  timestamp?: Timestamp33;
   prefix: Prefix1;
   suggestions: Suggestions;
 }
@@ -943,7 +1070,7 @@ export interface WSTopicSuggestionsResponse {
  *     topics: List of topics to unsubscribe from.
  */
 export interface WSUnsubscribeRequest {
-  type: Type31;
-  timestamp?: Timestamp31;
+  type: Type34;
+  timestamp?: Timestamp34;
   topics: Topics2;
 }

@@ -100,7 +100,7 @@ async def test_forward_to_clients_backpressure_trade_disconnects_client() -> Non
     """
     bridge = ZmqWebSocketBridgeService(connection_manager=None)
     ws: Any = DummyWebSocket()
-    topic = "orders.kraken"
+    topic = "orders.events.kraken."
     sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c1")
     sub.pending_count = bridge._get_max_pending(topic)
     bridge.topic_subscriptions[topic] = [sub]
@@ -1219,7 +1219,7 @@ class TestForwardToClientsBackpressure:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge.disconnect_client = AsyncMock()
-        topic = "orders"
+        topic = "orders.events."
         mock_ws = AsyncMock()
         sub = TopicSubscriptionModel(
             websocket=mock_ws,

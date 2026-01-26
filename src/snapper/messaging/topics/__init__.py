@@ -14,14 +14,20 @@ The messaging system uses dot-separated topic strings:
     market.kraken.BTC-USD.candles.1m # OHLCV bars by timeframe
     market.kraken.BTC-USD.trades    # Trade feed
 
-**Orders** (orders.{exchange}.{instrument}.{type})::
+**Order Commands** (orders.commands.{exchange}.{instrument}.{command})::
 
-    orders.kraken.BTC-USD.requests  # Order submission requests
-    orders.kraken.BTC-USD.status    # Order status updates
+    orders.commands.kraken.BTC-USD.submit   # Submit new order
+    orders.commands.kraken.BTC-USD.cancel   # Cancel existing order
+    orders.commands.kraken.BTC-USD.replace  # Modify order (price/qty)
 
-**Executions** (executions.{exchange}.{instrument}.fill)::
+**Order Events** (orders.events.{exchange}.{instrument}.{event})::
 
-    executions.kraken.BTC-USD.fill  # Order fill notifications
+    orders.events.kraken.BTC-USD.submitted  # Order submitted to exchange (local)
+    orders.events.kraken.BTC-USD.accepted   # Order accepted by exchange (ACK)
+    orders.events.kraken.BTC-USD.rejected   # Order rejected
+    orders.events.kraken.BTC-USD.fill       # Order fill (partial/full)
+    orders.events.kraken.BTC-USD.cancelled  # Order cancelled
+    orders.events.kraken.BTC-USD.expired    # Order expired
 
 **Signals** (signals.{exchange}.{instrument}.live|{strategy})::
 
@@ -45,13 +51,18 @@ Subscribers can use prefix patterns (ending with '.') to receive
 multiple topics::
 
     market.kraken.          # All Kraken market data
+    orders.commands.        # All order commands (for executors)
+    orders.events.          # All order events (for traders/UI)
+    orders.events.kraken.   # All Kraken order events
     system.                 # All system messages
-    orders.                 # All order-related messages
 
 Modules
 -------
 validation
     Topic and subscription pattern validation functions.
+
+builders
+    Functions for constructing valid topic strings.
 
 Example:
 -------
@@ -59,9 +70,16 @@ Validate a topic before publishing::
 
     from snapper.messaging.topics.validation import validate_topic
 
-    is_valid, error = validate_topic("market.kraken.BTC-USD.ticks")
+    is_valid, error = validate_topic("orders.commands.kraken.BTC-USD.submit")
     if is_valid:
         publisher.send(topic, payload)
     else:
         logger.error(f"Invalid topic: {error}")
+
+Build a topic with builders::
+
+    from snapper.messaging.topics.builders import order_command_topic
+
+    topic = order_command_topic("kraken", "BTC-USD", "submit")
+    publisher.send(topic, payload)
 """

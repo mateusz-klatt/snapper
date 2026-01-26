@@ -191,10 +191,10 @@ class TradingEngineService:
             exchange=self.exchange,
             signaled_at=signaled_at_dt,
         )
-        topic = f"orders.{self.exchange}.{self.instrument}.new"
+        topic = f"orders.commands.{self.exchange}.{self.instrument}.submit"
         payload = order.model_dump_json().encode("utf-8")
         await self.execution_socket.send_multipart(topic, payload, flags=zmq.NOBLOCK)
-        logger.debug(f"Published order to topic '{topic}': {order.client_order_id}")
+        logger.debug(f"Published order command to topic '{topic}': {order.client_order_id}")
 
     async def execute_desired_units(
         self, desired_units: float, current_price: float, signaled_at: float | None = None

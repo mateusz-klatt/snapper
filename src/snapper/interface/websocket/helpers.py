@@ -157,6 +157,7 @@ def determine_topic_category(topic: str) -> str | None:
 
     Uses prefix mapping for dotted names (e.g., 'market.BTCUSD.tick')
     or keyword mapping for simple names (e.g., 'tick').
+    Supports two-level prefixes for orders.commands and orders.events.
 
     Args:
         topic: Topic name to categorize.
@@ -165,17 +166,20 @@ def determine_topic_category(topic: str) -> str | None:
         Category name or None if unknown.
     """
     if "." in topic:
-        prefix = topic.split(".", 1)[0]
         prefix_map = {
             "market": "market",
-            "orders": "trade",
-            "executions": "trade",
+            "orders.commands": "trade",
+            "orders.events": "trade",
             "signals": "strategy",
             "strategy": "strategy",
             "system": "system",
             "admin": "admin",
         }
-        return prefix_map.get(prefix)
+        parts = topic.split(".")
+        two_level = f"{parts[0]}.{parts[1]}"
+        if two_level in prefix_map:
+            return prefix_map[two_level]
+        return prefix_map.get(parts[0])
     category_map = {
         "bar": "market",
         "tick": "market",

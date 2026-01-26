@@ -96,7 +96,7 @@ async def test_engine_execute_desired_units_buy_flow() -> None:
     await engine.execute_desired_units(1.0, current_price=100.0)
     assert len(socket.sent) == 1
     topic, payload, _flags = socket.sent[0]
-    assert topic == "orders.kraken.BTC-USD.new"
+    assert topic == "orders.commands.kraken.BTC-USD.submit"
     message = _decode_payload(payload)
     assert message["side"] == "buy"
     assert message["instrument"] == "BTC-USD"
@@ -160,7 +160,7 @@ async def test_engine_execute_desired_units_sell_flow() -> None:
     await engine.execute_desired_units(-1.0, current_price=120.0)
     assert len(socket.sent) == 1
     topic, payload, _flags = socket.sent[0]
-    assert topic == "orders.kraken.BTC-USD.new"
+    assert topic == "orders.commands.kraken.BTC-USD.submit"
     message = _decode_payload(payload)
     assert message["side"] == "sell"
     assert message["instrument"] == "BTC-USD"
@@ -207,7 +207,7 @@ class TestEngineExecuteDesiredUnits:
         topic = call_args[0][0]
         payload_bytes = call_args[0][1]
         payload = payload_bytes.decode() if isinstance(payload_bytes, bytes) else payload_bytes
-        assert topic == "orders.kraken.BTC-USD.new"
+        assert topic == "orders.commands.kraken.BTC-USD.submit"
         order_msg = json.loads(payload)
         assert order_msg["instrument"] == "BTC-USD"
         assert order_msg["side"] == "buy"
@@ -248,7 +248,7 @@ class TestEngineExecuteDesiredUnits:
         topic = call_args[0][0]
         payload_bytes = call_args[0][1]
         payload = payload_bytes.decode() if isinstance(payload_bytes, bytes) else payload_bytes
-        assert topic == "orders.kraken.BTC-USD.new"
+        assert topic == "orders.commands.kraken.BTC-USD.submit"
         order_msg = json.loads(payload)
         assert order_msg["instrument"] == "BTC-USD"
         assert order_msg["side"] == "sell"

@@ -40,8 +40,9 @@ export interface Bar {
  */
 export interface Fill {
   timestamp?: Date
-  id: string | number
-  orderId: string | number
+  tradeId?: string | null
+  exchangeOrderId?: string | null
+  clientOrderId: string
   instrument: string
   exchange: string
   side: 'buy' | 'sell'
@@ -63,6 +64,46 @@ export interface Heartbeat {
   sequence: number
   status: 'healthy' | 'warning' | 'error'
   lagMs: number
+}
+
+/**
+ * Canonical OrderCancel entity.
+ * From WebSocket OrderCancelEnvelope.
+ */
+export interface OrderCancel {
+  timestamp?: Date
+  exchange: 'paper' | 'kraken' | 'zonda' | 'walutomat'
+  instrument: string
+  exchangeOrderId: string
+  clientOrderId: string
+}
+
+/**
+ * Canonical OrderEvent entity.
+ * From WebSocket OrderEventEnvelope.
+ */
+export interface OrderEvent {
+  timestamp?: Date
+  exchangeOrderId: string
+  clientOrderId: string
+  exchange: 'paper' | 'kraken' | 'zonda' | 'walutomat'
+  instrument: string
+  event: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
+  reason?: string | null
+}
+
+/**
+ * Canonical OrderReplace entity.
+ * From WebSocket OrderReplaceEnvelope.
+ */
+export interface OrderReplace {
+  timestamp?: Date
+  exchange: 'paper' | 'kraken' | 'zonda' | 'walutomat'
+  instrument: string
+  exchangeOrderId: string
+  clientOrderId: string
+  newQuantity?: number | null
+  newPrice?: number | null
 }
 
 /**
@@ -89,16 +130,18 @@ export interface OrderRequest {
  */
 export interface OrderStatus {
   timestamp?: Date
-  id: string | number
+  exchangeOrderId?: string | null
+  clientOrderId: string
   instrument: string
   exchange: string
   side: 'buy' | 'sell'
-  status: string
+  status: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
   size: number
   filledSize: number
   price?: number | null
   averagePrice?: number | null
+  reason?: string | null
   createdAt?: Date
   updatedAt?: Date | null
 }

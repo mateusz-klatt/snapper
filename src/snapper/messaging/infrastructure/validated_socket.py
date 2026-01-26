@@ -6,8 +6,8 @@ invalid topic hierarchies from entering the messaging system.
 
 Validation ensures topics follow the structured hierarchy:
 - market.{exchange}.{instrument}.{type}
-- orders.{exchange}.{instrument}.{type}
-- executions.{exchange}.{instrument}.fill
+- orders.commands.{exchange}.{instrument}.{cmd}
+- orders.events.{exchange}.{instrument}.{event}
 - signals.{exchange}.{instrument}.live
 - system.{type}[.{component}[.{name}]]
 - admin.{resource}

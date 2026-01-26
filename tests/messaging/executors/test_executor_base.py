@@ -30,6 +30,9 @@ from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.schemas.messages import FillEnvelope
 from snapper.messaging.schemas.messages import HeartbeatEnvelope
+from snapper.messaging.schemas.messages import MessageParseError
+from snapper.messaging.schemas.messages import OrderCancelEnvelope
+from snapper.messaging.schemas.messages import OrderReplaceEnvelope
 from snapper.messaging.schemas.messages import OrderRequestEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 
@@ -234,7 +237,7 @@ async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.Monkey
 
     Given: A running executor with mocked execute that raises error,
     When: _process_order is called,
-    Then: A rejected fill and order status are published.
+    Then: Order status 'rejected' is published (no fill for syntactic rejection).
     """
     ex: Any = MergedDummyExecutor()
     ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
@@ -244,7 +247,7 @@ async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.Monkey
     ex._execute_live_order = AsyncMock(side_effect=RuntimeError("fail"))
     order = make_order()
     await ex._process_order(order)
-    ex._publish_fill.assert_awaited()
+    ex._publish_fill.assert_not_awaited()
     ex._publish_order_status.assert_awaited()
 
 
@@ -406,6 +409,62 @@ async def test_order_handler_unexpected_topic(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
+async def test_order_handler_malformed_topic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test order handler ignores malformed command topics.
+
+    Given: A running executor with subscriber returning malformed topic (less than 5 segments),
+    When: _order_handler processes messages,
+    Then: The topic is ignored with warning logged.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    class OneShotSubscriber:
+        """Subscriber returning malformed topic."""
+
+        def __init__(self) -> None:
+            self.close = lambda: None
+
+        async def recv_multipart(self) -> tuple[str, bytes]:
+            ex.running = False
+            return ("orders.commands.dummy.BTC-USD", b"{}")
+
+    ex.subscriber = OneShotSubscriber()
+    task = asyncio.create_task(ex._order_handler())
+    await task
+
+
+@pytest.mark.asyncio
+async def test_order_handler_ignores_unknown_command_topic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test order handler ignores unknown command topics.
+
+    Given: A running executor with subscriber returning orders.commands.dummy.BTC-USD.unknown,
+    When: _order_handler processes messages,
+    Then: The topic is ignored (logged at debug level).
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+
+    class OneShotSubscriber:
+        """Subscriber returning unknown command topic."""
+
+        def __init__(self) -> None:
+            self.close = lambda: None
+
+        async def recv_multipart(self) -> tuple[str, bytes]:
+            ex.running = False
+            return ("orders.commands.dummy.BTC-USD.unknown", b"{}")
+
+    ex.subscriber = OneShotSubscriber()
+    task = asyncio.create_task(ex._order_handler())
+    await task
+
+
+@pytest.mark.asyncio
 async def test_order_handler_settings_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test order handler processes settings messages.
 
@@ -450,7 +509,7 @@ async def test_order_handler_wrong_exchange(monkeypatch: pytest.MonkeyPatch) -> 
 
     async def recv_multipart() -> tuple[str, bytes]:
         ex.running = False
-        return ("orders.dummy.requests", b"{}")
+        return ("orders.commands.dummy.BTC-USD.submit", b"{}")
 
     ex.subscriber = SimpleNamespace(
         recv_multipart=AsyncMock(side_effect=recv_multipart),
@@ -478,7 +537,7 @@ async def test_order_handler_non_order_message(monkeypatch: pytest.MonkeyPatch) 
 
     async def recv_multipart() -> tuple[str, bytes]:
         ex.running = False
-        return ("orders.dummy.requests", b"{}")
+        return ("orders.commands.dummy.BTC-USD.submit", b"{}")
 
     ex.subscriber = SimpleNamespace(
         recv_multipart=AsyncMock(side_effect=recv_multipart),
@@ -636,6 +695,7 @@ async def test_process_execution_default_filled_and_removes_pending(
     execution = SimpleNamespace(
         order_id="ex1",
         exec_type="trade",
+        exec_id=None,
         order_status=None,
         cum_qty=None,
         average_price=None,
@@ -644,6 +704,41 @@ async def test_process_execution_default_filled_and_removes_pending(
     await ex._process_execution(execution)
     assert "ex1" not in ex.pending_orders
     ex._publish_fill.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_execution_none_exchange_order_id() -> None:
+    """Test fill preserves None exchange_order_id without fallback.
+
+    Given: An executor with pending order keyed by None,
+    When: Execution update with order_id=None is processed,
+    Then: Fill is published with exchange_order_id = None (no fallback).
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    order = make_order()
+    ex.pending_orders[None] = order
+    published_fills: list[Any] = []
+
+    async def track_publish_fill(fill: Any) -> None:
+        published_fills.append(fill)
+
+    ex._publish_fill = track_publish_fill
+    execution = SimpleNamespace(
+        order_id=None,
+        exec_type="filled",
+        exec_id="trade-123",
+        order_status=None,
+        cum_qty=1.0,
+        average_price=50000.0,
+        fee_usd_equiv=0.5,
+    )
+    await ex._process_execution(execution)
+    assert len(published_fills) == 1
+    fill = published_fills[0]
+    assert fill.exchange_order_id is None
+    assert fill.client_order_id == order.client_order_id
+    assert fill.trade_id == "trade-123"
 
 
 @pytest.mark.asyncio
@@ -836,7 +931,7 @@ class TestOrderHandlerEdgeCases:
             recv_count += 1
             if recv_count == 1:
                 return (
-                    "orders.kraken.requests",
+                    "orders.commands.binance.BTC-USD.submit",
                     (
                         b'{"type":"order_req","strategy_id":"test","exchange":"binance",'
                         b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
@@ -874,7 +969,7 @@ class TestOrderHandlerEdgeCases:
             recv_count += 1
             if recv_count == 1:
                 return (
-                    "orders.kraken.requests",
+                    "orders.commands.kraken.BTC-USD.submit",
                     b'{"type":"heartbeat","timestamp":"2024-01-01T00:00:00Z"}',
                 )
             service_any.running = False
@@ -1087,28 +1182,27 @@ class TestProcessOrder:
 
         Given: Order with failing execute_live_order call,
         When: Order is processed,
-        Then: Rejection fill is published.
+        Then: Order status 'rejected' is published (no fill for syntactic rejection).
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        published_fills: list[Any] = []
+        published_statuses: list[tuple[Any, str]] = []
 
         async def track_publish_fill(fill: Any) -> None:
-            published_fills.append(fill)
+            pass
 
         async def track_publish_order_status(order: Any, status: str) -> None:
-            pass
+            published_statuses.append((order, status))
 
         service_any._publish_fill = track_publish_fill
         service_any._publish_order_status = track_publish_order_status
         service_any._execute_live_order = AsyncMock(side_effect=Exception("Order execution failed"))
         order = self._create_order()
         await service_any._process_order(order)
-        assert len(published_fills) >= 1
-        assert published_fills[0].status == "rejected"
+        assert any(status == "rejected" for _, status in published_statuses)
 
 
 class TestProcessExecution:
@@ -1724,7 +1818,7 @@ class TestOrderHandlerWrongExchange:
             recv_count += 1
             if recv_count == 1:
                 return (
-                    "orders.kraken.requests",
+                    "orders.commands.kraken.BTC-USD.submit",
                     (
                         b'{"type":"order_req","strategy_id":"test","exchange":"binance",'
                         b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
@@ -1978,7 +2072,7 @@ async def test_order_handler_processes_order_and_stops(monkeypatch: pytest.Monke
     )
     payload = order.to_json().encode("utf-8")
     subscriber = SubscriberStub(
-        f"orders.{executor._get_exchange_name()}.requests",
+        f"orders.commands.{executor._get_exchange_name()}.BTC-USD.submit",
         payload,
     )
     executor.subscriber = cast(Any, subscriber)
@@ -2226,8 +2320,9 @@ class TestExecutorCoverage:
         service_any.publisher = mock_publisher
         service_any.running = True
         fill_msg = FillEnvelope(
-            id="exchange_123",
-            order_id="test_order_123",
+            trade_id="trade-1",
+            exchange_order_id="exchange_123",
+            client_order_id="test_order_123",
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -2255,8 +2350,9 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = False
         fill_msg = FillEnvelope(
-            id="test_order_123",
-            order_id="test_order_123",
+            trade_id="trade-1",
+            exchange_order_id="test_order_123",
+            client_order_id="test_order_123",
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -2435,7 +2531,7 @@ class TestExecutorCoverage:
 
         Given: Valid live order request,
         When: Order is processed,
-        Then: Order submitted status published and executed.
+        Then: Submitted and accepted statuses published.
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -2448,7 +2544,8 @@ class TestExecutorCoverage:
         order = self._create_order(mode="live")
         await service_any._process_order(order)
         service_any._publish_order_status.assert_any_await(order, "submitted")
-        assert service_any._publish_order_status.await_count == 1
+        service_any._publish_order_status.assert_any_await(order, "accepted", "abc123")
+        assert service_any._publish_order_status.await_count == 2
         service_any._publish_fill.assert_not_awaited()
         service_any._execute_live_order.assert_awaited_once_with(order)
 
@@ -2721,7 +2818,7 @@ class TestExecutorCoverage:
 
         async def fake_recv() -> tuple[str, bytes]:
             service_any.running = False
-            return ("orders.kraken.requests", b"{}")
+            return ("orders.commands.kraken.BTC-USD.submit", b"{}")
 
         service_any.subscriber.recv_multipart = AsyncMock(side_effect=fake_recv)
         wrong_order = self._create_order(exchange="zonda")
@@ -2874,8 +2971,9 @@ class TestExecutorCoverage:
         service_any.publisher = AsyncMock()
         service_any.publisher.send_multipart.side_effect = RuntimeError("fill failed")
         fill_msg = FillEnvelope(
-            id="one",
-            order_id="one",
+            trade_id="trade-1",
+            exchange_order_id="one",
+            client_order_id="one",
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -3328,8 +3426,8 @@ class TestExecutorWebSocketExecutions:
             mock_publish.assert_called_once()
             fill: FillEnvelope = mock_publish.call_args[0][0]
             assert isinstance(fill, FillEnvelope)
-            assert fill.order_id == "test-order-123"
-            assert fill.id == "KRAKEN-ORDER-ABC123"
+            assert fill.client_order_id == "test-order-123"
+            assert fill.exchange_order_id == "KRAKEN-ORDER-ABC123"
             assert fill.instrument == "BTC-USD"
             assert fill.size == 0.1
             assert fill.price == 45123.50
@@ -3546,10 +3644,7 @@ class TestExecutorWebSocketExecutions:
             patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish_fill,
         ):
             await service._process_order(order)
-            mock_publish_fill.assert_called_once()
-            fill: FillEnvelope = mock_publish_fill.call_args[0][0]
-            assert fill.status == "rejected"
-            assert fill.size == 0.0
+            mock_publish_fill.assert_not_called()
             assert mock_publish_status.call_args_list[1] == call(order, "rejected")
 
     @pytest.mark.asyncio
@@ -3582,3 +3677,716 @@ class TestExecutorWebSocketExecutions:
         handler_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await handler_task
+
+
+class TestCancelReplaceHandlers:
+    """Tests for cancel and replace command handlers."""
+
+    def _create_mock_settings(self) -> MagicMock:
+        """Create mock settings for tests."""
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_settings.master_password = "test_master_password"
+        mock_settings.encryption_salt = b"test_salt_16byte"
+        return mock_settings
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_cancel_command_processes_valid_cancel(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify cancel command handler processes valid cancel requests.
+
+        Given: A valid OrderCancelEnvelope for correct exchange,
+        When: Cancel command handler processes it,
+        Then: _process_cancel is called with the envelope.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_cancel = AsyncMock()
+        payload = (
+            '{"type":"order_cancel","exchange":"kraken","instrument":"BTC-USD",'
+            '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456"}'
+        )
+        await service_any._handle_cancel_command(payload, "kraken", "BTC-USD")
+        service_any._process_cancel.assert_awaited_once()
+        cancel_msg = service_any._process_cancel.call_args[0][0]
+        assert cancel_msg.exchange == "kraken"
+        assert cancel_msg.exchange_order_id == "KRAKEN-123"
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_cancel_command_rejects_wrong_exchange(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify cancel command handler rejects wrong exchange.
+
+        Given: An OrderCancelEnvelope for different exchange,
+        When: Cancel command handler processes it,
+        Then: _process_cancel is not called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_cancel = AsyncMock()
+        payload = (
+            '{"type":"order_cancel","exchange":"paper","instrument":"BTC-USD",'
+            '"exchange_order_id":"PAPER-123","client_order_id":"client_456"}'
+        )
+        await service_any._handle_cancel_command(payload, "kraken", "BTC-USD")
+        service_any._process_cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.messaging.executors.base.parse_message")
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_cancel_command_rejects_wrong_message_type(
+        self,
+        mock_get_settings: MagicMock,
+        mock_parse_message: MagicMock,
+    ) -> None:
+        """Verify cancel command handler rejects wrong message type.
+
+        Given: A non-cancel message on cancel topic,
+        When: Cancel command handler processes it,
+        Then: _process_cancel is not called and warning is logged.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_cancel = AsyncMock()
+        mock_msg = MagicMock()
+        mock_msg.type = "heartbeat"
+        mock_parse_message.return_value = mock_msg
+        await service_any._handle_cancel_command("{}", "kraken", "BTC-USD")
+        service_any._process_cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_replace_command_processes_valid_replace(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify replace command handler processes valid replace requests.
+
+        Given: A valid OrderReplaceEnvelope for correct exchange,
+        When: Replace command handler processes it,
+        Then: _process_replace is called with the envelope.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_replace = AsyncMock()
+        payload = (
+            '{"type":"order_replace","exchange":"kraken","instrument":"BTC-USD",'
+            '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456",'
+            '"new_quantity":0.5,"new_price":48000.0}'
+        )
+        await service_any._handle_replace_command(payload, "kraken", "BTC-USD")
+        service_any._process_replace.assert_awaited_once()
+        replace_msg = service_any._process_replace.call_args[0][0]
+        assert replace_msg.new_quantity == 0.5
+        assert replace_msg.new_price == 48000.0
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_replace_command_rejects_wrong_exchange(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify replace command handler rejects wrong exchange.
+
+        Given: An OrderReplaceEnvelope for different exchange,
+        When: Replace command handler processes it,
+        Then: _process_replace is not called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_replace = AsyncMock()
+        payload = (
+            '{"type":"order_replace","exchange":"zonda","instrument":"BTC-PLN",'
+            '"exchange_order_id":"ZONDA-123","client_order_id":"client_456","new_price":200000.0}'
+        )
+        await service_any._handle_replace_command(payload, "kraken", "BTC-PLN")
+        service_any._process_replace.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.messaging.executors.base.parse_message")
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_replace_command_rejects_wrong_message_type(
+        self,
+        mock_get_settings: MagicMock,
+        mock_parse_message: MagicMock,
+    ) -> None:
+        """Verify replace command handler rejects wrong message type.
+
+        Given: A non-replace message on replace topic,
+        When: Replace command handler processes it,
+        Then: _process_replace is not called and warning is logged.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_replace = AsyncMock()
+        mock_msg = MagicMock()
+        mock_msg.type = "heartbeat"
+        mock_parse_message.return_value = mock_msg
+        await service_any._handle_replace_command("{}", "kraken", "BTC-USD")
+        service_any._process_replace.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.messaging.executors.base.parse_message")
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_submit_command_handles_invalid_payload(
+        self,
+        mock_get_settings: MagicMock,
+        mock_parse_message: MagicMock,
+    ) -> None:
+        """Verify submit command handler handles invalid payload gracefully.
+
+        Given: An invalid payload that causes MessageParseError,
+        When: Submit command handler processes it,
+        Then: Warning is logged and no processing occurs.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_order = AsyncMock()
+        mock_parse_message.side_effect = MessageParseError("Invalid JSON")
+        await service_any._handle_submit_command("invalid-json", "kraken", "BTC-USD")
+        service_any._process_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.messaging.executors.base.parse_message")
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_cancel_command_handles_invalid_payload(
+        self,
+        mock_get_settings: MagicMock,
+        mock_parse_message: MagicMock,
+    ) -> None:
+        """Verify cancel command handler handles invalid payload gracefully.
+
+        Given: An invalid payload that causes MessageParseError,
+        When: Cancel command handler processes it,
+        Then: Warning is logged and no processing occurs.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_cancel = AsyncMock()
+        mock_parse_message.side_effect = MessageParseError("Invalid JSON")
+        await service_any._handle_cancel_command("invalid-json", "kraken", "BTC-USD")
+        service_any._process_cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.messaging.executors.base.parse_message")
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_replace_command_handles_invalid_payload(
+        self,
+        mock_get_settings: MagicMock,
+        mock_parse_message: MagicMock,
+    ) -> None:
+        """Verify replace command handler handles invalid payload gracefully.
+
+        Given: An invalid payload that causes MessageParseError,
+        When: Replace command handler processes it,
+        Then: Warning is logged and no processing occurs.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_replace = AsyncMock()
+        mock_parse_message.side_effect = MessageParseError("Invalid JSON")
+        await service_any._handle_replace_command("invalid-json", "kraken", "BTC-USD")
+        service_any._process_replace.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_submit_command_rejects_wrong_instrument(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify submit command handler rejects instrument mismatch.
+
+        Given: An OrderRequestEnvelope with different instrument than topic,
+        When: Submit command handler processes it,
+        Then: _process_order is not called due to invariant violation.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_order = AsyncMock()
+        payload = (
+            '{"type":"order_req","strategy_id":"test","exchange":"kraken",'
+            '"instrument":"ETH-USD","mode":"paper","side":"buy","order_type":"market",'
+            '"quantity":1.0,"client_order_id":"test-123"}'
+        )
+        await service_any._handle_submit_command(payload, "kraken", "BTC-USD")
+        service_any._process_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_cancel_command_rejects_wrong_instrument(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify cancel command handler rejects instrument mismatch.
+
+        Given: An OrderCancelEnvelope with different instrument than topic,
+        When: Cancel command handler processes it,
+        Then: _process_cancel is not called due to invariant violation.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_cancel = AsyncMock()
+        payload = (
+            '{"type":"order_cancel","exchange":"kraken","instrument":"ETH-USD",'
+            '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456"}'
+        )
+        await service_any._handle_cancel_command(payload, "kraken", "BTC-USD")
+        service_any._process_cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_handle_replace_command_rejects_wrong_instrument(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify replace command handler rejects instrument mismatch.
+
+        Given: An OrderReplaceEnvelope with different instrument than topic,
+        When: Replace command handler processes it,
+        Then: _process_replace is not called due to invariant violation.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._process_replace = AsyncMock()
+        payload = (
+            '{"type":"order_replace","exchange":"kraken","instrument":"ETH-USD",'
+            '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456","new_price":48000.0}'
+        )
+        await service_any._handle_replace_command(payload, "kraken", "BTC-USD")
+        service_any._process_replace.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_cancel_success(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _process_cancel handles successful cancellation.
+
+        Given: A cancel request for existing order,
+        When: Exchange client cancels successfully,
+        Then: Cancelled event is published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._publish_cancel_event = AsyncMock()
+        mock_client = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.status = OrderStatusEnum.CANCELED
+        mock_client.cancel_order = AsyncMock(return_value=mock_result)
+        service_any.exchange_client = mock_client
+        cancel_envelope = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._process_cancel(cancel_envelope)
+        service_any._publish_cancel_event.assert_awaited_with(cancel_envelope, "cancelled")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_cancel_failure(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _process_cancel handles failed cancellation.
+
+        Given: A cancel request,
+        When: Exchange client fails to cancel,
+        Then: Rejected event is published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._publish_cancel_event = AsyncMock()
+        mock_client = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.status = OrderStatusEnum.OPEN
+        mock_client.cancel_order = AsyncMock(return_value=mock_result)
+        service_any.exchange_client = mock_client
+        cancel_envelope = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._process_cancel(cancel_envelope)
+        service_any._publish_cancel_event.assert_awaited_with(cancel_envelope, "rejected")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_cancel_exception(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _process_cancel handles exceptions.
+
+        Given: A cancel request,
+        When: Exchange client raises exception,
+        Then: Rejected event is published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._publish_cancel_event = AsyncMock()
+        mock_client = AsyncMock()
+        mock_client.cancel_order = AsyncMock(side_effect=Exception("Network error"))
+        service_any.exchange_client = mock_client
+        cancel_envelope = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._process_cancel(cancel_envelope)
+        service_any._publish_cancel_event.assert_awaited_with(cancel_envelope, "rejected")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_replace_publishes_rejected(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _process_replace publishes rejected event.
+
+        Given: A replace request,
+        When: Replace is not implemented,
+        Then: Rejected event is published.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._publish_replace_event = AsyncMock()
+        replace_envelope = OrderReplaceEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+            new_price=49000.0,
+        )
+        await service_any._process_replace(replace_envelope)
+        service_any._publish_replace_event.assert_awaited_with(replace_envelope, "rejected")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_cancel_event_success(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _publish_cancel_event publishes to correct topic.
+
+        Given: A cancel envelope and status,
+        When: Publishing cancel event,
+        Then: Message is published to orders.events.*.*.{status}.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_publisher = AsyncMock()
+        service_any.publisher = mock_publisher
+        cancel_envelope = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._publish_cancel_event(cancel_envelope, "cancelled")
+        mock_publisher.send_multipart.assert_awaited_once()
+        call_args = mock_publisher.send_multipart.call_args
+        assert call_args[0][0] == "orders.events.kraken.BTC-USD.cancelled"
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_cancel_event_no_publisher(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _publish_cancel_event handles missing publisher.
+
+        Given: No publisher available,
+        When: Publishing cancel event,
+        Then: Returns without error.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.publisher = None
+        cancel_envelope = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._publish_cancel_event(cancel_envelope, "cancelled")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_cancel_event_handles_exception(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _publish_cancel_event handles publish exception.
+
+        Given: Publisher that raises exception,
+        When: Publishing cancel event,
+        Then: Error is logged without crash.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_publisher = AsyncMock()
+        mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Network error"))
+        service_any.publisher = mock_publisher
+        cancel_envelope = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._publish_cancel_event(cancel_envelope, "cancelled")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_replace_event_success(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _publish_replace_event publishes to correct topic.
+
+        Given: A replace envelope and status,
+        When: Publishing replace event,
+        Then: Message is published to orders.events.*.*.{status}.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_publisher = AsyncMock()
+        service_any.publisher = mock_publisher
+        replace_envelope = OrderReplaceEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+            new_quantity=0.5,
+            new_price=48000.0,
+        )
+        await service_any._publish_replace_event(replace_envelope, "rejected")
+        mock_publisher.send_multipart.assert_awaited_once()
+        call_args = mock_publisher.send_multipart.call_args
+        assert call_args[0][0] == "orders.events.kraken.BTC-USD.rejected"
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_replace_event_no_publisher(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _publish_replace_event handles missing publisher.
+
+        Given: No publisher available,
+        When: Publishing replace event,
+        Then: Returns without error.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any.publisher = None
+        replace_envelope = OrderReplaceEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._publish_replace_event(replace_envelope, "rejected")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_publish_replace_event_handles_exception(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _publish_replace_event handles publish exception.
+
+        Given: Publisher that raises exception,
+        When: Publishing replace event,
+        Then: Error is logged without crash.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        mock_publisher = AsyncMock()
+        mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Network error"))
+        service_any.publisher = mock_publisher
+        replace_envelope = OrderReplaceEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._publish_replace_event(replace_envelope, "rejected")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_dispatches_cancel_command(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order handler dispatches cancel commands.
+
+        Given: A message on orders.commands.*.*.cancel topic,
+        When: Order handler processes it,
+        Then: _handle_cancel_command is called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._handle_cancel_command = AsyncMock()
+        mock_subscriber = AsyncMock()
+        recv_count = 0
+
+        async def mock_recv() -> tuple[str, bytes]:
+            nonlocal recv_count
+            recv_count += 1
+            if recv_count == 1:
+                return (
+                    "orders.commands.kraken.BTC-USD.cancel",
+                    b'{"type":"order_cancel","exchange":"kraken","instrument":"BTC-USD",'
+                    b'"exchange_order_id":"K123","client_order_id":"c456"}',
+                )
+            service_any.running = False
+            return ("", b"")
+
+        mock_subscriber.recv_multipart = mock_recv
+        service_any.subscriber = mock_subscriber
+        await service_any._order_handler()
+        service_any._handle_cancel_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_dispatches_replace_command(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order handler dispatches replace commands.
+
+        Given: A message on orders.commands.*.*.replace topic,
+        When: Order handler processes it,
+        Then: _handle_replace_command is called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._handle_replace_command = AsyncMock()
+        mock_subscriber = AsyncMock()
+        recv_count = 0
+
+        async def mock_recv() -> tuple[str, bytes]:
+            nonlocal recv_count
+            recv_count += 1
+            if recv_count == 1:
+                return (
+                    "orders.commands.kraken.BTC-USD.replace",
+                    b'{"type":"order_replace","exchange":"kraken","instrument":"BTC-USD",'
+                    b'"exchange_order_id":"K123","client_order_id":"c456","new_price":50000.0}',
+                )
+            service_any.running = False
+            return ("", b"")
+
+        mock_subscriber.recv_multipart = mock_recv
+        service_any.subscriber = mock_subscriber
+        await service_any._order_handler()
+        service_any._handle_replace_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_order_handler_ignores_unknown_command(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify order handler ignores unknown commands.
+
+        Given: A message on orders.commands.*.*.unknown topic,
+        When: Order handler processes it,
+        Then: No handler is called.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._handle_submit_command = AsyncMock()
+        service_any._handle_cancel_command = AsyncMock()
+        service_any._handle_replace_command = AsyncMock()
+        mock_subscriber = AsyncMock()
+        recv_count = 0
+
+        async def mock_recv() -> tuple[str, bytes]:
+            nonlocal recv_count
+            recv_count += 1
+            if recv_count == 1:
+                return ("orders.commands.kraken.BTC-USD.unknown", b"{}")
+            service_any.running = False
+            return ("", b"")
+
+        mock_subscriber.recv_multipart = mock_recv
+        service_any.subscriber = mock_subscriber
+        await service_any._order_handler()
+        service_any._handle_submit_command.assert_not_awaited()
+        service_any._handle_cancel_command.assert_not_awaited()
+        service_any._handle_replace_command.assert_not_awaited()

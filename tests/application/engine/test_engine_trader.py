@@ -21,6 +21,9 @@ import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.engine.trader import run_zmq_trader
 from snapper.config.app import AppSettings
+from snapper.messaging.schemas.messages import FillEnvelope
+from snapper.messaging.schemas.messages import OrderEventEnvelope
+from snapper.messaging.schemas.messages import OrderStatusEnvelope
 from snapper.messaging.schemas.messages import SignalEnvelope
 
 
@@ -866,8 +869,7 @@ async def test_setup_signal_subscriber_subscribes_topics(monkeypatch: pytest.Mon
         "signals.paper.",
         "system.symbol_mappings",
         "system.settings",
-        "executions.",
-        "orders.",
+        "orders.events.",
     ]
     assert cast(Any, coord.signal_subscriber) is subscriber
 
@@ -1107,40 +1109,120 @@ async def test_handle_execution_fill_success(monkeypatch: pytest.MonkeyPatch) ->
     """Verify execution fill handler processes valid fill message.
 
     Given a TraderCoordinator,
-    When _handle_execution_fill is called with valid fill JSON,
+    When _handle_execution_fill is called with valid FillEnvelope,
     Then the fill is processed without errors.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
-    fill_payload = json.dumps(
-        {
-            "type": "fill",
-            "id": "exec-456",
-            "order_id": "order-123",
-            "instrument": "BTC-USD",
-            "exchange": "kraken",
-            "side": "buy",
-            "size": 0.5,
-            "price": 50000.0,
-            "fee": 0.5,
-            "fee_asset": "USD",
-            "status": "filled",
-        }
+    fill = FillEnvelope(
+        trade_id="trade-456",
+        exchange_order_id="exec-456",
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        fee=0.5,
+        fee_asset="USD",
+        status="filled",
     )
-    coord._handle_execution_fill("executions.kraken.BTC-USD.fill", fill_payload.encode("utf-8"))
+    coord._handle_execution_fill("orders.events.kraken.BTC-USD.fill", fill)
 
 
 @pytest.mark.asyncio
-async def test_handle_execution_fill_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify execution fill handler handles invalid JSON gracefully.
+async def test_handle_execution_fill_invariant_exchange_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify execution fill handler rejects exchange mismatch.
 
     Given a TraderCoordinator,
-    When _handle_execution_fill is called with invalid JSON,
-    Then no errors are raised.
+    When _handle_execution_fill is called with mismatched topic/payload exchange,
+    Then the fill is rejected with invariant violation warning.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
-    coord._handle_execution_fill("executions.kraken.BTC-USD.fill", b"not-json")
+    fill = FillEnvelope(
+        trade_id="trade-456",
+        exchange_order_id="exec-456",
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="paper",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        fee=0.5,
+        fee_asset="USD",
+        status="filled",
+    )
+    coord._handle_execution_fill("orders.events.kraken.BTC-USD.fill", fill)
+
+
+@pytest.mark.asyncio
+async def test_handle_execution_fill_invariant_instrument_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify execution fill handler rejects instrument mismatch.
+
+    Given a TraderCoordinator,
+    When _handle_execution_fill is called with mismatched topic/payload instrument,
+    Then the fill is rejected with invariant violation warning.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    fill = FillEnvelope(
+        trade_id="trade-456",
+        exchange_order_id="exec-456",
+        client_order_id="order-123",
+        instrument="ETH-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        fee=0.5,
+        fee_asset="USD",
+        status="filled",
+    )
+    coord._handle_execution_fill("orders.events.kraken.BTC-USD.fill", fill)
+
+
+@pytest.mark.asyncio
+async def test_handle_execution_fill_malformed_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify execution fill handler ignores malformed topics.
+
+    Given a TraderCoordinator,
+    When _handle_execution_fill is called with malformed topic,
+    Then the fill is ignored without error.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    fill = FillEnvelope(
+        trade_id="trade-456",
+        exchange_order_id="exec-456",
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        fee=0.5,
+        fee_asset="USD",
+        status="filled",
+    )
+    coord._handle_execution_fill("orders.events.kraken", fill)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_order_event_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify dispatch handles invalid JSON gracefully.
+
+    Given a TraderCoordinator,
+    When _dispatch_order_event is called with invalid JSON,
+    Then error is logged but no exception raised.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord._dispatch_order_event("orders.events.kraken.BTC-USD.fill", b"not-json")
 
 
 @pytest.mark.asyncio
@@ -1149,7 +1231,7 @@ async def test_listen_signals_routes_execution_fill(monkeypatch: pytest.MonkeyPa
 
     Given a TraderCoordinator with subscriber containing execution fill message,
     When _listen_signals processes the message,
-    Then the fill is routed to _handle_execution_fill.
+    Then the fill is routed to _dispatch_order_event.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
@@ -1157,16 +1239,21 @@ async def test_listen_signals_routes_execution_fill(monkeypatch: pytest.MonkeyPa
     subscriber = _SubscriberStub(subscriber_socket)
     subscriber.messages.append(
         (
-            "executions.kraken.BTC-USD.fill",
+            "orders.events.kraken.BTC-USD.fill",
             json.dumps(
                 {
                     "type": "fill",
-                    "id": "exec-1",
-                    "order_id": "order-123",
+                    "trade_id": "exec-1",
+                    "exchange_order_id": "exch-123",
+                    "client_order_id": "order-123",
                     "instrument": "BTC-USD",
+                    "exchange": "kraken",
                     "side": "buy",
                     "size": 0.5,
                     "price": 50000.0,
+                    "fee": 0.1,
+                    "fee_asset": "USD",
+                    "status": "filled",
                 }
             ).encode("utf-8"),
         )
@@ -1182,7 +1269,7 @@ async def test_listen_signals_routes_order_status(monkeypatch: pytest.MonkeyPatc
 
     Given a TraderCoordinator with subscriber containing order status message,
     When _listen_signals processes the message,
-    Then the status is routed to _handle_order_status.
+    Then the status is routed to _dispatch_order_event.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
@@ -1190,8 +1277,22 @@ async def test_listen_signals_routes_order_status(monkeypatch: pytest.MonkeyPatc
     subscriber = _SubscriberStub(subscriber_socket)
     subscriber.messages.append(
         (
-            "orders.kraken.BTC-USD.status",
-            json.dumps({"id": "order-123", "status": "filled"}).encode("utf-8"),
+            "orders.events.kraken.BTC-USD.accepted",
+            json.dumps(
+                {
+                    "type": "order_status",
+                    "exchange_order_id": "exch-123",
+                    "client_order_id": "order-123",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "status": "accepted",
+                    "order_type": "market",
+                    "size": 0.5,
+                    "filled_size": 0.0,
+                    "created_at": "2024-01-01T00:00:00Z",
+                }
+            ).encode("utf-8"),
         )
     )
     coord.signal_subscriber = cast(Any, subscriber)
@@ -1200,12 +1301,14 @@ async def test_listen_signals_routes_order_status(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_listen_signals_skips_order_new(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify listen_signals skips orders.*.new messages.
+async def test_listen_signals_handles_invalid_order_event_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify listen_signals handles invalid order event payload gracefully.
 
-    Given a TraderCoordinator with subscriber containing orders.*.new message,
+    Given a TraderCoordinator with subscriber containing order event with invalid payload,
     When _listen_signals processes the message,
-    Then the message is ignored without processing.
+    Then the message is logged but does not cause a crash.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
@@ -1213,8 +1316,8 @@ async def test_listen_signals_skips_order_new(monkeypatch: pytest.MonkeyPatch) -
     subscriber = _SubscriberStub(subscriber_socket)
     subscriber.messages.append(
         (
-            "orders.kraken.BTC-USD.new",
-            json.dumps({"id": "order-123"}).encode("utf-8"),
+            "orders.events.kraken.BTC-USD.accepted",
+            json.dumps({"type": "order_status", "client_order_id": "order-123"}).encode("utf-8"),
         )
     )
     coord.signal_subscriber = cast(Any, subscriber)
@@ -1227,38 +1330,330 @@ async def test_handle_order_status_success(monkeypatch: pytest.MonkeyPatch) -> N
     """Verify order status handler processes valid status message.
 
     Given a TraderCoordinator,
-    When _handle_order_status is called with valid status JSON,
+    When _handle_order_status is called with valid OrderStatusEnvelope,
     Then the status is processed without errors.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
-    status_payload = json.dumps(
-        {
-            "id": "order-123",
-            "instrument": "BTC-USD",
-            "exchange": "kraken",
-            "side": "buy",
-            "size": 0.5,
-            "price": 50000.0,
-            "order_type": "market",
-            "status": "filled",
-            "filled_size": 0.5,
-        }
+    order_status = OrderStatusEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        order_type="market",
+        status="accepted",
+        filled_size=0.0,
+        created_at=datetime.now(UTC),
     )
-    coord._handle_order_status("orders.kraken.BTC-USD.status", status_payload.encode("utf-8"))
+    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
 
 
 @pytest.mark.asyncio
-async def test_handle_order_status_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify order status handler handles invalid JSON gracefully.
+async def test_handle_order_status_invariant_exchange_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify order status handler rejects exchange mismatch.
 
     Given a TraderCoordinator,
-    When _handle_order_status is called with invalid JSON,
-    Then no errors are raised.
+    When _handle_order_status is called with mismatched topic/payload exchange,
+    Then the status is rejected with invariant violation warning.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
-    coord._handle_order_status("orders.kraken.BTC-USD.status", b"not-json")
+    order_status = OrderStatusEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="paper",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        order_type="market",
+        status="accepted",
+        filled_size=0.0,
+        created_at=datetime.now(UTC),
+    )
+    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_invariant_instrument_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify order status handler rejects instrument mismatch.
+
+    Given a TraderCoordinator,
+    When _handle_order_status is called with mismatched topic/payload instrument,
+    Then the status is rejected with invariant violation warning.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_status = OrderStatusEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        instrument="ETH-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        order_type="market",
+        status="accepted",
+        filled_size=0.0,
+        created_at=datetime.now(UTC),
+    )
+    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_rejected_logs_envelope_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify order status handler logs envelope type for rejected status.
+
+    Given a TraderCoordinator,
+    When _handle_order_status is called with 'rejected' status,
+    Then the log includes envelope type to disambiguate submit vs cancel rejection.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_status = OrderStatusEnvelope(
+        exchange_order_id=None,
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        order_type="market",
+        status="rejected",
+        filled_size=0.0,
+        created_at=datetime.now(UTC),
+    )
+    coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_order_event_routes_order_event_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify dispatch routes OrderEventEnvelope to _handle_order_event.
+
+    Given a TraderCoordinator,
+    When _dispatch_order_event is called with OrderEventEnvelope payload,
+    Then the message is routed to _handle_order_event.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    payload = json.dumps(
+        {
+            "type": "order_event",
+            "exchange_order_id": "exch-123",
+            "client_order_id": "order-123",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "event": "cancelled",
+        }
+    ).encode("utf-8")
+    coord._dispatch_order_event("orders.events.kraken.BTC-USD.cancelled", payload)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_order_event_unknown_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify dispatch handles unknown message types gracefully.
+
+    Given a TraderCoordinator,
+    When _dispatch_order_event is called with valid but unexpected message type,
+    Then the message is ignored with debug log.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    payload = json.dumps(
+        {"type": "heartbeat", "component": "test", "sequence": 1, "status": "healthy", "lag_ms": 0}
+    ).encode("utf-8")
+    coord._dispatch_order_event("orders.events.kraken.BTC-USD.accepted", payload)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_event_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify order event handler processes cancel/replace confirmations.
+
+    Given a TraderCoordinator,
+    When _handle_order_event is called with valid OrderEventEnvelope,
+    Then the event is processed without errors.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_event = OrderEventEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        exchange="kraken",
+        instrument="BTC-USD",
+        event="cancelled",
+    )
+    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_event_invariant_exchange_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify order event handler rejects exchange mismatch.
+
+    Given a TraderCoordinator,
+    When _handle_order_event is called with mismatched topic/payload exchange,
+    Then the event is rejected with invariant violation warning.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_event = OrderEventEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        exchange="paper",
+        instrument="BTC-USD",
+        event="cancelled",
+    )
+    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_event_invariant_instrument_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify order event handler rejects instrument mismatch.
+
+    Given a TraderCoordinator,
+    When _handle_order_event is called with mismatched topic/payload instrument,
+    Then the event is rejected with invariant violation warning.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_event = OrderEventEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        exchange="kraken",
+        instrument="ETH-USD",
+        event="cancelled",
+    )
+    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_event_malformed_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify order event handler ignores malformed topics.
+
+    Given a TraderCoordinator,
+    When _handle_order_event is called with topic having wrong segment count,
+    Then the message is ignored without error.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_event = OrderEventEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        exchange="kraken",
+        instrument="BTC-USD",
+        event="cancelled",
+    )
+    coord._handle_order_event("orders.events.kraken", order_event)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_event_topic_payload_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify invariant check logs warning when topic suffix mismatches event field.
+
+    Given a TraderCoordinator,
+    When _handle_order_event is called with topic suffix 'cancelled' but event 'rejected',
+    Then a warning is logged about invariant violation.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_event = OrderEventEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        exchange="kraken",
+        instrument="BTC-USD",
+        event="rejected",
+    )
+    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_event_rejected_logs_envelope_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify order event handler logs envelope type for rejected event.
+
+    Given a TraderCoordinator,
+    When _handle_order_event is called with 'rejected' event,
+    Then the log includes envelope type to disambiguate cancel/replace rejection.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_event = OrderEventEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        exchange="kraken",
+        instrument="BTC-USD",
+        event="rejected",
+    )
+    coord._handle_order_event("orders.events.kraken.BTC-USD.rejected", order_event)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_malformed_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify order status handler ignores malformed topics.
+
+    Given a TraderCoordinator,
+    When _handle_order_status is called with topic having wrong segment count,
+    Then the message is ignored without error.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_status = OrderStatusEnvelope(
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        status="accepted",
+        order_type="market",
+        size=0.5,
+        filled_size=0.0,
+        created_at=datetime.now(UTC),
+    )
+    coord._handle_order_status("orders.events.kraken", order_status)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_topic_payload_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify invariant check logs warning when topic suffix mismatches payload status.
+
+    Given a TraderCoordinator,
+    When _handle_order_status is called with topic suffix 'accepted' but payload status 'rejected',
+    Then a warning is logged about invariant violation.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    order_status = OrderStatusEnvelope(
+        exchange_order_id="exch-123",
+        client_order_id="order-123",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        order_type="market",
+        status="rejected",
+        filled_size=0.0,
+        created_at=datetime.now(UTC),
+    )
+    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
 
 
 @pytest.mark.asyncio

@@ -207,7 +207,7 @@ async def test_forward_to_clients_trade_backpressure(
     When: Another message is forwarded,
     Then: The client is disconnected and message is dropped.
     """
-    topic = "orders"
+    topic = "orders.events."
     subscription = TopicSubscriptionModel(
         websocket=AsyncMock(),
         throttle_ms=0,
@@ -234,7 +234,7 @@ async def test_forward_to_clients_trade_backpressure_without_metrics(
     When: Another message is forwarded,
     Then: The client is disconnected without metrics update.
     """
-    topic = "orders"
+    topic = "orders.events."
     subscription = TopicSubscriptionModel(
         websocket=AsyncMock(),
         throttle_ms=0,
@@ -2948,7 +2948,7 @@ class TestZmqWsBridgeE2ESmoke:
         """
         mock_ws = AsyncMock()
         mock_ws.send_text = AsyncMock()
-        topic = "executions."
+        topic = "orders.events."
         bridge_with_context.topic_subscriptions[topic] = [
             TopicSubscriptionModel(
                 websocket=mock_ws,
@@ -2959,8 +2959,9 @@ class TestZmqWsBridgeE2ESmoke:
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
         fill = FillEnvelope(
-            id="exec-1",
-            order_id="order-123",
+            trade_id="trade-1",
+            exchange_order_id="exec-1",
+            client_order_id="order-123",
             exchange="kraken",
             instrument="BTC-USD",
             side="buy",
@@ -2973,7 +2974,7 @@ class TestZmqWsBridgeE2ESmoke:
         )
         raw_json = fill.model_dump_json()
         await bridge_with_context._forward_to_clients(
-            topic, "executions.kraken.BTC-USD.fill", raw_json
+            topic, "orders.events.kraken.BTC-USD.fill", raw_json
         )
         mock_ws.send_text.assert_called_once_with(raw_json)
 
@@ -2989,7 +2990,7 @@ class TestZmqWsBridgeE2ESmoke:
         """
         mock_ws = AsyncMock()
         mock_ws.send_text = AsyncMock()
-        topic = "orders."
+        topic = "orders.events."
         bridge_with_context.topic_subscriptions[topic] = [
             TopicSubscriptionModel(
                 websocket=mock_ws,
@@ -3000,20 +3001,21 @@ class TestZmqWsBridgeE2ESmoke:
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
         order = OrderStatusEnvelope(
-            id="order-789",
+            exchange_order_id=None,
+            client_order_id="order-789",
             instrument="BTC-USD",
             exchange="kraken",
             side="sell",
             size=1.0,
             price=51000.0,
             order_type="limit",
-            status="filled",
-            filled_size=1.0,
+            status="accepted",
+            filled_size=0.0,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         raw_json = order.model_dump_json()
         await bridge_with_context._forward_to_clients(
-            topic, "orders.kraken.BTC-USD.status", raw_json
+            topic, "orders.events.kraken.BTC-USD.accepted", raw_json
         )
         mock_ws.send_text.assert_called_once_with(raw_json)
 
@@ -3032,37 +3034,37 @@ class TestPatternMatching:
     def test_executions_pattern_matches_fill_topics(
         self, bridge: ZmqWebSocketBridgeService
     ) -> None:
-        """Verify executions pattern matches fill topics.
+        """Verify orders.events pattern matches fill topics.
 
-        Given: A bridge with executions pattern configured,
+        Given: A bridge with orders.events pattern configured,
         When: Finding matching pattern for fill topic,
-        Then: Returns config with executions pattern.
+        Then: Returns config with orders.events pattern.
         """
-        config = bridge._find_matching_pattern("executions.kraken.BTC-USD.fill")
+        config = bridge._find_matching_pattern("orders.events.kraken.BTC-USD.fill")
         assert config is not None
-        assert config.pattern == "executions."
+        assert config.pattern == "orders.events."
 
     def test_orders_pattern_matches_status_topics(self, bridge: ZmqWebSocketBridgeService) -> None:
-        """Verify orders pattern matches status topics.
+        """Verify orders.events pattern matches status topics.
 
-        Given: A bridge with orders pattern configured,
+        Given: A bridge with orders.events pattern configured,
         When: Finding matching pattern for status topic,
-        Then: Returns config with orders pattern.
+        Then: Returns config with orders.events pattern.
         """
-        config = bridge._find_matching_pattern("orders.kraken.BTC-USD.status")
+        config = bridge._find_matching_pattern("orders.events.kraken.BTC-USD.accepted")
         assert config is not None
-        assert config.pattern == "orders."
+        assert config.pattern == "orders.events."
 
     def test_orders_pattern_matches_new_topics(self, bridge: ZmqWebSocketBridgeService) -> None:
-        """Verify orders pattern matches new order topics.
+        """Verify orders.commands pattern matches submit command topics.
 
-        Given: A bridge with orders pattern configured,
-        When: Finding matching pattern for new order topic,
-        Then: Returns config with orders pattern.
+        Given: A bridge with orders.commands pattern configured,
+        When: Finding matching pattern for submit command topic,
+        Then: Returns config with orders.commands pattern.
         """
-        config = bridge._find_matching_pattern("orders.zonda.ETH-PLN.new")
+        config = bridge._find_matching_pattern("orders.commands.zonda.ETH-PLN.submit")
         assert config is not None
-        assert config.pattern == "orders."
+        assert config.pattern == "orders.commands."
 
 
 class TestBackpressure:
@@ -3088,7 +3090,7 @@ class TestBackpressure:
         """
         mock_ws = AsyncMock()
         bridge.disconnect_client = AsyncMock()
-        topic = "orders."
+        topic = "orders.events."
         sub = TopicSubscriptionModel(
             websocket=mock_ws,
             throttle_ms=0,
@@ -3098,7 +3100,7 @@ class TestBackpressure:
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
         raw_json = '{"type": "order", "id": "123"}'
-        await bridge._forward_to_clients(topic, "orders.kraken.BTC-USD.new", raw_json)
+        await bridge._forward_to_clients(topic, "orders.events.kraken.BTC-USD.accepted", raw_json)
         bridge.disconnect_client.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -3138,8 +3140,9 @@ class TestEnvelopeSerialization:
         Then: JSON contains all fields with correct values.
         """
         fill = FillEnvelope(
-            id="exchange-fill-123",
-            order_id="order-123",
+            trade_id="trade-123",
+            exchange_order_id="exchange-fill-123",
+            client_order_id="order-123",
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -3153,8 +3156,8 @@ class TestEnvelopeSerialization:
         json_data = fill.model_dump_json()
         parsed = json.loads(json_data)
         assert parsed["type"] == "fill"
-        assert parsed["id"] == "exchange-fill-123"
-        assert parsed["order_id"] == "order-123"
+        assert parsed["exchange_order_id"] == "exchange-fill-123"
+        assert parsed["client_order_id"] == "order-123"
         assert parsed["exchange"] == "kraken"
         assert parsed["side"] == "buy"
         assert parsed["size"] == 0.5
@@ -3167,20 +3170,21 @@ class TestEnvelopeSerialization:
         Then: JSON contains all fields with correct values.
         """
         order = OrderStatusEnvelope(
-            id="order-789",
+            exchange_order_id="exchange-789",
+            client_order_id="order-789",
             instrument="BTC-USD",
             exchange="kraken",
             side="sell",
             size=1.0,
             price=51000.0,
             order_type="limit",
-            status="filled",
-            filled_size=1.0,
+            status="submitted",
+            filled_size=0.0,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         json_data = order.model_dump_json()
         parsed = json.loads(json_data)
         assert parsed["type"] == "order_status"
-        assert parsed["id"] == "order-789"
+        assert parsed["client_order_id"] == "order-789"
         assert parsed["exchange"] == "kraken"
-        assert parsed["status"] == "filled"
+        assert parsed["status"] == "submitted"

@@ -19,6 +19,7 @@ from snapper.config.settings import get_settings
 from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicSubscriptionModel
+from snapper.messaging.topics.builders import is_order_topic
 from snapper.messaging.topics.schemas import TOPIC_REGISTRY
 from snapper.utils.logging import set_log_context
 
@@ -29,8 +30,6 @@ MAX_PENDING_MESSAGES_MARKET = 100
 MAX_PENDING_MESSAGES_TRADE = 1000
 
 SEND_TIMEOUT_SECONDS = 1.0
-
-TRADE_CATEGORIES = {"orders", "executions"}
 
 
 class ZmqWebSocketBridgeService:
@@ -287,7 +286,10 @@ class ZmqWebSocketBridgeService:
             logger.error(f"Fatal error in subscription loop for {topic}: {e}")
 
     def _is_trade_topic(self, topic: str) -> bool:
-        """Check if a topic is trade-related (orders/executions).
+        """Check if a topic is trade-related (orders.commands/orders.events).
+
+        Uses centralized is_order_topic() for 2-level prefix matching.
+        For example, 'orders.events.kraken.BTC-USD' matches 'orders.events'.
 
         Args:
             topic: The topic name to check.
@@ -295,7 +297,7 @@ class ZmqWebSocketBridgeService:
         Returns:
             True if the topic is trade-related.
         """
-        return any(cat in topic for cat in TRADE_CATEGORIES)
+        return is_order_topic(topic)
 
     def _get_max_pending(self, topic: str) -> int:
         """Get maximum pending messages for a topic based on category.

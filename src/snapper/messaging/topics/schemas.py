@@ -121,53 +121,53 @@ TOPIC_REGISTRY: dict[str, TopicSchema] = {
             "timestamp": 1640995200000,
         },
     ),
-    "orders": TopicSchema(
-        name="orders",
-        pattern="orders.",
-        description="Order requests from trader to executor for specific exchange and instrument",
+    "orders.commands": TopicSchema(
+        name="orders.commands",
+        pattern="orders.commands.",
+        description=(
+            "Order commands from trader to executor. "
+            "Suffix indicates command type: submit, cancel, replace. "
+            "Format: orders.commands.{exchange}.{instrument}.{command}"
+        ),
         category="trade",
         throttle_ms=0,
-        required_fields=["id", "exchange", "instrument", "side", "size", "price"],
+        required_fields=["type", "exchange", "instrument"],
         sample_data={
-            "id": 12345,
+            "type": "order_req",
             "exchange": "kraken",
             "instrument": "BTC-USD",
             "side": "buy",
-            "type": "limit",
-            "size": 0.5,
+            "order_type": "limit",
+            "quantity": 0.5,
             "price": 47000.0,
-            "status": "new",
-            "created_at": 1640995200,
+            "client_order_id": "client_12345",
         },
     ),
-    "executions": TopicSchema(
-        name="executions",
-        pattern="executions.",
-        description="Execution confirmations (fills, rejects) from executor to trader",
+    "orders.events": TopicSchema(
+        name="orders.events",
+        pattern="orders.events.",
+        description=(
+            "Order events from executor to trader/UI. "
+            "Suffix indicates event type: submitted, accepted, rejected, fill, etc. "
+            "Payload varies: FillEnvelope for 'fill', OrderStatusEnvelope for others. "
+            "Format: orders.events.{exchange}.{instrument}.{event}"
+        ),
         category="trade",
         throttle_ms=0,
-        required_fields=[
-            "id",
-            "order_id",
-            "exchange",
-            "instrument",
-            "side",
-            "size",
-            "price",
-            "fee",
-            "executed_at",
-        ],
+        required_fields=["type", "exchange", "instrument"],
         sample_data={
-            "id": 67890,
-            "order_id": 12345,
+            "type": "fill",
+            "trade_id": "trade_67890",
+            "exchange_order_id": "KRAKEN-ABC123",
+            "client_order_id": "client_12345",
             "exchange": "kraken",
             "instrument": "BTC-USD",
             "side": "buy",
             "size": 0.5,
             "price": 47000.0,
             "fee": 0.26,
-            "status": "fill",
-            "executed_at": 1640995201,
+            "fee_asset": "USD",
+            "status": "filled",
         },
     ),
 }

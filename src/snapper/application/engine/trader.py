@@ -39,9 +39,13 @@ from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.messages import FillEnvelope
+from snapper.messaging.schemas.messages import MessageParseError
+from snapper.messaging.schemas.messages import OrderEventEnvelope
 from snapper.messaging.schemas.messages import OrderStatusEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import SignalEnvelope
+from snapper.messaging.schemas.messages import parse_message
+from snapper.messaging.topics.builders import parse_order_event_topic
 
 _bootstrap_settings = get_bootstrap_settings()
 
@@ -151,45 +155,143 @@ class TraderCoordinator(RegisterableProcess):
         except Exception as e:
             logger.error(f"ZMQTrader: Error handling settings update: {e}")
 
-    def _handle_execution_fill(self, topic: str, payload: bytes) -> None:
+    def _dispatch_order_event(self, topic: str, payload: bytes) -> None:
+        """Dispatch order event to appropriate handler based on message type.
+
+        Uses parse_message() to determine envelope type and routes accordingly:
+        - FillEnvelope -> _handle_execution_fill
+        - OrderStatusEnvelope -> _handle_order_status
+        - OrderEventEnvelope -> _handle_order_event
+
+        Args:
+            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.fill").
+            payload: JSON-encoded message envelope.
+        """
+        try:
+            msg = parse_message(payload.decode("utf-8"))
+        except MessageParseError as e:
+            logger.error(f"ZMQTrader: Invalid orders.events payload on {topic}: {e}")
+            return
+        if isinstance(msg, FillEnvelope):
+            self._handle_execution_fill(topic, msg)
+        elif isinstance(msg, OrderStatusEnvelope):
+            self._handle_order_status(topic, msg)
+        elif isinstance(msg, OrderEventEnvelope):
+            self._handle_order_event(topic, msg)
+        else:
+            logger.debug(f"ZMQTrader: Ignoring orders.events message type={msg.type} on {topic}")
+
+    def _handle_execution_fill(self, topic: str, fill: FillEnvelope) -> None:
         """Handle execution fill event from ZMQ.
 
         Logs fill information when an order is executed.
+        Performs invariant checks: topic exchange/instrument must match payload.
 
         Args:
-            topic: ZMQ topic (e.g., "executions.kraken.BTC-USD.fill").
-            payload: JSON-encoded FillEnvelope.
+            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.fill").
+            fill: Parsed FillEnvelope.
         """
-        try:
-            fill = FillEnvelope.from_json(payload.decode("utf-8"))
-            parts = topic.split(".")
-            exchange = parts[1] if len(parts) >= 2 else "unknown"
-            logger.info(
-                f"ZMQTrader: Fill received - {fill.order_id} {fill.side} {fill.size}@{fill.price} "
-                f"{fill.instrument} on {exchange}"
+        parsed = parse_order_event_topic(topic)
+        if parsed is None:
+            logger.debug(f"ZMQTrader: Ignoring malformed fill topic: {topic}")
+            return
+        if fill.exchange != parsed.exchange or fill.instrument != parsed.instrument:
+            logger.warning(
+                f"ZMQTrader: Invariant violation - topic '{parsed.exchange}/{parsed.instrument}' "
+                f"!= payload '{fill.exchange}/{fill.instrument}'"
             )
-        except Exception as e:
-            logger.error(f"ZMQTrader: Error handling execution fill: {e}")
+            return
+        logger.info(
+            f"ZMQTrader: Fill received - {fill.client_order_id} "
+            f"(exchange_order_id={fill.exchange_order_id}, trade_id={fill.trade_id}) "
+            f"{fill.side} {fill.size}@{fill.price} {fill.instrument} on {parsed.exchange}"
+        )
 
-    def _handle_order_status(self, topic: str, payload: bytes) -> None:
-        """Handle order status update from ZMQ.
+    def _handle_order_status(self, topic: str, order_status: OrderStatusEnvelope) -> None:
+        """Handle order status event from ZMQ.
 
-        Logs order status changes (pending, filled, cancelled, etc.).
+        Logs order status changes (submitted, accepted, rejected, etc.).
+        Performs invariant checks:
+        - topic exchange/instrument must match payload
+        - topic suffix must match payload status
+
+        For 'rejected' status, the log includes envelope type to disambiguate
+        submit rejection (OrderStatusEnvelope) vs cancel/replace rejection
+        (OrderEventEnvelope).
 
         Args:
-            topic: ZMQ topic (e.g., "orders.kraken.BTC-USD.status").
-            payload: JSON-encoded OrderStatusEnvelope.
+            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.accepted").
+            order_status: Parsed OrderStatusEnvelope.
         """
-        try:
-            order_status = OrderStatusEnvelope.from_json(payload.decode("utf-8"))
-            parts = topic.split(".")
-            exchange = parts[1] if len(parts) >= 2 else "unknown"
-            logger.info(
-                f"ZMQTrader: Order status - {order_status.id} {order_status.status} "
-                f"{order_status.instrument} on {exchange}"
+        parsed = parse_order_event_topic(topic)
+        if parsed is None:
+            logger.debug(f"ZMQTrader: Ignoring malformed order status topic: {topic}")
+            return
+        if order_status.exchange != parsed.exchange or order_status.instrument != parsed.instrument:
+            logger.warning(
+                f"ZMQTrader: Invariant violation - topic '{parsed.exchange}/{parsed.instrument}' "
+                f"!= payload '{order_status.exchange}/{order_status.instrument}'"
             )
-        except Exception as e:
-            logger.error(f"ZMQTrader: Error handling order status: {e}")
+            return
+        if order_status.status != parsed.suffix:
+            logger.warning(
+                f"ZMQTrader: Invariant violation - topic suffix '{parsed.suffix}' "
+                f"!= payload status '{order_status.status}'"
+            )
+        if parsed.suffix == "rejected":
+            logger.info(
+                f"ZMQTrader: Order status [OrderStatusEnvelope] - {order_status.client_order_id} "
+                f"{parsed.suffix} (submit rejection) {order_status.instrument} "
+                f"on {parsed.exchange}"
+            )
+        else:
+            logger.info(
+                f"ZMQTrader: Order status - {order_status.client_order_id} {parsed.suffix} "
+                f"{order_status.instrument} on {parsed.exchange}"
+            )
+
+    def _handle_order_event(self, topic: str, order_event: OrderEventEnvelope) -> None:
+        """Handle lightweight order event from ZMQ (cancel/replace confirmations).
+
+        Logs cancel/replace event confirmations (cancelled, replaced, rejected).
+        Performs invariant checks:
+        - topic exchange/instrument must match payload
+        - topic suffix must match payload event
+
+        For 'rejected' event, the log includes envelope type to disambiguate
+        cancel/replace rejection (OrderEventEnvelope) vs submit rejection
+        (OrderStatusEnvelope).
+
+        Args:
+            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.cancelled").
+            order_event: Parsed OrderEventEnvelope.
+        """
+        parsed = parse_order_event_topic(topic)
+        if parsed is None:
+            logger.debug(f"ZMQTrader: Ignoring malformed order event topic: {topic}")
+            return
+        if order_event.exchange != parsed.exchange or order_event.instrument != parsed.instrument:
+            logger.warning(
+                f"ZMQTrader: Invariant violation - topic '{parsed.exchange}/{parsed.instrument}' "
+                f"!= payload '{order_event.exchange}/{order_event.instrument}'"
+            )
+            return
+        if order_event.event != parsed.suffix:
+            logger.warning(
+                f"ZMQTrader: Invariant violation - topic suffix '{parsed.suffix}' "
+                f"!= payload event '{order_event.event}'"
+            )
+        if parsed.suffix == "rejected":
+            logger.info(
+                f"ZMQTrader: Order event [OrderEventEnvelope] - {order_event.client_order_id} "
+                f"{parsed.suffix} (cancel/replace rejection) {order_event.instrument} "
+                f"on {parsed.exchange}"
+            )
+        else:
+            logger.info(
+                f"ZMQTrader: Order event - {order_event.client_order_id} {parsed.suffix} "
+                f"{order_event.instrument} on {parsed.exchange}"
+            )
 
     async def stop(self) -> None:
         """Stop the trader coordinator and cleanup resources.
@@ -257,8 +359,7 @@ class TraderCoordinator(RegisterableProcess):
         - Signal topics (configurable)
         - system.symbol_mappings (cache invalidation)
         - system.settings (settings updates)
-        - executions.* (fill notifications)
-        - orders.* (order status updates)
+        - orders.events.* (fill notifications and order status updates)
         """
         self.zmq_context = zmq.asyncio.Context()
         raw_sub_socket = self.zmq_context.socket(zmq.SUB)
@@ -273,10 +374,8 @@ class TraderCoordinator(RegisterableProcess):
         self.signal_subscriber.subscribe("system.symbol_mappings")
         logger.info("ZMQTrader: Subscribing to system.settings")
         self.signal_subscriber.subscribe("system.settings")
-        logger.info("ZMQTrader: Subscribing to executions. (all exchanges)")
-        self.signal_subscriber.subscribe("executions.")
-        logger.info("ZMQTrader: Subscribing to orders. status updates (all exchanges)")
-        self.signal_subscriber.subscribe("orders.")
+        logger.info("ZMQTrader: Subscribing to orders.events. (fills and status updates)")
+        self.signal_subscriber.subscribe("orders.events.")
         logger.info("ZMQTrader: Signal subscriber setup complete")
 
     async def _run_trading_loop(self) -> None:
@@ -306,8 +405,7 @@ class TraderCoordinator(RegisterableProcess):
         Main message processing loop that routes messages based on topic:
         - Signals → _on_signal()
         - Settings → _handle_settings_update()
-        - Fills → _handle_execution_fill()
-        - Order status → _handle_order_status()
+        - Order events → _handle_execution_fill() or _handle_order_status()
         """
         if not self.signal_subscriber:
             logger.error("ZMQTrader: No signal subscriber in listen loop")
@@ -323,13 +421,8 @@ class TraderCoordinator(RegisterableProcess):
                 if topic_str == "system.settings":
                     self._handle_settings_update(msg_bytes)
                     continue
-                if topic_str.startswith("executions.") and topic_str.endswith(".fill"):
-                    self._handle_execution_fill(topic_str, msg_bytes)
-                    continue
-                if topic_str.startswith("orders.") and topic_str.endswith(".status"):
-                    self._handle_order_status(topic_str, msg_bytes)
-                    continue
-                if topic_str.startswith("orders.") and topic_str.endswith(".new"):
+                if topic_str.startswith("orders.events."):
+                    self._dispatch_order_event(topic_str, msg_bytes)
                     continue
                 signal = SignalEnvelope.from_json(msg_bytes.decode())
                 logger.info(f"ZMQTrader: Received signal from {topic_str}: {signal}")

@@ -375,8 +375,8 @@ class TestSecureWebSocketAdmin:
             assert "market" in topics
             assert "signals" in topics
             assert "system.heartbeats." in topics
-            assert "orders" in topics
-            assert "executions" in topics
+            assert "orders.commands" in topics
+            assert "orders.events" in topics
 
 
 def test_websocket_stats_endpoint(test_client: Any) -> None:
@@ -1884,7 +1884,7 @@ def test_filter_topics_respects_allowed_sets() -> None:
     topics = [
         "market.kraken.BTC-USD.candles.1m",
         "signals.kraken.BTC-USD.live",
-        "orders.kraken.BTC-USD.new",
+        "orders.commands.kraken.BTC-USD.submit",
         "signals.kraken.BTC-USD.live",
     ]
     allowed, denied = FILTER_TOPICS(
@@ -1896,7 +1896,7 @@ def test_filter_topics_respects_allowed_sets() -> None:
         "market.kraken.BTC-USD.candles.1m",
         "signals.kraken.BTC-USD.live",
     ]
-    assert denied == ["orders.kraken.BTC-USD.new"]
+    assert denied == ["orders.commands.kraken.BTC-USD.submit"]
 
 
 def test_determine_topic_category_fallbacks() -> None:
@@ -1908,8 +1908,14 @@ def test_determine_topic_category_fallbacks() -> None:
     """
     assert DETERMINE_TOPIC_CATEGORY("market.kraken.BTC-USD.candles.1m") == "market"
     assert DETERMINE_TOPIC_CATEGORY("trade.kraken.BTC-USD.live") is None
-    assert DETERMINE_TOPIC_CATEGORY("orders.kraken.BTC-USD") == "trade"
+    assert DETERMINE_TOPIC_CATEGORY("orders.commands.kraken.BTC-USD.submit") == "trade"
+    assert DETERMINE_TOPIC_CATEGORY("orders.events.kraken.BTC-USD.fill") == "trade"
     assert DETERMINE_TOPIC_CATEGORY("unknown.topic") is None
+    assert DETERMINE_TOPIC_CATEGORY("bar") == "market"
+    assert DETERMINE_TOPIC_CATEGORY("tick") == "market"
+    assert DETERMINE_TOPIC_CATEGORY("fill") == "trade"
+    assert DETERMINE_TOPIC_CATEGORY("heartbeat") == "system"
+    assert DETERMINE_TOPIC_CATEGORY("unknown") is None
 
 
 @pytest.mark.asyncio

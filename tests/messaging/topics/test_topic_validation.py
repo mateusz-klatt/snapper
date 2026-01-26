@@ -16,10 +16,10 @@ from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
 from snapper.messaging.topics.validation import _validate_admin_topic
 from snapper.messaging.topics.validation import _validate_exchange
-from snapper.messaging.topics.validation import _validate_executions_topic
 from snapper.messaging.topics.validation import _validate_instrument
 from snapper.messaging.topics.validation import _validate_market_topic
-from snapper.messaging.topics.validation import _validate_orders_topic
+from snapper.messaging.topics.validation import _validate_orders_commands_topic
+from snapper.messaging.topics.validation import _validate_orders_events_topic
 from snapper.messaging.topics.validation import _validate_prefix_pattern
 from snapper.messaging.topics.validation import _validate_signal_topic
 from snapper.messaging.topics.validation import _validate_system_topic
@@ -46,14 +46,14 @@ def test_market_candles_missing_timeframe(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_orders_invalid_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test orders topic rejects invalid instrument.
+    """Test orders command topic rejects invalid instrument.
 
-    Given: An orders topic with unknown instrument,
+    Given: An orders command topic with unknown instrument,
     When: Validated,
     Then: Validation fails with instrument error.
     """
     _patch_env(monkeypatch, {"kraken"}, {"ETH-USD"})
-    is_valid, message = validation.validate_topic("orders.kraken.BTC-USD.new")
+    is_valid, message = validation.validate_topic("orders.commands.kraken.BTC-USD.submit")
     assert not is_valid
     assert "Unknown instrument 'BTC-USD'" in message
 
@@ -96,14 +96,14 @@ def test_prefix_market_invalid_exchange(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_prefix_orders_invalid_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test orders prefix rejects invalid instrument.
+    """Test orders commands prefix rejects invalid instrument.
 
-    Given: An orders prefix with unknown instrument,
+    Given: An orders commands prefix with unknown instrument,
     When: Validated as subscription pattern,
     Then: Validation fails with instrument error.
     """
     _patch_env(monkeypatch, {"kraken"}, {"BTC-USD"})
-    is_valid, message = validation.validate_subscription_pattern("orders.kraken.BAD.")
+    is_valid, message = validation.validate_subscription_pattern("orders.commands.kraken.BAD.")
     assert not is_valid
     assert "Unknown instrument 'BAD'" in message
 
@@ -124,34 +124,34 @@ def test_prefix_signals_invalid_instrument(monkeypatch: pytest.MonkeyPatch) -> N
 class TestTopicContractValidation:
     """Tests for topic contract validation ensuring correct topic formats."""
 
-    def test_executor_executions_topic_format_is_valid(self) -> None:
-        """Test executor executions topics are valid.
+    def test_executor_orders_events_topic_format_is_valid(self) -> None:
+        """Test executor orders events topics are valid.
 
-        Given: Standard execution topic formats,
+        Given: Standard orders events topic formats,
         When: Validated,
         Then: All are valid.
         """
         valid_topics = [
-            "executions.kraken.BTC-USD.fill",
-            "executions.zonda.BTC-PLN.fill",
-            "executions.walutomat.EUR-PLN.fill",
+            "orders.events.kraken.BTC-USD.fill",
+            "orders.events.zonda.BTC-PLN.fill",
+            "orders.events.walutomat.EUR-PLN.fill",
         ]
         for topic in valid_topics:
             is_valid, error_msg = validate_topic(topic)
             assert is_valid is True, f"Expected {topic} to be valid but got: {error_msg}"
 
-    def test_executor_orders_topic_format_is_valid(self) -> None:
-        """Test executor orders topics are valid.
+    def test_executor_orders_commands_topic_format_is_valid(self) -> None:
+        """Test executor orders commands topics are valid.
 
-        Given: Standard orders topic formats,
+        Given: Standard orders commands topic formats,
         When: Validated,
         Then: All are valid.
         """
         valid_topics = [
-            "orders.kraken.BTC-USD.status",
-            "orders.zonda.BTC-PLN.status",
-            "orders.walutomat.EUR-PLN.status",
-            "orders.kraken.BTC-USD.new",
+            "orders.commands.kraken.BTC-USD.submit",
+            "orders.commands.zonda.BTC-PLN.submit",
+            "orders.commands.walutomat.EUR-PLN.submit",
+            "orders.commands.kraken.BTC-USD.cancel",
         ]
         for topic in valid_topics:
             is_valid, error_msg = validate_topic(topic)
@@ -186,10 +186,10 @@ class TestValidatedPublisherContract:
         Then: All are accepted.
         """
         valid_executor_topics = [
-            "executions.kraken.BTC-USD.fill",
-            "orders.kraken.BTC-USD.status",
-            "executions.zonda.BTC-PLN.fill",
-            "orders.zonda.BTC-PLN.status",
+            "orders.events.kraken.BTC-USD.fill",
+            "orders.events.kraken.BTC-USD.accepted",
+            "orders.events.zonda.BTC-PLN.fill",
+            "orders.events.zonda.BTC-PLN.accepted",
         ]
         for topic in valid_executor_topics:
             is_valid, error_msg = validate_topic(topic)
@@ -224,8 +224,9 @@ class TestPayloadContract:
         Then: All required frontend fields are present.
         """
         fill = FillEnvelope(
-            id="exch-456",
-            order_id="test-order-123",
+            trade_id="trade-456",
+            exchange_order_id="exch-456",
+            client_order_id="test-order-123",
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -236,8 +237,9 @@ class TestPayloadContract:
             status="filled",
             executed_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
-        assert hasattr(fill, "order_id")
-        assert hasattr(fill, "id")
+        assert hasattr(fill, "client_order_id")
+        assert hasattr(fill, "exchange_order_id")
+        assert hasattr(fill, "trade_id")
         assert hasattr(fill, "instrument")
         assert hasattr(fill, "exchange")
         assert hasattr(fill, "side")
@@ -247,8 +249,9 @@ class TestPayloadContract:
         assert hasattr(fill, "fee_asset")
         assert hasattr(fill, "executed_at")
         json_data = json.loads(fill.to_json())
-        assert json_data["order_id"] == "test-order-123"
-        assert json_data["id"] == "exch-456"
+        assert json_data["client_order_id"] == "test-order-123"
+        assert json_data["exchange_order_id"] == "exch-456"
+        assert json_data["trade_id"] == "trade-456"
         assert json_data["instrument"] == "BTC-USD"
         assert json_data["exchange"] == "kraken"
         assert json_data["side"] == "buy"
@@ -266,8 +269,9 @@ class TestPayloadContract:
         Then: Side value is preserved.
         """
         buy_fill = FillEnvelope(
-            id="exch-1",
-            order_id="test-1",
+            trade_id="trade-1",
+            exchange_order_id="exch-1",
+            client_order_id="test-1",
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -280,8 +284,9 @@ class TestPayloadContract:
         )
         assert buy_fill.side == "buy"
         sell_fill = FillEnvelope(
-            id="exch-2",
-            order_id="test-2",
+            trade_id="trade-2",
+            exchange_order_id="exch-2",
+            client_order_id="test-2",
             instrument="BTC-USD",
             exchange="kraken",
             side="sell",
@@ -304,8 +309,9 @@ class TestPayloadContract:
         valid_statuses = ["filled", "partial", "rejected", "cancelled"]
         for status in valid_statuses:
             fill = FillEnvelope(
-                id="exch",
-                order_id="test",
+                trade_id="trade",
+                exchange_order_id="exch",
+                client_order_id="test",
                 instrument="BTC-USD",
                 exchange="kraken",
                 side="buy",
@@ -434,26 +440,26 @@ def test_validate_topic_market_missing_timeframe() -> None:
     assert "include timeframe" in msg
 
 
-def test_validate_topic_orders_invalid_type() -> None:
-    """Test orders topic with invalid type.
+def test_validate_topic_orders_invalid_command() -> None:
+    """Test orders commands topic with invalid command.
 
-    Given: An orders topic with invalid order type,
+    Given: An orders commands topic with invalid command type,
     When: Validated,
     Then: Validation fails.
     """
-    ok, msg = validate_topic("orders.kraken.BTC-USD.cancel")
+    ok, msg = validate_topic("orders.commands.kraken.BTC-USD.update")
     assert ok is False
-    assert "Invalid order type" in msg
+    assert "Invalid order command" in msg
 
 
-def test_validate_topic_executions_invalid_instrument() -> None:
-    """Test executions topic with invalid instrument.
+def test_validate_topic_orders_events_invalid_instrument() -> None:
+    """Test orders events topic with invalid instrument.
 
-    Given: An executions topic with unknown instrument,
+    Given: An orders events topic with unknown instrument,
     When: Validated,
     Then: Validation fails with instrument error.
     """
-    ok, msg = validate_topic("executions.kraken.ABC-USD.fill")
+    ok, msg = validate_topic("orders.events.kraken.ABC-USD.fill")
     assert ok is False
     assert "Unknown instrument" in msg
 
@@ -566,7 +572,7 @@ def test_validate_subscription_pattern_full_topic_delegates_to_validate_topic() 
     When: Validated as subscription pattern,
     Then: Delegates to validate_topic.
     """
-    ok, msg = validate_subscription_pattern("orders.kraken.BTC-USD.new")
+    ok, msg = validate_subscription_pattern("orders.commands.kraken.BTC-USD.submit")
     assert ok is True
     assert msg == ""
 
@@ -748,10 +754,10 @@ class TestSubscriptionPatternValidation:
             "market.",
             "market.kraken.",
             "market.kraken.BTC-USD.",
-            "orders.",
-            "orders.kraken.",
-            "executions.",
-            "executions.kraken.",
+            "orders.commands.",
+            "orders.events.",
+            "orders.commands.kraken.",
+            "orders.events.kraken.",
             "system.",
             "signals.",
             "signals.kraken.",
@@ -920,84 +926,99 @@ class TestSystemTopicValidation:
 class TestOrdersTopicValidation:
     """Tests for orders topic validation including segment counts."""
 
-    def test_valid_orders_topic(self) -> None:
-        """Verify valid orders topic is accepted.
+    def test_valid_orders_commands_topic(self) -> None:
+        """Verify valid orders commands topic is accepted.
 
-        Given: A complete orders topic,
+        Given: A complete orders commands topic,
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("orders.kraken.BTC-USD.new")
+        valid, err = validate_topic("orders.commands.kraken.BTC-USD.submit")
         assert valid
         assert err == ""
 
     def test_invalid_orders_topic_segments(self) -> None:
         """Verify orders topic with wrong segment count is rejected.
 
-        Given: An orders topic with too few segments,
+        Given: An orders commands topic with too few segments,
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("orders.kraken")
+        valid, err = validate_topic("orders.commands.kraken")
         assert not valid
-        assert "4 segments" in err
+        assert "5 segments" in err
 
-    def test_orders_topic_invalid_exchange(self) -> None:
-        """Verify orders topic with unknown exchange is rejected.
+    def test_orders_commands_topic_invalid_exchange(self) -> None:
+        """Verify orders commands topic with unknown exchange is rejected.
 
-        Given: An orders topic with invalid exchange,
+        Given: An orders commands topic with invalid exchange,
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("orders.unknown_exchange.BTC-USD.new")
+        valid, err = validate_topic("orders.commands.unknown_exchange.BTC-USD.submit")
         assert not valid
         assert "Unknown exchange" in err
 
     def test_orders_prefixes(self) -> None:
         """Verify valid orders prefix patterns are accepted.
 
-        Given: Various orders prefix patterns,
+        Given: Various orders prefix patterns (excluding bare 'orders.'),
         When: Validated as subscription patterns,
         Then: All are accepted.
         """
-        for prefix in ["orders.", "orders.kraken.", "orders.kraken.BTC-USD."]:
+        for prefix in [
+            "orders.commands.",
+            "orders.commands.kraken.",
+            "orders.commands.kraken.BTC-USD.",
+        ]:
             valid, err = validate_subscription_pattern(prefix)
             assert valid, f"Failed for {prefix}: {err}"
             assert err == ""
 
+    def test_orders_bare_prefix_rejected(self) -> None:
+        """Verify bare 'orders.' prefix is rejected.
 
-class TestExecutionsTopicValidation:
-    """Tests for executions topic validation including segment counts."""
+        Given: A bare 'orders.' prefix without subcategory,
+        When: Validated as subscription pattern,
+        Then: Validation fails with subcategory requirement error.
+        """
+        valid, err = validate_subscription_pattern("orders.")
+        assert not valid
+        assert "subcategory" in err.lower() or "commands" in err.lower()
 
-    def test_executions_topic_valid(self) -> None:
-        """Verify valid executions topic is accepted.
 
-        Given: A complete executions topic,
+class TestOrdersEventsTopicValidation:
+    """Tests for orders events topic validation including segment counts."""
+
+    def test_orders_events_topic_valid(self) -> None:
+        """Verify valid orders events topic is accepted.
+
+        Given: A complete orders events topic,
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("executions.kraken.BTC-USD.fill")
-        assert valid, f"Expected valid execution topic, got error: {err}"
+        valid, err = validate_topic("orders.events.kraken.BTC-USD.fill")
+        assert valid, f"Expected valid orders events topic, got error: {err}"
 
-    def test_invalid_executions_topic_segments(self) -> None:
-        """Verify executions topic with wrong segment count is rejected.
+    def test_invalid_orders_events_topic_segments(self) -> None:
+        """Verify orders events topic with wrong segment count is rejected.
 
-        Given: An executions topic with too few segments,
+        Given: An orders events topic with too few segments,
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("executions.kraken")
+        valid, err = validate_topic("orders.events.kraken")
         assert not valid
-        assert "4 segments" in err
+        assert "5 segments" in err
 
-    def test_executions_prefixes(self) -> None:
-        """Verify valid executions prefix patterns are accepted.
+    def test_orders_events_prefixes(self) -> None:
+        """Verify valid orders events prefix patterns are accepted.
 
-        Given: Various executions prefix patterns,
+        Given: Various orders events prefix patterns,
         When: Validated as subscription patterns,
         Then: All are accepted.
         """
-        for prefix in ["executions.", "executions.kraken.", "executions.kraken.BTC-USD."]:
+        for prefix in ["orders.events.", "orders.events.kraken.", "orders.events.kraken.BTC-USD."]:
             valid, err = validate_subscription_pattern(prefix)
             assert valid, f"Failed for {prefix}: {err}"
             assert err == ""
@@ -1046,11 +1067,11 @@ class TestMarketCategoryValidation:
     def test_market_category_check_with_valid_format(self) -> None:
         """Verify market category is correctly validated.
 
-        Given: A non-market category orders topic,
+        Given: A non-market category orders commands topic,
         When: Validated,
         Then: Validation handles category checking.
         """
-        valid, err = validate_topic("orders.kraken.BTC-USD.new")
+        valid, err = validate_topic("orders.commands.kraken.BTC-USD.submit")
         if not valid:
             assert "category" in err.lower() or "orders" in err.lower()
 
@@ -1089,53 +1110,53 @@ class TestDataTypeValidation:
                 assert valid, f"Expected {topic} to be valid, got error: {err}"
 
 
-class TestExecutionOrdersTopics:
-    """Tests for execution and orders topic validation."""
+class TestOrdersCommandsAndEventsTopics:
+    """Tests for orders commands and events topic validation."""
 
-    def test_orders_topic_valid_format(self) -> None:
-        """Verify valid orders topic format.
+    def test_orders_commands_topic_valid_format(self) -> None:
+        """Verify valid orders commands topic format.
 
-        Given: A valid orders topic,
+        Given: A valid orders commands topic,
         When: Validated,
         Then: Validation succeeds or fails with expected message.
         """
-        valid, err = validate_topic("orders.kraken.BTC-USD.new")
+        valid, err = validate_topic("orders.commands.kraken.BTC-USD.submit")
         if valid:
             assert err == ""
         else:
             assert "orders" in err.lower() or "category" in err.lower()
 
-    def test_orders_topic_invalid_type(self) -> None:
-        """Verify orders topic with invalid type is rejected.
+    def test_orders_commands_topic_invalid_command(self) -> None:
+        """Verify orders commands topic with invalid command is rejected.
 
-        Given: An orders topic with invalid order type,
+        Given: An orders commands topic with invalid command type,
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("orders.kraken.BTC-USD.cancel")
+        valid, err = validate_topic("orders.commands.kraken.BTC-USD.update")
         assert not valid
 
-    def test_executions_topic_valid_format(self) -> None:
-        """Verify valid executions topic format.
+    def test_orders_events_topic_valid_format(self) -> None:
+        """Verify valid orders events topic format.
 
-        Given: A valid executions topic,
+        Given: A valid orders events topic,
         When: Validated,
         Then: Validation succeeds or fails with expected message.
         """
-        valid, err = validate_topic("executions.kraken.BTC-USD.fill")
+        valid, err = validate_topic("orders.events.kraken.BTC-USD.fill")
         if valid:
             assert err == ""
         else:
-            assert "executions" in err.lower() or "category" in err.lower()
+            assert "orders" in err.lower() or "category" in err.lower()
 
-    def test_executions_topic_invalid_type(self) -> None:
-        """Verify executions topic with invalid type is rejected.
+    def test_orders_events_topic_invalid_event(self) -> None:
+        """Verify orders events topic with invalid event is rejected.
 
-        Given: An executions topic with unknown type,
+        Given: An orders events topic with unknown event type,
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("executions.kraken.BTC-USD.unknown")
+        valid, err = validate_topic("orders.events.kraken.BTC-USD.unknown")
         assert not valid
 
 
@@ -1370,82 +1391,82 @@ class TestMarketTopicInvalidTimeframe:
         assert not valid
 
 
-class TestOrdersTopicCategoryCheck:
-    """Tests for orders topic category validation."""
+class TestOrdersCommandsTopicCategoryCheck:
+    """Tests for orders commands topic category validation."""
 
-    def test_orders_category_check_via_direct_function(self) -> None:
-        """Verify direct orders validator rejects wrong category.
+    def test_orders_commands_category_check_via_direct_function(self) -> None:
+        """Verify direct orders commands validator rejects wrong category.
 
-        Given: A topic with non-orders prefix,
-        When: Validated with orders validator,
-        Then: Validation fails with orders category error.
+        Given: A topic with non-orders.commands prefix,
+        When: Validated with orders commands validator,
+        Then: Validation fails with orders.commands category error.
         """
-        valid, err = _validate_orders_topic("notorders.kraken.BTC-USD.new")
+        valid, err = _validate_orders_commands_topic("notorders.commands.kraken.BTC-USD.submit")
         assert not valid
-        assert "orders" in err.lower()
+        assert "orders.commands" in err.lower()
 
-    def test_orders_topic_ends_with_dot(self) -> None:
-        """Verify orders topic ending with dot is rejected.
+    def test_orders_commands_topic_ends_with_dot(self) -> None:
+        """Verify orders commands topic ending with dot is rejected.
 
-        Given: An orders topic with trailing dot,
+        Given: An orders commands topic with trailing dot,
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_orders_topic("orders.kraken.BTC-USD.")
+        valid, err = _validate_orders_commands_topic("orders.commands.kraken.BTC-USD.")
         assert not valid
-        assert "4 segments" in err.lower()
+        assert "5 segments" in err.lower()
 
 
 class TestOrdersTopicTypeValidation:
     """Tests for orders topic type validation."""
 
-    def test_orders_invalid_type(self) -> None:
-        """Verify orders topic with invalid type is rejected.
+    def test_orders_missing_subcategory(self) -> None:
+        """Verify orders topic without commands/events subcategory is rejected.
 
-        Given: An orders topic with unsupported order type,
+        Given: An orders topic without proper subcategory,
         When: Validated,
-        Then: Validation fails with type error.
+        Then: Validation fails with subcategory error.
         """
         valid, err = validate_topic("orders.kraken.BTC-USD.cancel")
         assert not valid
-        assert "order type" in err.lower() or "new, status" in err.lower()
+        assert "orders.commands" in err.lower() or "orders.events" in err.lower()
 
 
-class TestExecutionsTopicValidationV2:
-    """Additional tests for executions topic validation."""
+class TestOrdersEventsTopicValidationV2:
+    """Additional tests for orders.events topic validation."""
 
-    def test_executions_category_check(self) -> None:
-        """Verify direct executions validator rejects wrong category.
+    def test_orders_events_category_check(self) -> None:
+        """Verify direct orders.events validator rejects wrong category.
 
-        Given: A topic with non-executions prefix,
-        When: Validated with executions validator,
-        Then: Validation fails with executions category error.
+        Given: A topic with non-orders.events prefix,
+        When: Validated with orders.events validator,
+        Then: Validation fails with orders.events category error.
         """
-        valid, err = _validate_executions_topic("notexecutions.kraken.BTC-USD.fill")
+        valid, err = _validate_orders_events_topic("notorders.events.kraken.BTC-USD.fill")
         assert not valid
-        assert "executions" in err.lower()
+        assert "orders.events" in err.lower()
 
-    def test_executions_topic_ends_with_dot(self) -> None:
-        """Verify executions topic ending with dot is rejected.
+    def test_orders_events_topic_ends_with_dot(self) -> None:
+        """Verify orders.events topic ending with dot is rejected.
 
-        Given: An executions topic with trailing dot,
+        Given: An orders.events topic with trailing dot,
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_executions_topic("executions.kraken.BTC-USD.")
+        valid, err = _validate_orders_events_topic("orders.events.kraken.BTC-USD.")
         assert not valid
-        assert "4 segments" in err.lower()
+        assert "5 segments" in err.lower()
 
-    def test_executions_invalid_type(self) -> None:
-        """Verify executions topic with invalid type is rejected.
+    def test_orders_events_invalid_type(self) -> None:
+        """Verify orders.events topic with invalid event type is rejected.
 
-        Given: An executions topic with unknown execution type,
+        Given: An orders.events topic with unknown event type,
         When: Validated,
-        Then: Validation fails with type error.
+        Then: Validation fails with event type error.
         """
-        valid, err = validate_topic("executions.kraken.BTC-USD.unknown")
+        valid, err = validate_topic("orders.events.kraken.BTC-USD.unknown")
         assert not valid
-        assert "execution type" in err.lower() or "fill" in err.lower()
+        assert "order event" in err.lower() or "accepted" in err.lower()
 
 
 class TestSignalTopicValidation:
@@ -1749,7 +1770,7 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_subscription_pattern("orders.invalid_exchange.")
+        valid, err = validate_subscription_pattern("orders.commands.invalid_exchange.")
         assert not valid
         assert "exchange" in err.lower()
 
@@ -1760,9 +1781,20 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_subscription_pattern("orders.kraken.INVALID.")
+        valid, err = validate_subscription_pattern("orders.commands.kraken.INVALID.")
         assert not valid
         assert "instrument" in err.lower()
+
+    def test_prefix_orders_invalid_subcategory(self) -> None:
+        """Verify orders prefix with invalid subcategory is rejected.
+
+        Given: An orders prefix without commands/events subcategory,
+        When: Validated,
+        Then: Validation fails with subcategory error.
+        """
+        valid, err = validate_subscription_pattern("orders.kraken.")
+        assert not valid
+        assert "commands" in err.lower() or "events" in err.lower()
 
     def test_prefix_signals_invalid_exchange(self) -> None:
         """Verify signals prefix with invalid exchange is rejected.
@@ -1916,62 +1948,62 @@ class TestCandlesTopicSegmentCount:
 class TestOrdersTopicValidationV2:
     """Additional tests for orders topic validation."""
 
-    def test_orders_topic_wrong_segment_count(self) -> None:
-        """Verify orders topic with wrong segment count is rejected.
+    def test_orders_commands_topic_wrong_segment_count(self) -> None:
+        """Verify orders.commands topic with wrong segment count is rejected.
 
-        Given: An orders topic with too few segments,
+        Given: An orders.commands topic with too few segments,
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_orders_topic("orders.kraken")
+        valid, err = _validate_orders_commands_topic("orders.commands.kraken")
         assert not valid
-        assert "4 segments" in err.lower()
+        assert "5 segments" in err.lower()
 
-    def test_orders_topic_invalid_exchange(self) -> None:
-        """Verify orders topic with invalid exchange is rejected.
+    def test_orders_commands_topic_invalid_exchange(self) -> None:
+        """Verify orders.commands topic with invalid exchange is rejected.
 
-        Given: An orders topic with unknown exchange,
+        Given: An orders.commands topic with unknown exchange,
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("orders.invalid_exch.BTC-USD.new")
+        valid, err = validate_topic("orders.commands.invalid_exch.BTC-USD.submit")
         assert not valid
         assert "exchange" in err.lower()
 
 
-class TestExecutionsTopicExchangeValidation:
-    """Tests for executions topic exchange validation."""
+class TestOrdersEventsTopicExchangeValidation:
+    """Tests for orders.events topic exchange validation."""
 
-    def test_executions_topic_wrong_segment_count(self) -> None:
-        """Verify executions topic with wrong segment count is rejected.
+    def test_orders_events_topic_wrong_segment_count(self) -> None:
+        """Verify orders.events topic with wrong segment count is rejected.
 
-        Given: An executions topic with too few segments,
+        Given: An orders.events topic with too few segments,
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_executions_topic("executions.kraken")
+        valid, err = _validate_orders_events_topic("orders.events.kraken")
         assert not valid
-        assert "4 segments" in err.lower()
+        assert "5 segments" in err.lower()
 
-    def test_executions_topic_invalid_exchange(self) -> None:
-        """Verify executions topic with invalid exchange is rejected.
+    def test_orders_events_topic_invalid_exchange(self) -> None:
+        """Verify orders.events topic with invalid exchange is rejected.
 
-        Given: An executions topic with unknown exchange,
+        Given: An orders.events topic with unknown exchange,
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("executions.invalid_exch.BTC-USD.fill")
+        valid, err = validate_topic("orders.events.invalid_exch.BTC-USD.fill")
         assert not valid
         assert "exchange" in err.lower()
 
-    def test_executions_topic_invalid_instrument(self) -> None:
-        """Verify executions topic with invalid instrument is rejected.
+    def test_orders_events_topic_invalid_instrument(self) -> None:
+        """Verify orders.events topic with invalid instrument is rejected.
 
-        Given: An executions topic with unknown instrument,
+        Given: An orders.events topic with unknown instrument,
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_topic("executions.kraken.INVALID-INST.fill")
+        valid, err = validate_topic("orders.events.kraken.INVALID-INST.fill")
         assert not valid
         assert "instrument" in err.lower()
 
@@ -2154,19 +2186,19 @@ class TestCandlesMissingTimeframe:
         assert "timeframe" in err.lower()
 
 
-class TestOrdersCategoryCheck:
-    """Tests for orders category check."""
+class TestOrdersCommandsCategoryCheck:
+    """Tests for orders.commands category check."""
 
-    def test_orders_wrong_category(self) -> None:
-        """Verify non-orders topic fails orders validation.
+    def test_orders_commands_wrong_category(self) -> None:
+        """Verify non-orders.commands topic fails orders.commands validation.
 
-        Given: A market topic passed to orders validator,
+        Given: A market topic passed to orders.commands validator,
         When: Validated,
-        Then: Validation fails with orders category error.
+        Then: Validation fails with orders.commands category error.
         """
-        valid, err = _validate_orders_topic("market.kraken.BTC-USD.new")
+        valid, err = _validate_orders_commands_topic("market.kraken.BTC-USD.submit")
         assert not valid
-        assert "orders" in err.lower()
+        assert "orders.commands" in err.lower()
 
 
 class TestSignalPaperEmptyStrategy:
@@ -2292,7 +2324,7 @@ class TestPrefixValidationOrders:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = _validate_prefix_pattern("orders.invalid_exchange.")
+        valid, err = _validate_prefix_pattern("orders.commands.invalid_exchange.")
         assert not valid
         assert "exchange" in err.lower()
 
@@ -2303,32 +2335,43 @@ class TestPrefixValidationOrders:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = _validate_prefix_pattern("orders.kraken.INVALID_INSTR.")
+        valid, err = _validate_prefix_pattern("orders.commands.kraken.INVALID_INSTR.")
         assert not valid
 
+    def test_orders_prefix_invalid_subcategory(self) -> None:
+        """Verify orders prefix with invalid subcategory is rejected.
 
-class TestPrefixValidationExecutions:
-    """Tests for executions prefix validation."""
+        Given: An orders prefix with unknown subcategory,
+        When: Validated,
+        Then: Validation fails with subcategory error.
+        """
+        valid, err = _validate_prefix_pattern("orders.invalid_subcategory.")
+        assert not valid
+        assert "commands" in err.lower() or "events" in err.lower()
 
-    def test_executions_prefix_invalid_exchange(self) -> None:
-        """Verify executions prefix with invalid exchange is rejected.
 
-        Given: An executions prefix with unknown exchange,
+class TestPrefixValidationOrdersEvents:
+    """Tests for orders.events prefix validation."""
+
+    def test_orders_events_prefix_invalid_exchange(self) -> None:
+        """Verify orders.events prefix with invalid exchange is rejected.
+
+        Given: An orders.events prefix with unknown exchange,
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = _validate_prefix_pattern("executions.invalid_exchange.")
+        valid, err = _validate_prefix_pattern("orders.events.invalid_exchange.")
         assert not valid
         assert "exchange" in err.lower()
 
-    def test_executions_prefix_invalid_instrument(self) -> None:
-        """Verify executions prefix with invalid instrument is rejected.
+    def test_orders_events_prefix_invalid_instrument(self) -> None:
+        """Verify orders.events prefix with invalid instrument is rejected.
 
-        Given: An executions prefix with unknown instrument,
+        Given: An orders.events prefix with unknown instrument,
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = _validate_prefix_pattern("executions.kraken.INVALID_INSTR.")
+        valid, err = _validate_prefix_pattern("orders.events.kraken.INVALID_INSTR.")
         assert not valid
 
 
@@ -2819,8 +2862,10 @@ class TestSystemFieldValidators:
     [
         ("market.binance.", "Unknown exchange 'binance'"),
         ("market.kraken.INVALID.", "Unknown instrument 'INVALID'"),
-        ("orders.binance.", "Unknown exchange 'binance'"),
-        ("orders.kraken.INVALID.", "Unknown instrument 'INVALID'"),
+        ("orders.commands.binance.", "Unknown exchange 'binance'"),
+        ("orders.commands.kraken.INVALID.", "Unknown instrument 'INVALID'"),
+        ("orders.events.binance.", "Unknown exchange 'binance'"),
+        ("orders.events.kraken.INVALID.", "Unknown instrument 'INVALID'"),
         ("signals.binance.", "Invalid exchange 'binance'"),
     ],
 )
@@ -2951,12 +2996,12 @@ def test_unknown_category_prefix_is_rejected() -> None:
         "market.kraken.BTC-USD.",
         "market.kraken.",
         "market.",
-        "orders.kraken.BTC-USD.",
-        "orders.kraken.",
-        "orders.",
-        "executions.kraken.BTC-USD.",
-        "executions.kraken.",
-        "executions.",
+        "orders.commands.kraken.BTC-USD.",
+        "orders.commands.kraken.",
+        "orders.commands.",
+        "orders.events.kraken.BTC-USD.",
+        "orders.events.kraken.",
+        "orders.events.",
         "signals.paper.BTC-USD.",
         "signals.paper.",
         "signals.",
@@ -3029,16 +3074,16 @@ def test_validate_market_topic_invalid_timeframe() -> None:
     assert "Invalid timeframe" in message
 
 
-def test_validate_orders_invalid_type() -> None:
-    """Verify invalid order type is rejected.
+def test_validate_orders_requires_subcategory() -> None:
+    """Verify orders topic requires commands/events subcategory.
 
-    Given an orders topic with an invalid order type,
+    Given an orders topic without proper subcategory,
     When validate_topic is called,
-    Then it returns False with invalid order type error.
+    Then it returns False with subcategory requirement error.
     """
     is_valid, message = validation.validate_topic("orders.kraken.BTC-USD.unknown")
     assert is_valid is False
-    assert "Invalid order type" in message
+    assert "orders.commands" in message or "orders.events" in message
 
 
 def test_validate_subscription_pattern_rejects_wildcards() -> None:

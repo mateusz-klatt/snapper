@@ -38,12 +38,12 @@ Topic Hierarchy
 ---------------
 ::
 
-    market.{exchange}.{instrument}.{type}       # Market data
-    orders.{exchange}.{instrument}.{type}       # Order lifecycle
-    executions.{exchange}.{instrument}.fill     # Trade fills
-    signals.{exchange}.{instrument}.{type}      # Trading signals
-    system.{type}[.{component}[.{name}]]        # System messages
-    admin.{resource}                             # Administration
+    market.{exchange}.{instrument}.{type}              # Market data
+    orders.commands.{exchange}.{instrument}.{cmd}      # Order commands
+    orders.events.{exchange}.{instrument}.{event}      # Order events/fills
+    signals.{exchange}.{instrument}.{type}             # Trading signals
+    system.{type}[.{component}[.{name}]]               # System messages
+    admin.{resource}                                    # Administration
 
 Message Types
 -------------

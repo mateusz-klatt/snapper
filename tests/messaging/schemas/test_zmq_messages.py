@@ -10,6 +10,9 @@ from snapper.messaging.schemas.messages import BarEnvelope
 from snapper.messaging.schemas.messages import FillEnvelope
 from snapper.messaging.schemas.messages import HeartbeatEnvelope
 from snapper.messaging.schemas.messages import MessageParseError
+from snapper.messaging.schemas.messages import OrderCancelEnvelope
+from snapper.messaging.schemas.messages import OrderEventEnvelope
+from snapper.messaging.schemas.messages import OrderReplaceEnvelope
 from snapper.messaging.schemas.messages import OrderRequestEnvelope
 from snapper.messaging.schemas.messages import SignalEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
@@ -121,8 +124,9 @@ class TestMessages:
         Then: Order ID, size, price, and status are preserved.
         """
         msg = FillEnvelope(
-            id="KRAKEN-ABC123",
-            order_id="test_order_123",
+            trade_id="TRADE-XYZ",
+            exchange_order_id="KRAKEN-ABC123",
+            client_order_id="test_order_123",
             instrument="BTCUSD",
             exchange="kraken",
             side="buy",
@@ -135,7 +139,7 @@ class TestMessages:
         json_str = msg.to_json()
         parsed = FillEnvelope.from_json(json_str)
         assert isinstance(parsed, FillEnvelope)
-        assert parsed.order_id == "test_order_123"
+        assert parsed.client_order_id == "test_order_123"
         assert parsed.size == 0.01
         assert parsed.price == 50000.0
         assert parsed.status == "filled"
@@ -278,3 +282,168 @@ class TestMessages:
                 client_order_id="test",
                 exchange="kraken",
             )
+
+    def test_order_cancel_message(self) -> None:
+        """Test OrderCancelEnvelope serialization.
+
+        Given: An OrderCancelEnvelope with cancel details,
+        When: Serialized and parsed,
+        Then: Exchange, instrument, and exchange_order_id are preserved.
+        """
+        msg = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-ABC123",
+            client_order_id="client_order_456",
+        )
+        json_str = msg.to_json()
+        parsed = OrderCancelEnvelope.from_json(json_str)
+        assert isinstance(parsed, OrderCancelEnvelope)
+        assert parsed.type == "order_cancel"
+        assert parsed.exchange == "kraken"
+        assert parsed.instrument == "BTC-USD"
+        assert parsed.exchange_order_id == "KRAKEN-ABC123"
+        assert parsed.client_order_id == "client_order_456"
+
+    def test_order_cancel_parse_message(self) -> None:
+        """Test OrderCancelEnvelope parsing via parse_message.
+
+        Given: A JSON string with order_cancel type,
+        When: Parsed via parse_message,
+        Then: Returns OrderCancelEnvelope instance.
+        """
+        json_data = {
+            "type": "order_cancel",
+            "exchange": "paper",
+            "instrument": "ETH-USD",
+            "exchange_order_id": "PAPER-XYZ789",
+            "client_order_id": "client_789",
+        }
+        msg = parse_message(json.dumps(json_data))
+        assert isinstance(msg, OrderCancelEnvelope)
+        assert msg.exchange_order_id == "PAPER-XYZ789"
+
+    def test_order_replace_message(self) -> None:
+        """Test OrderReplaceEnvelope serialization.
+
+        Given: An OrderReplaceEnvelope with replace details,
+        When: Serialized and parsed,
+        Then: Exchange, instrument, exchange_order_id, and new values are preserved.
+        """
+        msg = OrderReplaceEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-ABC123",
+            client_order_id="client_order_456",
+            new_quantity=0.5,
+            new_price=48000.0,
+        )
+        json_str = msg.to_json()
+        parsed = OrderReplaceEnvelope.from_json(json_str)
+        assert isinstance(parsed, OrderReplaceEnvelope)
+        assert parsed.type == "order_replace"
+        assert parsed.exchange == "kraken"
+        assert parsed.instrument == "BTC-USD"
+        assert parsed.exchange_order_id == "KRAKEN-ABC123"
+        assert parsed.new_quantity == 0.5
+        assert parsed.new_price == 48000.0
+
+    def test_order_replace_partial_update(self) -> None:
+        """Test OrderReplaceEnvelope with only quantity update.
+
+        Given: An OrderReplaceEnvelope with only new_quantity,
+        When: Serialized and parsed,
+        Then: new_quantity is set and new_price is None.
+        """
+        msg = OrderReplaceEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-ABC123",
+            client_order_id="client_456",
+            new_quantity=1.0,
+        )
+        assert msg.new_quantity == 1.0
+        assert msg.new_price is None
+
+    def test_order_replace_parse_message(self) -> None:
+        """Test OrderReplaceEnvelope parsing via parse_message.
+
+        Given: A JSON string with order_replace type,
+        When: Parsed via parse_message,
+        Then: Returns OrderReplaceEnvelope instance.
+        """
+        json_data = {
+            "type": "order_replace",
+            "exchange": "zonda",
+            "instrument": "BTC-PLN",
+            "exchange_order_id": "ZONDA-111",
+            "client_order_id": "client_111",
+            "new_price": 200000.0,
+        }
+        msg = parse_message(json.dumps(json_data))
+        assert isinstance(msg, OrderReplaceEnvelope)
+        assert msg.new_price == 200000.0
+        assert msg.new_quantity is None
+
+    def test_order_event_message(self) -> None:
+        """Test OrderEventEnvelope serialization.
+
+        Given: An OrderEventEnvelope with event details,
+        When: Serialized and parsed,
+        Then: All fields are preserved correctly.
+        """
+        msg = OrderEventEnvelope(
+            exchange_order_id="KRAKEN-ABC123",
+            client_order_id="client_order_456",
+            exchange="kraken",
+            instrument="BTC-USD",
+            event="cancelled",
+        )
+        json_str = msg.to_json()
+        parsed = OrderEventEnvelope.from_json(json_str)
+        assert isinstance(parsed, OrderEventEnvelope)
+        assert parsed.type == "order_event"
+        assert parsed.exchange_order_id == "KRAKEN-ABC123"
+        assert parsed.client_order_id == "client_order_456"
+        assert parsed.exchange == "kraken"
+        assert parsed.instrument == "BTC-USD"
+        assert parsed.event == "cancelled"
+        assert parsed.reason is None
+
+    def test_order_event_with_reason(self) -> None:
+        """Test OrderEventEnvelope with rejection reason.
+
+        Given: An OrderEventEnvelope with a reason,
+        When: Serialized and parsed,
+        Then: Reason is preserved.
+        """
+        msg = OrderEventEnvelope(
+            exchange_order_id="KRAKEN-ABC123",
+            client_order_id="client_456",
+            exchange="kraken",
+            instrument="BTC-USD",
+            event="rejected",
+            reason="Insufficient balance",
+        )
+        assert msg.event == "rejected"
+        assert msg.reason == "Insufficient balance"
+
+    def test_order_event_parse_message(self) -> None:
+        """Test OrderEventEnvelope parsing via parse_message.
+
+        Given: A JSON string with order_event type,
+        When: Parsed via parse_message,
+        Then: Returns OrderEventEnvelope instance.
+        """
+        json_data = {
+            "type": "order_event",
+            "exchange_order_id": "PAPER-XYZ789",
+            "client_order_id": "client_789",
+            "exchange": "paper",
+            "instrument": "ETH-USD",
+            "event": "replaced",
+        }
+        msg = parse_message(json.dumps(json_data))
+        assert isinstance(msg, OrderEventEnvelope)
+        assert msg.exchange_order_id == "PAPER-XYZ789"
+        assert msg.event == "replaced"
