@@ -30,8 +30,14 @@ OrderStatus = Literal[
 ]
 """Order lifecycle state from creation through completion or cancellation."""
 
-FillStatus = Literal["filled", "partial", "rejected", "cancelled"]
-"""Result of an order execution attempt."""
+FillStatus = Literal["filled", "partial"]
+"""Result of an order execution: 'filled' for complete, 'partial' for ongoing."""
+
+CancelEventType = Literal["cancelled", "rejected"]
+"""Event types for cancel command responses."""
+
+ReplaceEventType = Literal["replaced", "rejected"]
+"""Event types for replace command responses."""
 
 OrderEventType = Literal["submitted", "accepted", "rejected", "cancelled", "expired", "replaced"]
 """Order event type for ZMQ topic suffix (non-fill events).

@@ -165,17 +165,17 @@ def determine_topic_category(topic: str) -> str | None:
     Returns:
         Category name or None if unknown.
     """
-    if "." in topic:
-        prefix_map = {
-            "market": "market",
-            "orders.commands": "trade",
-            "orders.events": "trade",
-            "signals": "strategy",
-            "strategy": "strategy",
-            "system": "system",
-            "admin": "admin",
-        }
-        parts = topic.split(".")
+    prefix_map = {
+        "market": "market",
+        "orders.commands": "trade",
+        "orders.events": "trade",
+        "signals": "strategy",
+        "strategy": "strategy",
+        "system": "system",
+        "admin": "admin",
+    }
+    parts = topic.split(".")
+    if len(parts) >= 2:
         two_level = f"{parts[0]}.{parts[1]}"
         if two_level in prefix_map:
             return prefix_map[two_level]
@@ -188,6 +188,9 @@ def determine_topic_category(topic: str) -> str | None:
         "fill": "trade",
         "heartbeat": "system",
     }
+    result = prefix_map.get(topic)
+    if result is not None:
+        return result
     return category_map.get(topic)
 
 

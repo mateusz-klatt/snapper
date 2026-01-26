@@ -302,11 +302,14 @@ class TestPayloadContract:
     def test_fill_envelope_status_matches_frontend_expectations(self) -> None:
         """Test FillEnvelope status matches frontend.
 
-        Given: Valid fill status values,
+        Given: Valid fill status values (filled, partial),
         When: FillEnvelope created with each status,
         Then: Status is preserved correctly.
+
+        Note: cancelled/rejected are handled by separate event types,
+        not FillEnvelope. See CancelEventType and ReplaceEventType.
         """
-        valid_statuses = ["filled", "partial", "rejected", "cancelled"]
+        valid_statuses = ["filled", "partial"]
         for status in valid_statuses:
             fill = FillEnvelope(
                 trade_id="trade",

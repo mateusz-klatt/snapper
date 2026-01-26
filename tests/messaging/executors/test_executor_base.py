@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import time as time_module
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import call
 from unittest.mock import patch
+from unittest.mock import patch as mock_patch
 
 import pytest
 import zmq
@@ -683,14 +685,15 @@ async def test_process_execution_default_filled_and_removes_pending(
 ) -> None:
     """Test execution processing removes pending orders on fill.
 
-    Given: An executor with a pending order,
+    Given: An executor with a pending order and client_by_exchange mapping,
     When: Execution update with default filled status is received,
     Then: Fill is published and order is removed from pending.
     """
     ex: Any = MergedDummyExecutor()
     ex.running = True
     order = make_order()
-    ex.pending_orders["ex1"] = order
+    ex.pending_orders[order.client_order_id] = order
+    ex.client_by_exchange["ex1"] = order.client_order_id
     ex._publish_fill = AsyncMock()
     execution = SimpleNamespace(
         order_id="ex1",
@@ -702,22 +705,22 @@ async def test_process_execution_default_filled_and_removes_pending(
         fee_usd_equiv=None,
     )
     await ex._process_execution(execution)
-    assert "ex1" not in ex.pending_orders
+    assert order.client_order_id not in ex.pending_orders
     ex._publish_fill.assert_awaited()
 
 
 @pytest.mark.asyncio
 async def test_process_execution_none_exchange_order_id() -> None:
-    """Test fill preserves None exchange_order_id without fallback.
+    """Test execution with None exchange_order_id drops with warning.
 
-    Given: An executor with pending order keyed by None,
+    Given: An executor with pending orders,
     When: Execution update with order_id=None is processed,
-    Then: Fill is published with exchange_order_id = None (no fallback).
+    Then: No fill is published (cannot correlate without exchange_order_id).
     """
     ex: Any = MergedDummyExecutor()
     ex.running = True
     order = make_order()
-    ex.pending_orders[None] = order
+    ex.pending_orders[order.client_order_id] = order
     published_fills: list[Any] = []
 
     async def track_publish_fill(fill: Any) -> None:
@@ -734,25 +737,166 @@ async def test_process_execution_none_exchange_order_id() -> None:
         fee_usd_equiv=0.5,
     )
     await ex._process_execution(execution)
-    assert len(published_fills) == 1
-    fill = published_fills[0]
-    assert fill.exchange_order_id is None
-    assert fill.client_order_id == order.client_order_id
-    assert fill.trade_id == "trade-123"
+    assert len(published_fills) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_execution_orphaned_client_by_exchange() -> None:
+    """Test execution with orphaned client_by_exchange mapping drops with warning.
+
+    Given: An executor with client_by_exchange mapping but no matching pending order,
+    When: Execution update is processed,
+    Then: No fill is published (cannot correlate without pending order).
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.client_by_exchange["ex1"] = "orphaned_client_id"
+    published_fills: list[Any] = []
+
+    async def track_publish_fill(fill: Any) -> None:
+        published_fills.append(fill)
+
+    ex._publish_fill = track_publish_fill
+    execution = SimpleNamespace(
+        order_id="ex1",
+        exec_type="filled",
+        exec_id="trade-123",
+        order_status=None,
+        cum_qty=1.0,
+        average_price=50000.0,
+        fee_usd_equiv=0.5,
+    )
+    await ex._process_execution(execution)
+    assert len(published_fills) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_execution_duplicate_fill_idempotent() -> None:
+    """Test duplicate filled execution is idempotent (no crash, no double publish).
+
+    Given: An executor that already processed and removed an order,
+    When: Duplicate filled execution arrives for the same exchange_order_id,
+    Then: No crash, no fill published (maps already empty).
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    published_fills: list[Any] = []
+
+    async def track_publish_fill(fill: Any) -> None:
+        published_fills.append(fill)
+
+    ex._publish_fill = track_publish_fill
+    execution = SimpleNamespace(
+        order_id="already_filled_ex1",
+        exec_type="filled",
+        exec_id="trade-dup",
+        order_status=None,
+        cum_qty=1.0,
+        average_price=50000.0,
+        fee_usd_equiv=0.5,
+    )
+    await ex._process_execution(execution)
+    assert len(published_fills) == 0
+    assert "already_filled_ex1" not in ex.client_by_exchange
+
+
+@pytest.mark.asyncio
+async def test_process_execution_orphan_buffering_and_replay() -> None:
+    """Test orphan execution buffering and replay on ACK.
+
+    Given: An execution arrives before ACK (mapping not yet established),
+    When: ACK arrives and mapping is created,
+    Then: Buffered orphan is replayed and processed.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    order = make_order()
+    ex.pending_orders[order.client_order_id] = order
+    published_fills: list[Any] = []
+
+    async def track_publish_fill(fill: Any) -> None:
+        published_fills.append(fill)
+
+    ex._publish_fill = track_publish_fill
+    execution = SimpleNamespace(
+        order_id="fast_exchange_id",
+        exec_type="filled",
+        exec_id="trade-fast",
+        order_status=None,
+        cum_qty=1.0,
+        average_price=50000.0,
+        fee_usd_equiv=0.5,
+    )
+    await ex._process_execution(execution)
+    assert len(published_fills) == 0
+    assert "fast_exchange_id" in ex.orphaned_executions
+    ex.client_by_exchange["fast_exchange_id"] = order.client_order_id
+    ex._try_process_orphaned("fast_exchange_id", order.client_order_id)
+    await asyncio.sleep(0.01)
+    assert "fast_exchange_id" not in ex.orphaned_executions
+
+
+@pytest.mark.asyncio
+async def test_orphan_ttl_expiry_increments_drop_count() -> None:
+    """Test orphan executions expire and increment drop counter.
+
+    Given: An orphaned execution buffered past TTL,
+    When: _cleanup_expired_orphans is called,
+    Then: Orphan is removed and drop counter incremented.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.orphan_ttl_seconds = 0.1
+    ex.orphaned_executions["old_ex"] = (SimpleNamespace(order_id="old_ex"), time_module.monotonic())
+    initial_count = ex.orphan_drop_count
+    with mock_patch("time.monotonic", return_value=time_module.monotonic() + 1.0):
+        ex._cleanup_expired_orphans()
+    assert "old_ex" not in ex.orphaned_executions
+    assert ex.orphan_drop_count == initial_count + 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_duplicate_updates_timestamp_without_relogging() -> None:
+    """Test duplicate orphan updates refresh timestamp but do not re-log.
+
+    Given: An orphan execution already buffered,
+    When: Another execution with the same order_id arrives,
+    Then: Timestamp is refreshed but the entry is not re-logged (already_buffered check).
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.orphan_ttl_seconds = 5.0
+    initial_time = time_module.monotonic()
+    ex.orphaned_executions["dup_ex"] = (SimpleNamespace(order_id="dup_ex"), initial_time)
+    new_execution = SimpleNamespace(
+        order_id="dup_ex",
+        exec_type="trade",
+        order_status=None,
+        cum_qty=2.0,
+        average_price=100.0,
+        fee_usd_equiv=0.0,
+        exec_id="trade-dup",
+    )
+    await ex._process_execution(new_execution)
+    assert "dup_ex" in ex.orphaned_executions
+    stored_execution, stored_time = ex.orphaned_executions["dup_ex"]
+    assert stored_execution.cum_qty == 2.0
+    assert stored_time >= initial_time
 
 
 @pytest.mark.asyncio
 async def test_process_execution_exception_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test execution processing keeps order on publish error.
 
-    Given: An executor with pending order and failing _publish_fill,
+    Given: An executor with pending order, mapping, and failing _publish_fill,
     When: Execution update is processed,
     Then: Order remains in pending_orders after exception.
     """
     ex: Any = MergedDummyExecutor()
     ex.running = True
     order = make_order()
-    ex.pending_orders["ex1"] = order
+    ex.pending_orders[order.client_order_id] = order
+    ex.client_by_exchange["ex1"] = order.client_order_id
     ex._publish_fill = AsyncMock(side_effect=RuntimeError("fail"))
     execution = SimpleNamespace(
         order_id="ex1",
@@ -763,7 +907,7 @@ async def test_process_execution_exception_path(monkeypatch: pytest.MonkeyPatch)
         fee_usd_equiv=0.0,
     )
     await ex._process_execution(execution)
-    assert "ex1" in ex.pending_orders
+    assert order.client_order_id in ex.pending_orders
 
 
 @pytest.mark.asyncio
@@ -1242,12 +1386,15 @@ class TestProcessExecution:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_process_execution_cancelled(self, mock_get_settings: MagicMock) -> None:
-        """Verify cancelled execution is processed correctly.
+    async def test_process_execution_cancelled_cleans_maps_no_fill(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify cancelled execution cleans maps but publishes no fill.
 
         Given: Pending order with cancellation execution update,
         When: Execution is processed,
-        Then: Fill with cancelled status is published and order removed.
+        Then: No fill is published but maps are cleaned.
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -1263,7 +1410,8 @@ class TestProcessExecution:
             quantity=0.1,
             client_order_id="order_123",
         )
-        service_any.pending_orders = {"exchange_order_456": order}
+        service_any.pending_orders = {order.client_order_id: order}
+        service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
         async def track_publish_fill(fill: Any) -> None:
@@ -1280,9 +1428,58 @@ class TestProcessExecution:
             timestamp=datetime.now(UTC),
         )
         await service_any._process_execution(execution)
-        assert len(published_fills) == 1
-        assert published_fills[0].status == "cancelled"
-        assert "exchange_order_456" not in service_any.pending_orders
+        assert len(published_fills) == 0
+        assert order.client_order_id not in service_any.pending_orders
+        assert "exchange_order_456" not in service_any.client_by_exchange
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_execution_expired_cleans_maps_no_fill(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify expired execution cleans maps but publishes no fill.
+
+        Given: Pending order with expired execution update,
+        When: Execution is processed,
+        Then: No fill is published but maps are cleaned.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        order = OrderRequestEnvelope(
+            strategy_id="test",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="limit",
+            quantity=0.1,
+            price=50000.0,
+            client_order_id="order_expired_123",
+        )
+        service_any.pending_orders = {order.client_order_id: order}
+        service_any.client_by_exchange = {"exchange_order_789": order.client_order_id}
+        published_fills: list[Any] = []
+
+        async def track_publish_fill(fill: Any) -> None:
+            published_fills.append(fill)
+
+        service_any._publish_fill = track_publish_fill
+        execution = ExecutionUpdate(
+            order_id="exchange_order_789",
+            exec_type="expired",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CANCELED,
+            timestamp=datetime.now(UTC),
+        )
+        await service_any._process_execution(execution)
+        assert len(published_fills) == 0
+        assert order.client_order_id not in service_any.pending_orders
+        assert "exchange_order_789" not in service_any.client_by_exchange
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1308,7 +1505,8 @@ class TestProcessExecution:
             price=50000.0,
             client_order_id="order_123",
         )
-        service_any.pending_orders = {"exchange_order_456": order}
+        service_any.pending_orders = {order.client_order_id: order}
+        service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
         async def track_publish_fill(fill: Any) -> None:
@@ -1329,7 +1527,7 @@ class TestProcessExecution:
         await service_any._process_execution(execution)
         assert len(published_fills) == 1
         assert published_fills[0].status == "partial"
-        assert "exchange_order_456" in service_any.pending_orders
+        assert order.client_order_id in service_any.pending_orders
 
 
 class TestHeartbeat:
@@ -2601,7 +2799,7 @@ class TestExecutorCoverage:
     async def test_process_execution_updates_pending(self, mock_get_settings: MagicMock) -> None:
         """Verify execution processing updates pending orders.
 
-        Given: Pending order with filled execution,
+        Given: Pending order with filled execution and client_by_exchange mapping,
         When: Execution is processed,
         Then: Fill published and order removed from pending.
         """
@@ -2612,7 +2810,8 @@ class TestExecutorCoverage:
         service_any.running = True
         service_any._publish_fill = AsyncMock()
         order = self._create_order(mode="live")
-        service_any.pending_orders["ex123"] = order
+        service_any.pending_orders[order.client_order_id] = order
+        service_any.client_by_exchange = {"ex123": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="ex123",
             exec_type="filled",
@@ -2628,7 +2827,7 @@ class TestExecutorCoverage:
         )
         await service_any._process_execution(execution)
         service_any._publish_fill.assert_awaited_once()
-        assert "ex123" not in service_any.pending_orders
+        assert order.client_order_id not in service_any.pending_orders
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3407,7 +3606,8 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-order-123",
             exchange="kraken",
         )
-        service.pending_orders["KRAKEN-ORDER-ABC123"] = order
+        service.pending_orders[order.client_order_id] = order
+        service.client_by_exchange = {"KRAKEN-ORDER-ABC123": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="KRAKEN-ORDER-ABC123",
             exec_type="filled",
@@ -3434,7 +3634,7 @@ class TestExecutorWebSocketExecutions:
             assert fill.fee == 4.51
             assert fill.fee_asset == "USD"
             assert fill.status == "filled"
-            assert "KRAKEN-ORDER-ABC123" not in service.pending_orders
+            assert order.client_order_id not in service.pending_orders
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3444,7 +3644,7 @@ class TestExecutorWebSocketExecutions:
     ) -> None:
         """Verify partial fill execution creates partial status.
 
-        Given: Pending order with partial fill execution,
+        Given: Pending order with partial fill execution and client_by_exchange mapping,
         When: Execution is processed,
         Then: Partial fill published and order remains pending.
         """
@@ -3462,7 +3662,8 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-partial-123",
             exchange="kraken",
         )
-        service.pending_orders["KRAKEN-PARTIAL-XYZ"] = order
+        service.pending_orders[order.client_order_id] = order
+        service.client_by_exchange = {"KRAKEN-PARTIAL-XYZ": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="KRAKEN-PARTIAL-XYZ",
             exec_type="trade",
@@ -3481,19 +3682,19 @@ class TestExecutorWebSocketExecutions:
             fill: FillEnvelope = mock_publish.call_args[0][0]
             assert fill.size == 0.5
             assert fill.status == "partial"
-            assert "KRAKEN-PARTIAL-XYZ" in service.pending_orders
+            assert order.client_order_id in service.pending_orders
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_process_execution_cancelled_order(
+    async def test_process_execution_cancelled_order_cleans_maps(
         self,
         mock_get_settings: MagicMock,
     ) -> None:
-        """Verify cancelled order execution creates cancelled status.
+        """Verify cancelled order cleans maps but publishes no fill.
 
         Given: Pending order with cancellation execution,
         When: Execution is processed,
-        Then: Cancelled fill published and order removed.
+        Then: No fill is published but maps are cleaned.
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -3509,7 +3710,8 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-cancel-123",
             exchange="kraken",
         )
-        service.pending_orders["KRAKEN-CANCEL-ABC"] = order
+        service.pending_orders[order.client_order_id] = order
+        service.client_by_exchange = {"KRAKEN-CANCEL-ABC": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="KRAKEN-CANCEL-ABC",
             exec_type="canceled",
@@ -3524,10 +3726,9 @@ class TestExecutorWebSocketExecutions:
         )
         with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
-            fill: FillEnvelope = mock_publish.call_args[0][0]
-            assert fill.size == 0.0
-            assert fill.status == "cancelled"
-            assert "KRAKEN-CANCEL-ABC" not in service.pending_orders
+            mock_publish.assert_not_called()
+            assert order.client_order_id not in service.pending_orders
+            assert "KRAKEN-CANCEL-ABC" not in service.client_by_exchange
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4018,6 +4219,52 @@ class TestCancelReplaceHandlers:
             client_order_id="client_456",
         )
         await service_any._process_cancel(cancel_envelope)
+        service_any._publish_cancel_event.assert_awaited_with(cancel_envelope, "cancelled")
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_cancel_success_cleans_maps(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Verify _process_cancel cleans up maps on successful cancellation.
+
+        Given: A cancel request for order in pending_orders with client_by_exchange mapping,
+        When: Exchange client cancels successfully,
+        Then: Both maps are cleaned up.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any._publish_cancel_event = AsyncMock()
+        order = OrderRequestEnvelope(
+            strategy_id="test",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="limit",
+            quantity=1.0,
+            price=50000.0,
+            client_order_id="client_456",
+        )
+        service_any.pending_orders = {order.client_order_id: order}
+        service_any.client_by_exchange = {"KRAKEN-123": order.client_order_id}
+        mock_client = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.status = OrderStatusEnum.CANCELED
+        mock_client.cancel_order = AsyncMock(return_value=mock_result)
+        service_any.exchange_client = mock_client
+        cancel_envelope = OrderCancelEnvelope(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="KRAKEN-123",
+            client_order_id="client_456",
+        )
+        await service_any._process_cancel(cancel_envelope)
+        assert order.client_order_id not in service_any.pending_orders
+        assert "KRAKEN-123" not in service_any.client_by_exchange
         service_any._publish_cancel_event.assert_awaited_with(cancel_envelope, "cancelled")
 
     @pytest.mark.asyncio

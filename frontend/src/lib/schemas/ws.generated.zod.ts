@@ -45,7 +45,7 @@ export const FillEnvelopeSchema = z
     price: z.number(),
     fee: z.number(),
     fee_asset: z.string(),
-    status: z.enum(['filled', 'partial', 'rejected', 'cancelled']),
+    status: z.enum(['filled', 'partial']),
     executed_at: z.string().datetime().optional(),
   })
   .strict()

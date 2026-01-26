@@ -131,7 +131,7 @@ TOPIC_REGISTRY: dict[str, TopicSchema] = {
         ),
         category="trade",
         throttle_ms=0,
-        required_fields=["type", "exchange", "instrument"],
+        required_fields=["type", "exchange", "instrument", "client_order_id"],
         sample_data={
             "type": "order_req",
             "exchange": "kraken",
@@ -154,7 +154,7 @@ TOPIC_REGISTRY: dict[str, TopicSchema] = {
         ),
         category="trade",
         throttle_ms=0,
-        required_fields=["type", "exchange", "instrument"],
+        required_fields=["type", "exchange", "instrument", "client_order_id"],
         sample_data={
             "type": "fill",
             "trade_id": "trade_67890",

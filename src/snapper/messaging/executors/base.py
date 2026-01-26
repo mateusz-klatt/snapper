@@ -5,6 +5,7 @@ that handle order placement and fill reporting.
 """
 
 import asyncio
+import time
 from abc import ABC
 from abc import abstractmethod
 from typing import Any
@@ -19,7 +20,9 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import CancelEventType
 from snapper.core.types import OrderEventType
+from snapper.core.types import ReplaceEventType
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -73,6 +76,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.exchange_client: T | None = None
         self.repository: Any = None
         self.pending_orders: dict[str, OrderRequestEnvelope] = {}
+        self.client_by_exchange: dict[str, str] = {}
+        self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
+        self.orphan_ttl_seconds: float = 5.0
+        self.orphan_drop_count: int = 0
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -322,6 +329,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _process_order(self, order: OrderRequestEnvelope) -> None:
         """Submit an order to the exchange and handle the response.
 
+        Order correlation uses two-level mapping:
+        - pending_orders: keyed by client_order_id (always present, unique)
+        - client_by_exchange: maps exchange_order_id -> client_order_id (after ACK)
+
         Publishes order events to orders.events.{exchange}.{instrument}.{event}:
         - submitted: Executor accepted command, sending to exchange
         - accepted: Exchange ACK returned order_id (sync REST response)
@@ -337,9 +348,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         try:
+            self.pending_orders[order.client_order_id] = order
             await self._publish_order_status(order, "submitted")
             exchange_order_id = await self._execute_live_order(order)
             if exchange_order_id:
+                self.client_by_exchange[exchange_order_id] = order.client_order_id
+                self._try_process_orphaned(exchange_order_id, order.client_order_id)
                 await self._publish_order_status(order, "accepted", exchange_order_id)
                 logger.info(
                     f"[{exchange_name}] Order {order.client_order_id} "
@@ -349,13 +363,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 logger.warning(
                     f"[{exchange_name}] Order {order.client_order_id} rejected by exchange"
                 )
+                self.pending_orders.pop(order.client_order_id, None)
                 await self._publish_order_status(order, "rejected")
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing order {order.client_order_id}: {e}")
+            self.pending_orders.pop(order.client_order_id, None)
             await self._publish_order_status(order, "rejected")
 
     async def _process_cancel(self, cancel: OrderCancelEnvelope) -> None:
         """Cancel an existing order on the exchange.
+
+        Cleans up pending_orders and client_by_exchange on success.
 
         Args:
             cancel: Cancel request envelope containing order ID to cancel.
@@ -367,6 +385,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 cancel.exchange_order_id, cancel.instrument
             )
             if result and result.status == OrderStatusEnum.CANCELED:
+                client_id = self.client_by_exchange.pop(cancel.exchange_order_id, None)
+                if client_id:
+                    self.pending_orders.pop(client_id, None)
                 await self._publish_cancel_event(cancel, "cancelled")
                 logger.info(
                     f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
@@ -399,7 +420,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         await self._publish_replace_event(replace, "rejected")
 
     async def _publish_cancel_event(
-        self, cancel: OrderCancelEnvelope, event: OrderEventType
+        self, cancel: OrderCancelEnvelope, event: CancelEventType
     ) -> None:
         """Publish cancel event to orders.events.*.*.cancelled or rejected.
 
@@ -430,7 +451,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"[{exchange_name}] Error publishing cancel event: {e}")
 
     async def _publish_replace_event(
-        self, replace: OrderReplaceEnvelope, event: OrderEventType
+        self, replace: OrderReplaceEnvelope, event: ReplaceEventType
     ) -> None:
         """Publish replace event to orders.events.*.*.replaced or rejected.
 
@@ -537,29 +558,92 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if self.running:
                 logger.error(f"[{exchange_name}] Error in execution handler: {e}")
 
+    def _cleanup_expired_orphans(self) -> None:
+        """Remove orphaned executions that exceeded TTL."""
+        now = time.monotonic()
+        expired_keys = [
+            key
+            for key, (_, timestamp) in self.orphaned_executions.items()
+            if now - timestamp > self.orphan_ttl_seconds
+        ]
+        for key in expired_keys:
+            self.orphaned_executions.pop(key, None)
+            self.orphan_drop_count += 1
+        if expired_keys:
+            exchange_name = self._get_exchange_name()
+            logger.info(
+                f"[{exchange_name}] Dropped {len(expired_keys)} orphaned executions after TTL "
+                f"(total drops: {self.orphan_drop_count})"
+            )
+
+    def _try_process_orphaned(self, exchange_order_id: str, client_order_id: str) -> None:
+        """Try to process any orphaned execution for a newly mapped order.
+
+        Called after ACK when client_by_exchange mapping is established.
+
+        Args:
+            exchange_order_id: Exchange-assigned order ID.
+            client_order_id: Client-assigned order ID.
+        """
+        orphan = self.orphaned_executions.pop(exchange_order_id, None)
+        if orphan is not None:
+            execution, _ = orphan
+            exchange_name = self._get_exchange_name()
+            logger.info(
+                f"[{exchange_name}] Processing buffered orphan execution for {exchange_order_id}"
+            )
+            asyncio.create_task(self._process_execution(execution))
+
     async def _process_execution(self, execution: ExecutionUpdate) -> None:
         """Process an execution update and publish fill notification.
+
+        Uses two-level correlation:
+        1. Resolve exchange_order_id -> client_order_id via client_by_exchange
+        2. Lookup order by client_order_id in pending_orders
+
+        Cancelled/expired executions clean up maps but do not publish FillEnvelope.
+        Unknown executions are buffered for TTL in case ACK arrives later (race).
 
         Args:
             execution: Execution update from the exchange WebSocket.
         """
         exchange_name = self._get_exchange_name()
         try:
+            self._cleanup_expired_orphans()
             exchange_order_id = execution.order_id
-            if exchange_order_id not in self.pending_orders:
+            if exchange_order_id is None:
                 logger.warning(
-                    f"[{exchange_name}] Received execution for unknown order: {exchange_order_id}"
+                    f"[{exchange_name}] Received execution with None order_id, cannot correlate"
                 )
                 return
-            original_order = self.pending_orders[exchange_order_id]
+            client_order_id = self.client_by_exchange.get(exchange_order_id)
+            if client_order_id is None:
+                already_buffered = exchange_order_id in self.orphaned_executions
+                self.orphaned_executions[exchange_order_id] = (execution, time.monotonic())
+                if not already_buffered:
+                    logger.info(
+                        f"[{exchange_name}] Buffered orphan execution for {exchange_order_id} "
+                        f"(status={execution.exec_type}, awaiting ACK or TTL expiry)"
+                    )
+                return
+            original_order = self.pending_orders.get(client_order_id)
+            if original_order is None:
+                logger.warning(
+                    f"[{exchange_name}] Received execution for unknown client order: "
+                    f"{client_order_id} (exchange: {exchange_order_id})"
+                )
+                return
+            if execution.exec_type in ("canceled", "expired"):
+                self.pending_orders.pop(client_order_id, None)
+                self.client_by_exchange.pop(exchange_order_id, None)
+                logger.info(
+                    f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
+                    f"cleaned up maps (no FillEnvelope)"
+                )
+                return
             status: FillStatus
             if execution.exec_type == "filled" or execution.order_status == OrderStatusEnum.CLOSED:
                 status = "filled"
-            elif (
-                execution.exec_type == "canceled"
-                or execution.order_status == OrderStatusEnum.CANCELED
-            ):
-                status = "cancelled"
             elif execution.order_status == OrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
                 status = "partial"
             else:
@@ -580,11 +664,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 status=status,
             )
             await self._publish_fill(fill)
-            if status in ("filled", "cancelled"):
-                del self.pending_orders[exchange_order_id]
+            if status == "filled":
+                self.pending_orders.pop(client_order_id, None)
+                self.client_by_exchange.pop(exchange_order_id, None)
                 logger.info(
-                    f"[{exchange_name}] ExchangeOrderSnapshot {original_order.client_order_id} "
-                    f"{status}, removed from pending"
+                    f"[{exchange_name}] Order {client_order_id} filled, removed from pending"
                 )
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing execution: {e}")
@@ -631,13 +715,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"[{exchange_name}] Error publishing order event: {e}")
 
     async def _heartbeat_loop(self) -> None:
-        """Periodically publish heartbeat messages."""
+        """Periodically publish heartbeat messages and cleanup orphans."""
         exchange_name = self._get_exchange_name()
         while self.running:
             try:
                 await asyncio.sleep(self.settings.zmq_heartbeat_interval_ms / 1000.0)
                 if not self.running:
                     break
+                self._cleanup_expired_orphans()
                 self.heartbeat_seq += 1
                 lag_ms = 0
                 hb_msg = HeartbeatEnvelope(

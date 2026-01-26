@@ -1918,6 +1918,26 @@ def test_determine_topic_category_fallbacks() -> None:
     assert DETERMINE_TOPIC_CATEGORY("unknown") is None
 
 
+def test_determine_topic_category_edge_cases() -> None:
+    """Determine topic category handles edge cases correctly.
+
+    Given: Edge case topic strings (single segment, empty-ish, two-level prefixes),
+    When: Determining category,
+    Then: Returns correct category with no regression.
+    """
+    assert DETERMINE_TOPIC_CATEGORY("market") == "market"
+    assert DETERMINE_TOPIC_CATEGORY("market.") == "market"
+    assert DETERMINE_TOPIC_CATEGORY("signals") == "strategy"
+    assert DETERMINE_TOPIC_CATEGORY("signals.macd") == "strategy"
+    assert DETERMINE_TOPIC_CATEGORY("system") == "system"
+    assert DETERMINE_TOPIC_CATEGORY("system.heartbeats.executor.kraken") == "system"
+    assert DETERMINE_TOPIC_CATEGORY("admin") == "admin"
+    assert DETERMINE_TOPIC_CATEGORY("admin.users") == "admin"
+    assert DETERMINE_TOPIC_CATEGORY("orders") is None
+    assert DETERMINE_TOPIC_CATEGORY("orders.unknown.kraken") is None
+    assert DETERMINE_TOPIC_CATEGORY("") is None
+
+
 @pytest.mark.asyncio
 async def test_handle_ping_reports_active_connections() -> None:
     """Handle ping reports active connection count.

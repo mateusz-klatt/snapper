@@ -236,8 +236,9 @@ class TraderCoordinator(RegisterableProcess):
         if order_status.status != parsed.suffix:
             logger.warning(
                 f"ZMQTrader: Invariant violation - topic suffix '{parsed.suffix}' "
-                f"!= payload status '{order_status.status}'"
+                f"!= payload status '{order_status.status}', dropping message"
             )
+            return
         if parsed.suffix == "rejected":
             logger.info(
                 f"ZMQTrader: Order status [OrderStatusEnvelope] - {order_status.client_order_id} "
@@ -254,7 +255,7 @@ class TraderCoordinator(RegisterableProcess):
         """Handle lightweight order event from ZMQ (cancel/replace confirmations).
 
         Logs cancel/replace event confirmations (cancelled, replaced, rejected).
-        Performs invariant checks:
+        Performs invariant checks (all are hard drops on violation):
         - topic exchange/instrument must match payload
         - topic suffix must match payload event
 
@@ -279,8 +280,9 @@ class TraderCoordinator(RegisterableProcess):
         if order_event.event != parsed.suffix:
             logger.warning(
                 f"ZMQTrader: Invariant violation - topic suffix '{parsed.suffix}' "
-                f"!= payload event '{order_event.event}'"
+                f"!= payload event '{order_event.event}', dropping message"
             )
+            return
         if parsed.suffix == "rejected":
             logger.info(
                 f"ZMQTrader: Order event [OrderEventEnvelope] - {order_event.client_order_id} "

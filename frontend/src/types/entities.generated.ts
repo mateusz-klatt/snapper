@@ -50,7 +50,7 @@ export interface Fill {
   price: number
   fee: number
   feeAsset: string
-  status: 'filled' | 'partial' | 'rejected' | 'cancelled'
+  status: 'filled' | 'partial'
   executedAt?: Date
 }
 

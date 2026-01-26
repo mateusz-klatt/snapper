@@ -11,8 +11,6 @@ enum FillEnvelopeSide: String, Codable, Sendable {
 enum FillEnvelopeStatus: String, Codable, Sendable {
     case filled
     case partial
-    case rejected
-    case cancelled
 }
 
 enum HeartbeatEnvelopeStatus: String, Codable, Sendable {
