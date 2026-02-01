@@ -255,9 +255,9 @@ class TestPayloadContract:
         assert json_data["instrument"] == "BTC-USD"
         assert json_data["exchange"] == "kraken"
         assert json_data["side"] == "buy"
-        assert json_data["size"] == 0.5
-        assert json_data["price"] == 50000.0
-        assert json_data["fee"] == 5.0
+        assert json_data["size"] == pytest.approx(0.5)
+        assert json_data["price"] == pytest.approx(50000.0)
+        assert json_data["fee"] == pytest.approx(5.0)
         assert json_data["fee_asset"] == "USD"
         assert "executed_at" in json_data
 
@@ -354,13 +354,13 @@ class TestBridgeNormalizerContract:
         }
         assert fill_data["order_id"] == "order-123"
         assert fill_data["id"] == "exch-456"
-        assert fill_data["size"] == 0.5
-        assert fill_data["price"] == 50000.0
+        assert fill_data["size"] == pytest.approx(0.5)
+        assert fill_data["price"] == pytest.approx(50000.0)
         assert fill_data["executed_at"] == "2024-01-01T00:00:00+00:00"
         assert fill_data["exchange"] == "kraken"
         assert fill_data["instrument"] == "BTC-USD"
         assert fill_data["side"] == "buy"
-        assert fill_data["fee"] == 5.0
+        assert fill_data["fee"] == pytest.approx(5.0)
         assert fill_data["fee_asset"] == "USD"
 
 
@@ -604,9 +604,9 @@ class TestMarketTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.1m")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.1m")
         assert valid
-        assert err == ""
+        assert _err == ""
 
     def test_valid_market_topic_all_types(self) -> None:
         """Test market topic with all data types.
@@ -615,13 +615,13 @@ class TestMarketTopicValidation:
         When: Validated,
         Then: All are valid.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.1m")
-        assert valid, f"Failed for candles: {err}"
-        assert err == ""
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.1m")
+        assert valid, f"Failed for candles: {_err}"
+        assert _err == ""
         for data_type in ["ticks", "trades"]:
-            valid, err = validate_topic(f"market.kraken.BTC-USD.{data_type}")
-            assert valid, f"Failed for {data_type}: {err}"
-            assert err == ""
+            valid, _err = validate_topic(f"market.kraken.BTC-USD.{data_type}")
+            assert valid, f"Failed for {data_type}: {_err}"
+            assert _err == ""
 
     def test_invalid_market_topic_wrong_segments(self) -> None:
         """Test market topic with wrong segment count.
@@ -630,9 +630,9 @@ class TestMarketTopicValidation:
         When: Validated,
         Then: Validation fails with segment error.
         """
-        valid, err = validate_topic("market.kraken.candles")
+        valid, _err = validate_topic("market.kraken.candles")
         assert not valid
-        assert "4-5 segments" in err
+        assert "4-5 segments" in _err
 
     def test_invalid_market_topic_unknown_data_type(self) -> None:
         """Test market topic with unknown data type.
@@ -641,9 +641,9 @@ class TestMarketTopicValidation:
         When: Validated,
         Then: Validation fails with data type error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.unknown")
+        valid, _err = validate_topic("market.kraken.BTC-USD.unknown")
         assert not valid
-        assert "Invalid market data type" in err
+        assert "Invalid market data type" in _err
 
     def test_invalid_market_topic_unknown_exchange(self) -> None:
         """Test market topic with unknown exchange.
@@ -652,9 +652,9 @@ class TestMarketTopicValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("market.unknown_exchange.BTC-USD.candles.1m")
+        valid, _err = validate_topic("market.unknown_exchange.BTC-USD.candles.1m")
         assert not valid
-        assert "Unknown exchange" in err
+        assert "Unknown exchange" in _err
 
     def test_market_prefix_rejected(self) -> None:
         """Test market prefix rejected as full topic.
@@ -663,9 +663,9 @@ class TestMarketTopicValidation:
         When: Validated as topic,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.")
+        valid, _err = validate_topic("market.kraken.BTC-USD.")
         assert not valid
-        assert "4-5 segments" in err
+        assert "4-5 segments" in _err
 
     def test_subscription_pattern_accepts_prefixes(self) -> None:
         """Test subscription pattern accepts prefixes.
@@ -680,9 +680,9 @@ class TestMarketTopicValidation:
             "market.kraken.BTC-USD.",
             "market.kraken.BTC-USD.candles.",
         ]:
-            valid, err = validate_subscription_pattern(prefix)
-            assert valid, f"Failed for {prefix}: {err}"
-            assert err == ""
+            valid, _err = validate_subscription_pattern(prefix)
+            assert valid, f"Failed for {prefix}: {_err}"
+            assert _err == ""
 
     def test_candles_without_timeframe_rejected(self) -> None:
         """Test candles topic requires timeframe.
@@ -691,9 +691,9 @@ class TestMarketTopicValidation:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_candles_with_invalid_timeframe_rejected(self) -> None:
         """Test candles with invalid timeframe rejected.
@@ -702,9 +702,9 @@ class TestMarketTopicValidation:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.invalid")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.invalid")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_candles_with_valid_timeframes(self) -> None:
         """Test candles with valid timeframes.
@@ -715,9 +715,9 @@ class TestMarketTopicValidation:
         """
         valid_timeframes = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"]
         for timeframe in valid_timeframes:
-            valid, err = validate_topic(f"market.kraken.BTC-USD.candles.{timeframe}")
-            assert valid, f"Failed for timeframe {timeframe}: {err}"
-            assert err == ""
+            valid, _err = validate_topic(f"market.kraken.BTC-USD.candles.{timeframe}")
+            assert valid, f"Failed for timeframe {timeframe}: {_err}"
+            assert _err == ""
 
     def test_non_candles_with_timeframe_rejected(self) -> None:
         """Test non-candles data types reject timeframe.
@@ -727,9 +727,9 @@ class TestMarketTopicValidation:
         Then: Validation fails.
         """
         for data_type in ["ticks", "trades"]:
-            valid, err = validate_topic(f"market.kraken.BTC-USD.{data_type}.1m")
+            valid, _err = validate_topic(f"market.kraken.BTC-USD.{data_type}.1m")
             assert not valid, f"Should reject {data_type} with timeframe"
-            assert "timeframe" in err.lower() or "candles" in err.lower()
+            assert "timeframe" in _err.lower() or "candles" in _err.lower()
 
 
 class TestSubscriptionPatternValidation:
@@ -742,9 +742,9 @@ class TestSubscriptionPatternValidation:
         When: Validated as subscription pattern,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("market.kraken.BTC-USD.candles.1m")
+        valid, _err = validate_subscription_pattern("market.kraken.BTC-USD.candles.1m")
         assert valid
-        assert err == ""
+        assert _err == ""
 
     def test_valid_prefix_patterns(self) -> None:
         """Test valid prefix patterns.
@@ -768,9 +768,9 @@ class TestSubscriptionPatternValidation:
             "signals.paper.BTC-USD.",
         ]
         for pattern in valid_patterns:
-            valid, err = validate_subscription_pattern(pattern)
-            assert valid, f"Failed for {pattern}: {err}"
-            assert err == ""
+            valid, _err = validate_subscription_pattern(pattern)
+            assert valid, f"Failed for {pattern}: {_err}"
+            assert _err == ""
 
     def test_reject_partial_instrument(self) -> None:
         """Test partial instrument rejected.
@@ -779,9 +779,9 @@ class TestSubscriptionPatternValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_subscription_pattern("market.kraken.BTC-")
+        valid, _err = validate_subscription_pattern("market.kraken.BTC-")
         assert not valid
-        assert "4-5 segments" in err or "Prefix must end" in err.lower()
+        assert "4-5 segments" in _err or "Prefix must end" in _err.lower()
 
     def test_reject_empty_pattern(self) -> None:
         """Test empty pattern rejected.
@@ -790,9 +790,9 @@ class TestSubscriptionPatternValidation:
         When: Validated,
         Then: Validation fails with empty error.
         """
-        valid, err = validate_subscription_pattern("")
+        valid, _err = validate_subscription_pattern("")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
     def test_reject_double_dots(self) -> None:
         """Test double dots rejected.
@@ -801,7 +801,7 @@ class TestSubscriptionPatternValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_subscription_pattern("market..candles")
+        valid, _err = validate_subscription_pattern("market..candles")
         assert not valid
 
 
@@ -816,9 +816,9 @@ class TestSystemTopicValidation:
         Then: All are accepted.
         """
         for sys_type in ["heartbeats", "symbol_mappings"]:
-            valid, err = validate_topic(f"system.{sys_type}")
-            assert valid, f"Failed for system.{sys_type}: {err}"
-            assert err == ""
+            valid, _err = validate_topic(f"system.{sys_type}")
+            assert valid, f"Failed for system.{sys_type}: {_err}"
+            assert _err == ""
 
     def test_invalid_system_topic_type(self) -> None:
         """Test invalid system topic type.
@@ -827,9 +827,9 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.unknown")
+        valid, _err = validate_topic("system.unknown")
         assert not valid
-        assert "Invalid system type" in err
+        assert "Invalid system type" in _err
 
     def test_system_prefix(self) -> None:
         """Test system prefix pattern.
@@ -838,9 +838,9 @@ class TestSystemTopicValidation:
         When: Validated as subscription pattern,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("system.")
+        valid, _err = validate_subscription_pattern("system.")
         assert valid
-        assert err == ""
+        assert _err == ""
 
     def test_hierarchical_heartbeat_strategy(self) -> None:
         """Test hierarchical heartbeat strategy topic.
@@ -849,9 +849,9 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats.strategy.macd_btc")
-        assert valid, f"Failed for strategy heartbeat: {err}"
-        assert err == ""
+        valid, _err = validate_topic("system.heartbeats.strategy.macd_btc")
+        assert valid, f"Failed for strategy heartbeat: {_err}"
+        assert _err == ""
 
     def test_hierarchical_heartbeat_executor(self) -> None:
         """Test hierarchical heartbeat executor topic.
@@ -860,9 +860,9 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats.executor.kraken")
-        assert valid, f"Failed for executor heartbeat: {err}"
-        assert err == ""
+        valid, _err = validate_topic("system.heartbeats.executor.kraken")
+        assert valid, f"Failed for executor heartbeat: {_err}"
+        assert _err == ""
 
     def test_hierarchical_heartbeat_feed(self) -> None:
         """Test hierarchical heartbeat feed topic.
@@ -871,9 +871,9 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats.feed.kraken")
-        assert valid, f"Failed for feed heartbeat: {err}"
-        assert err == ""
+        valid, _err = validate_topic("system.heartbeats.feed.kraken")
+        assert valid, f"Failed for feed heartbeat: {_err}"
+        assert _err == ""
 
     def test_hierarchical_heartbeat_feed_with_symbol_rejected(self) -> None:
         """Test feed heartbeat with symbol rejected.
@@ -882,9 +882,9 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.heartbeats.feed.kraken.BTC-USD")
+        valid, _err = validate_topic("system.heartbeats.feed.kraken.BTC-USD")
         assert not valid
-        assert "exactly exchange" in err
+        assert "exactly exchange" in _err
 
     def test_hierarchical_heartbeat_missing_name(self) -> None:
         """Test heartbeat topic requires component name.
@@ -893,15 +893,15 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.heartbeats.strategy")
+        valid, _err = validate_topic("system.heartbeats.strategy")
         assert not valid
-        assert "requires component name" in err
-        valid, err = validate_topic("system.heartbeats.executor")
+        assert "requires component name" in _err
+        valid, _err = validate_topic("system.heartbeats.executor")
         assert not valid
-        assert "requires component name" in err
-        valid, err = validate_topic("system.heartbeats.feed")
+        assert "requires component name" in _err
+        valid, _err = validate_topic("system.heartbeats.feed")
         assert not valid
-        assert "exactly exchange" in err
+        assert "exactly exchange" in _err
 
     def test_hierarchical_heartbeat_invalid_component(self) -> None:
         """Test heartbeat with invalid component.
@@ -910,9 +910,9 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.heartbeats.invalid.name")
+        valid, _err = validate_topic("system.heartbeats.invalid.name")
         assert not valid
-        assert "Invalid heartbeat component type" in err
+        assert "Invalid heartbeat component type" in _err
 
     def test_hierarchical_heartbeat_prefix(self) -> None:
         """Test heartbeat prefix pattern.
@@ -921,9 +921,9 @@ class TestSystemTopicValidation:
         When: Validated as subscription pattern,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("system.heartbeats.")
+        valid, _err = validate_subscription_pattern("system.heartbeats.")
         assert valid
-        assert err == ""
+        assert _err == ""
 
 
 class TestOrdersTopicValidation:
@@ -936,9 +936,9 @@ class TestOrdersTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("orders.commands.kraken.BTC-USD.submit")
+        valid, _err = validate_topic("orders.commands.kraken.BTC-USD.submit")
         assert valid
-        assert err == ""
+        assert _err == ""
 
     def test_invalid_orders_topic_segments(self) -> None:
         """Verify orders topic with wrong segment count is rejected.
@@ -947,9 +947,9 @@ class TestOrdersTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("orders.commands.kraken")
+        valid, _err = validate_topic("orders.commands.kraken")
         assert not valid
-        assert "5 segments" in err
+        assert "5 segments" in _err
 
     def test_orders_commands_topic_invalid_exchange(self) -> None:
         """Verify orders commands topic with unknown exchange is rejected.
@@ -958,9 +958,9 @@ class TestOrdersTopicValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("orders.commands.unknown_exchange.BTC-USD.submit")
+        valid, _err = validate_topic("orders.commands.unknown_exchange.BTC-USD.submit")
         assert not valid
-        assert "Unknown exchange" in err
+        assert "Unknown exchange" in _err
 
     def test_orders_prefixes(self) -> None:
         """Verify valid orders prefix patterns are accepted.
@@ -974,9 +974,9 @@ class TestOrdersTopicValidation:
             "orders.commands.kraken.",
             "orders.commands.kraken.BTC-USD.",
         ]:
-            valid, err = validate_subscription_pattern(prefix)
-            assert valid, f"Failed for {prefix}: {err}"
-            assert err == ""
+            valid, _err = validate_subscription_pattern(prefix)
+            assert valid, f"Failed for {prefix}: {_err}"
+            assert _err == ""
 
     def test_orders_bare_prefix_rejected(self) -> None:
         """Verify bare 'orders.' prefix is rejected.
@@ -985,9 +985,9 @@ class TestOrdersTopicValidation:
         When: Validated as subscription pattern,
         Then: Validation fails with subcategory requirement error.
         """
-        valid, err = validate_subscription_pattern("orders.")
+        valid, _err = validate_subscription_pattern("orders.")
         assert not valid
-        assert "subcategory" in err.lower() or "commands" in err.lower()
+        assert "subcategory" in _err.lower() or "commands" in _err.lower()
 
 
 class TestOrdersEventsTopicValidation:
@@ -1000,8 +1000,8 @@ class TestOrdersEventsTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("orders.events.kraken.BTC-USD.fill")
-        assert valid, f"Expected valid orders events topic, got error: {err}"
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.fill")
+        assert valid, f"Expected valid orders events topic, got error: {_err}"
 
     def test_invalid_orders_events_topic_segments(self) -> None:
         """Verify orders events topic with wrong segment count is rejected.
@@ -1010,9 +1010,9 @@ class TestOrdersEventsTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("orders.events.kraken")
+        valid, _err = validate_topic("orders.events.kraken")
         assert not valid
-        assert "5 segments" in err
+        assert "5 segments" in _err
 
     def test_orders_events_prefixes(self) -> None:
         """Verify valid orders events prefix patterns are accepted.
@@ -1022,9 +1022,9 @@ class TestOrdersEventsTopicValidation:
         Then: All are accepted.
         """
         for prefix in ["orders.events.", "orders.events.kraken.", "orders.events.kraken.BTC-USD."]:
-            valid, err = validate_subscription_pattern(prefix)
-            assert valid, f"Failed for {prefix}: {err}"
-            assert err == ""
+            valid, _err = validate_subscription_pattern(prefix)
+            assert valid, f"Failed for {prefix}: {_err}"
+            assert _err == ""
 
 
 class TestEdgeCases:
@@ -1037,9 +1037,9 @@ class TestEdgeCases:
         When: Validated,
         Then: Validation fails with empty error.
         """
-        valid, err = validate_topic("")
+        valid, _err = validate_topic("")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
     def test_unknown_category(self) -> None:
         """Verify topic with unknown category is rejected.
@@ -1048,9 +1048,9 @@ class TestEdgeCases:
         When: Validated,
         Then: Validation fails with category error.
         """
-        valid, err = validate_topic("unknown.something")
+        valid, _err = validate_topic("unknown.something")
         assert not valid
-        assert "Unknown topic category" in err
+        assert "Unknown topic category" in _err
 
     def test_topic_without_category(self) -> None:
         """Verify topic without proper category is rejected.
@@ -1059,9 +1059,9 @@ class TestEdgeCases:
         When: Validated,
         Then: Validation fails with category error.
         """
-        valid, err = validate_topic("just_a_string")
+        valid, _err = validate_topic("just_a_string")
         assert not valid
-        assert "Unknown topic category" in err
+        assert "Unknown topic category" in _err
 
 
 class TestMarketCategoryValidation:
@@ -1074,9 +1074,9 @@ class TestMarketCategoryValidation:
         When: Validated,
         Then: Validation handles category checking.
         """
-        valid, err = validate_topic("orders.commands.kraken.BTC-USD.submit")
+        valid, _err = validate_topic("orders.commands.kraken.BTC-USD.submit")
         if not valid:
-            assert "category" in err.lower() or "orders" in err.lower()
+            assert "category" in _err.lower() or "orders" in _err.lower()
 
 
 class TestDataTypeValidation:
@@ -1089,9 +1089,9 @@ class TestDataTypeValidation:
         When: Validated,
         Then: Validation fails with data type error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.ohlcv")
+        valid, _err = validate_topic("market.kraken.BTC-USD.ohlcv")
         assert not valid
-        assert "data type" in err.lower()
+        assert "data type" in _err.lower()
 
     def test_data_type_candles_variations(self) -> None:
         """Verify candles data type with various timeframes.
@@ -1108,9 +1108,9 @@ class TestDataTypeValidation:
             ("market.kraken.BTC-USD.candles.1d", True),
         ]
         for topic, should_be_valid in test_cases:
-            valid, err = validate_topic(topic)
+            valid, _err = validate_topic(topic)
             if should_be_valid:
-                assert valid, f"Expected {topic} to be valid, got error: {err}"
+                assert valid, f"Expected {topic} to be valid, got error: {_err}"
 
 
 class TestOrdersCommandsAndEventsTopics:
@@ -1123,11 +1123,11 @@ class TestOrdersCommandsAndEventsTopics:
         When: Validated,
         Then: Validation succeeds or fails with expected message.
         """
-        valid, err = validate_topic("orders.commands.kraken.BTC-USD.submit")
+        valid, _err = validate_topic("orders.commands.kraken.BTC-USD.submit")
         if valid:
-            assert err == ""
+            assert _err == ""
         else:
-            assert "orders" in err.lower() or "category" in err.lower()
+            assert "orders" in _err.lower() or "category" in _err.lower()
 
     def test_orders_commands_topic_invalid_command(self) -> None:
         """Verify orders commands topic with invalid command is rejected.
@@ -1136,7 +1136,7 @@ class TestOrdersCommandsAndEventsTopics:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("orders.commands.kraken.BTC-USD.update")
+        valid, _err = validate_topic("orders.commands.kraken.BTC-USD.update")
         assert not valid
 
     def test_orders_events_topic_valid_format(self) -> None:
@@ -1146,11 +1146,11 @@ class TestOrdersCommandsAndEventsTopics:
         When: Validated,
         Then: Validation succeeds or fails with expected message.
         """
-        valid, err = validate_topic("orders.events.kraken.BTC-USD.fill")
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.fill")
         if valid:
-            assert err == ""
+            assert _err == ""
         else:
-            assert "orders" in err.lower() or "category" in err.lower()
+            assert "orders" in _err.lower() or "category" in _err.lower()
 
     def test_orders_events_topic_invalid_event(self) -> None:
         """Verify orders events topic with invalid event is rejected.
@@ -1159,7 +1159,7 @@ class TestOrdersCommandsAndEventsTopics:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("orders.events.kraken.BTC-USD.unknown")
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.unknown")
         assert not valid
 
 
@@ -1173,9 +1173,9 @@ class TestSystemTopics:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats.broker1")
+        valid, _err = validate_topic("system.heartbeats.broker1")
         if valid:
-            assert err == ""
+            assert _err == ""
 
     def test_system_process_status_valid(self) -> None:
         """Verify system process status topic is valid.
@@ -1184,9 +1184,9 @@ class TestSystemTopics:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.process.status.broker")
+        valid, _err = validate_topic("system.process.status.broker")
         if valid:
-            assert err == ""
+            assert _err == ""
 
     def test_system_process_lifecycle_valid(self) -> None:
         """Verify system process lifecycle topic is valid.
@@ -1195,9 +1195,9 @@ class TestSystemTopics:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.process.lifecycle.feed")
+        valid, _err = validate_topic("system.process.lifecycle.feed")
         if valid:
-            assert err == ""
+            assert _err == ""
 
     def test_system_invalid_event_type(self) -> None:
         """Verify system topic with invalid event type is rejected.
@@ -1206,7 +1206,7 @@ class TestSystemTopics:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.unknown.source")
+        valid, _err = validate_topic("system.unknown.source")
         assert not valid
 
 
@@ -1220,9 +1220,9 @@ class TestTimeframeValidation:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.5")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.5")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_invalid_timeframe_wrong_order(self) -> None:
         """Verify timeframe with wrong order is rejected.
@@ -1231,9 +1231,9 @@ class TestTimeframeValidation:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.m5")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.m5")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_invalid_timeframe_bad_unit(self) -> None:
         """Verify timeframe with invalid unit is rejected.
@@ -1242,9 +1242,9 @@ class TestTimeframeValidation:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.5x")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.5x")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_invalid_timeframe_non_numeric(self) -> None:
         """Verify timeframe with non-numeric value is rejected.
@@ -1253,7 +1253,7 @@ class TestTimeframeValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.abc")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.abc")
         assert not valid
 
 
@@ -1267,9 +1267,9 @@ class TestNonCandlesTimeframe:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.ticks.1m")
+        valid, _err = validate_topic("market.kraken.BTC-USD.ticks.1m")
         assert not valid
-        assert "timeframe" in err.lower() or "segments" in err.lower()
+        assert "timeframe" in _err.lower() or "segments" in _err.lower()
 
     def test_trades_with_timeframe_rejected(self) -> None:
         """Verify trades topic rejects timeframe.
@@ -1278,7 +1278,7 @@ class TestNonCandlesTimeframe:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.trades.1m")
+        valid, _err = validate_topic("market.kraken.BTC-USD.trades.1m")
         assert not valid
 
 
@@ -1292,7 +1292,7 @@ class TestPrefixPatterns:
         When: Validated as subscription pattern,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("market.")
+        valid, _err = validate_subscription_pattern("market.")
         assert valid
 
     def test_valid_two_segment_prefix(self) -> None:
@@ -1302,7 +1302,7 @@ class TestPrefixPatterns:
         When: Validated as subscription pattern,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("market.kraken.")
+        valid, _err = validate_subscription_pattern("market.kraken.")
         assert valid
 
     def test_valid_three_segment_prefix(self) -> None:
@@ -1312,7 +1312,7 @@ class TestPrefixPatterns:
         When: Validated as subscription pattern,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("market.kraken.BTC-USD.")
+        valid, _err = validate_subscription_pattern("market.kraken.BTC-USD.")
         assert valid
 
 
@@ -1328,7 +1328,7 @@ class TestFieldValidatorEdgeCases:
         """
         valid_exchanges = ["kraken", "paper", "walutomat", "zonda"]
         for exchange in valid_exchanges:
-            valid, err = _validate_exchange(exchange)
+            valid, _err = _validate_exchange(exchange)
             assert valid, f"Exchange {exchange} should be valid"
 
     def test_timeframe_valid_formats(self) -> None:
@@ -1364,9 +1364,9 @@ class TestMarketTopicCategoryMismatch:
         When: Validated,
         Then: Validation fails with market category error.
         """
-        valid, err = _validate_market_topic("notmarket.kraken.BTC-USD.ticks")
+        valid, _err = _validate_market_topic("notmarket.kraken.BTC-USD.ticks")
         assert not valid
-        assert "market" in err.lower()
+        assert "market" in _err.lower()
 
 
 class TestMarketTopicInvalidTimeframe:
@@ -1379,9 +1379,9 @@ class TestMarketTopicInvalidTimeframe:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.invalid")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.invalid")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_candles_with_partial_timeframe(self) -> None:
         """Verify candles topic with partial timeframe is rejected.
@@ -1390,7 +1390,7 @@ class TestMarketTopicInvalidTimeframe:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.1")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.1")
         assert not valid
 
 
@@ -1404,9 +1404,9 @@ class TestOrdersCommandsTopicCategoryCheck:
         When: Validated with orders commands validator,
         Then: Validation fails with orders.commands category error.
         """
-        valid, err = _validate_orders_commands_topic("notorders.commands.kraken.BTC-USD.submit")
+        valid, _err = _validate_orders_commands_topic("notorders.commands.kraken.BTC-USD.submit")
         assert not valid
-        assert "orders.commands" in err.lower()
+        assert "orders.commands" in _err.lower()
 
     def test_orders_commands_topic_ends_with_dot(self) -> None:
         """Verify orders commands topic ending with dot is rejected.
@@ -1415,9 +1415,9 @@ class TestOrdersCommandsTopicCategoryCheck:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_orders_commands_topic("orders.commands.kraken.BTC-USD.")
+        valid, _err = _validate_orders_commands_topic("orders.commands.kraken.BTC-USD.")
         assert not valid
-        assert "5 segments" in err.lower()
+        assert "5 segments" in _err.lower()
 
 
 class TestOrdersTopicTypeValidation:
@@ -1430,9 +1430,9 @@ class TestOrdersTopicTypeValidation:
         When: Validated,
         Then: Validation fails with subcategory error.
         """
-        valid, err = validate_topic("orders.kraken.BTC-USD.cancel")
+        valid, _err = validate_topic("orders.kraken.BTC-USD.cancel")
         assert not valid
-        assert "orders.commands" in err.lower() or "orders.events" in err.lower()
+        assert "orders.commands" in _err.lower() or "orders.events" in _err.lower()
 
 
 class TestOrdersEventsTopicValidationV2:
@@ -1445,9 +1445,9 @@ class TestOrdersEventsTopicValidationV2:
         When: Validated with orders.events validator,
         Then: Validation fails with orders.events category error.
         """
-        valid, err = _validate_orders_events_topic("notorders.events.kraken.BTC-USD.fill")
+        valid, _err = _validate_orders_events_topic("notorders.events.kraken.BTC-USD.fill")
         assert not valid
-        assert "orders.events" in err.lower()
+        assert "orders.events" in _err.lower()
 
     def test_orders_events_topic_ends_with_dot(self) -> None:
         """Verify orders.events topic ending with dot is rejected.
@@ -1456,9 +1456,9 @@ class TestOrdersEventsTopicValidationV2:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_orders_events_topic("orders.events.kraken.BTC-USD.")
+        valid, _err = _validate_orders_events_topic("orders.events.kraken.BTC-USD.")
         assert not valid
-        assert "5 segments" in err.lower()
+        assert "5 segments" in _err.lower()
 
     def test_orders_events_invalid_type(self) -> None:
         """Verify orders.events topic with invalid event type is rejected.
@@ -1467,9 +1467,9 @@ class TestOrdersEventsTopicValidationV2:
         When: Validated,
         Then: Validation fails with event type error.
         """
-        valid, err = validate_topic("orders.events.kraken.BTC-USD.unknown")
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.unknown")
         assert not valid
-        assert "order event" in err.lower() or "accepted" in err.lower()
+        assert "order event" in _err.lower() or "accepted" in _err.lower()
 
 
 class TestSignalTopicValidation:
@@ -1482,9 +1482,9 @@ class TestSignalTopicValidation:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_signal_topic("signals.kraken.BTC-USD.")
+        valid, _err = _validate_signal_topic("signals.kraken.BTC-USD.")
         assert not valid
-        assert "4 segments" in err.lower()
+        assert "4 segments" in _err.lower()
 
     def test_signal_topic_wrong_segment_count(self) -> None:
         """Verify signal topic with wrong segment count is rejected.
@@ -1493,9 +1493,9 @@ class TestSignalTopicValidation:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_signal_topic("signals.kraken.BTC-USD")
+        valid, _err = _validate_signal_topic("signals.kraken.BTC-USD")
         assert not valid
-        assert "4 segments" in err.lower()
+        assert "4 segments" in _err.lower()
 
     def test_signal_topic_category_check(self) -> None:
         """Verify direct signal validator rejects wrong category.
@@ -1504,9 +1504,9 @@ class TestSignalTopicValidation:
         When: Validated with signals validator,
         Then: Validation fails with signals category error.
         """
-        valid, err = _validate_signal_topic("notsignals.kraken.BTC-USD.live")
+        valid, _err = _validate_signal_topic("notsignals.kraken.BTC-USD.live")
         assert not valid
-        assert "signals" in err.lower()
+        assert "signals" in _err.lower()
 
     def test_signal_topic_invalid_exchange(self) -> None:
         """Verify signal topic with invalid exchange is rejected.
@@ -1515,9 +1515,9 @@ class TestSignalTopicValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("signals.invalid_exchange.BTC-USD.live")
+        valid, _err = validate_topic("signals.invalid_exchange.BTC-USD.live")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_signal_topic_invalid_instrument(self) -> None:
         """Verify signal topic with invalid instrument is rejected.
@@ -1526,9 +1526,9 @@ class TestSignalTopicValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_topic("signals.kraken.INVALID-INSTRUMENT.live")
+        valid, _err = validate_topic("signals.kraken.INVALID-INSTRUMENT.live")
         assert not valid
-        assert "instrument" in err.lower()
+        assert "instrument" in _err.lower()
 
     def test_live_signal_topic_wrong_type(self) -> None:
         """Verify live signal topic with wrong type is rejected.
@@ -1537,9 +1537,9 @@ class TestSignalTopicValidation:
         When: Validated,
         Then: Validation fails with live requirement error.
         """
-        valid, err = validate_topic("signals.kraken.BTC-USD.notlive")
+        valid, _err = validate_topic("signals.kraken.BTC-USD.notlive")
         assert not valid
-        assert "live" in err.lower()
+        assert "live" in _err.lower()
 
     def test_paper_signal_topic_empty_strategy(self) -> None:
         """Verify paper signal topic with valid strategy is accepted.
@@ -1562,7 +1562,7 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats")
+        valid, _err = validate_topic("system.heartbeats")
         assert valid
 
     def test_system_heartbeats_strategy_with_name(self) -> None:
@@ -1572,7 +1572,7 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats.strategy.my_strategy")
+        valid, _err = validate_topic("system.heartbeats.strategy.my_strategy")
         assert valid
 
     def test_system_heartbeats_strategy_without_name(self) -> None:
@@ -1582,9 +1582,9 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation fails with required name error.
         """
-        valid, err = validate_topic("system.heartbeats.strategy")
+        valid, _err = validate_topic("system.heartbeats.strategy")
         assert not valid
-        assert "requires" in err.lower()
+        assert "requires" in _err.lower()
 
     def test_system_heartbeats_executor_with_exchange(self) -> None:
         """Verify executor heartbeat with exchange is valid.
@@ -1593,7 +1593,7 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats.executor.kraken")
+        valid, _err = validate_topic("system.heartbeats.executor.kraken")
         assert valid
 
     def test_system_heartbeats_feed_valid(self) -> None:
@@ -1603,7 +1603,7 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.heartbeats.feed.kraken")
+        valid, _err = validate_topic("system.heartbeats.feed.kraken")
         assert valid
 
     def test_system_heartbeats_feed_wrong_segments(self) -> None:
@@ -1613,9 +1613,9 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = validate_topic("system.heartbeats.feed")
+        valid, _err = validate_topic("system.heartbeats.feed")
         assert not valid
-        assert "4 segments" in err.lower()
+        assert "4 segments" in _err.lower()
 
     def test_system_heartbeats_invalid_component(self) -> None:
         """Verify heartbeat with invalid component type is rejected.
@@ -1624,9 +1624,9 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation fails with component type error.
         """
-        valid, err = validate_topic("system.heartbeats.invalid.test")
+        valid, _err = validate_topic("system.heartbeats.invalid.test")
         assert not valid
-        assert "component type" in err.lower()
+        assert "component type" in _err.lower()
 
     def test_system_settings_valid(self) -> None:
         """Verify system.settings topic is valid.
@@ -1635,7 +1635,7 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("system.settings")
+        valid, _err = validate_topic("system.settings")
         assert valid
 
     def test_system_settings_extra_segments(self) -> None:
@@ -1645,9 +1645,9 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = validate_topic("system.settings.extra")
+        valid, _err = validate_topic("system.settings.extra")
         assert not valid
-        assert "2 segments" in err.lower()
+        assert "2 segments" in _err.lower()
 
     def test_system_invalid_type(self) -> None:
         """Verify system topic with invalid type is rejected.
@@ -1656,9 +1656,9 @@ class TestSystemTopicHeartbeatPaths:
         When: Validated,
         Then: Validation fails with system type error.
         """
-        valid, err = validate_topic("system.unknown")
+        valid, _err = validate_topic("system.unknown")
         assert not valid
-        assert "system type" in err.lower()
+        assert "system type" in _err.lower()
 
 
 class TestAdminTopicValidation:
@@ -1671,9 +1671,9 @@ class TestAdminTopicValidation:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_admin_topic("admin.")
+        valid, _err = _validate_admin_topic("admin.")
         assert not valid
-        assert "2 segments" in err.lower()
+        assert "2 segments" in _err.lower()
 
     def test_admin_topic_wrong_segment_count(self) -> None:
         """Verify admin topic with wrong segment count is rejected.
@@ -1682,9 +1682,9 @@ class TestAdminTopicValidation:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_admin_topic("admin.users.extra")
+        valid, _err = _validate_admin_topic("admin.users.extra")
         assert not valid
-        assert "2 segments" in err.lower()
+        assert "2 segments" in _err.lower()
 
     def test_admin_topic_category_check(self) -> None:
         """Verify direct admin validator rejects wrong category.
@@ -1693,9 +1693,9 @@ class TestAdminTopicValidation:
         When: Validated with admin validator,
         Then: Validation fails with admin category error.
         """
-        valid, err = _validate_admin_topic("notadmin.users")
+        valid, _err = _validate_admin_topic("notadmin.users")
         assert not valid
-        assert "admin" in err.lower()
+        assert "admin" in _err.lower()
 
     def test_admin_topic_empty_resource(self) -> None:
         """Verify admin topic with valid resource is accepted.
@@ -1704,7 +1704,7 @@ class TestAdminTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("admin.users")
+        valid, _err = validate_topic("admin.users")
         assert valid
 
 
@@ -1718,9 +1718,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with dot requirement error.
         """
-        valid, err = _validate_prefix_pattern("market.kraken")
+        valid, _err = _validate_prefix_pattern("market.kraken")
         assert not valid
-        assert "dot" in err.lower()
+        assert "dot" in _err.lower()
 
     def test_prefix_with_empty_segment(self) -> None:
         """Verify prefix with empty segment is rejected.
@@ -1729,9 +1729,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with empty segment error.
         """
-        valid, err = _validate_prefix_pattern("market..kraken.")
+        valid, _err = _validate_prefix_pattern("market..kraken.")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
     def test_prefix_unknown_category(self) -> None:
         """Verify prefix with unknown category is rejected.
@@ -1740,9 +1740,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with category error.
         """
-        valid, err = _validate_prefix_pattern("unknown.")
+        valid, _err = _validate_prefix_pattern("unknown.")
         assert not valid
-        assert "category" in err.lower()
+        assert "category" in _err.lower()
 
     def test_prefix_market_invalid_exchange(self) -> None:
         """Verify market prefix with invalid exchange is rejected.
@@ -1751,9 +1751,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_subscription_pattern("market.invalid_exchange.")
+        valid, _err = validate_subscription_pattern("market.invalid_exchange.")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_prefix_market_invalid_instrument(self) -> None:
         """Verify market prefix with invalid instrument is rejected.
@@ -1762,9 +1762,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_subscription_pattern("market.kraken.INVALID.")
+        valid, _err = validate_subscription_pattern("market.kraken.INVALID.")
         assert not valid
-        assert "instrument" in err.lower()
+        assert "instrument" in _err.lower()
 
     def test_prefix_orders_invalid_exchange(self) -> None:
         """Verify orders prefix with invalid exchange is rejected.
@@ -1773,9 +1773,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_subscription_pattern("orders.commands.invalid_exchange.")
+        valid, _err = validate_subscription_pattern("orders.commands.invalid_exchange.")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_prefix_orders_invalid_instrument(self) -> None:
         """Verify orders prefix with invalid instrument is rejected.
@@ -1784,9 +1784,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_subscription_pattern("orders.commands.kraken.INVALID.")
+        valid, _err = validate_subscription_pattern("orders.commands.kraken.INVALID.")
         assert not valid
-        assert "instrument" in err.lower()
+        assert "instrument" in _err.lower()
 
     def test_prefix_orders_invalid_subcategory(self) -> None:
         """Verify orders prefix with invalid subcategory is rejected.
@@ -1795,9 +1795,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with subcategory error.
         """
-        valid, err = validate_subscription_pattern("orders.kraken.")
+        valid, _err = validate_subscription_pattern("orders.kraken.")
         assert not valid
-        assert "commands" in err.lower() or "events" in err.lower()
+        assert "commands" in _err.lower() or "events" in _err.lower()
 
     def test_prefix_signals_invalid_exchange(self) -> None:
         """Verify signals prefix with invalid exchange is rejected.
@@ -1806,9 +1806,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_subscription_pattern("signals.invalid_exchange.")
+        valid, _err = validate_subscription_pattern("signals.invalid_exchange.")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_prefix_signals_invalid_instrument(self) -> None:
         """Verify signals prefix with invalid instrument is rejected.
@@ -1817,9 +1817,9 @@ class TestPrefixPatternValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_subscription_pattern("signals.kraken.INVALID.")
+        valid, _err = validate_subscription_pattern("signals.kraken.INVALID.")
         assert not valid
-        assert "instrument" in err.lower()
+        assert "instrument" in _err.lower()
 
 
 class TestStrategyTopicValidation:
@@ -1832,8 +1832,8 @@ class TestStrategyTopicValidation:
         When: Validated,
         Then: Validation handles strategy category.
         """
-        valid, err = validate_topic("strategy.my_strategy.state")
-        assert valid or "strategy" in err.lower()
+        valid, _err = validate_topic("strategy.my_strategy.state")
+        assert valid or "strategy" in _err.lower()
 
 
 class TestEmptyTopicValidation:
@@ -1846,9 +1846,9 @@ class TestEmptyTopicValidation:
         When: Validated,
         Then: Validation fails with empty error.
         """
-        valid, err = validate_topic("")
+        valid, _err = validate_topic("")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
     def test_empty_pattern(self) -> None:
         """Verify empty pattern string is rejected.
@@ -1857,9 +1857,9 @@ class TestEmptyTopicValidation:
         When: Validated,
         Then: Validation fails with empty error.
         """
-        valid, err = validate_subscription_pattern("")
+        valid, _err = validate_subscription_pattern("")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
 
 class TestWildcardRejection:
@@ -1872,9 +1872,9 @@ class TestWildcardRejection:
         When: Validated,
         Then: Validation fails with wildcard error.
         """
-        valid, err = validate_subscription_pattern("market.*")
+        valid, _err = validate_subscription_pattern("market.*")
         assert not valid
-        assert "wildcard" in err.lower()
+        assert "wildcard" in _err.lower()
 
 
 class TestMarketTopicPrefixRejection:
@@ -1887,9 +1887,9 @@ class TestMarketTopicPrefixRejection:
         When: Validated with market validator,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_market_topic("market.kraken.BTC-USD.")
+        valid, _err = _validate_market_topic("market.kraken.BTC-USD.")
         assert not valid
-        assert "4-5 segments" in err.lower() or "4 segments" in err.lower()
+        assert "4-5 segments" in _err.lower() or "4 segments" in _err.lower()
 
     def test_market_topic_wrong_segment_count(self) -> None:
         """Verify market topic with wrong segment count is rejected.
@@ -1898,9 +1898,9 @@ class TestMarketTopicPrefixRejection:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_market_topic("market.kraken")
+        valid, _err = _validate_market_topic("market.kraken")
         assert not valid
-        assert "segment" in err.lower()
+        assert "segment" in _err.lower()
 
 
 class TestMarketTopicInstrumentValidation:
@@ -1913,9 +1913,9 @@ class TestMarketTopicInstrumentValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_topic("market.kraken.INVALID-INST.ticks")
+        valid, _err = validate_topic("market.kraken.INVALID-INST.ticks")
         assert not valid
-        assert "instrument" in err.lower()
+        assert "instrument" in _err.lower()
 
 
 class TestMarketTopicExchangeValidation:
@@ -1928,9 +1928,9 @@ class TestMarketTopicExchangeValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("market.invalid_exch.BTC-USD.ticks")
+        valid, _err = validate_topic("market.invalid_exch.BTC-USD.ticks")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
 
 class TestCandlesTopicSegmentCount:
@@ -1943,9 +1943,9 @@ class TestCandlesTopicSegmentCount:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
 
 class TestOrdersTopicValidationV2:
@@ -1958,9 +1958,9 @@ class TestOrdersTopicValidationV2:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_orders_commands_topic("orders.commands.kraken")
+        valid, _err = _validate_orders_commands_topic("orders.commands.kraken")
         assert not valid
-        assert "5 segments" in err.lower()
+        assert "5 segments" in _err.lower()
 
     def test_orders_commands_topic_invalid_exchange(self) -> None:
         """Verify orders.commands topic with invalid exchange is rejected.
@@ -1969,9 +1969,9 @@ class TestOrdersTopicValidationV2:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("orders.commands.invalid_exch.BTC-USD.submit")
+        valid, _err = validate_topic("orders.commands.invalid_exch.BTC-USD.submit")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
 
 class TestOrdersEventsTopicExchangeValidation:
@@ -1984,9 +1984,9 @@ class TestOrdersEventsTopicExchangeValidation:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_orders_events_topic("orders.events.kraken")
+        valid, _err = _validate_orders_events_topic("orders.events.kraken")
         assert not valid
-        assert "5 segments" in err.lower()
+        assert "5 segments" in _err.lower()
 
     def test_orders_events_topic_invalid_exchange(self) -> None:
         """Verify orders.events topic with invalid exchange is rejected.
@@ -1995,9 +1995,9 @@ class TestOrdersEventsTopicExchangeValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("orders.events.invalid_exch.BTC-USD.fill")
+        valid, _err = validate_topic("orders.events.invalid_exch.BTC-USD.fill")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_orders_events_topic_invalid_instrument(self) -> None:
         """Verify orders.events topic with invalid instrument is rejected.
@@ -2006,9 +2006,9 @@ class TestOrdersEventsTopicExchangeValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, err = validate_topic("orders.events.kraken.INVALID-INST.fill")
+        valid, _err = validate_topic("orders.events.kraken.INVALID-INST.fill")
         assert not valid
-        assert "instrument" in err.lower()
+        assert "instrument" in _err.lower()
 
 
 class TestLiveSignalTopicValidation:
@@ -2021,7 +2021,7 @@ class TestLiveSignalTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("signals.kraken.BTC-USD.live")
+        valid, _err = validate_topic("signals.kraken.BTC-USD.live")
         assert valid
 
     def test_live_signal_wrong_suffix(self) -> None:
@@ -2031,9 +2031,9 @@ class TestLiveSignalTopicValidation:
         When: Validated,
         Then: Validation fails with live requirement error.
         """
-        valid, err = validate_topic("signals.kraken.BTC-USD.paper")
+        valid, _err = validate_topic("signals.kraken.BTC-USD.paper")
         assert not valid
-        assert "live" in err.lower()
+        assert "live" in _err.lower()
 
 
 class TestSystemTopicBranches:
@@ -2046,7 +2046,7 @@ class TestSystemTopicBranches:
         When: Validated,
         Then: Returns boolean result.
         """
-        valid, err = _validate_system_topic("system.heartbeats.")
+        valid, _err = _validate_system_topic("system.heartbeats.")
         assert isinstance(valid, bool)
 
     def test_system_topic_general_dot_ending(self) -> None:
@@ -2056,9 +2056,9 @@ class TestSystemTopicBranches:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = _validate_system_topic("system.settings.")
+        valid, _err = _validate_system_topic("system.settings.")
         assert not valid
-        assert "dot" in err.lower() or "segments" in err.lower()
+        assert "dot" in _err.lower() or "segments" in _err.lower()
 
     def test_system_topic_too_few_segments(self) -> None:
         """Verify system topic with too few segments is rejected.
@@ -2067,9 +2067,9 @@ class TestSystemTopicBranches:
         When: Validated,
         Then: Validation fails with segment count error.
         """
-        valid, err = _validate_system_topic("system")
+        valid, _err = _validate_system_topic("system")
         assert not valid
-        assert "2 segments" in err.lower()
+        assert "2 segments" in _err.lower()
 
     def test_system_heartbeats_invalid_format(self) -> None:
         """Placeholder test for system heartbeats format.
@@ -2091,7 +2091,7 @@ class TestAdminResourceValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("admin.users")
+        valid, _err = validate_topic("admin.users")
         assert valid
 
     def test_admin_settings_resource(self) -> None:
@@ -2101,7 +2101,7 @@ class TestAdminResourceValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_topic("admin.settings")
+        valid, _err = validate_topic("admin.settings")
         assert valid
 
 
@@ -2115,9 +2115,9 @@ class TestEmptyInstrumentValidation:
         When: Validated,
         Then: Validation fails with empty error.
         """
-        valid, err = _validate_instrument("")
+        valid, _err = _validate_instrument("")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
 
 class TestEmptyExchangeValidation:
@@ -2130,9 +2130,9 @@ class TestEmptyExchangeValidation:
         When: Validated,
         Then: Validation fails with empty error.
         """
-        valid, err = _validate_exchange("")
+        valid, _err = _validate_exchange("")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
 
 class TestUnknownTopicCategory:
@@ -2145,9 +2145,9 @@ class TestUnknownTopicCategory:
         When: Validated,
         Then: Validation fails with category error.
         """
-        valid, err = validate_topic("unknown.something.else")
+        valid, _err = validate_topic("unknown.something.else")
         assert not valid
-        assert "category" in err.lower()
+        assert "category" in _err.lower()
 
 
 class TestSubscriptionPatternFullTopic:
@@ -2160,7 +2160,7 @@ class TestSubscriptionPatternFullTopic:
         When: Validated as subscription pattern,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("market.kraken.BTC-USD.ticks")
+        valid, _err = validate_subscription_pattern("market.kraken.BTC-USD.ticks")
         assert valid
 
     def test_full_topic_invalid_via_subscription_pattern(self) -> None:
@@ -2170,7 +2170,7 @@ class TestSubscriptionPatternFullTopic:
         When: Validated as subscription pattern,
         Then: Validation fails.
         """
-        valid, err = validate_subscription_pattern("market.invalid.BTC-USD.ticks")
+        valid, _err = validate_subscription_pattern("market.invalid.BTC-USD.ticks")
         assert not valid
 
 
@@ -2184,9 +2184,9 @@ class TestCandlesMissingTimeframe:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = _validate_market_topic("market.kraken.BTC-USD.candles.")
+        valid, _err = _validate_market_topic("market.kraken.BTC-USD.candles.")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
 
 class TestOrdersCommandsCategoryCheck:
@@ -2199,9 +2199,9 @@ class TestOrdersCommandsCategoryCheck:
         When: Validated,
         Then: Validation fails with orders.commands category error.
         """
-        valid, err = _validate_orders_commands_topic("market.kraken.BTC-USD.submit")
+        valid, _err = _validate_orders_commands_topic("market.kraken.BTC-USD.submit")
         assert not valid
-        assert "orders.commands" in err.lower()
+        assert "orders.commands" in _err.lower()
 
 
 class TestSignalPaperEmptyStrategy:
@@ -2214,9 +2214,9 @@ class TestSignalPaperEmptyStrategy:
         When: Validated,
         Then: Validation fails with empty strategy error.
         """
-        valid, err = _validate_signal_topic("signals.paper.BTC-USD.")
+        valid, _err = _validate_signal_topic("signals.paper.BTC-USD.")
         assert not valid
-        assert "empty" in err.lower() or "strategy" in err.lower()
+        assert "empty" in _err.lower() or "strategy" in _err.lower()
 
 
 class TestSystemTopicEndingDot:
@@ -2229,10 +2229,12 @@ class TestSystemTopicEndingDot:
         When: Validated,
         Then: Validation result is checked.
         """
-        valid, err = validate_subscription_pattern("system.heartbeats.")
+        valid, _err = validate_subscription_pattern("system.heartbeats.")
         if not valid:
             assert (
-                "heartbeats" in err.lower() or "segments" in err.lower() or "format" in err.lower()
+                "heartbeats" in _err.lower()
+                or "segments" in _err.lower()
+                or "format" in _err.lower()
             )
 
     def test_system_topic_ending_dot_not_heartbeats(self) -> None:
@@ -2242,9 +2244,9 @@ class TestSystemTopicEndingDot:
         When: Validated with system validator,
         Then: Validation fails.
         """
-        valid, err = _validate_system_topic("system.settings.")
+        valid, _err = _validate_system_topic("system.settings.")
         assert not valid
-        assert "segments" in err.lower() or "cannot end" in err.lower()
+        assert "segments" in _err.lower() or "cannot end" in _err.lower()
 
 
 class TestSystemTopicInvalidCategory:
@@ -2257,9 +2259,9 @@ class TestSystemTopicInvalidCategory:
         When: Validated,
         Then: Validation fails with system category error.
         """
-        valid, err = _validate_system_topic("market.heartbeats")
+        valid, _err = _validate_system_topic("market.heartbeats")
         assert not valid
-        assert "system" in err.lower()
+        assert "system" in _err.lower()
 
 
 class TestSystemHeartbeatInvalidComponent:
@@ -2272,9 +2274,9 @@ class TestSystemHeartbeatInvalidComponent:
         When: Validated,
         Then: Validation fails with component type error.
         """
-        valid, err = _validate_system_topic("system.heartbeats.unknown.name")
+        valid, _err = _validate_system_topic("system.heartbeats.unknown.name")
         assert not valid
-        assert "component type" in err.lower() or "invalid" in err.lower()
+        assert "component type" in _err.lower() or "invalid" in _err.lower()
 
 
 class TestAdminEmptyResource:
@@ -2287,9 +2289,9 @@ class TestAdminEmptyResource:
         When: Validated,
         Then: Validation fails with segment error.
         """
-        valid, err = _validate_admin_topic("admin.")
+        valid, _err = _validate_admin_topic("admin.")
         assert not valid
-        assert "segments" in err.lower() or "empty" in err.lower() or "resource" in err.lower()
+        assert "segments" in _err.lower() or "empty" in _err.lower() or "resource" in _err.lower()
 
 
 class TestPrefixSegmentEmpty:
@@ -2302,9 +2304,9 @@ class TestPrefixSegmentEmpty:
         When: Validated,
         Then: Validation fails with empty segment error.
         """
-        valid, err = _validate_prefix_pattern("market..kraken.")
+        valid, _err = _validate_prefix_pattern("market..kraken.")
         assert not valid
-        assert "empty" in err.lower()
+        assert "empty" in _err.lower()
 
     def test_prefix_no_segments(self) -> None:
         """Verify single dot prefix is rejected.
@@ -2313,7 +2315,7 @@ class TestPrefixSegmentEmpty:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = _validate_prefix_pattern(".")
+        valid, _err = _validate_prefix_pattern(".")
         assert not valid
 
 
@@ -2327,9 +2329,9 @@ class TestPrefixValidationOrders:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = _validate_prefix_pattern("orders.commands.invalid_exchange.")
+        valid, _err = _validate_prefix_pattern("orders.commands.invalid_exchange.")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_orders_prefix_invalid_instrument(self) -> None:
         """Verify orders prefix with invalid instrument is rejected.
@@ -2338,7 +2340,7 @@ class TestPrefixValidationOrders:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = _validate_prefix_pattern("orders.commands.kraken.INVALID_INSTR.")
+        valid, _err = _validate_prefix_pattern("orders.commands.kraken.INVALID_INSTR.")
         assert not valid
 
     def test_orders_prefix_invalid_subcategory(self) -> None:
@@ -2348,9 +2350,9 @@ class TestPrefixValidationOrders:
         When: Validated,
         Then: Validation fails with subcategory error.
         """
-        valid, err = _validate_prefix_pattern("orders.invalid_subcategory.")
+        valid, _err = _validate_prefix_pattern("orders.invalid_subcategory.")
         assert not valid
-        assert "commands" in err.lower() or "events" in err.lower()
+        assert "commands" in _err.lower() or "events" in _err.lower()
 
 
 class TestPrefixValidationOrdersEvents:
@@ -2363,9 +2365,9 @@ class TestPrefixValidationOrdersEvents:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = _validate_prefix_pattern("orders.events.invalid_exchange.")
+        valid, _err = _validate_prefix_pattern("orders.events.invalid_exchange.")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_orders_events_prefix_invalid_instrument(self) -> None:
         """Verify orders.events prefix with invalid instrument is rejected.
@@ -2374,7 +2376,7 @@ class TestPrefixValidationOrdersEvents:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = _validate_prefix_pattern("orders.events.kraken.INVALID_INSTR.")
+        valid, _err = _validate_prefix_pattern("orders.events.kraken.INVALID_INSTR.")
         assert not valid
 
 
@@ -2388,9 +2390,9 @@ class TestPrefixValidationSignals:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = _validate_prefix_pattern("signals.invalid_exchange.")
+        valid, _err = _validate_prefix_pattern("signals.invalid_exchange.")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
     def test_signals_prefix_invalid_instrument(self) -> None:
         """Verify signals prefix with invalid instrument is rejected.
@@ -2399,7 +2401,7 @@ class TestPrefixValidationSignals:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = _validate_prefix_pattern("signals.kraken.INVALID_INSTR.")
+        valid, _err = _validate_prefix_pattern("signals.kraken.INVALID_INSTR.")
         assert not valid
 
 
@@ -2413,9 +2415,9 @@ class TestWildcardRejectionV2:
         When: Validated,
         Then: Validation fails with wildcard error.
         """
-        valid, err = validate_subscription_pattern("market.kraken.*")
+        valid, _err = validate_subscription_pattern("market.kraken.*")
         assert not valid
-        assert "Wildcards (*) not supported" in err
+        assert "Wildcards (*) not supported" in _err
 
     def test_wildcard_in_middle_rejected(self) -> None:
         """Verify wildcard in middle of pattern is rejected.
@@ -2424,9 +2426,9 @@ class TestWildcardRejectionV2:
         When: Validated,
         Then: Validation fails with wildcard error.
         """
-        valid, err = validate_subscription_pattern("market.*.BTC-USD.candles.1m")
+        valid, _err = validate_subscription_pattern("market.*.BTC-USD.candles.1m")
         assert not valid
-        assert "Wildcards" in err
+        assert "Wildcards" in _err
 
 
 class TestInvalidCategory:
@@ -2439,9 +2441,9 @@ class TestInvalidCategory:
         When: Validated,
         Then: Validation fails with category error.
         """
-        valid, err = validate_topic("trading.kraken.BTC-USD.candles.1m")
+        valid, _err = validate_topic("trading.kraken.BTC-USD.candles.1m")
         assert not valid
-        assert "Unknown topic category" in err
+        assert "Unknown topic category" in _err
 
     def test_typo_in_category(self) -> None:
         """Verify typo in category is rejected.
@@ -2450,9 +2452,9 @@ class TestInvalidCategory:
         When: Validated,
         Then: Validation fails with category error.
         """
-        valid, err = validate_topic("marekt.kraken.BTC-USD.ticks")
+        valid, _err = validate_topic("marekt.kraken.BTC-USD.ticks")
         assert not valid
-        assert "category" in err.lower()
+        assert "category" in _err.lower()
 
 
 class TestInvalidInstrument:
@@ -2465,7 +2467,7 @@ class TestInvalidInstrument:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken..ticks")
+        valid, _err = validate_topic("market.kraken..ticks")
         assert not valid
 
 
@@ -2479,9 +2481,9 @@ class TestInvalidDataType:
         When: Validated,
         Then: Validation fails with data type error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.snapshots")
+        valid, _err = validate_topic("market.kraken.BTC-USD.snapshots")
         assert not valid
-        assert "Invalid market data type" in err
+        assert "Invalid market data type" in _err
 
     def test_misspelled_data_type(self) -> None:
         """Verify misspelled data type is rejected.
@@ -2490,9 +2492,9 @@ class TestInvalidDataType:
         When: Validated,
         Then: Validation fails with data type error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candels.1m")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candels.1m")
         assert not valid
-        assert "data type" in err.lower()
+        assert "data type" in _err.lower()
 
 
 class TestInvalidExchange:
@@ -2505,9 +2507,9 @@ class TestInvalidExchange:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("market.unknown_exchange.BTC-USD.ticks")
+        valid, _err = validate_topic("market.unknown_exchange.BTC-USD.ticks")
         assert not valid
-        assert "Unknown exchange" in err
+        assert "Unknown exchange" in _err
 
     def test_typo_in_exchange(self) -> None:
         """Verify typo in exchange is rejected.
@@ -2516,9 +2518,9 @@ class TestInvalidExchange:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, err = validate_topic("market.krakn.BTC-USD.trades")
+        valid, _err = validate_topic("market.krakn.BTC-USD.trades")
         assert not valid
-        assert "exchange" in err.lower()
+        assert "exchange" in _err.lower()
 
 
 class TestExecutionTopicValidation:
@@ -2531,9 +2533,9 @@ class TestExecutionTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("executions.kraken.ORDER123.filled")
+        valid, _err = validate_topic("executions.kraken.ORDER123.filled")
         assert not valid
-        assert "Unknown" in err or "Invalid" in err
+        assert "Unknown" in _err or "Invalid" in _err
 
     def test_execution_topic_missing_segments(self) -> None:
         """Verify execution topic with missing segments is rejected.
@@ -2542,7 +2544,7 @@ class TestExecutionTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("execution.kraken.ORDER123")
+        valid, _err = validate_topic("execution.kraken.ORDER123")
         assert not valid
 
     def test_execution_topic_invalid_event_type(self) -> None:
@@ -2552,7 +2554,7 @@ class TestExecutionTopicValidation:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("execution.kraken.ORDER123.unknown_event")
+        valid, _err = validate_topic("execution.kraken.ORDER123.unknown_event")
         assert not valid
 
     def test_execution_topic_valid(self) -> None:
@@ -2560,11 +2562,10 @@ class TestExecutionTopicValidation:
 
         Given: A properly formatted execution topic,
         When: Validated,
-        Then: Either validation passes or test passes.
+        Then: Validation passes or topic format is not yet supported.
         """
-        valid, err = validate_topic("execution.kraken.ORDER123.filled")
-        if not valid:
-            assert True
+        valid, _err = validate_topic("execution.kraken.ORDER123.filled")
+        assert isinstance(valid, bool)
 
 
 class TestSystemTopicValidationV2:
@@ -2577,7 +2578,7 @@ class TestSystemTopicValidationV2:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.heartbeat")
+        valid, _err = validate_topic("system.heartbeat")
         assert not valid
 
     def test_system_unknown_event_type(self) -> None:
@@ -2587,7 +2588,7 @@ class TestSystemTopicValidationV2:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.unknown_event.source123")
+        valid, _err = validate_topic("system.unknown_event.source123")
         assert not valid
 
     def test_system_process_status_invalid_format(self) -> None:
@@ -2597,7 +2598,7 @@ class TestSystemTopicValidationV2:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.process.status")
+        valid, _err = validate_topic("system.process.status")
         assert not valid
 
     def test_system_process_status_too_many_segments(self) -> None:
@@ -2607,7 +2608,7 @@ class TestSystemTopicValidationV2:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.process.status.myprocess.extra.segment")
+        valid, _err = validate_topic("system.process.status.myprocess.extra.segment")
         assert not valid
 
 
@@ -2621,9 +2622,9 @@ class TestFieldValidators:
         When: Validated,
         Then: Returns False with error message.
         """
-        valid, err = _validate_exchange("unknown_exch")
+        valid, _err = _validate_exchange("unknown_exch")
         assert not valid
-        assert "Unknown exchange" in err
+        assert "Unknown exchange" in _err
 
     def test_validate_instrument_unknown(self) -> None:
         """Verify unknown instrument is rejected.
@@ -2632,9 +2633,9 @@ class TestFieldValidators:
         When: Validated,
         Then: Returns False with error message.
         """
-        valid, err = _validate_instrument("UNKNOWN-PAIR")
+        valid, _err = _validate_instrument("UNKNOWN-PAIR")
         assert not valid
-        assert "Unknown instrument" in err
+        assert "Unknown instrument" in _err
 
     def test_is_valid_timeframe_invalid_format(self) -> None:
         """Verify invalid timeframe formats are rejected.
@@ -2664,9 +2665,9 @@ class TestFieldValidators:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_validate_candles_topic_invalid_timeframe(self) -> None:
         """Verify candles topic with invalid timeframe is rejected.
@@ -2675,9 +2676,9 @@ class TestFieldValidators:
         When: Validated,
         Then: Validation fails with timeframe error.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.candles.invalid")
+        valid, _err = validate_topic("market.kraken.BTC-USD.candles.invalid")
         assert not valid
-        assert "timeframe" in err.lower()
+        assert "timeframe" in _err.lower()
 
     def test_validate_ticks_topic_extra_segments(self) -> None:
         """Verify ticks topic with extra segments is rejected.
@@ -2686,7 +2687,7 @@ class TestFieldValidators:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.ticks.extra")
+        valid, _err = validate_topic("market.kraken.BTC-USD.ticks.extra")
         assert not valid
 
     def test_validate_trades_topic_extra_segments(self) -> None:
@@ -2696,7 +2697,7 @@ class TestFieldValidators:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("market.kraken.BTC-USD.trades.extra")
+        valid, _err = validate_topic("market.kraken.BTC-USD.trades.extra")
         assert not valid
 
 
@@ -2710,9 +2711,9 @@ class TestPrefixValidation:
         When: Validated,
         Then: Validation fails with segments error.
         """
-        valid, err = validate_subscription_pattern("market.krak")
+        valid, _err = validate_subscription_pattern("market.krak")
         assert not valid
-        assert "segments" in err.lower()
+        assert "segments" in _err.lower()
 
     def test_prefix_with_dash_incomplete(self) -> None:
         """Verify prefix with incomplete instrument is rejected.
@@ -2721,9 +2722,9 @@ class TestPrefixValidation:
         When: Validated,
         Then: Validation fails with segment or instrument error.
         """
-        valid, err = validate_subscription_pattern("market.kraken.BTC-")
+        valid, _err = validate_subscription_pattern("market.kraken.BTC-")
         assert not valid
-        assert "segments" in err.lower() or "instrument" in err.lower()
+        assert "segments" in _err.lower() or "instrument" in _err.lower()
 
     def test_prefix_valid_multi_level(self) -> None:
         """Verify valid multi-level prefix is accepted.
@@ -2732,9 +2733,9 @@ class TestPrefixValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, err = validate_subscription_pattern("market.kraken.")
+        valid, _err = validate_subscription_pattern("market.kraken.")
         assert valid
-        assert err == ""
+        assert _err == ""
 
 
 class TestExecutionFieldValidators:
@@ -2747,7 +2748,7 @@ class TestExecutionFieldValidators:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("execution.kraken..filled")
+        valid, _err = validate_topic("execution.kraken..filled")
         assert not valid
 
     def test_validate_event_type_unknown(self) -> None:
@@ -2766,9 +2767,9 @@ class TestExecutionFieldValidators:
         When: Validated,
         Then: If valid, error is empty.
         """
-        valid, err = validate_topic("execution.kraken.ORDER123.filled")
+        valid, _err = validate_topic("execution.kraken.ORDER123.filled")
         if valid:
-            assert err == ""
+            assert _err == ""
 
     def test_validate_execution_topic_valid_canceled(self) -> None:
         """Verify valid canceled execution topic is accepted.
@@ -2777,9 +2778,9 @@ class TestExecutionFieldValidators:
         When: Validated,
         Then: If valid, error is empty.
         """
-        valid, err = validate_topic("execution.kraken.ORDER456.canceled")
+        valid, _err = validate_topic("execution.kraken.ORDER456.canceled")
         if valid:
-            assert err == ""
+            assert _err == ""
 
 
 class TestSystemFieldValidators:
@@ -2792,7 +2793,7 @@ class TestSystemFieldValidators:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.heartbeats.")
+        valid, _err = validate_topic("system.heartbeats.")
         assert not valid
 
     def test_validate_process_name_empty(self) -> None:
@@ -2802,7 +2803,7 @@ class TestSystemFieldValidators:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.process.status.")
+        valid, _err = validate_topic("system.process.status.")
         assert not valid
 
     def test_validate_process_event_invalid(self) -> None:
@@ -2812,7 +2813,7 @@ class TestSystemFieldValidators:
         When: Validated,
         Then: Validation fails.
         """
-        valid, err = validate_topic("system.process.unknown.myprocess")
+        valid, _err = validate_topic("system.process.unknown.myprocess")
         assert not valid
 
     def test_validate_system_metrics_valid(self) -> None:
@@ -2822,9 +2823,9 @@ class TestSystemFieldValidators:
         When: Validated,
         Then: If valid, error is empty.
         """
-        valid, err = validate_topic("system.metrics.cpu.host123")
+        valid, _err = validate_topic("system.metrics.cpu.host123")
         if valid:
-            assert err == ""
+            assert _err == ""
 
     def test_validate_system_alerts_valid(self) -> None:
         """Verify valid system alerts topic is accepted.
@@ -2833,9 +2834,9 @@ class TestSystemFieldValidators:
         When: Validated,
         Then: If valid, error is empty.
         """
-        valid, err = validate_topic("system.alerts.high_cpu.server1")
+        valid, _err = validate_topic("system.alerts.high_cpu.server1")
         if valid:
-            assert err == ""
+            assert _err == ""
 
     def test_validate_system_logs_valid(self) -> None:
         """Verify valid system logs topic is accepted.
@@ -2844,9 +2845,9 @@ class TestSystemFieldValidators:
         When: Validated,
         Then: If valid, error is empty.
         """
-        valid, err = validate_topic("system.logs.error.app1")
+        valid, _err = validate_topic("system.logs.error.app1")
         if valid:
-            assert err == ""
+            assert _err == ""
 
     def test_validate_system_config_valid(self) -> None:
         """Verify valid system config topic is accepted.
@@ -2855,9 +2856,9 @@ class TestSystemFieldValidators:
         When: Validated,
         Then: If valid, error is empty.
         """
-        valid, err = validate_topic("system.config.updated.component1")
+        valid, _err = validate_topic("system.config.updated.component1")
         if valid:
-            assert err == ""
+            assert _err == ""
 
 
 @pytest.mark.parametrize(

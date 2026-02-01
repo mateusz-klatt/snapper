@@ -10,7 +10,7 @@ interface SkeletonProps {
   style?: React.CSSProperties
 }
 
-export const Skeleton: React.FC<SkeletonProps> = ({
+export const Skeleton: React.FC<Readonly<SkeletonProps>> = ({
   className,
   width,
   height,
@@ -51,7 +51,7 @@ interface SkeletonTextProps {
   lastLineWidth?: string
 }
 
-export const SkeletonText: React.FC<SkeletonTextProps> = ({
+export const SkeletonText: React.FC<Readonly<SkeletonTextProps>> = ({
   lines = 3,
   className,
   lineClassName,
@@ -59,9 +59,9 @@ export const SkeletonText: React.FC<SkeletonTextProps> = ({
 }) => {
   return (
     <div className={clsx('space-y-2', className)} data-testid='skeleton-text'>
-      {Array.from({ length: lines }).map((_, index) => (
+      {Array.from({ length: lines }, (_, i) => `text-line-${i}`).map((key, index) => (
         <Skeleton
-          key={`text-line-${index}`}
+          key={key}
           height={16}
           className={clsx(
             'w-full',
@@ -81,7 +81,7 @@ interface CardSkeletonProps {
   contentLines?: number
 }
 
-export const CardSkeleton: React.FC<CardSkeletonProps> = ({
+export const CardSkeleton: React.FC<Readonly<CardSkeletonProps>> = ({
   className,
   showTitle = true,
   contentLines = 4,
@@ -95,8 +95,8 @@ export const CardSkeleton: React.FC<CardSkeletonProps> = ({
         </div>
       )}
       <div className='space-y-3'>
-        {Array.from({ length: contentLines }).map((_, index) => (
-          <div key={`card-line-${index}`} className='flex items-center justify-between'>
+        {Array.from({ length: contentLines }, (_, i) => `card-line-${i}`).map(key => (
+          <div key={key} className='flex items-center justify-between'>
             <Skeleton width={120} height={16} />
             <Skeleton width={80} height={16} />
           </div>
@@ -110,7 +110,7 @@ interface MetricCardSkeletonProps {
   className?: string
 }
 
-export const MetricCardSkeleton: React.FC<MetricCardSkeletonProps> = ({ className }) => {
+export const MetricCardSkeleton: React.FC<Readonly<MetricCardSkeletonProps>> = ({ className }) => {
   return (
     <div
       className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
@@ -132,7 +132,7 @@ interface TableSkeletonProps {
   showHeader?: boolean
 }
 
-export const TableSkeleton: React.FC<TableSkeletonProps> = ({
+export const TableSkeleton: React.FC<Readonly<TableSkeletonProps>> = ({
   columns = 5,
   rows = 5,
   className,
@@ -142,16 +142,16 @@ export const TableSkeleton: React.FC<TableSkeletonProps> = ({
     <div className={clsx('w-full', className)} data-testid='table-skeleton'>
       {showHeader && (
         <div className='flex gap-4 pb-3 border-b border-dark-700 mb-3'>
-          {Array.from({ length: columns }).map((_, index) => (
-            <Skeleton key={`table-header-${index}`} height={16} className='flex-1' />
+          {Array.from({ length: columns }, (_, i) => `table-header-${i}`).map(key => (
+            <Skeleton key={key} height={16} className='flex-1' />
           ))}
         </div>
       )}
       <div className='space-y-3'>
-        {Array.from({ length: rows }).map((_, rowIndex) => (
-          <div key={`table-row-${rowIndex}`} className='flex gap-4'>
-            {Array.from({ length: columns }).map((_, colIndex) => (
-              <Skeleton key={`table-cell-${rowIndex}-${colIndex}`} height={20} className='flex-1' />
+        {Array.from({ length: rows }, (_, i) => `table-row-${i}`).map(rowKey => (
+          <div key={rowKey} className='flex gap-4'>
+            {Array.from({ length: columns }, (_, j) => `${rowKey}-col-${j}`).map(cellKey => (
+              <Skeleton key={cellKey} height={20} className='flex-1' />
             ))}
           </div>
         ))}
@@ -166,7 +166,7 @@ interface ChartSkeletonProps {
   showLegend?: boolean
 }
 
-export const ChartSkeleton: React.FC<ChartSkeletonProps> = ({
+export const ChartSkeleton: React.FC<Readonly<ChartSkeletonProps>> = ({
   className,
   height = 300,
   showLegend = true,
@@ -189,7 +189,9 @@ interface ProcessCardSkeletonProps {
   className?: string
 }
 
-export const ProcessCardSkeleton: React.FC<ProcessCardSkeletonProps> = ({ className }) => {
+export const ProcessCardSkeleton: React.FC<Readonly<ProcessCardSkeletonProps>> = ({
+  className,
+}) => {
   return (
     <div
       className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
@@ -214,7 +216,9 @@ interface StrategyCardSkeletonProps {
   className?: string
 }
 
-export const StrategyCardSkeleton: React.FC<StrategyCardSkeletonProps> = ({ className }) => {
+export const StrategyCardSkeleton: React.FC<Readonly<StrategyCardSkeletonProps>> = ({
+  className,
+}) => {
   return (
     <div
       className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
@@ -251,16 +255,16 @@ interface ListSkeletonProps {
   itemClassName?: string
 }
 
-export const ListSkeleton: React.FC<ListSkeletonProps> = ({
+export const ListSkeleton: React.FC<Readonly<ListSkeletonProps>> = ({
   items = 5,
   className,
   itemClassName,
 }) => {
   return (
     <div className={clsx('space-y-3', className)} data-testid='list-skeleton'>
-      {Array.from({ length: items }).map((_, index) => (
+      {Array.from({ length: items }, (_, i) => `list-item-${i}`).map(key => (
         <div
-          key={`list-item-${index}`}
+          key={key}
           className={clsx('flex items-center gap-3 p-3 bg-dark-800 rounded-lg', itemClassName)}
         >
           <Skeleton width={40} height={40} rounded='full' />
@@ -279,7 +283,7 @@ interface OverviewSkeletonProps {
   className?: string
 }
 
-export const OverviewSkeleton: React.FC<OverviewSkeletonProps> = ({ className }) => {
+export const OverviewSkeleton: React.FC<Readonly<OverviewSkeletonProps>> = ({ className }) => {
   return (
     <div className={clsx('space-y-6', className)} data-testid='overview-skeleton'>
       {}
@@ -307,7 +311,7 @@ interface ProcessesSkeletonProps {
   className?: string
 }
 
-export const ProcessesSkeleton: React.FC<ProcessesSkeletonProps> = ({ className }) => {
+export const ProcessesSkeleton: React.FC<Readonly<ProcessesSkeletonProps>> = ({ className }) => {
   return (
     <div className={clsx('space-y-6', className)} data-testid='processes-skeleton'>
       {}
@@ -335,7 +339,7 @@ interface StrategiesSkeletonProps {
   className?: string
 }
 
-export const StrategiesSkeleton: React.FC<StrategiesSkeletonProps> = ({ className }) => {
+export const StrategiesSkeleton: React.FC<Readonly<StrategiesSkeletonProps>> = ({ className }) => {
   return (
     <div className={clsx('space-y-6', className)} data-testid='strategies-skeleton'>
       {}
@@ -357,7 +361,7 @@ interface SignalCardSkeletonProps {
   className?: string
 }
 
-export const SignalCardSkeleton: React.FC<SignalCardSkeletonProps> = ({ className }) => {
+export const SignalCardSkeleton: React.FC<Readonly<SignalCardSkeletonProps>> = ({ className }) => {
   return (
     <div
       className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
@@ -385,7 +389,7 @@ interface SignalsSkeletonProps {
   className?: string
 }
 
-export const SignalsSkeleton: React.FC<SignalsSkeletonProps> = ({ className }) => {
+export const SignalsSkeleton: React.FC<Readonly<SignalsSkeletonProps>> = ({ className }) => {
   return (
     <div className={clsx('p-4 space-y-6', className)} data-testid='signals-skeleton'>
       {}
@@ -413,7 +417,7 @@ interface OrderCardSkeletonProps {
   className?: string
 }
 
-export const OrderCardSkeleton: React.FC<OrderCardSkeletonProps> = ({ className }) => {
+export const OrderCardSkeleton: React.FC<Readonly<OrderCardSkeletonProps>> = ({ className }) => {
   return (
     <div
       className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
@@ -445,7 +449,7 @@ interface OrdersSkeletonProps {
   className?: string
 }
 
-export const OrdersSkeleton: React.FC<OrdersSkeletonProps> = ({ className }) => {
+export const OrdersSkeleton: React.FC<Readonly<OrdersSkeletonProps>> = ({ className }) => {
   return (
     <div className={clsx('p-4 space-y-6', className)} data-testid='orders-skeleton'>
       {}
@@ -469,7 +473,7 @@ interface HealthSkeletonProps {
   className?: string
 }
 
-export const HealthSkeleton: React.FC<HealthSkeletonProps> = ({ className }) => {
+export const HealthSkeleton: React.FC<Readonly<HealthSkeletonProps>> = ({ className }) => {
   return (
     <div className={clsx('p-6 space-y-6', className)} data-testid='health-skeleton'>
       {}
@@ -498,7 +502,7 @@ interface MarketDataSkeletonProps {
   className?: string
 }
 
-export const MarketDataSkeleton: React.FC<MarketDataSkeletonProps> = ({ className }) => {
+export const MarketDataSkeleton: React.FC<Readonly<MarketDataSkeletonProps>> = ({ className }) => {
   return (
     <div className={clsx('p-4 space-y-4', className)} data-testid='market-data-skeleton'>
       {}

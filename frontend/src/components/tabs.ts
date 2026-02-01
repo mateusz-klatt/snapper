@@ -1,4 +1,4 @@
-export type TabType =
+type TabType =
   | 'overview'
   | 'market'
   | 'processes'

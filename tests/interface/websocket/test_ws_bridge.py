@@ -126,7 +126,6 @@ async def test_subscription_loop_invalid_format_continues(
     Then: The loop continues without incrementing received count.
     """
     topic = "market.candles."
-    config = bridge.available_topics[topic]
     bridge.topic_metrics[topic] = TopicMetricsModel()
     fake_socket = MagicMock()
     fake_socket.recv_multipart = AsyncMock(
@@ -136,7 +135,7 @@ async def test_subscription_loop_invalid_format_continues(
         ]
     )
     with pytest.raises(asyncio.CancelledError):
-        await bridge._zmq_subscription_loop(topic, fake_socket, config)
+        await bridge._zmq_subscription_loop(topic, fake_socket)
     assert bridge.topic_metrics[topic].received_count == 0
 
 
@@ -149,7 +148,6 @@ async def test_subscription_loop_fatal_error_path(bridge: ZmqWebSocketBridgeServ
     Then: The fatal error is logged.
     """
     topic = "market.candles."
-    config = bridge.available_topics[topic]
     fake_socket = MagicMock()
     fake_socket.recv_multipart = AsyncMock(side_effect=zmq.ZMQError(zmq.EAGAIN))
     with (
@@ -159,7 +157,7 @@ async def test_subscription_loop_fatal_error_path(bridge: ZmqWebSocketBridgeServ
         ),
         patch("snapper.interface.websocket.bridge.logger") as mock_logger,
     ):
-        await bridge._zmq_subscription_loop(topic, fake_socket, config)
+        await bridge._zmq_subscription_loop(topic, fake_socket)
     mock_logger.error.assert_any_call(f"Fatal error in subscription loop for {topic}: sleep fail")
 
 
@@ -607,7 +605,10 @@ async def test_handle_zmq_messages_forwards_raw_json(
     async def forward_stub(*args: object, **kwargs: object) -> None:
         forward_calls.append((args, kwargs))
 
-    with patch.object(bridge, "_forward_to_websockets", new=forward_stub):
+    with (
+        patch.object(bridge, "_forward_to_websockets", new=forward_stub),
+        pytest.raises(asyncio.CancelledError),
+    ):
         await bridge._handle_zmq_messages(topic, mock_socket, config)
     assert len(forward_calls) == 1
     args = forward_calls[0][0]
@@ -871,29 +872,22 @@ class TestZMQBridgeRemainingCoverage:
         bridge.topic_metrics[topic] = TopicMetricsModel()
         mock_websocket.send_text = AsyncMock(side_effect=TimeoutError())
 
-        async def fast_timeout_wait_for(coro: Any, timeout: float) -> Any:
-            try:
-                return await coro
-            except TimeoutError:
-                raise
-
-        with patch("asyncio.wait_for", side_effect=fast_timeout_wait_for):
-            forward_func = bridge._forward_to_websockets
-            test_data_str = json.dumps(
-                {
-                    "type": "bar",
-                    "instrument": "BTC-USD",
-                    "exchange": "kraken",
-                    "timeframe": "1m",
-                    "open": 50000.0,
-                    "high": 51000.0,
-                    "low": 49000.0,
-                    "close": 50500.0,
-                    "volume": 100.0,
-                    "timestamp": "2024-01-01T00:00:00+00:00",
-                }
-            )
-            await forward_func(topic, topic, test_data_str)
+        forward_func = bridge._forward_to_websockets
+        test_data_str = json.dumps(
+            {
+                "type": "bar",
+                "instrument": "BTC-USD",
+                "exchange": "kraken",
+                "timeframe": "1m",
+                "open": 50000.0,
+                "high": 51000.0,
+                "low": 49000.0,
+                "close": 50500.0,
+                "volume": 100.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+            }
+        )
+        await forward_func(topic, topic, test_data_str)
         assert len(bridge.topic_subscriptions[topic]) == 0
         assert bridge.topic_metrics[topic].timeout_count == 1
 
@@ -1522,7 +1516,6 @@ class TestZMQSubscriptionLoop:
         Then: Logs warnings for invalid formats and continues processing.
         """
         topic = "market.prices"
-        config = bridge.available_topics[topic]
         mock_socket = AsyncMock()
         mock_socket.recv_multipart.side_effect = [
             [b"single_part"],
@@ -1536,7 +1529,7 @@ class TestZMQSubscriptionLoop:
             patch("snapper.interface.websocket.bridge.logger") as mock_logger,
             pytest.raises(asyncio.CancelledError),
         ):
-            await bridge._zmq_subscription_loop(topic, mock_socket, config)
+            await bridge._zmq_subscription_loop(topic, mock_socket)
         warning_calls = list(mock_logger.warning.call_args_list)
         assert len(warning_calls) == 2
         assert "expected 2 parts, got 1" in warning_calls[0][0][0]
@@ -1553,7 +1546,6 @@ class TestZMQSubscriptionLoop:
         Then: Forwards raw payload string and updates metrics.
         """
         topic = "market.prices"
-        config = bridge.available_topics[topic]
         mock_socket = AsyncMock()
         mock_socket.recv_multipart.side_effect = [
             [b"market.prices", b"invalid_json{"],
@@ -1570,7 +1562,7 @@ class TestZMQSubscriptionLoop:
 
         bridge._forward_to_clients = mock_forward
         with pytest.raises(asyncio.CancelledError):
-            await bridge._zmq_subscription_loop(topic, mock_socket, config)
+            await bridge._zmq_subscription_loop(topic, mock_socket)
         assert len(forwarded_messages) == 1
         forwarded_topic, received_topic, payload_str = forwarded_messages[0]
         assert forwarded_topic == topic
@@ -1590,7 +1582,6 @@ class TestZMQSubscriptionLoop:
         Then: Logs error, sleeps for backoff, and continues processing.
         """
         topic = "market.prices"
-        config = bridge.available_topics[topic]
         mock_socket = AsyncMock()
         mock_socket.recv_multipart.side_effect = [
             zmq.ZMQError(),
@@ -1607,7 +1598,7 @@ class TestZMQSubscriptionLoop:
             patch("snapper.interface.websocket.bridge.logger") as mock_logger,
             pytest.raises(asyncio.CancelledError),
         ):
-            await bridge._zmq_subscription_loop(topic, mock_socket, config)
+            await bridge._zmq_subscription_loop(topic, mock_socket)
         error_calls = list(mock_logger.error.call_args_list)
         assert any("ZMQ error in subscription loop" in str(call) for call in error_calls)
         mock_sleep.assert_called_with(1)
@@ -2079,11 +2070,11 @@ class TestZMQBridgeIntegration:
         topics = ["market.candles"]
 
         async def start_fail(topic: str) -> None:
-            raise Exception("ZMQ Error")
+            raise RuntimeError("ZMQ Error")
 
         with (
             patch.object(zmq_bridge, "_start_zmq_subscription", new=start_fail),
-            pytest.raises(Exception, match="ZMQ Error"),
+            pytest.raises(RuntimeError, match="ZMQ Error"),
         ):
             await zmq_bridge.subscribe_client(mock_websocket, topics)
         assert mock_websocket in zmq_bridge.client_subscriptions
@@ -2128,11 +2119,8 @@ class TestZMQBridgeIntegration:
                 "timestamp": "2024-01-01T00:00:00+00:00",
             }
         )
-        try:
-            forward_method = zmq_bridge._forward_to_websockets
-            await forward_method(topic, "market.BTCUSD.candles", valid_candle_payload)
-        except Exception:
-            pass
+        forward_method = zmq_bridge._forward_to_websockets
+        await forward_method(topic, "market.BTCUSD.candles", valid_candle_payload)
         assert (
             topic not in zmq_bridge.topic_subscriptions
             or len(zmq_bridge.topic_subscriptions[topic]) == 0
@@ -3160,7 +3148,7 @@ class TestEnvelopeSerialization:
         assert parsed["client_order_id"] == "order-123"
         assert parsed["exchange"] == "kraken"
         assert parsed["side"] == "buy"
-        assert parsed["size"] == 0.5
+        assert parsed["size"] == pytest.approx(0.5)
 
     def test_order_status_envelope_serialization_matches_expected_format(self) -> None:
         """Verify OrderStatusEnvelope serializes to expected JSON format.

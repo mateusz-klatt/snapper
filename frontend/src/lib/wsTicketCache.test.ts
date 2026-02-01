@@ -107,7 +107,7 @@ describe('wsTicketCache', () => {
       expect(consumed).toBeNull()
     })
     it('handles NaN exp timestamp', () => {
-      storeWsTicket({ token: 'abc', exp: NaN })
+      storeWsTicket({ token: 'abc', exp: Number.NaN })
       const consumed = consumeWsTicket(0)
 
       expect(consumed).toBeNull()

@@ -80,7 +80,7 @@ class TestInterceptStdLogHandler:
 
             @property
             def levelname(self) -> str:
-                raise Exception("Broken levelname")
+                raise RuntimeError("Broken levelname")
 
             def getMessage(self) -> str:
                 return "Test message"

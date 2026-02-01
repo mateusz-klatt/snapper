@@ -36,7 +36,7 @@ class AuthErrorBoundary extends Component<Props, State> {
 
     if (this.state.hasError && !this.hasTriggeredLogout) {
       this.hasTriggeredLogout = true
-      const authCallback = (window as { authLogoutCallback?: () => void }).authLogoutCallback
+      const authCallback = (globalThis as { authLogoutCallback?: () => void }).authLogoutCallback
 
       if (authCallback) {
         setTimeout(() => {

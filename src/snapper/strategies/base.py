@@ -10,6 +10,7 @@ import logging
 import time
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -69,6 +70,26 @@ class Signal:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _get_exchange_instrument_resolver(
+    exchange: str,
+) -> tuple[Callable[[], list[str]], str] | None:
+    """Look up the instrument resolver and label for an exchange.
+
+    Args:
+        exchange: Exchange name to look up.
+
+    Returns:
+        Tuple of (resolver_callable, label) or None if exchange unknown.
+    """
+    resolvers: dict[str, tuple[Callable[[], list[str]], str]] = {
+        "paper": (get_available_symbols, "Paper (all exchanges)"),
+        "walutomat": (get_available_walutomat_symbols, "Walutomat (FX pairs only)"),
+        "zonda": (get_available_zonda_symbols, "Zonda"),
+        "kraken": (get_available_kraken_symbols, "Kraken"),
+    }
+    return resolvers.get(exchange)
+
+
 @dataclass
 class StrategyConfig:
     """Configuration for a trading strategy.
@@ -89,6 +110,37 @@ class StrategyConfig:
     exchange: TradingExchange = "paper"
     params: dict[str, Any] = field(default_factory=dict)
 
+    @staticmethod
+    def _is_paper_or_replay(topic: str) -> bool:
+        """Check if a topic string refers to paper or replay data.
+
+        Args:
+            topic: Input topic string.
+
+        Returns:
+            True if the topic contains 'paper' or 'replay'.
+        """
+        lowered = topic.lower()
+        return "paper" in lowered or "replay" in lowered
+
+    def _validate_paper_inputs(self) -> None:
+        """Validate paper/replay input consistency with exchange setting."""
+        has_paper_input = any(self._is_paper_or_replay(inp) for inp in self.inputs)
+        if not has_paper_input:
+            return
+        if self.exchange != "paper":
+            raise ValueError(
+                f"Strategy {self.name}: Paper/replay input data MUST use exchange='paper'. "
+                f"Found inputs: {self.inputs}, exchange: {self.exchange}"
+            )
+        all_paper = all(self._is_paper_or_replay(inp) for inp in self.inputs)
+        if not all_paper:
+            raise ValueError(
+                f"Strategy {self.name}: Cannot mix paper/replay and live inputs. "
+                f"All inputs must be paper/replay OR all must be live (no mixing). "
+                f"Found inputs: {self.inputs}"
+            )
+
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         if not self.name:
@@ -104,41 +156,15 @@ class StrategyConfig:
                 f"got '{self.exchange}'"
             )
         self._validate_output_instruments()
-        has_paper_input = any(
-            "paper" in inp.lower() or "replay" in inp.lower() for inp in self.inputs
-        )
-        if has_paper_input and self.exchange != "paper":
-            raise ValueError(
-                f"Strategy {self.name}: Paper/replay input data MUST use exchange='paper'. "
-                f"Found inputs: {self.inputs}, exchange: {self.exchange}"
-            )
-        if has_paper_input:
-            all_paper = all(
-                "paper" in inp.lower() or "replay" in inp.lower() for inp in self.inputs
-            )
-            if not all_paper:
-                raise ValueError(
-                    f"Strategy {self.name}: Cannot mix paper/replay and live inputs. "
-                    f"All inputs must be paper/replay OR all must be live (no mixing). "
-                    f"Found inputs: {self.inputs}"
-                )
+        self._validate_paper_inputs()
 
     def _validate_output_instruments(self) -> None:
         """Validate that output instruments are valid for the exchange."""
-        if self.exchange == "paper":
-            valid_instruments = get_available_symbols()
-            exchange_label = "Paper (all exchanges)"
-        elif self.exchange == "walutomat":
-            valid_instruments = get_available_walutomat_symbols()
-            exchange_label = "Walutomat (FX pairs only)"
-        elif self.exchange == "zonda":
-            valid_instruments = get_available_zonda_symbols()
-            exchange_label = "Zonda"
-        elif self.exchange == "kraken":
-            valid_instruments = get_available_kraken_symbols()
-            exchange_label = "Kraken"
-        else:
+        resolver = _get_exchange_instrument_resolver(self.exchange)
+        if resolver is None:
             return
+        get_instruments, exchange_label = resolver
+        valid_instruments = get_instruments()
         if not valid_instruments:
             logger.warning(
                 f"Strategy {self.name}: No symbols loaded for {exchange_label}, "
@@ -203,9 +229,7 @@ class BaseStrategy(ABC):
         self.heartbeat_seq: int = 0
         self._feed_heartbeats: dict[str, dict[str, Any]] = {}
         self._last_data_ts: float | None = None
-        self._is_paper_input = any(
-            "paper" in inp.lower() or "replay" in inp.lower() for inp in self.inputs
-        )
+        self._is_paper_input = any(StrategyConfig._is_paper_or_replay(inp) for inp in self.inputs)
 
     @property
     def is_running(self) -> bool:
@@ -313,12 +337,12 @@ class BaseStrategy(ABC):
             self.zmq_context.term()
             self.zmq_context = None
 
-    async def _subscribe_inputs(self) -> None:
-        """Subscribe to input topics via ZMQ."""
-        if self.subscriber:
-            return
-        assert self.zmq_context is not None, "ZMQ context must be initialized in start()"
-        raw_sub_socket = self.zmq_context.socket(zmq.SUB)
+    def _connect_subscriber_socket(self, raw_sub_socket: zmq.asyncio.Socket) -> None:
+        """Connect the subscriber socket to broker or direct feed.
+
+        Args:
+            raw_sub_socket: ZMQ subscriber socket to connect.
+        """
         use_broker = self.params.get("use_broker", True)
         if use_broker:
             broker_addr = _bootstrap_settings.zmq_broker_xpub
@@ -328,6 +352,34 @@ class BaseStrategy(ABC):
             feed_addr = self.params.get("feed_addr", "tcp://127.0.0.1:5555")
             logger.info(f"Strategy {self.name}: Connecting subscriber to feed {feed_addr}")
             raw_sub_socket.connect(feed_addr)
+
+    def _subscribe_feed_heartbeats(self) -> None:
+        """Subscribe to heartbeat topics for exchanges in input market topics."""
+        assert self.subscriber is not None
+        subscribed_exchanges: set[str] = set()
+        for topic in self.inputs:
+            if not topic.startswith("market."):
+                continue
+            parts = topic.split(".")
+            if len(parts) < 2:
+                continue
+            exchange = parts[1]
+            if exchange in subscribed_exchanges:
+                continue
+            heartbeat_topic = f"system.heartbeats.feed.{exchange}"
+            logger.info(
+                f"Strategy {self.name}: Subscribing to {heartbeat_topic} for feed health monitoring"
+            )
+            self.subscriber.subscribe(heartbeat_topic)
+            subscribed_exchanges.add(exchange)
+
+    async def _subscribe_inputs(self) -> None:
+        """Subscribe to input topics via ZMQ."""
+        if self.subscriber:
+            return
+        assert self.zmq_context is not None, "ZMQ context must be initialized in start()"
+        raw_sub_socket = self.zmq_context.socket(zmq.SUB)
+        self._connect_subscriber_socket(raw_sub_socket)
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
         for topic in self.inputs:
             logger.info(f"Strategy {self.name}: Subscribing to {topic}")
@@ -336,19 +388,7 @@ class BaseStrategy(ABC):
         self.subscriber.subscribe("system.symbol_mappings")
         logger.info(f"Strategy {self.name}: Subscribing to system.settings")
         self.subscriber.subscribe("system.settings")
-        subscribed_exchanges = set()
-        for topic in self.inputs:
-            if topic.startswith("market."):
-                parts = topic.split(".")
-                if len(parts) >= 2:
-                    exchange = parts[1]
-                    if exchange not in subscribed_exchanges:
-                        heartbeat_topic = f"system.heartbeats.feed.{exchange}"
-                        logger.info(
-                            f"Strategy {self.name}: Subscribing to {heartbeat_topic} for feed health monitoring"
-                        )
-                        self.subscriber.subscribe(heartbeat_topic)
-                        subscribed_exchanges.add(exchange)
+        self._subscribe_feed_heartbeats()
         if self._is_paper_input:
             logger.info(
                 f"Strategy {self.name}: Auto-subscribing to system.replay. (paper input detected)"
@@ -362,6 +402,75 @@ class BaseStrategy(ABC):
             self.subscriber.close()
             self.subscriber = None
 
+    def _handle_system_heartbeat(self, topic_str: str, payload_str: str) -> None:
+        """Handle feed heartbeat system message.
+
+        Args:
+            topic_str: The ZMQ topic string.
+            payload_str: The JSON payload string.
+        """
+        exchange = topic_str.replace("system.heartbeats.feed.", "")
+        heartbeat = HeartbeatEnvelope.from_json(payload_str)
+        self._feed_heartbeats[exchange] = {
+            "timestamp": time.time(),
+            "status": heartbeat.status,
+            "lag_ms": heartbeat.lag_ms,
+            "component": heartbeat.component,
+            "symbol_count": heartbeat.meta.get("symbol_count", 0),
+        }
+        logger.debug(
+            f"Strategy {self.name}: Received heartbeat from feed.{exchange}, "
+            f"status={heartbeat.status}, lag={heartbeat.lag_ms}ms, "
+            f"symbols={heartbeat.meta.get('symbol_count', 0)}"
+        )
+
+    def _handle_symbol_mappings_update(self) -> None:
+        """Handle symbol_mappings system message by refreshing cache."""
+        logger.info(f"Strategy {self.name}: Received symbol_mappings update, refreshing cache")
+        _get_db_mapper().trigger_cache_invalidation(fail_fast=False)
+
+    async def _handle_replay_start(self, payload_str: str) -> None:
+        """Handle replay start system message.
+
+        Args:
+            payload_str: The JSON payload string.
+        """
+        replay_envelope = ReplayStartEnvelope.from_json(payload_str)
+        logger.info(f"Strategy {self.name}: Replay started, resetting state")
+        await self.reset()
+        self._last_data_ts = (
+            replay_envelope.started_at.timestamp() if replay_envelope.started_at else None
+        )
+
+    def _handle_replay_end(self, payload_str: str) -> None:
+        """Handle replay end system message.
+
+        Args:
+            payload_str: The JSON payload string.
+        """
+        ReplayEndEnvelope.from_json(payload_str)
+        logger.info(f"Strategy {self.name}: Replay ended")
+        self._last_data_ts = None
+
+    async def _handle_system_message(self, topic_str: str, payload_str: str) -> None:
+        """Handle a system-category message.
+
+        Args:
+            topic_str: The ZMQ topic string.
+            payload_str: The JSON payload string.
+        """
+        if topic_str == "system.symbol_mappings":
+            self._handle_symbol_mappings_update()
+        elif topic_str == "system.settings":
+            envelope = SettingChangedEnvelope.from_json(payload_str)
+            self._handle_settings_update(envelope)
+        elif topic_str.startswith("system.heartbeats.feed."):
+            self._handle_system_heartbeat(topic_str, payload_str)
+        elif topic_str == "system.replay.start":
+            await self._handle_replay_start(payload_str)
+        elif topic_str == "system.replay.end":
+            self._handle_replay_end(payload_str)
+
     async def _listen_loop(self) -> None:
         """Main loop for receiving and processing market data."""
         if not self.subscriber:
@@ -374,42 +483,7 @@ class BaseStrategy(ABC):
                 payload_str = payload.decode()
                 self.last_data_timestamp = time.time()
                 if topic_str.startswith("system."):
-                    if topic_str == "system.symbol_mappings":
-                        logger.info(
-                            f"Strategy {self.name}: Received symbol_mappings update, refreshing cache"
-                        )
-                        _get_db_mapper().trigger_cache_invalidation(fail_fast=False)
-                    elif topic_str == "system.settings":
-                        envelope = SettingChangedEnvelope.from_json(payload_str)
-                        self._handle_settings_update(envelope)
-                    elif topic_str.startswith("system.heartbeats.feed."):
-                        exchange = topic_str.replace("system.heartbeats.feed.", "")
-                        heartbeat = HeartbeatEnvelope.from_json(payload_str)
-                        self._feed_heartbeats[exchange] = {
-                            "timestamp": time.time(),
-                            "status": heartbeat.status,
-                            "lag_ms": heartbeat.lag_ms,
-                            "component": heartbeat.component,
-                            "symbol_count": heartbeat.meta.get("symbol_count", 0),
-                        }
-                        logger.debug(
-                            f"Strategy {self.name}: Received heartbeat from feed.{exchange}, "
-                            f"status={heartbeat.status}, lag={heartbeat.lag_ms}ms, "
-                            f"symbols={heartbeat.meta.get('symbol_count', 0)}"
-                        )
-                    elif topic_str == "system.replay.start":
-                        replay_envelope = ReplayStartEnvelope.from_json(payload_str)
-                        logger.info(f"Strategy {self.name}: Replay started, resetting state")
-                        await self.reset()
-                        self._last_data_ts = (
-                            replay_envelope.started_at.timestamp()
-                            if replay_envelope.started_at
-                            else None
-                        )
-                    elif topic_str == "system.replay.end":
-                        ReplayEndEnvelope.from_json(payload_str)
-                        logger.info(f"Strategy {self.name}: Replay ended")
-                        self._last_data_ts = None
+                    await self._handle_system_message(topic_str, payload_str)
                     continue
                 if topic_str.startswith("market."):
                     parts = topic_str.split(".")
@@ -423,6 +497,26 @@ class BaseStrategy(ABC):
         except Exception as e:
             logger.error(f"Strategy {self.name}: Error in listen loop: {e}", exc_info=True)
             self._running = False
+
+    async def _handle_candle_data(self, instrument: str, payload: str) -> Signal | None:
+        """Handle incoming candle bar data.
+
+        Args:
+            instrument: The instrument symbol.
+            payload: The JSON payload string.
+
+        Returns:
+            Optional signal from the bar handler.
+        """
+        bar = BarEnvelope.from_json(payload)
+        self._last_data_ts = bar.timestamp.timestamp()
+        if instrument not in self.candle_buffer:
+            self.candle_buffer[instrument] = []
+        self.candle_buffer[instrument].append(bar)
+        max_buffer_size = self.params.get("buffer_size", 100)
+        if len(self.candle_buffer[instrument]) > max_buffer_size:
+            self.candle_buffer[instrument].pop(0)
+        return await self.on_bar(instrument, bar)
 
     async def _dispatch_market_data(
         self, topic: str, instrument: str, payload: str
@@ -438,15 +532,7 @@ class BaseStrategy(ABC):
             Optional signal from the handler.
         """
         if ".candles." in topic:
-            bar = BarEnvelope.from_json(payload)
-            self._last_data_ts = bar.timestamp.timestamp()
-            if instrument not in self.candle_buffer:
-                self.candle_buffer[instrument] = []
-            self.candle_buffer[instrument].append(bar)
-            max_buffer_size = self.params.get("buffer_size", 100)
-            if len(self.candle_buffer[instrument]) > max_buffer_size:
-                self.candle_buffer[instrument].pop(0)
-            return await self.on_bar(instrument, bar)
+            return await self._handle_candle_data(instrument, payload)
         if ".ticks" in topic:
             tick = TickEnvelope.from_json(payload)
             self._last_data_ts = tick.timestamp.timestamp()
@@ -500,6 +586,65 @@ class BaseStrategy(ABC):
             f"(strength={signal.strength:.2f}, price={signal.price:.2f}) -> {topic}"
         )
 
+    @staticmethod
+    def _classify_health_status(lag_ms: int) -> HealthStatus:
+        """Classify health status based on data lag.
+
+        Args:
+            lag_ms: Milliseconds since last data received.
+
+        Returns:
+            Health status string.
+        """
+        if lag_ms < 2000:
+            return "healthy"
+        if lag_ms < 10000:
+            return "warning"
+        return "error"
+
+    def _build_feed_health(self) -> dict[str, dict[str, Any]] | None:
+        """Build feed health summary from cached heartbeats.
+
+        Returns:
+            Feed health dict or None if no heartbeats collected.
+        """
+        if not self._feed_heartbeats:
+            return None
+        current_time = time.time()
+        feed_health: dict[str, dict[str, Any]] = {}
+        for feed_key, heartbeat in self._feed_heartbeats.items():
+            age_ms = int((current_time - heartbeat["timestamp"]) * 1000)
+            feed_health[feed_key] = {
+                "status": heartbeat["status"],
+                "lag_ms": heartbeat["lag_ms"],
+                "heartbeat_age_ms": age_ms,
+                "healthy": age_ms < 5000,
+            }
+        return feed_health
+
+    def _build_heartbeat_envelope(self, lag_ms: int) -> HeartbeatEnvelope:
+        """Build a heartbeat envelope with current strategy state.
+
+        Args:
+            lag_ms: Milliseconds since last data received.
+
+        Returns:
+            HeartbeatEnvelope ready for publishing.
+        """
+        return HeartbeatEnvelope(
+            component=f"strategy_{self.name}",
+            sequence=self.heartbeat_seq,
+            status=self._classify_health_status(lag_ms),
+            lag_ms=lag_ms,
+            meta={
+                "inputs": self.inputs,
+                "outputs": self.outputs,
+                "output_topics": self.output_topics,
+                "running": self._running,
+                "feed_health": self._build_feed_health(),
+            },
+        )
+
     async def _heartbeat_loop(self) -> None:
         """Background loop for emitting strategy heartbeats."""
         await asyncio.sleep(1.0)
@@ -509,36 +654,7 @@ class BaseStrategy(ABC):
                 try:
                     self.heartbeat_seq += 1
                     lag_ms = int((time.time() - self.last_data_timestamp) * 1000)
-                    status: HealthStatus
-                    if lag_ms < 2000:
-                        status = "healthy"
-                    elif lag_ms < 10000:
-                        status = "warning"
-                    else:
-                        status = "error"
-                    feed_health = {}
-                    current_time = time.time()
-                    for feed_key, heartbeat in self._feed_heartbeats.items():
-                        age_ms = int((current_time - heartbeat["timestamp"]) * 1000)
-                        feed_health[feed_key] = {
-                            "status": heartbeat["status"],
-                            "lag_ms": heartbeat["lag_ms"],
-                            "heartbeat_age_ms": age_ms,
-                            "healthy": age_ms < 5000,
-                        }
-                    hb_msg = HeartbeatEnvelope(
-                        component=f"strategy_{self.name}",
-                        sequence=self.heartbeat_seq,
-                        status=status,
-                        lag_ms=lag_ms,
-                        meta={
-                            "inputs": self.inputs,
-                            "outputs": self.outputs,
-                            "output_topics": self.output_topics,
-                            "running": self._running,
-                            "feed_health": feed_health if feed_health else None,
-                        },
-                    )
+                    hb_msg = self._build_heartbeat_envelope(lag_ms)
                     if self.publisher:
                         topic = f"system.heartbeats.strategy.{self.name}"
                         payload = hb_msg.to_json().encode()

@@ -1,10 +1,16 @@
 import type { OrderStatus, Fill, Signal, Position } from '../types/entities'
 
-export function createTestOrder(
-  overrides: Partial<OrderStatus> & { id: string | number; instrument: string } = {
+const DEFAULT_ORDER_OVERRIDES: Partial<OrderStatus> & { id: string | number; instrument: string } =
+  {
     id: 'order-1',
     instrument: 'BTC-USD',
   }
+
+export function createTestOrder(
+  overrides: Partial<OrderStatus> & {
+    id: string | number
+    instrument: string
+  } = DEFAULT_ORDER_OVERRIDES
 ): OrderStatus {
   const now = new Date()
 
@@ -14,7 +20,7 @@ export function createTestOrder(
     exchange: overrides.exchange ?? 'test',
     side: overrides.side ?? 'buy',
     orderType: overrides.orderType ?? 'limit',
-    size: overrides.size ?? 1.0,
+    size: overrides.size ?? 1,
     filledSize: overrides.filledSize ?? 0,
     price: overrides.price ?? 50000,
     averagePrice: overrides.averagePrice ?? null,
@@ -24,11 +30,19 @@ export function createTestOrder(
   }
 }
 
+const DEFAULT_EXECUTION_OVERRIDES: Partial<Fill> & {
+  id: string | number
+  orderId: string | number
+} = {
+  id: 'exec-1',
+  orderId: 'order-1',
+}
+
 export function createTestExecution(
-  overrides: Partial<Fill> & { id: string | number; orderId: string | number } = {
-    id: 'exec-1',
-    orderId: 'order-1',
-  }
+  overrides: Partial<Fill> & {
+    id: string | number
+    orderId: string | number
+  } = DEFAULT_EXECUTION_OVERRIDES
 ): Fill {
   const now = new Date()
 
@@ -47,10 +61,12 @@ export function createTestExecution(
   }
 }
 
+const DEFAULT_SIGNAL_OVERRIDES: Partial<Signal> & { instrument: string } = {
+  instrument: 'BTC-USD',
+}
+
 export function createTestSignal(
-  overrides: Partial<Signal> & { instrument: string } = {
-    instrument: 'BTC-USD',
-  }
+  overrides: Partial<Signal> & { instrument: string } = DEFAULT_SIGNAL_OVERRIDES
 ): Signal {
   const now = new Date()
 
@@ -67,10 +83,12 @@ export function createTestSignal(
   }
 }
 
+const DEFAULT_POSITION_OVERRIDES: Partial<Position> & { instrument: string } = {
+  instrument: 'BTC-USD',
+}
+
 export function createTestPosition(
-  overrides: Partial<Position> & { instrument: string } = {
-    instrument: 'BTC-USD',
-  }
+  overrides: Partial<Position> & { instrument: string } = DEFAULT_POSITION_OVERRIDES
 ): Position {
   const now = new Date()
 
@@ -78,7 +96,7 @@ export function createTestPosition(
     id: overrides.id ?? 1,
     instrument: overrides.instrument,
     exchange: overrides.exchange ?? 'test',
-    quantity: overrides.quantity ?? 1.0,
+    quantity: overrides.quantity ?? 1,
     averagePrice: overrides.averagePrice ?? 50000,
     unrealizedPnl: overrides.unrealizedPnl ?? 0,
     realizedPnl: overrides.realizedPnl ?? 0,

@@ -70,10 +70,10 @@ class TestSignalService:
             stored_signal = await session.get(SignalEvent, signal_id)
             assert stored_signal is not None
             assert stored_signal.side == "buy"
-            assert stored_signal.strength == 0.8
+            assert stored_signal.strength == pytest.approx(0.8)
             assert stored_signal.reason == "Test signal"
             assert stored_signal.strategy_name == "test_strategy"
-            assert stored_signal.price == 50000.0
+            assert stored_signal.price == pytest.approx(50000.0)
 
     async def test_store_signal_without_price(
         self,

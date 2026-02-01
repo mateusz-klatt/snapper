@@ -8,14 +8,14 @@ import { z } from 'zod/v4'
 export const WsMessageBaseSchema = z
   .object({
     type: z.string(),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
   })
   .strict()
 
 export const BarEnvelopeSchema = z
   .object({
     type: z.literal('bar'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     timeframe: z.string(),
@@ -33,7 +33,7 @@ export const BarEnvelopeSchema = z
 export const FillEnvelopeSchema = z
   .object({
     type: z.literal('fill'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     trade_id: z.string().nullable(),
     exchange_order_id: z.string().nullable(),
@@ -46,14 +46,14 @@ export const FillEnvelopeSchema = z
     fee: z.number(),
     fee_asset: z.string(),
     status: z.enum(['filled', 'partial']),
-    executed_at: z.string().datetime().optional(),
+    executed_at: z.iso.datetime().optional(),
   })
   .strict()
 
 export const HeartbeatEnvelopeSchema = z
   .object({
     type: z.literal('heartbeat'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     component: z.string(),
     sequence: z.number().int(),
@@ -65,7 +65,7 @@ export const HeartbeatEnvelopeSchema = z
 export const OrderCancelEnvelopeSchema = z
   .object({
     type: z.literal('order_cancel'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     instrument: z.string(),
@@ -77,7 +77,7 @@ export const OrderCancelEnvelopeSchema = z
 export const OrderEventEnvelopeSchema = z
   .object({
     type: z.literal('order_event'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     exchange_order_id: z.string(),
     client_order_id: z.string(),
@@ -91,7 +91,7 @@ export const OrderEventEnvelopeSchema = z
 export const OrderReplaceEnvelopeSchema = z
   .object({
     type: z.literal('order_replace'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     instrument: z.string(),
@@ -105,7 +105,7 @@ export const OrderReplaceEnvelopeSchema = z
 export const OrderRequestEnvelopeSchema = z
   .object({
     type: z.literal('order_req'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     strategy_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
@@ -116,14 +116,14 @@ export const OrderRequestEnvelopeSchema = z
     quantity: z.number(),
     price: z.number().nullable(),
     client_order_id: z.string(),
-    signaled_at: z.string().datetime().nullable(),
+    signaled_at: z.iso.datetime().nullable(),
   })
   .strict()
 
 export const OrderStatusEnvelopeSchema = z
   .object({
     type: z.literal('order_status'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     exchange_order_id: z.string().nullable(),
     client_order_id: z.string(),
@@ -137,15 +137,15 @@ export const OrderStatusEnvelopeSchema = z
     price: z.number().nullable(),
     average_price: z.number().nullable(),
     reason: z.string().nullable(),
-    created_at: z.string().datetime().optional(),
-    updated_at: z.string().datetime().nullable(),
+    created_at: z.iso.datetime().optional(),
+    updated_at: z.iso.datetime().nullable(),
   })
   .strict()
 
 export const ReplayEndEnvelopeSchema = z
   .object({
     type: z.literal('replay_end'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
   })
   .strict()
@@ -153,16 +153,16 @@ export const ReplayEndEnvelopeSchema = z
 export const ReplayStartEnvelopeSchema = z
   .object({
     type: z.literal('replay_start'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
-    started_at: z.string().datetime().nullable(),
+    started_at: z.iso.datetime().nullable(),
   })
   .strict()
 
 export const SettingChangedEnvelopeSchema = z
   .object({
     type: z.literal('setting_changed'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     key: z.string(),
     value: z.string(),
@@ -174,7 +174,7 @@ export const SettingChangedEnvelopeSchema = z
 export const SignalEnvelopeSchema = z
   .object({
     type: z.literal('signal'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     side: z.enum(['buy', 'sell']),
@@ -190,7 +190,7 @@ export const SignalEnvelopeSchema = z
 export const SymbolMappingUpdateEnvelopeSchema = z
   .object({
     type: z.literal('symbol_mapping_update'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     event: z.literal('symbol_mappings_updated'),
     action: z.literal('clear_cache'),
@@ -200,7 +200,7 @@ export const SymbolMappingUpdateEnvelopeSchema = z
 export const TickEnvelopeSchema = z
   .object({
     type: z.literal('tick'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     volume: z.number(),
@@ -214,7 +214,7 @@ export const TickEnvelopeSchema = z
 export const TradeEnvelopeSchema = z
   .object({
     type: z.literal('trade'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     price: z.number(),
@@ -227,25 +227,25 @@ export const TradeEnvelopeSchema = z
 export const WSAuthCompleteResponseSchema = z
   .object({
     type: z.literal('auth_complete'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     available_topics: z.array(z.string()),
     user_role: z.string(),
-    session_expires_at: z.string().datetime().nullable(),
-    ws_token_exp: z.string().datetime(),
+    session_expires_at: z.iso.datetime().nullable(),
+    ws_token_exp: z.iso.datetime(),
   })
   .strict()
 
 export const WSAuthExpiredResponseSchema = z
   .object({
     type: z.literal('auth_expired'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
   })
   .strict()
 
 export const WSAuthFailedResponseSchema = z
   .object({
     type: z.literal('auth_failed'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     reason: z.string().nullable(),
   })
   .strict()
@@ -253,15 +253,15 @@ export const WSAuthFailedResponseSchema = z
 export const WSAuthOkResponseSchema = z
   .object({
     type: z.literal('auth_ok'),
-    timestamp: z.string().datetime().optional(),
-    exp: z.string().datetime(),
+    timestamp: z.iso.datetime().optional(),
+    exp: z.iso.datetime(),
   })
   .strict()
 
 export const WSAuthRequiredResponseSchema = z
   .object({
     type: z.literal('auth_required'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     timeout: z.number().int(),
   })
   .strict()
@@ -269,7 +269,7 @@ export const WSAuthRequiredResponseSchema = z
 export const WSAuthenticateRequestSchema = z
   .object({
     type: z.literal('authenticate'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     ws_token: z.string(),
   })
   .strict()
@@ -277,7 +277,7 @@ export const WSAuthenticateRequestSchema = z
 export const WSErrorResponseSchema = z
   .object({
     type: z.literal('error'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     message: z.string(),
   })
   .strict()
@@ -285,14 +285,14 @@ export const WSErrorResponseSchema = z
 export const WSGetSubscriptionsRequestSchema = z
   .object({
     type: z.literal('get_subscriptions'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
   })
   .strict()
 
 export const WSGetTopicSuggestionsRequestSchema = z
   .object({
     type: z.literal('get_topic_suggestions'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     prefix: z.string(),
   })
   .strict()
@@ -300,14 +300,14 @@ export const WSGetTopicSuggestionsRequestSchema = z
 export const WSPingRequestSchema = z
   .object({
     type: z.literal('ping'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
   })
   .strict()
 
 export const WSPongResponseSchema = z
   .object({
     type: z.literal('pong'),
-    timestamp: z.string().datetime(),
+    timestamp: z.iso.datetime(),
     active_connections: z.number().int(),
   })
   .strict()
@@ -315,15 +315,15 @@ export const WSPongResponseSchema = z
 export const WSReauthOkResponseSchema = z
   .object({
     type: z.literal('reauth_ok'),
-    timestamp: z.string().datetime().optional(),
-    exp: z.string().datetime(),
+    timestamp: z.iso.datetime().optional(),
+    exp: z.iso.datetime(),
   })
   .strict()
 
 export const WSReauthRequestSchema = z
   .object({
     type: z.literal('reauth'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     ws_token: z.string(),
   })
   .strict()
@@ -331,15 +331,15 @@ export const WSReauthRequestSchema = z
 export const WSReauthRequiredResponseSchema = z
   .object({
     type: z.literal('reauth_required'),
-    timestamp: z.string().datetime().optional(),
-    deadline: z.string().datetime(),
+    timestamp: z.iso.datetime().optional(),
+    deadline: z.iso.datetime(),
   })
   .strict()
 
 export const WSSubscribeRequestSchema = z
   .object({
     type: z.literal('subscribe'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     topics: z.array(z.string()),
   })
   .strict()
@@ -347,7 +347,7 @@ export const WSSubscribeRequestSchema = z
 export const WSSubscriptionSuccessResponseSchema = z
   .object({
     type: z.literal('subscription_success'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     action: z.enum(['subscribe', 'unsubscribe']),
     status: z.enum(['subscribed', 'unsubscribed', 'partial', 'denied', 'no_topics']),
     topics: z.array(z.string()),
@@ -361,7 +361,7 @@ export const WSSubscriptionSuccessResponseSchema = z
 export const WSSubscriptionsListResponseSchema = z
   .object({
     type: z.literal('subscriptions_list'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     subscriptions: z.array(z.string()),
     available_topics: z.array(z.string()),
     total_available: z.number().int(),
@@ -371,7 +371,7 @@ export const WSSubscriptionsListResponseSchema = z
 export const WSTopicSuggestionsResponseSchema = z
   .object({
     type: z.literal('topic_suggestions'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     prefix: z.string(),
     suggestions: z.array(z.string()),
   })
@@ -380,7 +380,7 @@ export const WSTopicSuggestionsResponseSchema = z
 export const WSUnsubscribeRequestSchema = z
   .object({
     type: z.literal('unsubscribe'),
-    timestamp: z.string().datetime().optional(),
+    timestamp: z.iso.datetime().optional(),
     topics: z.array(z.string()),
   })
   .strict()

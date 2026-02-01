@@ -111,7 +111,7 @@ class StrategyFactory:
 
     async def stop_all(self) -> None:
         """Stop all active strategies."""
-        for name in list(self._active_strategies.keys()):
+        for name in list(self._active_strategies):
             await self.stop_strategy(name)
 
     def get_strategy(self, name: str) -> BaseStrategy:

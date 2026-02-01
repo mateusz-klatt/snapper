@@ -27,6 +27,7 @@ from snapper.auth.schemas.user import UserProfile
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.server import process_runner
+from snapper.server.app import _build_strategy_payload
 from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
@@ -69,6 +70,7 @@ class TestLifespan:
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
+                """Consumed by iteration to trigger exception."""
                 pass
         mock_discover.assert_called_once()
         mock_factory.sync_registry_to_database.assert_awaited_once()
@@ -102,6 +104,7 @@ class TestLifespan:
             mock_factory_cls.return_value = mock_factory
             with pytest.raises(Exception, match="Cleanup error"):
                 async with lifespan(mock_app):
+                    """Consumed by iteration to trigger exception."""
                     pass
         mock_discover.assert_called_once()
         mock_factory.stop_all_processes.assert_awaited_once()
@@ -259,8 +262,8 @@ class TestCreateApiRouter:
         assert isinstance(data, list)
         assert len(data) == 1
         assert data[0]["instrument"] == "BTC-USD"
-        assert data[0]["open"] == 50000.0
-        assert data[0]["close"] == 50500.0
+        assert data[0]["open"] == pytest.approx(50000.0)
+        assert data[0]["close"] == pytest.approx(50500.0)
 
     @patch("snapper.server.app.get_settings")
     @patch("snapper.server.app.get_repository")
@@ -611,7 +614,7 @@ class TestLifespanCancellation:
 
         Given: A running lifespan context,
         When: CancelledError is raised,
-        Then: Cleanup completes and processes are stopped.
+        Then: CancelledError propagates after cleanup completes.
         """
         mock_app = MagicMock()
         mock_manager = MagicMock()
@@ -638,8 +641,9 @@ class TestLifespanCancellation:
             mock_factory.start_all_processes = AsyncMock()
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
-            async with lifespan(mock_app):
-                raise asyncio.CancelledError()
+            with pytest.raises(asyncio.CancelledError):
+                async with lifespan(mock_app):
+                    raise asyncio.CancelledError()
             mock_factory.stop_all_processes.assert_awaited_once()
             mock_manager.cleanup.assert_awaited()
 
@@ -696,7 +700,7 @@ class TestLifespanCancellation:
 
         Given: A ZMQ bridge that raises CancelledError,
         When: The lifespan context runs,
-        Then: Cleanup completes without error.
+        Then: Cleanup completes and shutdown proceeds normally.
         """
         mock_app = MagicMock()
         mock_manager = MagicMock()
@@ -1336,7 +1340,7 @@ class TestSignalsSuccessPath:
         assert data[0]["id"] == 1
         assert data[0]["instrument"] == "BTC-USD"
         assert data[0]["side"] == "buy"
-        assert data[0]["strength"] == 0.8
+        assert data[0]["strength"] == pytest.approx(0.8)
         assert data[0]["reason"] == "RSI oversold"
         assert data[0]["strategy_name"] == "rsi_strategy"
 
@@ -1392,9 +1396,9 @@ class TestExecutionsSuccessPath:
         assert len(data) == 1
         assert data[0]["id"] == 1
         assert data[0]["order_id"] == 1
-        assert data[0]["price"] == 50000.0
-        assert data[0]["size"] == 1.0
-        assert data[0]["fee"] == 10.0
+        assert data[0]["price"] == pytest.approx(50000.0)
+        assert data[0]["size"] == pytest.approx(1.0)
+        assert data[0]["fee"] == pytest.approx(10.0)
         assert data[0]["fee_asset"] == "USD"
 
     def test_get_executions_empty(self) -> None:
@@ -1432,10 +1436,10 @@ class TestPositionsSuccessPath:
         assert len(data) == 1
         assert data[0]["id"] == 1
         assert data[0]["instrument"] == "BTC-USD"
-        assert data[0]["quantity"] == 1.5
-        assert data[0]["average_price"] == 48000.0
-        assert data[0]["unrealized_pnl"] == 3000.0
-        assert data[0]["realized_pnl"] == 500.0
+        assert data[0]["quantity"] == pytest.approx(1.5)
+        assert data[0]["average_price"] == pytest.approx(48000.0)
+        assert data[0]["unrealized_pnl"] == pytest.approx(3000.0)
+        assert data[0]["realized_pnl"] == pytest.approx(500.0)
 
     def test_get_positions_empty(self) -> None:
         """Verify positions endpoint returns empty list when no data.
@@ -1737,3 +1741,13 @@ async def test_run_async_method_handles_nested_awaitable() -> None:
         return nested()
 
     assert await process_runner._run_async_method(method) == "nested"
+
+
+def test_build_strategy_payload_returns_none_for_non_dict() -> None:
+    """Verify _build_strategy_payload returns None for non-dict input.
+
+    Given a non-dict value passed as raw_status,
+    When _build_strategy_payload is called,
+    Then it returns None without raising.
+    """
+    assert _build_strategy_payload("not_a_dict") is None

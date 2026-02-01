@@ -6,7 +6,11 @@ interface ErrorFallbackProps {
   componentName?: string
 }
 
-export function ErrorFallback({ error, resetError, componentName }: ErrorFallbackProps): ReactNode {
+export function ErrorFallback({
+  error,
+  resetError,
+  componentName,
+}: Readonly<ErrorFallbackProps>): ReactNode {
   const title = componentName ? `Error in ${componentName}` : 'Something went wrong'
 
   return (

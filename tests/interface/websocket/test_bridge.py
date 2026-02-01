@@ -198,11 +198,6 @@ class TestBridgeMissingBranches:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge.topic_metrics["test_topic"] = TopicMetricsModel()
-        config = TopicConfigurationModel(
-            endpoint="tcp://localhost:5555",
-            pattern="test.*",
-            throttle_ms=0,
-        )
         mock_socket = MagicMock()
         call_count = 0
 
@@ -221,7 +216,7 @@ class TestBridgeMissingBranches:
 
         bridge._forward_to_clients = mock_forward
         with pytest.raises(asyncio.CancelledError):
-            await bridge._zmq_subscription_loop("test_topic", mock_socket, config)
+            await bridge._zmq_subscription_loop("test_topic", mock_socket)
         assert len(forward_calls) == 1
         assert forward_calls[0][2] == "invalid json {{{"
 
@@ -235,11 +230,6 @@ class TestBridgeMissingBranches:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge.topic_metrics["test_topic"] = TopicMetricsModel()
-        config = TopicConfigurationModel(
-            endpoint="tcp://localhost:5555",
-            pattern="test.*",
-            throttle_ms=0,
-        )
         mock_socket = MagicMock()
         call_count = 0
 
@@ -255,7 +245,7 @@ class TestBridgeMissingBranches:
         mock_socket.recv_multipart = mock_recv_multipart
         bridge._forward_to_clients = AsyncMock()
         with pytest.raises(asyncio.CancelledError):
-            await bridge._zmq_subscription_loop("test_topic", mock_socket, config)
+            await bridge._zmq_subscription_loop("test_topic", mock_socket)
         assert bridge.topic_metrics["test_topic"].error_count >= 1
 
     @pytest.mark.asyncio
@@ -546,14 +536,15 @@ class TestHandleZmqMessagesCoverage:
 
         Given: A ZMQ socket that raises CancelledError,
         When: Handling messages,
-        Then: Method returns without error.
+        Then: CancelledError propagates after logging.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         topic = "test.topic"
         config = TopicConfigurationModel(pattern=topic, endpoint="tcp://localhost:5555")
         mock_socket = MagicMock()
         mock_socket.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError())
-        await bridge._handle_zmq_messages(topic, mock_socket, config)
+        with pytest.raises(asyncio.CancelledError):
+            await bridge._handle_zmq_messages(topic, mock_socket, config)
 
     @pytest.mark.asyncio
     async def test_handle_zmq_messages_fatal_exception(self) -> None:
@@ -590,7 +581,8 @@ class TestHandleZmqMessagesCoverage:
             side_effect=[(bad_topic, bad_data), asyncio.CancelledError()]
         )
         with patch("snapper.interface.websocket.bridge.logger") as mock_logger:
-            await bridge._handle_zmq_messages(topic, mock_socket, config)
+            with pytest.raises(asyncio.CancelledError):
+                await bridge._handle_zmq_messages(topic, mock_socket, config)
             assert any(
                 "Error processing ZMQ message" in str(call)
                 for call in mock_logger.error.call_args_list
@@ -658,16 +650,18 @@ class TestForwardToWebsocketsTimeoutCoverage:
         bridge.client_subscriptions[mock_ws] = {topic}
         original_remove = list.remove
 
-        def remove_that_clears_first(self: list[Any], item: Any) -> None:
+        def _remove_that_clears_first(self: list[Any], item: Any) -> None:
+            """Clear entire list on removal (stress-test helper)."""
             self.clear()
 
         bridge.disconnect_client = AsyncMock()
         remove_count = [0]
 
-        def patched_remove(self: list[Any], item: Any) -> None:
+        def _patched_remove(self: list[Any], item: Any) -> None:
+            """Count removals and delegate to original (stress-test helper)."""
             remove_count[0] += 1
-            if remove_count[0] == 1:
-                pass
+            if remove_count[0] != 1:
+                """First call is intentionally a no-op."""
             original_remove(self, item)
 
         mock_ws1 = AsyncMock()
@@ -1342,17 +1336,13 @@ class TestZmqSubscriptionLoopBranchCoverage:
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge._forward_to_clients = AsyncMock()
         topic = "market.candles.BTC"
-        config = TopicConfigurationModel(
-            endpoint="tcp://localhost:5555",
-            pattern=topic,
-        )
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
         valid_message = [topic.encode(), b'{"type": "bar", "open": 100}']
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[valid_message, asyncio.CancelledError()]
         )
         with pytest.raises(asyncio.CancelledError):
-            await bridge._zmq_subscription_loop(topic, mock_socket, config)
+            await bridge._zmq_subscription_loop(topic, mock_socket)
         bridge._forward_to_clients.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1365,17 +1355,13 @@ class TestZmqSubscriptionLoopBranchCoverage:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         topic = "market.candles.BTC"
-        config = TopicConfigurationModel(
-            endpoint="tcp://localhost:5555",
-            pattern=topic,
-        )
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
         invalid_json_message = [topic.encode(), b"not valid json"]
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[invalid_json_message, asyncio.CancelledError()]
         )
         with pytest.raises(asyncio.CancelledError):
-            await bridge._zmq_subscription_loop(topic, mock_socket, config)
+            await bridge._zmq_subscription_loop(topic, mock_socket)
 
     @pytest.mark.asyncio
     async def test_unexpected_error_without_metrics(self) -> None:
@@ -1387,16 +1373,12 @@ class TestZmqSubscriptionLoopBranchCoverage:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         topic = "market.candles.BTC"
-        config = TopicConfigurationModel(
-            endpoint="tcp://localhost:5555",
-            pattern=topic,
-        )
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[RuntimeError("Unexpected"), asyncio.CancelledError()]
         )
         with pytest.raises(asyncio.CancelledError):
-            await bridge._zmq_subscription_loop(topic, mock_socket, config)
+            await bridge._zmq_subscription_loop(topic, mock_socket)
 
 
 class TestStartZmqSubscriberBranchCoverage:
@@ -1439,7 +1421,8 @@ class TestHandleZmqMessagesBranchCoverage:
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[valid_message, asyncio.CancelledError()]
         )
-        await bridge._handle_zmq_messages(topic, mock_socket, config)
+        with pytest.raises(asyncio.CancelledError):
+            await bridge._handle_zmq_messages(topic, mock_socket, config)
         bridge._forward_to_websockets.assert_awaited_once()
         args = bridge._forward_to_websockets.call_args[0]
         assert args[2] == raw_json

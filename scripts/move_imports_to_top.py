@@ -76,6 +76,25 @@ class ImportMover(ast.NodeVisitor):
         return super().visit(node)
 
 
+def _dedent_lines(lines: list[str]) -> list[str]:
+    """Remove common leading whitespace from non-empty lines.
+
+    Args:
+        lines: Source lines to dedent.
+
+    Returns:
+        Dedented lines, or original lines if no common indent found.
+    """
+    min_indent = float("inf")
+    for line in lines:
+        if line.strip():
+            indent = len(line) - len(line.lstrip())
+            min_indent = min(min_indent, indent)
+    if min_indent == float("inf") or min_indent == 0:
+        return lines
+    return [line[int(min_indent) :] if line.strip() else line for line in lines]
+
+
 def get_import_statement(node: ast.Import | ast.ImportFrom, source_lines: list[str]) -> str:
     """Extract the source code for an import statement.
 
@@ -92,20 +111,136 @@ def get_import_statement(node: ast.Import | ast.ImportFrom, source_lines: list[s
     end_line = node.end_lineno or node.lineno
     lines = source_lines[start_line:end_line]
     if lines:
-        min_indent = float("inf")
-        for line in lines:
-            if line.strip():
-                indent = len(line) - len(line.lstrip())
-                min_indent = min(min_indent, indent)
-        if min_indent != float("inf") and min_indent > 0:
-            dedented_lines = []
-            for line in lines:
-                if line.strip():
-                    dedented_lines.append(line[int(min_indent) :])
-                else:
-                    dedented_lines.append(line)
-            return "".join(dedented_lines)
+        lines = _dedent_lines(lines)
     return "".join(lines)
+
+
+def _imports_already_at_top(
+    imports_sorted: list[tuple[int, ast.Import | ast.ImportFrom]],
+    expected_start: int,
+) -> bool:
+    """Check whether all imports are already at the top of the file.
+
+    Args:
+        imports_sorted: Sorted list of (lineno, node) tuples.
+        expected_start: Expected first import line number.
+
+    Returns:
+        True if all imports are contiguous at the top.
+    """
+    first_import_line = imports_sorted[0][0]
+    if first_import_line > expected_start + 1:
+        return False
+    prev_end = None
+    for lineno, node in imports_sorted:
+        if prev_end is not None and lineno > prev_end + 2:
+            return False
+        prev_end = node.end_lineno or lineno
+    return True
+
+
+def _collect_import_statements(
+    visitor: ImportMover, lines: list[str]
+) -> tuple[list[str], set[int]]:
+    """Collect import statement text and line indices to remove.
+
+    Args:
+        visitor: ImportMover with collected imports.
+        lines: Source file lines.
+
+    Returns:
+        Tuple of (import_statements, lines_to_remove).
+    """
+    import_statements: list[str] = []
+    import_lines_to_remove: set[int] = set()
+    for _lineno, node in visitor.imports:
+        stmt = get_import_statement(node, lines)
+        if stmt:
+            import_statements.append(stmt.rstrip() + "\n")
+            start = node.lineno - 1
+            end = node.end_lineno or node.lineno
+            for i in range(start, end):
+                import_lines_to_remove.add(i)
+    return import_statements, import_lines_to_remove
+
+
+def _deduplicate_imports(import_statements: list[str]) -> list[str]:
+    """Remove duplicate import statements while preserving order.
+
+    Args:
+        import_statements: List of import statement strings.
+
+    Returns:
+        Deduplicated list of import statements.
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for stmt in import_statements:
+        if stmt not in seen:
+            seen.add(stmt)
+            unique.append(stmt)
+    return unique
+
+
+def _collect_body_lines(
+    lines: list[str],
+    docstring_end: int,
+    import_lines_to_remove: set[int],
+) -> list[str]:
+    """Collect remaining body lines with blank-line deduplication near the top.
+
+    Args:
+        lines: Original source file lines.
+        docstring_end: Line index where the module docstring ends.
+        import_lines_to_remove: Line indices to skip.
+
+    Returns:
+        List of body lines after imports.
+    """
+    body: list[str] = []
+    prev_was_blank = False
+    near_top_boundary = docstring_end + 10
+    for i, line in enumerate(lines):
+        if i < docstring_end or i in import_lines_to_remove:
+            continue
+        if i < near_top_boundary and line.strip() == "":
+            if prev_was_blank:
+                continue
+            prev_was_blank = True
+        else:
+            prev_was_blank = False
+        body.append(line)
+    return body
+
+
+def _build_new_content(
+    lines: list[str],
+    visitor: ImportMover,
+    import_statements: list[str],
+    import_lines_to_remove: set[int],
+) -> str:
+    """Build new file content with imports moved to top.
+
+    Args:
+        lines: Original source file lines.
+        visitor: ImportMover with docstring end info.
+        import_statements: Collected import statement strings.
+        import_lines_to_remove: Line indices to skip from original.
+
+    Returns:
+        Rebuilt file content string.
+    """
+    new_lines: list[str] = []
+    if visitor.module_docstring_end > 0:
+        new_lines.extend(lines[i] for i in range(visitor.module_docstring_end))
+        new_lines.append("\n")
+    if import_statements:
+        new_lines.extend(_deduplicate_imports(import_statements))
+        new_lines.append("\n")
+    new_lines.extend(
+        _collect_body_lines(lines, visitor.module_docstring_end, import_lines_to_remove)
+    )
+    return "".join(new_lines)
 
 
 def move_imports_to_top(file_path: Path, dry_run: bool = False) -> bool:
@@ -131,57 +266,10 @@ def move_imports_to_top(file_path: Path, dry_run: bool = False) -> bool:
         if not visitor.imports:
             return False
         imports_sorted = sorted(visitor.imports, key=lambda x: x[0])
-        expected_start = visitor.module_docstring_end + 1
-        first_import_line = imports_sorted[0][0]
-        all_at_top = True
-        if first_import_line > expected_start + 1:
-            all_at_top = False
-        else:
-            prev_end = None
-            for lineno, node in imports_sorted:
-                if prev_end is not None and lineno > prev_end + 2:
-                    all_at_top = False
-                    break
-                prev_end = node.end_lineno or lineno
-        if all_at_top:
+        if _imports_already_at_top(imports_sorted, visitor.module_docstring_end + 1):
             return False
-        import_statements: list[str] = []
-        import_lines_to_remove: set[int] = set()
-        for _lineno, node in visitor.imports:
-            stmt = get_import_statement(node, lines)
-            if stmt:
-                import_statements.append(stmt.rstrip() + "\n")
-                start = node.lineno - 1
-                end = node.end_lineno or node.lineno
-                for i in range(start, end):
-                    import_lines_to_remove.add(i)
-        new_lines: list[str] = []
-        if visitor.module_docstring_end > 0:
-            new_lines.extend(lines[i] for i in range(visitor.module_docstring_end))
-            new_lines.append("\n")
-        if import_statements:
-            seen = set()
-            unique_imports = []
-            for stmt in import_statements:
-                if stmt not in seen:
-                    seen.add(stmt)
-                    unique_imports.append(stmt)
-            new_lines.extend(unique_imports)
-            new_lines.append("\n")
-        skip_until = visitor.module_docstring_end
-        prev_was_blank = False
-        for i, line in enumerate(lines):
-            if i < skip_until or i in import_lines_to_remove:
-                continue
-            if i < (visitor.module_docstring_end + 10):
-                if line.strip() == "":
-                    if prev_was_blank:
-                        continue
-                    prev_was_blank = True
-                else:
-                    prev_was_blank = False
-            new_lines.append(line)
-        new_content = "".join(new_lines)
+        import_statements, import_lines_to_remove = _collect_import_statements(visitor, lines)
+        new_content = _build_new_content(lines, visitor, import_statements, import_lines_to_remove)
         if dry_run:
             print(f"  Would modify {file_path}")
             return True
@@ -191,6 +279,42 @@ def move_imports_to_top(file_path: Path, dry_run: bool = False) -> bool:
     except Exception as e:
         print(f"  Error processing {file_path}: {e}")
         return False
+
+
+_DEFAULT_EXCLUDES = {
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".git",
+    ".pytest_cache",
+    "build",
+    "dist",
+    "*.egg-info",
+}
+
+
+def _collect_python_files(
+    paths: list[Path],
+    excludes: set[str],
+) -> list[Path]:
+    """Collect all Python files from given paths, respecting excludes.
+
+    Args:
+        paths: File or directory paths to scan.
+        excludes: Patterns to skip when scanning directories.
+
+    Returns:
+        List of Python file paths to process.
+    """
+    files: list[Path] = []
+    for path in paths:
+        if path.is_file() and path.suffix == ".py":
+            files.append(path)
+        elif path.is_dir():
+            for py_file in path.rglob("*.py"):
+                if not any(exclude in str(py_file) for exclude in excludes):
+                    files.append(py_file)
+    return files
 
 
 def main() -> int:
@@ -219,36 +343,10 @@ def main() -> int:
         help="Patterns to exclude (can be specified multiple times)",
     )
     args = parser.parse_args()
-    default_excludes = {
-        "__pycache__",
-        ".venv",
-        "venv",
-        ".git",
-        ".pytest_cache",
-        "build",
-        "dist",
-        "*.egg-info",
-    }
-    excludes = default_excludes | set(args.exclude)
-    modified_count = 0
-    total_count = 0
-    for path_arg in args.paths:
-        path = Path(path_arg)
-        if path.is_file():
-            if path.suffix == ".py":
-                total_count += 1
-                if move_imports_to_top(path, args.dry_run):
-                    modified_count += 1
-        elif path.is_dir():
-            for py_file in path.rglob("*.py"):
-                if any(exclude in str(py_file) for exclude in excludes):
-                    continue
-                total_count += 1
-                if move_imports_to_top(py_file, args.dry_run):
-                    modified_count += 1
-    print(
-        f"\n{'Would modify' if args.dry_run else 'Modified'} {modified_count}/{total_count} files"
-    )
+    excludes = _DEFAULT_EXCLUDES | set(args.exclude)
+    files = _collect_python_files([Path(p) for p in args.paths], excludes)
+    modified_count = sum(1 for f in files if move_imports_to_top(f, args.dry_run))
+    print(f"\n{'Would modify' if args.dry_run else 'Modified'} {modified_count}/{len(files)} files")
     if modified_count > 0 and not args.dry_run:
         print("\nRemember to run formatters (black, isort) after this script!")
     return 0

@@ -177,8 +177,8 @@ def test_create_exchange_client_uses_expected_configuration() -> None:
     updater = ExposedWalutomatSymbolMappingUpdater(update_threshold_hours=1, force=True)
     client = updater.create_exchange_client_public()
     assert isinstance(client, WalutomatExchangeClient)
-    assert client.polling_interval == 10.0
-    assert client.timeout == 5.0
+    assert client.polling_interval == pytest.approx(10.0)
+    assert client.timeout == pytest.approx(5.0)
 
 
 def test_get_setting_key_returns_expected_value() -> None:

@@ -480,11 +480,9 @@ def normalize_to_xcode_format(content: str) -> str:
     Returns:
         Normalized content matching Xcode 16.1 format.
     """
-    content = re.sub(r"objectVersion = 77;", "objectVersion = 70;", content)
-    content = re.sub(
-        r"\s*preferredProjectObjectVersion = \d+;\n",
-        "\n",
-        content,
+    content = content.replace("objectVersion = 77;", "objectVersion = 70;")
+    content = "\n".join(
+        "" if "preferredProjectObjectVersion" in line else line for line in content.split("\n")
     )
     content = re.sub(
         r"(40BE9EE10BEF49D1DCA0F3C5 /\* Snapper\.app \*/ = "
@@ -504,10 +502,9 @@ def normalize_to_xcode_format(content: str) -> str:
         "\n",
         content,
     )
-    content = re.sub(
-        r'DEVELOPMENT_TEAM = "";',
-        r"DEVELOPMENT_TEAM = 26MP7QQP95;",
-        content,
+    content = content.replace(
+        'DEVELOPMENT_TEAM = "";',
+        "DEVELOPMENT_TEAM = 26MP7QQP95;",
     )
     content = re.sub(
         r'(minimizedProjectReferenceProxies = 1;)\n\n(\s+projectDirPath = "";)',

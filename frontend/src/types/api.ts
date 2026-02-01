@@ -1,6 +1,6 @@
-import type { components, operations, paths } from './api.generated'
+export type { components, operations, paths } from './api.generated'
+import type { components } from './api.generated'
 
-export type { components, operations, paths }
 export type CandleSnapshot = components['schemas']['CandleSnapshot']
 export type OrderStatus = components['schemas']['OrderStatus']
 export type ExecutionRecord = components['schemas']['ExecutionRecord']
@@ -35,4 +35,3 @@ export type ProcessStatus = components['schemas']['ProcessStatus']
 export type SystemStatus = components['schemas']['SystemStatus']
 export type HealthCheckResponse = components['schemas']['HealthCheckResponse']
 export type MessageResponse = components['schemas']['MessageResponse']
-export type SystemStatusResponse = SystemStatus

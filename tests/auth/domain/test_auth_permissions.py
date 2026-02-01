@@ -268,7 +268,7 @@ class TestCointegrationInstrument2Exit:
         if signal is not None:
             assert signal.instrument == "ETH-USD"
             assert signal.side == "sell"
-            assert signal.strength == 0.0
+            assert signal.strength == pytest.approx(0.0)
             assert "Exit short spread" in signal.reason
 
 
@@ -310,7 +310,7 @@ class TestCointegrationInstrument2ExitDirect:
         assert signal is not None
         assert signal.instrument == "ETH-USD"
         assert signal.side == "sell"
-        assert signal.strength == 0.0
+        assert signal.strength == pytest.approx(0.0)
         assert "Exit short spread hedge" in signal.reason
 
     @pytest.mark.asyncio
@@ -382,7 +382,7 @@ class TestCointegrationInstrument2ExitDirect:
         assert signal is not None
         assert signal.instrument == "ETH-USD"
         assert signal.side == "buy"
-        assert signal.strength == 0.0
+        assert signal.strength == pytest.approx(0.0)
         assert "Exit long spread hedge" in signal.reason
         assert strategy._position is None
 
@@ -420,7 +420,7 @@ class TestCointegrationInstrument2ExitDirect:
         assert signal is not None
         assert signal.instrument == "BTC-USD"
         assert signal.side == "sell"
-        assert signal.strength == 0.0
+        assert signal.strength == pytest.approx(0.0)
         assert "Exit long spread" in signal.reason
         assert strategy._position is None
 
@@ -596,7 +596,7 @@ class TestTokenManager:
         assert token_manager.settings is not None
         assert isinstance(token_manager._blacklisted_tokens, dict)
         assert len(token_manager._blacklisted_tokens) == 0
-        assert token_manager._blacklist_grace_period == 10.0
+        assert token_manager._blacklist_grace_period == pytest.approx(10.0)
 
     def test_create_tokens_basic(self) -> None:
         """Verify create_tokens generates valid access and refresh tokens.
@@ -685,7 +685,7 @@ class TestTokenManager:
             token_data = token_manager.verify_token(token_pair.access_token)
             assert token_data is not None
             assert token_data.role == role
-            assert len(token_data.permissions) >= 0
+            assert token_data.permissions is not None
 
     def test_verify_token_valid(self) -> None:
         """Verify verify_token returns claims for valid token.
@@ -1388,7 +1388,7 @@ class TestGetCurrentUser:
         """
         request = Mock(spec=Request)
         request.cookies = {}
-        result = await get_current_user(request)
+        result = get_current_user(request)
         assert result is None
 
     async def test_get_current_user_valid_token(self) -> None:
@@ -1416,7 +1416,7 @@ class TestGetCurrentUser:
             mock_token_manager = Mock()
             mock_token_manager.verify_token.return_value = token_data
             mock_get_token_manager.return_value = mock_token_manager
-            result = await get_current_user(request)
+            result = get_current_user(request)
             assert result is not None
             assert result.id == "user123"
             assert result.username == "testuser"
@@ -1437,7 +1437,7 @@ class TestGetCurrentUser:
             mock_token_manager = Mock()
             mock_token_manager.verify_token.return_value = None
             mock_get_token_manager.return_value = mock_token_manager
-            result = await get_current_user(request)
+            result = get_current_user(request)
             assert result is None
 
 
@@ -1452,7 +1452,7 @@ class TestRequireAuthentication:
         Then: Same user is returned.
         """
         user = UserProfile(id="user123", username="testuser", role=UserRole.OPERATOR)
-        result = await require_authentication(user)
+        result = require_authentication(user)
         assert result == user
 
     async def test_require_authentication_without_user(self) -> None:
@@ -1463,7 +1463,7 @@ class TestRequireAuthentication:
         Then: HTTPException with 401 status is raised.
         """
         with pytest.raises(HTTPException) as exc_info:
-            await require_authentication(None)
+            require_authentication(None)
         assert exc_info.value.status_code == 401
         assert "Authentication required" in exc_info.value.detail
 
@@ -1484,7 +1484,7 @@ class TestRequirePermission:
             "snapper.auth.domain.permissions.ROLE_PERMISSIONS",
             {UserRole.ADMIN: {Permission.MANAGE_PROCESSES}},
         ):
-            result = await permission_checker(user)
+            result = permission_checker(user)
             assert result == user
 
     async def test_require_permission_without_permission(self) -> None:
@@ -1498,7 +1498,7 @@ class TestRequirePermission:
         permission_checker = require_permission(Permission.MANAGE_PROCESSES)
         with patch("snapper.auth.domain.permissions.ROLE_PERMISSIONS", {UserRole.VIEWER: set()}):
             with pytest.raises(HTTPException) as exc_info:
-                await permission_checker(user)
+                permission_checker(user)
             assert exc_info.value.status_code == 403
             assert "Permission 'manage:processes' required" in exc_info.value.detail
 
@@ -1515,7 +1515,7 @@ class TestRequireRole:
         """
         user = UserProfile(id="user123", username="testuser", role=UserRole.ADMIN)
         role_checker = require_role(UserRole.OPERATOR)
-        result = await role_checker(user)
+        result = role_checker(user)
         assert result == user
 
     async def test_require_role_with_exact_role(self) -> None:
@@ -1527,7 +1527,7 @@ class TestRequireRole:
         """
         user = UserProfile(id="user123", username="testuser", role=UserRole.OPERATOR)
         role_checker = require_role(UserRole.OPERATOR)
-        result = await role_checker(user)
+        result = role_checker(user)
         assert result == user
 
     async def test_require_role_with_insufficient_role(self) -> None:
@@ -1540,7 +1540,7 @@ class TestRequireRole:
         user = UserProfile(id="user123", username="testuser", role=UserRole.VIEWER)
         role_checker = require_role(UserRole.ADMIN)
         with pytest.raises(HTTPException) as exc_info:
-            await role_checker(user)
+            role_checker(user)
         assert exc_info.value.status_code == 403
         assert "Role 'admin' or higher required" in exc_info.value.detail
 
@@ -1662,7 +1662,7 @@ class TestCSRFManager:
         """
         csrf_manager = CSRFManager()
         csrf_manager.cleanup_expired_tokens()
-        assert True
+        assert csrf_manager is not None
 
 
 def test_csrf_manager_settings_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1761,7 +1761,7 @@ class TestCSRFDependencies:
         request = Mock(spec=Request)
         request.headers = {"X-CSRF-Token": "token_from_header"}
         request.cookies = {}
-        token = await get_csrf_token(request)
+        token = get_csrf_token(request)
         assert token == "token_from_header"
 
     async def test_get_csrf_token_from_cookie(self) -> None:
@@ -1774,7 +1774,7 @@ class TestCSRFDependencies:
         request = Mock(spec=Request)
         request.headers = {}
         request.cookies = {"csrf_token": "token_from_cookie"}
-        token = await get_csrf_token(request)
+        token = get_csrf_token(request)
         assert token == "token_from_cookie"
 
     async def test_get_csrf_token_not_found(self) -> None:
@@ -1787,7 +1787,7 @@ class TestCSRFDependencies:
         request = Mock(spec=Request)
         request.headers = {}
         request.cookies = {}
-        token = await get_csrf_token(request)
+        token = get_csrf_token(request)
         assert token is None
 
     async def test_validate_csrf_token_safe_method(self) -> None:
@@ -1801,7 +1801,7 @@ class TestCSRFDependencies:
         request.method = "GET"
         request.headers = {}
         request.cookies = {}
-        await validate_csrf_token(request, None)
+        validate_csrf_token(request, None)
 
     async def test_validate_csrf_token_missing_token(self) -> None:
         """Verify validate_csrf_token raises 403 for missing token.
@@ -1815,7 +1815,7 @@ class TestCSRFDependencies:
         request.headers = {}
         request.cookies = {}
         with pytest.raises(HTTPException) as exc_info:
-            await validate_csrf_token(request, None)
+            validate_csrf_token(request, None)
         assert exc_info.value.status_code == 403
         assert "CSRF token required" in exc_info.value.detail
 
@@ -1832,7 +1832,7 @@ class TestCSRFDependencies:
         request.method = "POST"
         request.headers = {"origin": "http://localhost:8000", "X-CSRF-Token": valid_token}
         request.cookies = {"csrf_token": valid_token}
-        await validate_csrf_token(request, valid_token)
+        validate_csrf_token(request, valid_token)
 
     async def test_validate_csrf_token_mismatch(self) -> None:
         """Verify validate_csrf_token raises 403 for token mismatch.
@@ -1849,7 +1849,7 @@ class TestCSRFDependencies:
         request.headers = {"origin": "http://localhost:8000", "X-CSRF-Token": token1}
         request.cookies = {"csrf_token": token2}
         with pytest.raises(HTTPException) as exc_info:
-            await validate_csrf_token(request, token1)
+            validate_csrf_token(request, token1)
         assert exc_info.value.status_code == 403
         assert "CSRF token mismatch between cookie and header" in exc_info.value.detail
 
@@ -1872,7 +1872,7 @@ class TestCSRFDependencies:
             mock_csrf_manager.validate_token.return_value = False
             mock_get_csrf_manager.return_value = mock_csrf_manager
             with pytest.raises(HTTPException) as exc_info:
-                await validate_csrf_token(request, "nonce.1234567890.invalid_signature")
+                validate_csrf_token(request, "nonce.1234567890.invalid_signature")
             assert exc_info.value.status_code == 403
             assert "Invalid or tampered CSRF token signature" in exc_info.value.detail
 
@@ -1892,7 +1892,7 @@ class TestCSRFDependencies:
         }
         request.cookies = {"csrf_token": "test_token"}
         with pytest.raises(HTTPException) as exc_info:
-            await validate_csrf_token(request, "test_token")
+            validate_csrf_token(request, "test_token")
         assert exc_info.value.status_code == 403
         assert "Invalid origin" in exc_info.value.detail
 
@@ -1910,7 +1910,7 @@ class TestCSRFDependencies:
         request.headers = {"origin": "http://localhost:8000"}
         request.cookies = {"csrf_token": token}
         with pytest.raises(HTTPException) as exc_info:
-            await validate_csrf_token(request, token)
+            validate_csrf_token(request, token)
         assert exc_info.value.status_code == 403
         assert "both cookie and header" in exc_info.value.detail
 
@@ -1928,6 +1928,6 @@ class TestCSRFDependencies:
         request.headers = {"origin": "http://localhost:8000", "X-CSRF-Token": token}
         request.cookies = {}
         with pytest.raises(HTTPException) as exc_info:
-            await validate_csrf_token(request, token)
+            validate_csrf_token(request, token)
         assert exc_info.value.status_code == 403
         assert "both cookie and header" in exc_info.value.detail

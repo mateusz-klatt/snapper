@@ -117,10 +117,8 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
         all_symbols = await self.load_all_symbols()
         logger.info(f"Will subscribe to {len(all_symbols)} Walutomat symbols")
         try:
-            await asyncio.wait_for(
-                self._collect_snapshots_loop(all_symbols, snapshots),
-                timeout=timeout_seconds,
-            )
+            async with asyncio.timeout(timeout_seconds):
+                await self._collect_snapshots_loop(all_symbols, snapshots)
         except TimeoutError:
             logger.warning(
                 f"Polling collection timed out after {timeout_seconds}s - "

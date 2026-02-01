@@ -25,6 +25,7 @@ from loguru import logger
 from snapper.config.settings import get_settings
 from snapper.data.models import MarketSnapshot
 from snapper.data.repository import DatabaseRepository
+from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
 from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
@@ -121,16 +122,64 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
         all_symbols = await self.load_all_symbols()
         logger.info(f"Will subscribe to {len(all_symbols)} Zonda symbols")
         try:
-            await asyncio.wait_for(
-                self._collect_snapshots_loop(all_symbols, snapshots),
-                timeout=timeout_seconds,
-            )
+            async with asyncio.timeout(timeout_seconds):
+                await self._collect_snapshots_loop(all_symbols, snapshots)
         except TimeoutError:
             logger.warning(
                 f"WebSocket collection timed out after {timeout_seconds}s - "
                 f"collected {len(snapshots)}/{len(all_symbols)} symbols"
             )
         return list(snapshots.values())
+
+    def _resolve_native_symbol(self, zonda_symbol: str) -> str | None:
+        """Resolve a Zonda symbol to its native format.
+
+        Args:
+            zonda_symbol: Exchange symbol in Zonda format.
+
+        Returns:
+            Native symbol string, or None if symbol is unknown.
+        """
+        try:
+            return zonda_to_native(zonda_symbol)
+        except ValueError:
+            logger.warning(f"Unknown Zonda symbol: {zonda_symbol}")
+            return None
+
+    @staticmethod
+    def _build_zonda_snapshot(native_symbol: str, ticker_data: TickerUpdate) -> MarketSnapshot:
+        """Build a MarketSnapshot from Zonda ticker data.
+
+        Args:
+            native_symbol: Native symbol string.
+            ticker_data: Parsed ticker update from exchange.
+
+        Returns:
+            MarketSnapshot instance populated with ticker values.
+        """
+        bid = ticker_data.bid
+        ask = ticker_data.ask
+        has_valid_prices = bid > 0 and ask > 0
+        spread = ask - bid if has_valid_prices else 0.0
+        mid = (bid + ask) / 2 if has_valid_prices else 0.0
+        spread_pct = (spread / mid * 100) if mid > 0 else 0.0
+        return MarketSnapshot(
+            exchange="zonda",
+            symbol=native_symbol,
+            bid=bid,
+            bid_volume=ticker_data.bid_qty,
+            ask=ask,
+            ask_volume=ticker_data.ask_qty,
+            last_price=ticker_data.last,
+            volume_24h=ticker_data.volume,
+            vwap_24h=ticker_data.vwap,
+            low_24h=ticker_data.low,
+            high_24h=ticker_data.high,
+            change_24h=ticker_data.change,
+            spread=spread,
+            spread_pct=spread_pct,
+            updated_at=datetime.now(UTC),
+        )
 
     async def _collect_snapshots_loop(
         self, all_symbols: list[str], snapshots: dict[str, MarketSnapshot]
@@ -146,43 +195,10 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
         """
         async for ticker_data in self.exchange_client.subscribe_ticks(all_symbols, snapshot=True):
             try:
-                zonda_symbol = ticker_data.symbol
-                try:
-                    native_symbol = zonda_to_native(zonda_symbol)
-                except ValueError:
-                    logger.warning(f"Unknown Zonda symbol: {zonda_symbol}")
+                native_symbol = self._resolve_native_symbol(ticker_data.symbol)
+                if native_symbol is None:
                     continue
-                bid = ticker_data.bid
-                ask = ticker_data.ask
-                last_price = ticker_data.last
-                high_24h = ticker_data.high
-                low_24h = ticker_data.low
-                volume_24h = ticker_data.volume
-                change_24h = ticker_data.change
-                vwap_24h = ticker_data.vwap
-                bid_volume = ticker_data.bid_qty
-                ask_volume = ticker_data.ask_qty
-                spread = ask - bid if (bid > 0 and ask > 0) else 0.0
-                mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else 0.0
-                spread_pct = (spread / mid * 100) if mid > 0 else 0.0
-                snapshot = MarketSnapshot(
-                    exchange="zonda",
-                    symbol=native_symbol,
-                    bid=bid,
-                    bid_volume=bid_volume,
-                    ask=ask,
-                    ask_volume=ask_volume,
-                    last_price=last_price,
-                    volume_24h=volume_24h,
-                    vwap_24h=vwap_24h,
-                    low_24h=low_24h,
-                    high_24h=high_24h,
-                    change_24h=change_24h,
-                    spread=spread,
-                    spread_pct=spread_pct,
-                    updated_at=datetime.now(UTC),
-                )
-                snapshots[native_symbol] = snapshot
+                snapshots[native_symbol] = self._build_zonda_snapshot(native_symbol, ticker_data)
                 if len(snapshots) % 10 == 0:
                     logger.debug(f"Collected {len(snapshots)} unique Zonda snapshots...")
                 if len(snapshots) >= len(all_symbols):

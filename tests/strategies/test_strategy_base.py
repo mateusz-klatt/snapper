@@ -257,8 +257,8 @@ class TestSignal:
         )
         assert signal.instrument == "BTC-USD"
         assert signal.side == "buy"
-        assert signal.strength == 0.8
-        assert signal.price == 50000.0
+        assert signal.strength == pytest.approx(0.8)
+        assert signal.price == pytest.approx(50000.0)
         assert signal.reason == "MACD crossover"
         assert signal.metadata["indicator"] == "macd"
 
@@ -309,9 +309,11 @@ class MockStrategy(BaseStrategy):
         self._trigger_signal = False
 
     async def _subscribe_inputs(self) -> None:
+        """No-op subscription management for test strategy."""
         pass
 
     async def _unsubscribe_inputs(self) -> None:
+        """No-op subscription management for test strategy."""
         pass
 
     async def emit_signal(self, signal: Signal) -> None:
@@ -428,7 +430,6 @@ class DummyRawSocket:
 
     def setsockopt_string(self, *_args: Any, **_kwargs: Any) -> None:
         """Set socket option as string."""
-        return
 
     def close(self) -> None:
         """Close the socket."""
@@ -632,13 +633,13 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
     assert invalidate_calls == ["False"]
     assert strategy.reset_called is True
     assert strategy._feed_heartbeats["kraken"]["status"] == "healthy"
-    assert strategy._last_data_ts == 123.0
+    assert strategy._last_data_ts == pytest.approx(123.0)
     assert strategy.received[0][0] == "BTC-USD"
     sent_topic, payload, _ = publisher.sent[0]
     assert sent_topic == strategy.output_topics[0]
     payload_data = json.loads(payload)
     assert payload_data["instrument"] == "BTC-USD"
-    assert datetime.fromisoformat(payload_data["timestamp"]).timestamp() == 123.0
+    assert datetime.fromisoformat(payload_data["timestamp"]).timestamp() == pytest.approx(123.0)
 
 
 @pytest.mark.asyncio
@@ -666,6 +667,7 @@ async def test_default_handlers_return_none() -> None:
 
     class MinimalStrategy(BaseStrategy):
         async def reset(self) -> None:
+            """No-op reset for test strategy."""
             pass
 
     strategy = MinimalStrategy(_strategy_config())
@@ -748,6 +750,7 @@ async def test_listen_loop_handles_tick_data() -> None:
 
     class TickStrategy(BaseStrategy):
         async def reset(self) -> None:
+            """No-op reset for test strategy."""
             pass
 
         async def on_tick(self, instrument: str, tick: TickEnvelope) -> None:
@@ -769,7 +772,7 @@ async def test_listen_loop_handles_tick_data() -> None:
     await strategy._listen_loop()
     assert len(received_ticks) == 1
     assert received_ticks[0][0] == "BTC-USD"
-    assert received_ticks[0][1].bid == 50000.0
+    assert received_ticks[0][1].bid == pytest.approx(50000.0)
     assert strategy._last_data_ts is not None
 
 
@@ -785,6 +788,7 @@ async def test_listen_loop_handles_trade_data() -> None:
 
     class TradeStrategy(BaseStrategy):
         async def reset(self) -> None:
+            """No-op reset for test strategy."""
             pass
 
         async def on_trade(self, instrument: str, trade: TradeEnvelope) -> None:
@@ -805,7 +809,7 @@ async def test_listen_loop_handles_trade_data() -> None:
     await strategy._listen_loop()
     assert len(received_trades) == 1
     assert received_trades[0][0] == "BTC-USD"
-    assert received_trades[0][1].price == 50000.0
+    assert received_trades[0][1].price == pytest.approx(50000.0)
     assert strategy._last_data_ts is not None
 
 
@@ -1134,6 +1138,7 @@ class TestSubscribeInputs:
         mock_context.socket.return_value = mock_socket
 
         async def mock_listen_loop() -> None:
+            """Intentionally empty mock implementation."""
             pass
 
         with (
@@ -1425,7 +1430,7 @@ class TestListenLoop:
         assert len(strategy.bars_processed) == 1
         instrument, received_bar = strategy.bars_processed[0]
         assert instrument == "BTC-USD"
-        assert received_bar.close == 50000.0
+        assert received_bar.close == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_receives_signal_data(self, strategy_config: StrategyConfig) -> None:
@@ -1486,7 +1491,7 @@ class TestListenLoop:
             await strategy._listen_loop()
         assert len(strategy.candle_buffer["BTC-USD"]) == 3
         assert len(strategy.bars_processed) == 3
-        assert strategy.candle_buffer["BTC-USD"][-1].close == 102.0
+        assert strategy.candle_buffer["BTC-USD"][-1].close == pytest.approx(102.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_respects_buffer_size(self, strategy_config: StrategyConfig) -> None:
@@ -1520,8 +1525,8 @@ class TestListenLoop:
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
         assert len(strategy.candle_buffer["BTC-USD"]) == 2
-        assert strategy.candle_buffer["BTC-USD"][0].close == 102.0
-        assert strategy.candle_buffer["BTC-USD"][1].close == 103.0
+        assert strategy.candle_buffer["BTC-USD"][0].close == pytest.approx(102.0)
+        assert strategy.candle_buffer["BTC-USD"][1].close == pytest.approx(103.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_emits_signals(self, strategy_config: StrategyConfig) -> None:
@@ -1549,7 +1554,7 @@ class TestListenLoop:
         assert len(strategy.bars_processed) == 1
         instrument, received_bar = strategy.bars_processed[0]
         assert instrument == "BTC-USD"
-        assert received_bar.close == 50000.0
+        assert received_bar.close == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_handles_exception(self, strategy_config: StrategyConfig) -> None:
@@ -1689,7 +1694,7 @@ class TestListenLoop:
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
-        assert strategy._last_data_ts == 100.0
+        assert strategy._last_data_ts == pytest.approx(100.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_triggers_symbol_mapping_refresh(
@@ -1832,6 +1837,7 @@ class TestEmitSignal:
         mock_context.socket.side_effect = socket_factory
 
         async def mock_listen_loop() -> None:
+            """Intentionally empty mock implementation."""
             pass
 
         with patch("zmq.asyncio.Context", return_value=mock_context):
@@ -1885,8 +1891,8 @@ class TestEmitSignal:
         payload_data = json.loads(payload.decode())
         assert payload_data["instrument"] == "BTC-USD"
         assert payload_data["side"] == "buy"
-        assert payload_data["strength"] == 0.8
-        assert payload_data["price"] == 50000.0
+        assert payload_data["strength"] == pytest.approx(0.8)
+        assert payload_data["price"] == pytest.approx(50000.0)
         assert payload_data["reason"] == "Test signal"
         assert payload_data["meta"]["test"] == "value"
         assert "timestamp" in payload_data
@@ -2012,7 +2018,7 @@ class TestEmitSignal:
             timestamp=123456789.0,
         )
         await strategy.emit_signal(signal)
-        assert signal.timestamp == 123456789.0
+        assert signal.timestamp == pytest.approx(123456789.0)
 
     @pytest.mark.asyncio
     async def test_emit_signal_skips_publish_when_no_publisher(self) -> None:
@@ -2032,6 +2038,7 @@ class TestEmitSignal:
         strategy.publisher = None
 
         async def noop_setup() -> None:
+            """Intentionally empty mock implementation."""
             pass
 
         strategy._setup_publisher = noop_setup
@@ -2081,10 +2088,8 @@ class TestStop:
         strategy._running = True
 
         async def dummy_task() -> None:
-            try:
-                await asyncio.sleep(100)
-            except asyncio.CancelledError:
-                raise
+            """Simulate a long-running task for cancellation testing."""
+            await asyncio.sleep(100)
 
         task = asyncio.create_task(dummy_task())
         strategy._listen_task = task
@@ -2135,7 +2140,7 @@ class TestStop:
         strategy._running = True
 
         async def completed_task() -> None:
-            return
+            """Immediately-completing coroutine for test."""
 
         task = asyncio.create_task(completed_task())
         await asyncio.sleep(0.01)
@@ -2363,6 +2368,7 @@ class TestReplayHandling:
                 self.sent = False
 
             def close(self) -> None:
+                """No-op close for test stub."""
                 pass
 
             async def recv_multipart(self) -> tuple[str, bytes]:
@@ -2401,6 +2407,7 @@ class TestReplayHandling:
                 self.sent = False
 
             def close(self) -> None:
+                """No-op close for test stub."""
                 pass
 
             async def recv_multipart(self) -> tuple[str, bytes]:
@@ -2440,6 +2447,7 @@ class TestReplayHandling:
                 self.calls = 0
 
             def close(self) -> None:
+                """No-op close for test stub."""
                 pass
 
             async def recv_multipart(self) -> tuple[str, bytes]:
@@ -2451,7 +2459,7 @@ class TestReplayHandling:
 
         strategy.subscriber = cast(Any, UnknownSystemSubscriber())
         await strategy._listen_loop()
-        assert strategy._last_data_ts == 88.0
+        assert strategy._last_data_ts == pytest.approx(88.0)
 
 
 class TestHeartbeatLoop:
@@ -2676,6 +2684,7 @@ class TestSubscribeInputsBranches:
 
         class MockValidatedSubscriber:
             def __init__(self, socket: Any) -> None:
+                """Intentionally empty stub for testing."""
                 pass
 
             def subscribe(self, topic: str) -> None:
@@ -2713,6 +2722,7 @@ class TestSubscribeInputsBranches:
 
         class MockValidatedSubscriber:
             def __init__(self, socket: Any) -> None:
+                """Intentionally empty stub for testing."""
                 pass
 
             def subscribe(self, topic: str) -> None:
@@ -2745,6 +2755,7 @@ class TestSubscribeInputsBranches:
 
         class MockValidatedSubscriber:
             def __init__(self, socket: Any) -> None:
+                """Intentionally empty stub for testing."""
                 pass
 
             def subscribe(self, topic: str) -> None:
@@ -3054,7 +3065,7 @@ class TestListenLoopSignalTimestamp:
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
-        assert strategy._last_data_ts == 500.0
+        assert strategy._last_data_ts == pytest.approx(500.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_signal_does_not_update_ts(self) -> None:
@@ -3086,7 +3097,7 @@ class TestListenLoopSignalTimestamp:
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
-        assert strategy._last_data_ts == 999.0
+        assert strategy._last_data_ts == pytest.approx(999.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_signal_with_non_numeric_ts_ignored(self) -> None:
@@ -3118,7 +3129,7 @@ class TestListenLoopSignalTimestamp:
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
-        assert strategy._last_data_ts == 888.0
+        assert strategy._last_data_ts == pytest.approx(888.0)
 
 
 class TestEmitSignalTimestamp:
@@ -3152,7 +3163,7 @@ class TestEmitSignalTimestamp:
             timestamp=None,
         )
         await strategy.emit_signal(signal)
-        assert signal.timestamp == 1700000000.0
+        assert signal.timestamp == pytest.approx(1700000000.0)
 
     @pytest.mark.asyncio
     async def test_emit_signal_uses_wall_time_when_no_replay_ts(self) -> None:
@@ -3592,6 +3603,7 @@ class TestBaseStrategyFeedHeartbeat:
                 return None
 
             async def reset(self) -> None:
+                """No-op reset for test strategy."""
                 pass
 
         strategy = object.__new__(TestStrategy)
@@ -3634,6 +3646,7 @@ class TestBaseStrategyEmitSignal:
                 return None
 
             async def reset(self) -> None:
+                """No-op reset for test strategy."""
                 pass
 
         strategy = object.__new__(TestStrategy)
@@ -3676,6 +3689,7 @@ class TestCompositeStrategyAddSubStrategy:
                 return None
 
             async def reset(self) -> None:
+                """No-op reset for test strategy."""
                 pass
 
         composite = object.__new__(TestCompositeStrategy)
@@ -3728,9 +3742,9 @@ class TestCointegrationInitialization:
         Then: All parameters correctly assigned.
         """
         assert strategy.name == "cointegration_btc_eth"
-        assert strategy.beta == 0.05
-        assert strategy.entry_threshold == 2.0
-        assert strategy.exit_threshold == 0.5
+        assert strategy.beta == pytest.approx(0.05)
+        assert strategy.entry_threshold == pytest.approx(2.0)
+        assert strategy.exit_threshold == pytest.approx(0.5)
         assert strategy.lookback_window == 50
         assert strategy.min_data_points == 30
         assert strategy.instrument1 == "BTC-USD"
@@ -3834,7 +3848,7 @@ class TestCointegrationDataProcessing:
         await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0)
         assert "BTC-USD" in strategy.candle_buffer
         assert len(strategy.candle_buffer["BTC-USD"]) == 1
-        assert strategy.candle_buffer["BTC-USD"][0].close == 50000.0
+        assert strategy.candle_buffer["BTC-USD"][0].close == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
     async def test_on_bar_returns_none_with_single_instrument_data(
@@ -3880,7 +3894,7 @@ class TestCointegrationDataProcessing:
         closes = [50000.0 + i for i in range(60)]
         await feed_closes_to_strategy(strategy, "BTC-USD", closes)
         assert len(strategy.candle_buffer["BTC-USD"]) == 50
-        assert strategy.candle_buffer["BTC-USD"][0].close == 50010.0
+        assert strategy.candle_buffer["BTC-USD"][0].close == pytest.approx(50010.0)
 
 
 class TestCointegrationSignalGeneration:
@@ -3975,7 +3989,7 @@ class TestCointegrationSignalGeneration:
             eth_price = 3035.0 + i * 5
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             signal = await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
-            if signal and signal.strength == 0.0:
+            if signal and signal.strength == pytest.approx(0.0):
                 assert "exit" in signal.reason.lower()
                 break
 
@@ -3999,7 +4013,11 @@ class TestCointegrationSignalGeneration:
         for i in range(20):
             btc_price = 55000.0 - i * 500
             signal = await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
-            if signal and signal.strength == 0.0 and "Exit short spread" in signal.reason:
+            if (
+                signal
+                and signal.strength == pytest.approx(0.0)
+                and "Exit short spread" in signal.reason
+            ):
                 assert signal.instrument == "BTC-USD"
                 assert signal.side == "buy"
                 break
@@ -4025,7 +4043,7 @@ class TestCointegrationSignalGeneration:
             eth_price = 3200.0 - i * 10
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             signal = await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
-            if signal and signal.strength == 0.0:
+            if signal and signal.strength == pytest.approx(0.0):
                 break
         assert strategy._position is None
 
@@ -4159,7 +4177,7 @@ class TestCointegrationEdgeCases:
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             signal = await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
             if signal and "exit" in signal.reason.lower():
-                assert signal.strength == 0.0
+                assert signal.strength == pytest.approx(0.0)
                 return
 
 
@@ -4895,8 +4913,8 @@ class TestRSIReversion:
         Then: Parameters correctly assigned.
         """
         assert strategy.period == 14
-        assert strategy.upper == 70.0
-        assert strategy.lower == 30.0
+        assert strategy.upper == pytest.approx(70.0)
+        assert strategy.lower == pytest.approx(30.0)
         assert strategy.cooldown == 0
         assert strategy._cool == {}
 
@@ -4913,10 +4931,10 @@ class TestRSIReversion:
         assert signal is not None
         assert signal.instrument == TEST_INSTRUMENT
         assert signal.side == "buy"
-        assert signal.strength == 1.0
+        assert signal.strength == pytest.approx(1.0)
         assert "RSI" in signal.reason
         assert signal.metadata["period"] == 14
-        assert signal.metadata["lower"] == 30.0
+        assert signal.metadata["lower"] == pytest.approx(30.0)
         assert "rsi_value" in signal.metadata
 
     @pytest.mark.asyncio
@@ -4932,10 +4950,10 @@ class TestRSIReversion:
         assert signal is not None
         assert signal.instrument == TEST_INSTRUMENT
         assert signal.side == "sell"
-        assert signal.strength == 1.0
+        assert signal.strength == pytest.approx(1.0)
         assert "RSI" in signal.reason
         assert signal.metadata["period"] == 14
-        assert signal.metadata["upper"] == 70.0
+        assert signal.metadata["upper"] == pytest.approx(70.0)
         assert "rsi_value" in signal.metadata
 
     @pytest.mark.asyncio
@@ -5056,8 +5074,8 @@ class TestRSIReversion:
         )
         strategy = RSIReversion(config)
         assert strategy.period == 10
-        assert strategy.upper == 75.0
-        assert strategy.lower == 25.0
+        assert strategy.upper == pytest.approx(75.0)
+        assert strategy.lower == pytest.approx(25.0)
 
     @pytest.mark.asyncio
     async def test_reset_clears_cooldown(self, strategy: RSIReversion) -> None:

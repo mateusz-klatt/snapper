@@ -643,6 +643,7 @@ class TestStartProcess:
 
         class OneShotProcess:
             def run(self) -> None:
+                """No-op run for OneShotProcess test stub."""
                 pass
 
         config = ProcessConfigModel(
@@ -683,6 +684,7 @@ class TestStartProcess:
 
         class SimpleProcess:
             def start(self) -> None:
+                """No-op start for SimpleProcess test stub."""
                 pass
 
         config = ProcessConfigModel(
@@ -1404,6 +1406,7 @@ class TestTaskCompletion:
         """
 
         async def completing_task() -> None:
+            """Intentionally empty async stub for testing."""
             pass
 
         task = asyncio.create_task(completing_task())
@@ -1504,6 +1507,7 @@ class TestSyncRegistryToDatabase:
 
         class TestProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for TestProcess test stub."""
                 pass
 
         with (
@@ -1844,3 +1848,25 @@ async def test_handle_process_completion_long_running_unexpected(
     await launcher._handle_process_completion("worker", proc_info)
     assert finalize_calls
     assert finalize_calls[0][0] == "worker"
+
+
+def test_resolve_lifecycle_returns_default_for_none() -> None:
+    """Verify _resolve_lifecycle returns LONG_RUNNING when raw is None.
+
+    Given a None lifecycle value,
+    When _resolve_lifecycle is called,
+    Then it returns ProcessLifecycleEnum.LONG_RUNNING.
+    """
+    result = ProcessLauncherService._resolve_lifecycle(None, "test_process")
+    assert result == ProcessLifecycleEnum.LONG_RUNNING
+
+
+def test_resolve_role_returns_default_for_none() -> None:
+    """Verify _resolve_role returns CORE when raw is None.
+
+    Given a None role value,
+    When _resolve_role is called,
+    Then it returns ProcessRoleEnum.CORE.
+    """
+    result = ProcessLauncherService._resolve_role(None, "test_process")
+    assert result == ProcessRoleEnum.CORE

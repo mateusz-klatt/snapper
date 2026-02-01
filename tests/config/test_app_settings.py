@@ -302,7 +302,7 @@ class TestAppSettingsRiskProperties:
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         service = MockSettingsService({"risk_max_leverage": 2.0})
         settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.risk_max_leverage == 2.0
+        assert settings.risk_max_leverage == pytest.approx(2.0)
 
     def test_risk_max_drawdown_returns_value(self) -> None:
         """Verify risk_max_drawdown returns configured value.
@@ -314,7 +314,7 @@ class TestAppSettingsRiskProperties:
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         service = MockSettingsService({"risk_max_drawdown": 0.20})
         settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.risk_max_drawdown == 0.20
+        assert settings.risk_max_drawdown == pytest.approx(0.20)
 
     def test_risk_r_per_trade_returns_value(self) -> None:
         """Verify risk_r_per_trade returns configured value.
@@ -326,7 +326,7 @@ class TestAppSettingsRiskProperties:
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         service = MockSettingsService({"risk_r_per_trade": 0.01})
         settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.risk_r_per_trade == 0.01
+        assert settings.risk_r_per_trade == pytest.approx(0.01)
 
 
 class TestAppSettingsLoggingProperties:
@@ -394,7 +394,7 @@ class TestAppSettingsRestApiProperties:
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         service = MockSettingsService({"rest_retry_backoff_base": 0.5})
         settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.rest_retry_backoff_base == 0.5
+        assert settings.rest_retry_backoff_base == pytest.approx(0.5)
 
     def test_rest_retry_max_delay_returns_value(self) -> None:
         """Verify rest_retry_max_delay returns configured value.
@@ -406,7 +406,7 @@ class TestAppSettingsRestApiProperties:
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         service = MockSettingsService({"rest_retry_max_delay": 5.0})
         settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.rest_retry_max_delay == 5.0
+        assert settings.rest_retry_max_delay == pytest.approx(5.0)
 
     def test_rest_circuit_failure_threshold_returns_value(self) -> None:
         """Verify rest_circuit_failure_threshold returns configured value.

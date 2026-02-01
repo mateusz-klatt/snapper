@@ -206,7 +206,7 @@ class TestZondaPublisherLoops:
         assert topic == "market.zonda.BTC-PLN.candles.1m"
         assert msg.type == "bar"
         assert msg.instrument == "BTC-PLN"
-        assert msg.close == 101000.0
+        assert msg.close == pytest.approx(101000.0)
 
     @patch("snapper.config.settings.get_settings")
     @patch("snapper.messaging.publishers.zonda.ZondaMarketDataPublisher._validate_symbols")

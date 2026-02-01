@@ -3,6 +3,8 @@
 from typing import Any
 from typing import cast
 
+import pytest
+
 from snapper.application.portfolio.models import PortfolioTracker
 
 
@@ -14,7 +16,7 @@ def test_equity_without_prices_returns_cash() -> None:
     Then: Cash amount is returned.
     """
     portfolio = PortfolioTracker(cash=1234.5)
-    assert portfolio.equity() == 1234.5
+    assert portfolio.equity() == pytest.approx(1234.5)
 
 
 def test_update_fill_closes_position_resets_avg_price() -> None:
@@ -29,7 +31,7 @@ def test_update_fill_closes_position_resets_avg_price() -> None:
     portfolio.update_fill(instrument="BTC-USD", side="sell", size=1.0, price=10_000.0, fee=0.0)
     position = portfolio.positions["BTC-USD"]
     assert position.quantity <= 1e-12
-    assert position.average_price == 0.0
+    assert position.average_price == pytest.approx(0.0)
 
 
 def test_partial_sell_keeps_average_price() -> None:
@@ -44,7 +46,7 @@ def test_partial_sell_keeps_average_price() -> None:
     p.update_fill("BTC-USD", "sell", size=0.4, price=220.0, fee=0.0)
     position = p.positions["BTC-USD"]
     assert position.quantity > 0.0
-    assert position.average_price == 200.0
+    assert position.average_price == pytest.approx(200.0)
 
 
 def test_clamp_cash_handles_tiny_negatives() -> None:
@@ -71,7 +73,7 @@ def test_clamp_cash_handles_tiny_negatives() -> None:
     portfolio = PortfolioTracker(cash=0.0)
     portfolio.cash = cast(Any, ToggleNumber())
     portfolio._clamp_cash()
-    assert portfolio.cash == 0.0
+    assert portfolio.cash == pytest.approx(0.0)
 
 
 def test_clamp_cash_adjusts_small_positive() -> None:
@@ -83,7 +85,7 @@ def test_clamp_cash_adjusts_small_positive() -> None:
     """
     portfolio = PortfolioTracker(cash=5e-10)
     portfolio._clamp_cash()
-    assert portfolio.cash == 1e-6
+    assert portfolio.cash == pytest.approx(1e-6)
 
 
 def test_portfolio_fill_buy_sell() -> None:
@@ -95,10 +97,10 @@ def test_portfolio_fill_buy_sell() -> None:
     """
     p = PortfolioTracker(cash=1000.0)
     p.update_fill("BTC-USD", "buy", size=0.1, price=100.0, fee=0.01)
-    assert p.positions["BTC-USD"].quantity == 0.1
+    assert p.positions["BTC-USD"].quantity == pytest.approx(0.1)
     assert p.cash < 1000.0
     p.update_fill("BTC-USD", "sell", size=0.1, price=110.0, fee=0.01)
-    assert p.positions["BTC-USD"].quantity == 0.0
+    assert p.positions["BTC-USD"].quantity == pytest.approx(0.0)
     assert p.positions["BTC-USD"].realized_pnl > 0
 
 
@@ -110,9 +112,9 @@ def test_portfolio_position_qty() -> None:
     Then: Correct quantities are returned.
     """
     p = PortfolioTracker()
-    assert p.position_qty("ETH-USD") == 0.0
+    assert p.position_qty("ETH-USD") == pytest.approx(0.0)
     p.update_fill("BTC-USD", "buy", size=0.5, price=100.0, fee=0.01)
-    assert p.position_qty("BTC-USD") == 0.5
+    assert p.position_qty("BTC-USD") == pytest.approx(0.5)
 
 
 def test_portfolio_notional_exposure() -> None:
@@ -125,7 +127,7 @@ def test_portfolio_notional_exposure() -> None:
     p = PortfolioTracker()
     p.update_fill("BTC-USD", "buy", size=0.5, price=100.0, fee=0.01)
     exposure = p.notional_exposure("BTC-USD", 120.0)
-    assert exposure == 0.5 * 120.0
+    assert exposure == pytest.approx(0.5 * 120.0)
 
 
 def test_portfolio_equity_with_prices() -> None:
@@ -190,7 +192,7 @@ def test_clamp_cash_tiny_negative_to_zero() -> None:
     """
     p = PortfolioTracker(cash=-5e-10)
     p._clamp_cash()
-    assert p.cash == 0.0 or p.cash == 1e-6
+    assert p.cash == pytest.approx(0.0) or p.cash == pytest.approx(1e-6)
 
 
 def test_equity_with_missing_price_for_some_positions() -> None:
@@ -218,10 +220,10 @@ def test_sell_clears_position_and_average_price() -> None:
     """
     p = PortfolioTracker(cash=1000.0)
     p.update_fill("BTC-USD", "buy", size=0.5, price=100.0, fee=0.0)
-    assert p.positions["BTC-USD"].average_price == 100.0
+    assert p.positions["BTC-USD"].average_price == pytest.approx(100.0)
     p.update_fill("BTC-USD", "sell", size=0.5, price=110.0, fee=0.0)
     assert p.positions["BTC-USD"].quantity <= 1e-12
-    assert p.positions["BTC-USD"].average_price == 0.0
+    assert p.positions["BTC-USD"].average_price == pytest.approx(0.0)
 
 
 def test_portfolio_avg_price_calculation() -> None:
@@ -233,7 +235,7 @@ def test_portfolio_avg_price_calculation() -> None:
     """
     p = PortfolioTracker(cash=10000.0)
     p.update_fill("BTC-USD", "buy", size=1.0, price=100.0, fee=0.0)
-    assert p.positions["BTC-USD"].average_price == 100.0
+    assert p.positions["BTC-USD"].average_price == pytest.approx(100.0)
     p.update_fill("BTC-USD", "buy", size=1.0, price=200.0, fee=0.0)
     assert abs(p.positions["BTC-USD"].average_price - 150.0) < 1e-9
 
@@ -247,13 +249,13 @@ def test_portfolio_equity_exposure_turnover() -> None:
     """
     p = PortfolioTracker(cash=1000.0)
     p.update_fill("BTC-USD", "buy", size=0.1, price=100.0, fee=0.0)
-    assert p.position_qty("BTC-USD") == 0.1
+    assert p.position_qty("BTC-USD") == pytest.approx(0.1)
     assert abs(p.notional_exposure("BTC-USD", 110.0) - 11.0) < 1e-9
     eq = p.equity({"BTC-USD": 110.0})
     assert abs(eq - 1001.0) < 1e-9
     assert abs(p.turnover - 10.0) < 1e-9
     p.update_fill("BTC-USD", "sell", size=0.1, price=110.0, fee=0.0)
-    assert p.position_qty("BTC-USD") == 0.0
+    assert p.position_qty("BTC-USD") == pytest.approx(0.0)
     assert abs(p.turnover - 21.0) < 1e-9
     assert abs(p.cash - 1001.0) < 1e-9
-    assert p.notional_exposure("BTC-USD", 120.0) == 0.0
+    assert p.notional_exposure("BTC-USD", 120.0) == pytest.approx(0.0)

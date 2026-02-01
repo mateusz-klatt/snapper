@@ -28,7 +28,7 @@ interface StrategyCardProps {
   isStopping?: boolean
 }
 
-export const StrategyCard: React.FC<StrategyCardProps> = React.memo(
+export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
   ({
     name,
     running,
@@ -57,18 +57,29 @@ export const StrategyCard: React.FC<StrategyCardProps> = React.memo(
           error: 'Error - no recent data',
         }[health.status]
       : 'Unknown - no heartbeat data'
+
+    const resolveStatusKey = (): 'starting' | 'running' | 'stopped' => {
+      if (isStarting) return 'starting'
+      if (isRunning) return 'running'
+
+      return 'stopped'
+    }
+
     const statusColor = {
       running: 'text-green-400 bg-green-400/10',
       stopped: 'text-gray-400 bg-gray-400/10',
       starting: 'text-blue-400 bg-blue-400/10',
-    }[isStarting ? 'starting' : isRunning ? 'running' : 'stopped']
-    const statusText = isStarting
-      ? 'starting'
-      : isStopping
-        ? 'stopping'
-        : isRunning
-          ? 'running'
-          : 'stopped'
+    }[resolveStatusKey()]
+
+    const resolveStatusText = (): string => {
+      if (isStarting) return 'starting'
+      if (isStopping) return 'stopping'
+      if (isRunning) return 'running'
+
+      return 'stopped'
+    }
+
+    const statusText = resolveStatusText()
     const showLagBadge = health && health.lag_ms > 2000
     const displayName = name
       .replace(/^strategy_/, '')
@@ -77,20 +88,18 @@ export const StrategyCard: React.FC<StrategyCardProps> = React.memo(
       .join(' ')
 
     return (
-      <div
+      <article
         className='bg-dark-800 border border-dark-700 rounded-lg p-6 space-y-4'
-        role='article'
         aria-label={`Strategy: ${displayName}`}
       >
         {}
         <div className='flex items-start justify-between'>
           <div className='flex items-center space-x-3'>
             {}
-            <div
-              className={clsx('w-3 h-3 rounded-full', healthColor)}
+            <output
+              className={clsx('w-3 h-3 rounded-full block', healthColor)}
               title={healthLabel}
               aria-label={healthLabel}
-              role='status'
             />
             <div>
               <h3 className='text-lg font-semibold text-white'>{displayName}</h3>
@@ -101,21 +110,19 @@ export const StrategyCard: React.FC<StrategyCardProps> = React.memo(
             </div>
           </div>
           <div className='flex items-center space-x-2'>
-            <span
+            <output
               className={clsx('px-2 py-1 rounded-md text-xs font-medium', statusColor)}
-              role='status'
               aria-label={`Status: ${statusText}`}
             >
               {statusText}
-            </span>
+            </output>
             {showLagBadge && (
-              <span
+              <output
                 className='px-2 py-1 rounded-md text-xs font-medium text-orange-400 bg-orange-400/10'
-                role='status'
                 aria-label={`Data lag: ${Math.round(health.lag_ms / 1000)} seconds`}
               >
                 lag: {Math.round(health.lag_ms / 1000)}s
-              </span>
+              </output>
             )}
           </div>
         </div>
@@ -263,28 +270,7 @@ export const StrategyCard: React.FC<StrategyCardProps> = React.memo(
         )}
         {}
         <div className='flex space-x-2 pt-2 border-t border-dark-700'>
-          {!showStopButton ? (
-            <button
-              onClick={onStart}
-              disabled={isStarting || isStopping}
-              aria-label={`Start ${displayName} strategy`}
-              className={clsx(
-                'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                isStarting || isStopping
-                  ? 'bg-green-400/20 text-green-300 cursor-not-allowed'
-                  : 'bg-green-600 text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500'
-              )}
-            >
-              {isStarting ? (
-                <>
-                  <div className='w-4 h-4 border-2 border-green-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
-                  Starting...
-                </>
-              ) : (
-                'Start'
-              )}
-            </button>
-          ) : (
+          {showStopButton ? (
             <button
               onClick={onStop}
               disabled={isStopping || isStarting}
@@ -305,9 +291,30 @@ export const StrategyCard: React.FC<StrategyCardProps> = React.memo(
                 'Stop'
               )}
             </button>
+          ) : (
+            <button
+              onClick={onStart}
+              disabled={isStarting || isStopping}
+              aria-label={`Start ${displayName} strategy`}
+              className={clsx(
+                'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
+                isStarting || isStopping
+                  ? 'bg-green-400/20 text-green-300 cursor-not-allowed'
+                  : 'bg-green-600 text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500'
+              )}
+            >
+              {isStarting ? (
+                <>
+                  <div className='w-4 h-4 border-2 border-green-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                  Starting...
+                </>
+              ) : (
+                'Start'
+              )}
+            </button>
           )}
         </div>
-      </div>
+      </article>
     )
   }
 )

@@ -11,6 +11,8 @@ from pydantic import Field
 
 from snapper.api.schemas.base import StrictApiSchema
 
+_CONN_STATS_DESC = "Connection statistics"
+
 
 class HealthTopics(StrictApiSchema):
     """Topic availability statistics.
@@ -41,7 +43,7 @@ class HealthCheckResponse(StrictApiSchema):
     status: str = Field(description="Overall service health status")
     timestamp: datetime = Field(description="Timestamp of the health check")
     version: str = Field(description="Application version")
-    connections: dict[str, Any] = Field(description="Connection statistics")
+    connections: dict[str, Any] = Field(description=_CONN_STATS_DESC)
     topics: HealthTopics = Field(description="Topics availability")
 
 
@@ -89,7 +91,7 @@ class ZmqHealthResponse(StrictApiSchema):
     timestamp: datetime = Field(description="Timestamp of the health check")
     components: ZmqComponents = Field(description="Component status details")
     config: ZmqConfig = Field(description="ZMQ configuration")
-    connections: dict[str, Any] = Field(description="Connection statistics")
+    connections: dict[str, Any] = Field(description=_CONN_STATS_DESC)
     message_stats: dict[str, Any] = Field(description="Message statistics per topic")
     errors: list[str] = Field(default_factory=list, description="Error messages if unhealthy")
 
@@ -163,7 +165,7 @@ class WsStatsResponse(StrictApiSchema):
 
     websocket: WebSocketStats = Field(description="WebSocket statistics")
     zmq_bridge: ZmqBridgeStats = Field(description="ZMQ bridge statistics")
-    connections: dict[str, Any] = Field(description="Connection statistics")
+    connections: dict[str, Any] = Field(description=_CONN_STATS_DESC)
     topics: dict[str, Any] = Field(description="Topic message statistics")
     subscriptions: SubscriptionsStats = Field(description="Subscription details")
     config: WsStatsConfig = Field(description="Configuration details")

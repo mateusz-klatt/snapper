@@ -100,7 +100,7 @@ async def test_make_request_with_retry_handles_429(monkeypatch: pytest.MonkeyPat
         nonlocal attempts
         attempts += 1
         if attempts < 2:
-            raise Exception("429 rate limit")
+            raise RuntimeError("429 rate limit")
         return "ok"
 
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
@@ -163,7 +163,7 @@ async def test_get_last_quote_validates_symbol(monkeypatch: pytest.MonkeyPatch) 
     )
     monkeypatch.setattr(client, "_make_request_with_retry", AsyncMock(return_value=[pc]))
     quote = await client.get_last_quote("X:BTCUSD")
-    assert quote.last == 100.0
+    assert quote.last == pytest.approx(100.0)
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,9 @@ async def test_subscribe_instruments_uses_cache(
     client = PolygonExchangeClient(
         api_key="key", symbols_cache_file=cache_file, cache_ttl_hours=1000
     )
-    yielded = [item async for item in client.subscribe_instruments()]
+    yielded: list[dict[str, Any]] = []
+    async for item in client.subscribe_instruments():
+        yielded.append(item)
     assert yielded == [{"ticker": "X:BTCUSD", "name": "BTC"}]
 
 
@@ -250,10 +252,10 @@ class TestPolygonRetryLogic:
         """
 
         def always_429() -> None:
-            raise Exception("429 Too Many Requests")
+            raise RuntimeError("429 Too Many Requests")
 
         polygon_client._wait_for_rate_limit = AsyncMock()
-        with patch("asyncio.sleep"), pytest.raises(Exception, match="429"):
+        with patch("asyncio.sleep"), pytest.raises(RuntimeError, match="429"):
             await polygon_client._make_request_with_retry(always_429, max_retries=3)
 
     @pytest.mark.asyncio
@@ -272,7 +274,7 @@ class TestPolygonRetryLogic:
             nonlocal attempt_count
             attempt_count += 1
             if attempt_count == 1:
-                raise Exception("429 rate limit exceeded")
+                raise RuntimeError("429 rate limit exceeded")
             return "success"
 
         polygon_client._wait_for_rate_limit = AsyncMock()
@@ -295,10 +297,10 @@ class TestPolygonRetryLogic:
         """
 
         def always_fails() -> None:
-            raise Exception("429 Too Many Requests")
+            raise RuntimeError("429 Too Many Requests")
 
         polygon_client._wait_for_rate_limit = AsyncMock()
-        with patch("asyncio.sleep"), pytest.raises(Exception, match="429"):
+        with patch("asyncio.sleep"), pytest.raises(RuntimeError, match="429"):
             await polygon_client._make_request_with_retry(always_fails, max_retries=2)
 
     @pytest.mark.asyncio
@@ -715,7 +717,9 @@ async def test_subscribe_instruments_downloads_all(
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    yielded = [s async for s in client.subscribe_instruments()]
+    yielded: list[dict[str, Any]] = []
+    async for s in client.subscribe_instruments():
+        yielded.append(s)
     assert len(yielded) == 1000
     assert sleeps, "should sleep after page"
     assert saved and len(saved[0]) == 1000
@@ -762,7 +766,9 @@ class TestPolygonSubscribeInstruments:
             SimpleNamespace(ticker="X:ETHUSD", name="Ethereum"),
         ]
         polygon_client._client.list_tickers = MagicMock(return_value=iter(mock_tickers))
-        symbols = [symbol async for symbol in polygon_client.subscribe_instruments()]
+        symbols: list[dict[str, Any]] = []
+        async for symbol in polygon_client.subscribe_instruments():
+            symbols.append(symbol)
         assert len(symbols) == 2
         assert symbols[0]["ticker"] == "X:BTCUSD"
 
@@ -777,13 +783,20 @@ class TestPolygonSubscribeInstruments:
         Then: Uses cached data.
         """
         cache_file = tmp_path / "symbols.csv"
-        with open(cache_file, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f, lineterminator="\n")
-            writer.writerow(["ticker", "name"])
-            writer.writerow(["X:BTCUSD", "Bitcoin"])
-            writer.writerow(["X:ETHUSD", "Ethereum"])
+
+        def _write_cache() -> None:
+            """Write fresh cache file for test."""
+            with open(cache_file, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, lineterminator="\n")
+                writer.writerow(["ticker", "name"])
+                writer.writerow(["X:BTCUSD", "Bitcoin"])
+                writer.writerow(["X:ETHUSD", "Ethereum"])
+
+        await asyncio.to_thread(_write_cache)
         polygon_client._client.list_tickers = MagicMock()
-        symbols = [symbol async for symbol in polygon_client.subscribe_instruments()]
+        symbols: list[dict[str, Any]] = []
+        async for symbol in polygon_client.subscribe_instruments():
+            symbols.append(symbol)
         assert len(symbols) == 2
         polygon_client._client.list_tickers.assert_not_called()
 
@@ -798,10 +811,15 @@ class TestPolygonSubscribeInstruments:
         Then: Refreshes from API.
         """
         cache_file = tmp_path / "symbols.csv"
-        with open(cache_file, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f, lineterminator="\n")
-            writer.writerow(["ticker", "name"])
-            writer.writerow(["X:BTCUSD", "Bitcoin"])
+
+        def _write_stale_cache() -> None:
+            """Write stale cache file for test."""
+            with open(cache_file, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, lineterminator="\n")
+                writer.writerow(["ticker", "name"])
+                writer.writerow(["X:BTCUSD", "Bitcoin"])
+
+        await asyncio.to_thread(_write_stale_cache)
         stale_timestamp = time.time() - (2 * 3600)
         os.utime(cache_file, (stale_timestamp, stale_timestamp))
         mock_tickers = [
@@ -809,7 +827,9 @@ class TestPolygonSubscribeInstruments:
             SimpleNamespace(ticker="X:ETHUSD", name="Ethereum"),
         ]
         polygon_client._client.list_tickers = MagicMock(return_value=iter(mock_tickers))
-        symbols = [symbol async for symbol in polygon_client.subscribe_instruments()]
+        symbols: list[dict[str, Any]] = []
+        async for symbol in polygon_client.subscribe_instruments():
+            symbols.append(symbol)
         assert len(symbols) == 2
         polygon_client._client.list_tickers.assert_called_once()
 

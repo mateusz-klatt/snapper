@@ -24,6 +24,8 @@ from snapper.core.types import OrderStatus
 from snapper.core.types import OrderType
 from snapper.core.types import TradeSide
 
+_TYPE_DESC = "Message type discriminator"
+
 __all__ = [
     "ExecutionMode",
     "FillStatus",
@@ -44,7 +46,7 @@ class WSErrorResponse(WsMessageSchema):
         message: Human-readable error description.
     """
 
-    type: Literal["error"] = Field(default="error", description="Message type discriminator")
+    type: Literal["error"] = Field(default="error", description=_TYPE_DESC)
     message: str = Field(..., description="Error description")
 
 
@@ -58,7 +60,7 @@ class WSAuthOkResponse(WsMessageSchema):
         exp: Token expiration timestamp (ISO 8601).
     """
 
-    type: Literal["auth_ok"] = Field(default="auth_ok", description="Message type discriminator")
+    type: Literal["auth_ok"] = Field(default="auth_ok", description=_TYPE_DESC)
     exp: datetime = Field(..., description="Token expiration (ISO 8601)")
 
 
@@ -72,9 +74,7 @@ class WSAuthRequiredResponse(WsMessageSchema):
         timeout: Seconds until authentication timeout.
     """
 
-    type: Literal["auth_required"] = Field(
-        "auth_required", description="Message type discriminator"
-    )
+    type: Literal["auth_required"] = Field("auth_required", description=_TYPE_DESC)
     timeout: int = Field(default=30, description="Authentication timeout in seconds")
 
 
@@ -88,9 +88,7 @@ class WSAuthFailedResponse(WsMessageSchema):
         reason: Optional failure reason code.
     """
 
-    type: Literal["auth_failed"] = Field(
-        default="auth_failed", description="Message type discriminator"
-    )
+    type: Literal["auth_failed"] = Field(default="auth_failed", description=_TYPE_DESC)
     reason: str | None = Field(default=None, description="Failure reason")
 
 
@@ -104,9 +102,7 @@ class WSReauthRequiredResponse(WsMessageSchema):
         deadline: Deadline for reauthentication (ISO 8601).
     """
 
-    type: Literal["reauth_required"] = Field(
-        "reauth_required", description="Message type discriminator"
-    )
+    type: Literal["reauth_required"] = Field("reauth_required", description=_TYPE_DESC)
     deadline: datetime = Field(..., description="Deadline for reauthentication (ISO 8601)")
 
 
@@ -120,9 +116,7 @@ class WSReauthOkResponse(WsMessageSchema):
         exp: New token expiration timestamp (ISO 8601).
     """
 
-    type: Literal["reauth_ok"] = Field(
-        default="reauth_ok", description="Message type discriminator"
-    )
+    type: Literal["reauth_ok"] = Field(default="reauth_ok", description=_TYPE_DESC)
     exp: datetime = Field(..., description="New token expiration (ISO 8601)")
 
 
@@ -135,7 +129,7 @@ class WSAuthExpiredResponse(WsMessageSchema):
         type: Message type discriminator ('auth_expired').
     """
 
-    type: Literal["auth_expired"] = Field("auth_expired", description="Message type discriminator")
+    type: Literal["auth_expired"] = Field("auth_expired", description=_TYPE_DESC)
 
 
 class WSAuthCompleteResponse(WsMessageSchema):
@@ -151,9 +145,7 @@ class WSAuthCompleteResponse(WsMessageSchema):
         ws_token_exp: WebSocket token expiration (ISO 8601).
     """
 
-    type: Literal["auth_complete"] = Field(
-        "auth_complete", description="Message type discriminator"
-    )
+    type: Literal["auth_complete"] = Field("auth_complete", description=_TYPE_DESC)
     available_topics: list[str] = Field(..., description="Topics available for subscription")
     user_role: str = Field(..., description="Authenticated user role")
     session_expires_at: datetime | None = Field(
@@ -170,9 +162,7 @@ class WSSubscribeRequest(WsMessageSchema):
         topics: List of topics to subscribe to.
     """
 
-    type: Literal["subscribe"] = Field(
-        default="subscribe", description="Message type discriminator"
-    )
+    type: Literal["subscribe"] = Field(default="subscribe", description=_TYPE_DESC)
     topics: list[str] = Field(..., description="Topics to subscribe to")
 
 
@@ -184,9 +174,7 @@ class WSUnsubscribeRequest(WsMessageSchema):
         topics: List of topics to unsubscribe from.
     """
 
-    type: Literal["unsubscribe"] = Field(
-        default="unsubscribe", description="Message type discriminator"
-    )
+    type: Literal["unsubscribe"] = Field(default="unsubscribe", description=_TYPE_DESC)
     topics: list[str] = Field(..., description="Topics to unsubscribe from")
 
 
@@ -206,9 +194,7 @@ class WSSubscriptionSuccessResponse(WsMessageSchema):
         message: Optional additional details.
     """
 
-    type: Literal["subscription_success"] = Field(
-        "subscription_success", description="Message type discriminator"
-    )
+    type: Literal["subscription_success"] = Field("subscription_success", description=_TYPE_DESC)
     action: Literal["subscribe", "unsubscribe"] = Field(
         ..., description="The subscription action performed"
     )
@@ -238,9 +224,7 @@ class WSSubscriptionsListResponse(WsMessageSchema):
         total_available: Total number of available topics.
     """
 
-    type: Literal["subscriptions_list"] = Field(
-        "subscriptions_list", description="Message type discriminator"
-    )
+    type: Literal["subscriptions_list"] = Field("subscriptions_list", description=_TYPE_DESC)
     subscriptions: list[str] = Field(..., description="Current active subscriptions")
     available_topics: list[str] = Field(..., description="Topics available for subscription")
     total_available: int = Field(..., description="Total number of available topics")
@@ -257,9 +241,7 @@ class WSTopicSuggestionsResponse(WsMessageSchema):
         suggestions: Matching topic names.
     """
 
-    type: Literal["topic_suggestions"] = Field(
-        "topic_suggestions", description="Message type discriminator"
-    )
+    type: Literal["topic_suggestions"] = Field("topic_suggestions", description=_TYPE_DESC)
     prefix: str = Field(..., description="Search prefix that was used")
     suggestions: list[str] = Field(..., description="Matching topic names")
 
@@ -275,7 +257,7 @@ class WSPongResponse(WsMessageSchema):
         active_connections: Number of active WebSocket connections.
     """
 
-    type: Literal["pong"] = Field(default="pong", description="Message type discriminator")
+    type: Literal["pong"] = Field(default="pong", description=_TYPE_DESC)
     timestamp: datetime = Field(..., description="Server timestamp (ISO 8601)")
     active_connections: int = Field(..., description="Number of active WebSocket connections")
 
@@ -290,9 +272,7 @@ class WSAuthenticateRequest(WsMessageSchema):
         ws_token: WebSocket authentication token.
     """
 
-    type: Literal["authenticate"] = Field(
-        default="authenticate", description="Message type discriminator"
-    )
+    type: Literal["authenticate"] = Field(default="authenticate", description=_TYPE_DESC)
     ws_token: str = Field(..., description="WebSocket authentication token")
 
 
@@ -306,7 +286,7 @@ class WSReauthRequest(WsMessageSchema):
         ws_token: New WebSocket authentication token.
     """
 
-    type: Literal["reauth"] = Field(default="reauth", description="Message type discriminator")
+    type: Literal["reauth"] = Field(default="reauth", description=_TYPE_DESC)
     ws_token: str = Field(..., description="New WebSocket authentication token")
 
 
@@ -319,7 +299,7 @@ class WSPingRequest(WsMessageSchema):
         type: Message type discriminator ('ping').
     """
 
-    type: Literal["ping"] = Field(default="ping", description="Message type discriminator")
+    type: Literal["ping"] = Field(default="ping", description=_TYPE_DESC)
 
 
 class WSGetSubscriptionsRequest(WsMessageSchema):
@@ -329,9 +309,7 @@ class WSGetSubscriptionsRequest(WsMessageSchema):
         type: Message type discriminator ('get_subscriptions').
     """
 
-    type: Literal["get_subscriptions"] = Field(
-        default="get_subscriptions", description="Message type discriminator"
-    )
+    type: Literal["get_subscriptions"] = Field(default="get_subscriptions", description=_TYPE_DESC)
 
 
 class WSGetTopicSuggestionsRequest(WsMessageSchema):
@@ -343,6 +321,6 @@ class WSGetTopicSuggestionsRequest(WsMessageSchema):
     """
 
     type: Literal["get_topic_suggestions"] = Field(
-        default="get_topic_suggestions", description="Message type discriminator"
+        default="get_topic_suggestions", description=_TYPE_DESC
     )
     prefix: str = Field(default="", description="Search prefix for topics")

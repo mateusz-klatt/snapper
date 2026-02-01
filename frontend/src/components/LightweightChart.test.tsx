@@ -181,7 +181,7 @@ describe('LightweightChart', () => {
   it('handles resize event', () => {
     const { container } = render(<LightweightChart data={sampleData} />)
 
-    window.dispatchEvent(new Event('resize'))
+    globalThis.dispatchEvent(new Event('resize'))
     expect(mockApplyOptions).toHaveBeenCalled()
     expect(container.firstChild).toBeInTheDocument()
   })
@@ -212,7 +212,7 @@ describe('LightweightChart', () => {
     render(<MockedLightweightChart data={sampleData} />)
     mockApplyOptions.mockClear()
     chartRef.current = null
-    window.dispatchEvent(new Event('resize'))
+    globalThis.dispatchEvent(new Event('resize'))
     expect(mockApplyOptions).not.toHaveBeenCalled()
     vi.doUnmock('react')
     vi.resetModules()

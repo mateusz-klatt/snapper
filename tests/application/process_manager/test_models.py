@@ -35,6 +35,7 @@ class TestRegisterableProcess:
 
         class MinimalProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for MinimalProcess test stub."""
                 pass
 
         process = MinimalProcess()
@@ -50,6 +51,7 @@ class TestRegisterableProcess:
 
         class MinimalProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for MinimalProcess test stub."""
                 pass
 
         process = MinimalProcess()

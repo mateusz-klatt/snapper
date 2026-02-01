@@ -111,14 +111,14 @@ export const Signals: React.FC = () => {
   const { data: signals = [], isLoading } = useQuery({
     queryKey: ['signals', strategyFilter],
     queryFn: async () => {
-      return await apiClient.getSignals(strategyFilter !== 'all' ? strategyFilter : undefined, 50)
+      return await apiClient.getSignals(strategyFilter === 'all' ? undefined : strategyFilter, 50)
     },
     refetchInterval: false,
     enabled: isAuthenticated,
   })
   const availableStrategies = Array.from(
     new Set(signals.map((signal: TradingSignal) => signal.strategy_name).filter(Boolean))
-  ) as string[]
+  )
   const filteredSignals = signals.filter(
     (signal: TradingSignal) => strategyFilter === 'all' || signal.strategy_name === strategyFilter
   )
@@ -160,8 +160,11 @@ export const Signals: React.FC = () => {
       {}
       <div className='flex items-center justify-between'>
         <div className='flex items-center space-x-4'>
-          <label className='text-sm text-dark-400'>Filter by strategy:</label>
+          <label htmlFor='strategy-filter' className='text-sm text-dark-400'>
+            Filter by strategy:
+          </label>
           <select
+            id='strategy-filter'
             value={strategyFilter}
             onChange={e => setStrategyFilter(e.target.value)}
             className='px-3 py-1 bg-dark-800 border border-dark-600 rounded-sm text-white text-sm focus:outline-hidden focus:ring-2 focus:ring-blue-500'
@@ -180,31 +183,31 @@ export const Signals: React.FC = () => {
           <div
             className={clsx(
               'px-3 py-1 rounded-full text-xs font-medium',
-              buySignals > sellSignals
-                ? 'bg-green-900/20 text-green-400'
-                : sellSignals > buySignals
-                  ? 'bg-red-900/20 text-red-400'
-                  : 'bg-gray-900/20 text-gray-400'
+              buySignals > sellSignals && 'bg-green-900/20 text-green-400',
+              sellSignals > buySignals && 'bg-red-900/20 text-red-400',
+              buySignals === sellSignals && 'bg-gray-900/20 text-gray-400'
             )}
           >
-            {buySignals > sellSignals
-              ? 'Bullish'
-              : sellSignals > buySignals
-                ? 'Bearish'
-                : 'Neutral'}
+            {(() => {
+              if (buySignals > sellSignals) return 'Bullish'
+              if (sellSignals > buySignals) return 'Bearish'
+
+              return 'Neutral'
+            })()}
           </div>
         </div>
       </div>
       {}
       <div className='space-y-4'>
-        {isLoading ? (
+        {isLoading && (
           <div className='space-y-3'>
             <SignalCardSkeleton />
             <SignalCardSkeleton />
             <SignalCardSkeleton />
             <SignalCardSkeleton />
           </div>
-        ) : filteredSignals.length === 0 ? (
+        )}
+        {!isLoading && filteredSignals.length === 0 && (
           <div className='text-center py-8 text-dark-400'>
             <div className='w-12 h-12 bg-dark-700 rounded-full flex items-center justify-center mx-auto mb-3'>
               <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
@@ -223,7 +226,8 @@ export const Signals: React.FC = () => {
                 : `No signals from ${strategyFilter} strategy`}
             </p>
           </div>
-        ) : (
+        )}
+        {!isLoading && filteredSignals.length > 0 && (
           <div className='space-y-3'>
             <div className='flex items-center justify-between text-sm text-dark-400'>
               <span>Showing {filteredSignals.length} signals</span>

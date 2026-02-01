@@ -98,6 +98,35 @@ def is_test_function(name: str) -> bool:
     return name.startswith("test_")
 
 
+def _is_fixture_decorator(decorator: ast.expr) -> bool:
+    """Check if a single decorator AST node represents a pytest fixture.
+
+    Handles the following decorator forms:
+        - ``@pytest.fixture`` (Attribute node)
+        - ``@pytest.fixture(...)`` (Call wrapping Attribute)
+        - ``@fixture(...)`` (Call wrapping Name)
+        - ``@fixture`` (bare Name node)
+
+    Args:
+        decorator: A decorator AST expression node.
+
+    Returns:
+        True if the decorator represents a pytest fixture.
+    """
+    if isinstance(decorator, ast.Attribute):
+        return decorator.attr == "fixture"
+    if isinstance(decorator, ast.Call):
+        func = decorator.func
+        if isinstance(func, ast.Attribute):
+            return func.attr == "fixture"
+        if isinstance(func, ast.Name):
+            return func.id == "fixture"
+        return False
+    if isinstance(decorator, ast.Name):
+        return decorator.id == "fixture"
+    return False
+
+
 def is_pytest_fixture(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Check if function is decorated with @pytest.fixture.
 
@@ -107,19 +136,45 @@ def is_pytest_fixture(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     Returns:
         True if the function has a pytest.fixture decorator.
     """
-    for decorator in node.decorator_list:
-        if isinstance(decorator, ast.Attribute):
-            if decorator.attr == "fixture":
-                return True
-        elif isinstance(decorator, ast.Call):
-            func = decorator.func
-            if isinstance(func, ast.Attribute) and func.attr == "fixture":
-                return True
-            if isinstance(func, ast.Name) and func.id == "fixture":
-                return True
-        elif isinstance(decorator, ast.Name) and decorator.id == "fixture":
-            return True
-    return False
+    return any(_is_fixture_decorator(d) for d in node.decorator_list)
+
+
+def _extract_string_sequence(node: ast.AST) -> list[str] | None:
+    """Extract a sequence of string literals from a list, tuple, or set AST node.
+
+    Args:
+        node: AST node expected to be a List, Tuple, or Set of string constants.
+
+    Returns:
+        List of string values if all elements are string constants, None otherwise.
+    """
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return None
+    values: list[str] = []
+    for elt in node.elts:
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+            values.append(elt.value)
+        else:
+            return None
+    return values
+
+
+def _find_all_assignment_value(node: ast.stmt) -> ast.AST | None:
+    """Extract the assigned value from a ``__all__`` assignment statement.
+
+    Args:
+        node: A top-level statement in a module body.
+
+    Returns:
+        The right-hand-side AST node if this is a ``__all__`` assignment, None otherwise.
+    """
+    if isinstance(node, ast.Assign):
+        if any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets):
+            return node.value
+    elif isinstance(node, ast.AnnAssign):
+        if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            return node.value
+    return None
 
 
 def extract_dunder_all(tree: ast.Module) -> set[str] | None:
@@ -131,40 +186,17 @@ def extract_dunder_all(tree: ast.Module) -> set[str] | None:
         tree: The parsed AST of a Python module.
 
     Returns:
-        Set of exported names, or None if `__all__` is not present or cannot
+        Set of exported names, or None if `__all__`` is not present or cannot
         be resolved statically.
     """
-
-    def extract_string_sequence(node: ast.AST) -> list[str] | None:
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            values: list[str] = []
-            for elt in node.elts:
-                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                    values.append(elt.value)
-                else:
-                    return None
-            return values
-        return None
-
     for node in tree.body:
-        value: ast.AST | None = None
-        if isinstance(node, ast.Assign):
-            if any(
-                isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
-            ):
-                value = node.value
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == "__all__":
-                value = node.value
-
+        value = _find_all_assignment_value(node)
         if value is None:
             continue
-
-        extracted = extract_string_sequence(value)
+        extracted = _extract_string_sequence(value)
         if extracted is None:
             return None
         return set(extracted)
-
     return None
 
 
@@ -207,9 +239,12 @@ def validate_google_docstring(
         return_annotation = (
             ast.unparse(node.returns) if hasattr(ast, "unparse") else str(node.returns)
         )
-        if return_annotation not in ("None", "None:"):
-            if "Returns:" not in docstring and "Yields:" not in docstring:
-                errors.append("Missing 'Returns:' or 'Yields:' section")
+        if (
+            return_annotation not in ("None", "None:")
+            and "Returns:" not in docstring
+            and "Yields:" not in docstring
+        ):
+            errors.append("Missing 'Returns:' or 'Yields:' section")
 
     return errors
 
@@ -303,14 +338,106 @@ def check_class(
 
     for item in node.body:
         if isinstance(item, ast.FunctionDef) and item.name == "__init__":
-            pass
+            """Skip __init__ - validated separately by type checker."""
+
+
+def _report_missing_docstring(
+    filepath: Path,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    result: ScanResult,
+    is_test: bool,
+) -> None:
+    """Report a missing docstring issue for a function or test.
+
+    Args:
+        filepath: Path to the file being checked.
+        node: The FunctionDef AST node.
+        result: ScanResult to accumulate findings.
+        is_test: Whether this is a test function.
+    """
+    if is_test:
+        result.issues.append(
+            Issue(
+                filepath=filepath,
+                line=node.lineno,
+                name=node.name,
+                issue_type="missing_test_docstring",
+                message=f"Test '{node.name}' lacks BDD docstring",
+            )
+        )
+    else:
+        result.issues.append(
+            Issue(
+                filepath=filepath,
+                line=node.lineno,
+                name=node.name,
+                issue_type="missing_function_docstring",
+                message=f"Function '{node.name}' lacks docstring",
+            )
+        )
+
+
+def _validate_docstring_style(
+    filepath: Path,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    result: ScanResult,
+    docstring: str,
+    is_test: bool,
+    enforce_bdd: bool,
+    enforce_google_sections: bool,
+) -> None:
+    """Validate docstring content against BDD or Google style rules.
+
+    Args:
+        filepath: Path to the file being checked.
+        node: The FunctionDef AST node.
+        result: ScanResult to accumulate findings.
+        docstring: The docstring content.
+        is_test: Whether this is a test function.
+        enforce_bdd: Whether to enforce BDD style for tests.
+        enforce_google_sections: Whether to enforce Google style.
+    """
+    if is_test and enforce_bdd:
+        errors = validate_bdd_docstring(docstring)
+        issue_type = "invalid_bdd_docstring"
+        prefix = f"Test '{node.name}'"
+    elif not is_test and enforce_google_sections:
+        if is_pytest_fixture(node):
+            return
+        errors = validate_google_docstring(docstring, node)
+        issue_type = "invalid_google_docstring"
+        prefix = f"Function '{node.name}'"
+    else:
+        return
+    for error in errors:
+        result.issues.append(
+            Issue(
+                filepath=filepath,
+                line=node.lineno,
+                name=node.name,
+                issue_type=issue_type,
+                message=f"{prefix}: {error}",
+            )
+        )
+
+
+def _should_skip_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Determine whether a function should be skipped during docstring checks.
+
+    Args:
+        node: The FunctionDef AST node.
+
+    Returns:
+        True if the function is private or a dunder method.
+    """
+    return node.name.startswith("_")
 
 
 def check_function(
     filepath: Path,
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     result: ScanResult,
-    is_method: bool = False,
+    _is_method: bool = False,
     enforce_bdd: bool = False,
     enforce_google_sections: bool = False,
 ) -> None:
@@ -320,70 +447,124 @@ def check_function(
         filepath: Path to the file being checked.
         node: The FunctionDef AST node.
         result: ScanResult to accumulate findings.
-        is_method: Whether this is a class method.
+        _is_method: Whether this is a class method (reserved for future use).
         enforce_bdd: Whether to enforce Given/When/Then docstrings for tests.
         enforce_google_sections: Whether to enforce Args/Returns sections.
     """
     result.functions_checked += 1
 
-    if node.name.startswith("_") and not node.name.startswith("__"):
-        return
-
-    if node.name.startswith("__"):
+    if _should_skip_function(node):
         return
 
     docstring = get_docstring(node)
     is_test = is_test_file(filepath) and is_test_function(node.name) and not is_pytest_fixture(node)
 
     if not docstring:
-        if is_test:
-            result.issues.append(
-                Issue(
-                    filepath=filepath,
-                    line=node.lineno,
-                    name=node.name,
-                    issue_type="missing_test_docstring",
-                    message=f"Test '{node.name}' lacks BDD docstring",
-                )
-            )
-        else:
-            result.issues.append(
-                Issue(
-                    filepath=filepath,
-                    line=node.lineno,
-                    name=node.name,
-                    issue_type="missing_function_docstring",
-                    message=f"Function '{node.name}' lacks docstring",
-                )
-            )
+        _report_missing_docstring(filepath, node, result, is_test)
         return
 
-    if is_test and enforce_bdd:
-        errors = validate_bdd_docstring(docstring)
-        for error in errors:
-            result.issues.append(
-                Issue(
-                    filepath=filepath,
-                    line=node.lineno,
-                    name=node.name,
-                    issue_type="invalid_bdd_docstring",
-                    message=f"Test '{node.name}': {error}",
-                )
+    _validate_docstring_style(
+        filepath, node, result, docstring, is_test, enforce_bdd, enforce_google_sections
+    )
+
+
+def _should_skip_class(
+    node: ast.ClassDef,
+    is_test_module: bool,
+    exported_names: set[str] | None,
+) -> bool:
+    """Determine whether a class node should be skipped during scanning.
+
+    Args:
+        node: The ClassDef AST node.
+        is_test_module: Whether the file is a test module.
+        exported_names: Set of names from __all__, or None if not defined.
+
+    Returns:
+        True if the class should be skipped.
+    """
+    if is_test_module:
+        return True
+    if exported_names is not None and node.name not in exported_names:
+        return True
+    return node.name.startswith("_")
+
+
+def _should_skip_top_level_function(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    is_test_module: bool,
+    exported_names: set[str] | None,
+) -> bool:
+    """Determine whether a top-level function should be skipped during scanning.
+
+    Args:
+        node: The FunctionDef AST node.
+        is_test_module: Whether the file is a test module.
+        exported_names: Set of names from __all__, or None if not defined.
+
+    Returns:
+        True if the function should be skipped.
+    """
+    if is_test_module:
+        return not is_test_function(node.name)
+    if exported_names is not None and node.name not in exported_names:
+        return True
+    return node.name.startswith("_")
+
+
+def _scan_class_methods(
+    filepath: Path,
+    node: ast.ClassDef,
+    result: ScanResult,
+    enforce_bdd: bool,
+    enforce_google_sections: bool,
+) -> None:
+    """Check a class and its methods for docstring compliance.
+
+    Args:
+        filepath: Path to the file being checked.
+        node: The ClassDef AST node.
+        result: ScanResult to accumulate findings.
+        enforce_bdd: Whether to enforce BDD style for tests.
+        enforce_google_sections: Whether to enforce Google style.
+    """
+    check_class(filepath, node, result)
+    for item in node.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            check_function(
+                filepath,
+                item,
+                result,
+                _is_method=True,
+                enforce_bdd=enforce_bdd,
+                enforce_google_sections=enforce_google_sections,
             )
-    elif not is_test and enforce_google_sections:
-        if is_pytest_fixture(node):
-            return
-        errors = validate_google_docstring(docstring, node)
-        for error in errors:
-            result.issues.append(
-                Issue(
-                    filepath=filepath,
-                    line=node.lineno,
-                    name=node.name,
-                    issue_type="invalid_google_docstring",
-                    message=f"Function '{node.name}': {error}",
-                )
+
+
+def _parse_file(filepath: Path, result: ScanResult) -> ast.Module | None:
+    """Parse a Python file into an AST, recording errors as issues.
+
+    Args:
+        filepath: Path to the Python file.
+        result: ScanResult to accumulate findings.
+
+    Returns:
+        Parsed AST module, or None if parsing failed.
+    """
+    try:
+        content = filepath.read_text(encoding="utf-8")
+        return ast.parse(content, filename=str(filepath))
+    except (SyntaxError, UnicodeDecodeError) as e:
+        result.issues.append(
+            Issue(
+                filepath=filepath,
+                line=1,
+                name=filepath.name,
+                issue_type="parse_error",
+                message=f"Could not parse: {e}",
             )
+        )
+        return None
 
 
 def scan_file(
@@ -401,60 +582,28 @@ def scan_file(
         enforce_bdd: Whether to enforce Given/When/Then docstrings for tests.
         enforce_google_sections: Whether to enforce Args/Returns sections.
     """
-    try:
-        content = filepath.read_text(encoding="utf-8")
-        tree = ast.parse(content, filename=str(filepath))
-    except (SyntaxError, UnicodeDecodeError) as e:
-        result.issues.append(
-            Issue(
-                filepath=filepath,
-                line=1,
-                name=filepath.name,
-                issue_type="parse_error",
-                message=f"Could not parse: {e}",
-            )
-        )
+    tree = _parse_file(filepath, result)
+    if tree is None:
         return
 
     result.files_scanned += 1
-
     is_test_module = is_test_file(filepath)
     exported_names = extract_dunder_all(tree)
-
     check_module(filepath, tree, result)
 
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
-            if is_test_module:
+            if _should_skip_class(node, is_test_module, exported_names):
                 continue
-            if exported_names is not None and node.name not in exported_names:
-                continue
-            if node.name.startswith("_"):
-                continue
-            check_class(filepath, node, result)
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    check_function(
-                        filepath,
-                        item,
-                        result,
-                        is_method=True,
-                        enforce_bdd=enforce_bdd,
-                        enforce_google_sections=enforce_google_sections,
-                    )
+            _scan_class_methods(filepath, node, result, enforce_bdd, enforce_google_sections)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if is_test_module and not is_test_function(node.name):
+            if _should_skip_top_level_function(node, is_test_module, exported_names):
                 continue
-            if not is_test_module:
-                if exported_names is not None and node.name not in exported_names:
-                    continue
-                if node.name.startswith("_"):
-                    continue
             check_function(
                 filepath,
                 node,
                 result,
-                is_method=False,
+                _is_method=False,
                 enforce_bdd=enforce_bdd,
                 enforce_google_sections=enforce_google_sections,
             )

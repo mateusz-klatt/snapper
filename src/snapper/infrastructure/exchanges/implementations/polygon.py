@@ -58,6 +58,8 @@ from snapper.infrastructure.exchanges.schemas.polygon import PolygonAgg
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonGroupedAgg
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonPreviousClose
 
+_MARKET_DATA_ONLY_MSG = "PolygonExchangeClient provides market data only."
+
 
 @dataclass
 class PolygonTickerSnapshot(TickerSnapshot):
@@ -571,7 +573,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         Raises:
             NotImplementedError: Polygon.io does not support trading.
         """
-        raise NotImplementedError("PolygonExchangeClient provides market data only.")
+        raise NotImplementedError(_MARKET_DATA_ONLY_MSG)
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
         """Not implemented - Polygon is data-only provider.
@@ -586,7 +588,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         Raises:
             NotImplementedError: Polygon.io does not support trading.
         """
-        raise NotImplementedError("PolygonExchangeClient provides market data only.")
+        raise NotImplementedError(_MARKET_DATA_ONLY_MSG)
 
     async def get_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
         """Not implemented - Polygon is data-only provider.
@@ -601,7 +603,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         Raises:
             NotImplementedError: Polygon.io does not support trading.
         """
-        raise NotImplementedError("PolygonExchangeClient provides market data only.")
+        raise NotImplementedError(_MARKET_DATA_ONLY_MSG)
 
     async def get_orders(
         self,
@@ -622,7 +624,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         Raises:
             NotImplementedError: Polygon.io does not support trading.
         """
-        raise NotImplementedError("PolygonExchangeClient provides market data only.")
+        raise NotImplementedError(_MARKET_DATA_ONLY_MSG)
 
     async def get_balance(self, currency: str | None = None) -> dict[str, AccountBalance]:
         """Not implemented - Polygon is data-only provider.
@@ -636,7 +638,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         Raises:
             NotImplementedError: Polygon.io does not support trading.
         """
-        raise NotImplementedError("PolygonExchangeClient provides market data only.")
+        raise NotImplementedError(_MARKET_DATA_ONLY_MSG)
 
     def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Not implemented - Polygon does not support streaming.
@@ -762,6 +764,42 @@ class PolygonExchangeClient(ExchangeClientBase):
                 writer.writerow(symbol)
         logger.info(f"Saved {len(symbols)} symbols to cache: {self.symbols_cache_file}")
 
+    _TICKER_FIELDS: tuple[str, ...] = (
+        "ticker",
+        "name",
+        "market",
+        "locale",
+        "primary_exchange",
+        "type",
+        "active",
+        "currency_symbol",
+        "currency_name",
+        "base_currency_symbol",
+        "base_currency_name",
+        "cik",
+        "composite_figi",
+        "share_class_figi",
+        "source_feed",
+    )
+
+    @staticmethod
+    def _extract_ticker_fields(ticker: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+        """Extract non-None fields from a Polygon ticker object.
+
+        Args:
+            ticker: Polygon SDK ticker object.
+            fields: Tuple of attribute names to extract.
+
+        Returns:
+            Dictionary with field names and their values.
+        """
+        result: dict[str, Any] = {}
+        for field in fields:
+            value = getattr(ticker, field, None)
+            if value is not None:
+                result[field] = value
+        return result
+
     async def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Stream instrument/ticker metadata from Polygon.io.
 
@@ -795,37 +833,7 @@ class PolygonExchangeClient(ExchangeClientBase):
 
         ticker_iterator = await asyncio.to_thread(_fetch_tickers)
         for ticker in ticker_iterator:
-            ticker_dict: dict[str, Any] = {}
-            if hasattr(ticker, "ticker") and ticker.ticker is not None:
-                ticker_dict["ticker"] = ticker.ticker
-            if hasattr(ticker, "name") and ticker.name is not None:
-                ticker_dict["name"] = ticker.name
-            if hasattr(ticker, "market") and ticker.market is not None:
-                ticker_dict["market"] = ticker.market
-            if hasattr(ticker, "locale") and ticker.locale is not None:
-                ticker_dict["locale"] = ticker.locale
-            if hasattr(ticker, "primary_exchange") and ticker.primary_exchange is not None:
-                ticker_dict["primary_exchange"] = ticker.primary_exchange
-            if hasattr(ticker, "type") and ticker.type is not None:
-                ticker_dict["type"] = ticker.type
-            if hasattr(ticker, "active") and ticker.active is not None:
-                ticker_dict["active"] = ticker.active
-            if hasattr(ticker, "currency_symbol") and ticker.currency_symbol is not None:
-                ticker_dict["currency_symbol"] = ticker.currency_symbol
-            if hasattr(ticker, "currency_name") and ticker.currency_name is not None:
-                ticker_dict["currency_name"] = ticker.currency_name
-            if hasattr(ticker, "base_currency_symbol") and ticker.base_currency_symbol is not None:
-                ticker_dict["base_currency_symbol"] = ticker.base_currency_symbol
-            if hasattr(ticker, "base_currency_name") and ticker.base_currency_name is not None:
-                ticker_dict["base_currency_name"] = ticker.base_currency_name
-            if hasattr(ticker, "cik") and ticker.cik is not None:
-                ticker_dict["cik"] = ticker.cik
-            if hasattr(ticker, "composite_figi") and ticker.composite_figi is not None:
-                ticker_dict["composite_figi"] = ticker.composite_figi
-            if hasattr(ticker, "share_class_figi") and ticker.share_class_figi is not None:
-                ticker_dict["share_class_figi"] = ticker.share_class_figi
-            if hasattr(ticker, "source_feed") and ticker.source_feed is not None:
-                ticker_dict["source_feed"] = ticker.source_feed
+            ticker_dict = self._extract_ticker_fields(ticker, self._TICKER_FIELDS)
             symbols_list.append(ticker_dict)
             yield ticker_dict
             total_yielded += 1

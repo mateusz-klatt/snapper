@@ -5,7 +5,7 @@ import Foundation
 
 enum UserRole: String, Codable, Sendable {
     case viewer
-    case `operator`
+    case operatorRole = "operator"
     case admin
 }
 
@@ -53,7 +53,7 @@ enum OrderStatusType: String, Codable, Sendable {
 enum OrderStatusStatus: String, Codable, Sendable {
     case new
     case submitted
-    case `open`
+    case openStatus = "open"
     case filled
     case partiallyFilled = "partially_filled"
     case cancelled

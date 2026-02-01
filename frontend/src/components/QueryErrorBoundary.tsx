@@ -10,7 +10,7 @@ export function QueryErrorFallback({
   error,
   refetch,
   componentName,
-}: QueryErrorFallbackProps): ReactNode {
+}: Readonly<QueryErrorFallbackProps>): ReactNode {
   const title = componentName ? `Failed to load ${componentName}` : 'Failed to load data'
   const isNetworkError =
     error.message.includes('Network') ||
@@ -89,7 +89,7 @@ export function QueryStateWrapper<T>({
   componentName,
   emptyMessage,
   isEmpty,
-}: QueryStateWrapperProps<T>): ReactNode {
+}: Readonly<QueryStateWrapperProps<T>>): ReactNode {
   if (isLoading) {
     return (
       loadingFallback || (

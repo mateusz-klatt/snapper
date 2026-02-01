@@ -140,7 +140,7 @@ async def test_get_balance_filters_and_returns_currency() -> None:
     assert "info" not in balances
     eur_only = await client.get_balance("EUR")
     assert set(eur_only.keys()) == {"EUR"}
-    assert eur_only["EUR"].total == 0.0
+    assert eur_only["EUR"].total == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -313,7 +313,7 @@ class TestKrakenExchangeClient:
             assert candle1.low == float("49000.0")
             assert candle1.close == float("50000.0")
             assert candle1.volume == float("100.0")
-            assert candle1.timestamp == 1640995200.0
+            assert candle1.timestamp == pytest.approx(1640995200.0)
             mock_client.fetch_ohlcv.assert_called_once_with("BTC/USD", "1h", None, 2)
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
@@ -787,8 +787,8 @@ class TestKrakenExchangeClient:
                     break
             assert len(messages) == 1
             assert messages[0].symbol == "BTC-USD"
-            assert messages[0].bid == 50000.0
-            assert messages[0].ask == 50001.0
+            assert messages[0].bid == pytest.approx(50000.0)
+            assert messages[0].ask == pytest.approx(50001.0)
             mock_ws_client.subscribe.assert_called_once()
             mock_ensure_ws.assert_called_once()
 
@@ -833,8 +833,8 @@ class TestKrakenExchangeClient:
                     break
             assert len(messages) == 1
             assert messages[0].symbol == "BTC-USD"
-            assert messages[0].open == 50000.0
-            assert messages[0].close == 50050.0
+            assert messages[0].open == pytest.approx(50000.0)
+            assert messages[0].close == pytest.approx(50050.0)
             assert messages[0].interval == 5
             mock_ws_client.subscribe.assert_called_once()
             mock_ensure_ws.assert_called_once()
@@ -876,8 +876,8 @@ class TestKrakenExchangeClient:
             assert len(messages) == 1
             assert messages[0].symbol == "BTC-USD"
             assert messages[0].side == "buy"
-            assert messages[0].price == 50000.0
-            assert messages[0].quantity == 0.1
+            assert messages[0].price == pytest.approx(50000.0)
+            assert messages[0].quantity == pytest.approx(0.1)
             mock_ws_client.subscribe.assert_called_once()
             mock_ensure_ws.assert_called_once()
 
@@ -943,6 +943,7 @@ class TestKrakenExchangeClient:
             pytest.raises(Exception, match="WebSocket connection failed"),
         ):
             async for _ in kraken_client.subscribe_ticks(["BTC-USD"]):
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
@@ -1364,6 +1365,7 @@ class TestKrakenCoverageImprovement:
             pytest.raises(Exception, match="WebSocket error"),
         ):
             async for _ in kraken_client.subscribe_ticks(["BTC-USD"]):
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
@@ -1380,6 +1382,7 @@ class TestKrakenCoverageImprovement:
             pytest.raises(Exception, match="WebSocket error"),
         ):
             async for _ in kraken_client.subscribe_candles(["BTC-USD"]):
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
@@ -1539,7 +1542,7 @@ class TestKrakenCoverageImprovement:
                 amount=float("0.5"),
                 client_order_id="CLIENT1",
             )
-            result = await kraken_client.create_order_ws(request, timeout=1.0)
+            result = await kraken_client.create_order_ws(request)
         assert result.id == "ORDER1"
         assert result.client_order_id == "CLIENT1"
         assert kraken_client._ws_order_requests == {}
@@ -1560,7 +1563,7 @@ class TestKrakenCoverageImprovement:
         with patch.object(
             kraken_client, "_get_or_create_ws_client", new=AsyncMock(return_value=dummy_ws)
         ):
-            result = await kraken_client.cancel_order_ws("ABC123", timeout=1.0)
+            result = await kraken_client.cancel_order_ws("ABC123")
         assert result.id == "ABC123"
         assert result.status == OrderStatusEnum.CANCELED
         assert kraken_client._ws_order_requests == {}
@@ -1668,6 +1671,7 @@ class TestExecutionsSubscriptionCredentials:
         """Verify subscribe executions requires credentials."""
         with pytest.raises(RuntimeError, match="API credentials required"):
             async for _ in kraken_client_no_creds.subscribe_executions():
+                """Consumed by iteration to trigger exception."""
                 pass
 
 
@@ -2697,7 +2701,9 @@ async def test_subscribe_ticks_with_wildcard() -> None:
     client._ws_client = ws
     client._tick_queue = _OneShotQueue({"tick": 1}, ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_ticks(["*"], req_id=7)]
+        updates: list[Any] = []
+        async for item in client.subscribe_ticks(["*"], req_id=7):
+            updates.append(item)
     assert updates == [{"tick": 1}]
     ws.subscribe.assert_called_once()
 
@@ -2715,7 +2721,9 @@ async def test_subscribe_candles_uses_interval_queue() -> None:
     client._ws_client = ws
     client._candle_queues = {1: _OneShotQueue({"candle": 1}, ws)}
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_candles(["*"], timeframe="1m", req_id=1)]
+        updates: list[Any] = []
+        async for item in client.subscribe_candles(["*"], timeframe="1m", req_id=1):
+            updates.append(item)
     assert updates == [{"candle": 1}]
     ws.subscribe.assert_called_once()
 
@@ -2733,7 +2741,9 @@ async def test_subscribe_trades_consumes_queue() -> None:
     client._ws_client = ws
     client._trade_queue = _OneShotQueue({"trade": 1}, ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_trades(["*"], req_id=3)]
+        updates: list[Any] = []
+        async for item in client.subscribe_trades(["*"], req_id=3):
+            updates.append(item)
     assert updates == [{"trade": 1}]
     ws.subscribe.assert_called_once()
 
@@ -2751,7 +2761,9 @@ async def test_subscribe_executions_consumes_queue() -> None:
     client._ws_client = ws
     client._execution_queue = _OneShotQueue({"execution": 1}, ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_executions(req_id=5)]
+        updates: list[Any] = []
+        async for item in client.subscribe_executions(req_id=5):
+            updates.append(item)
     assert updates == [{"execution": 1}]
     ws.subscribe.assert_called_once()
 
@@ -2896,7 +2908,9 @@ async def test_subscribe_ticks_handles_receive_error() -> None:
     client._ws_client = ws
     client._tick_queue = _ErrorOnGetQueue(ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_ticks(["BTC-USD"])]
+        updates: list[Any] = []
+        async for item in client.subscribe_ticks(["BTC-USD"]):
+            updates.append(item)
     assert updates == []
 
 
@@ -2913,7 +2927,9 @@ async def test_subscribe_candles_handles_receive_error() -> None:
     client._ws_client = ws
     client._candle_queues = {1: _ErrorOnGetQueue(ws)}
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_candles(["BTC-USD"], timeframe="1m")]
+        updates: list[Any] = []
+        async for item in client.subscribe_candles(["BTC-USD"], timeframe="1m"):
+            updates.append(item)
     assert updates == []
 
 
@@ -2930,7 +2946,9 @@ async def test_subscribe_trades_handles_receive_error() -> None:
     client._ws_client = ws
     client._trade_queue = _ErrorOnGetQueue(ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_trades(["BTC-USD"])]
+        updates: list[Any] = []
+        async for item in client.subscribe_trades(["BTC-USD"]):
+            updates.append(item)
     assert updates == []
 
 
@@ -2947,7 +2965,9 @@ async def test_subscribe_executions_handles_receive_error() -> None:
     client._ws_client = ws
     client._execution_queue = _ErrorOnGetQueue(ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
-        updates = [item async for item in client.subscribe_executions()]
+        updates: list[Any] = []
+        async for item in client.subscribe_executions():
+            updates.append(item)
     assert updates == []
 
 
@@ -2984,6 +3004,7 @@ async def test_subscribe_ticks_raises_on_outer_error() -> None:
         pytest.raises(RuntimeError, match="boom"),
     ):
         async for _ in client.subscribe_ticks(["BTC-USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -3003,6 +3024,7 @@ async def test_subscribe_candles_raises_on_outer_error() -> None:
         pytest.raises(RuntimeError, match="boom"),
     ):
         async for _ in client.subscribe_candles(["BTC-USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -3022,6 +3044,7 @@ async def test_subscribe_trades_raises_on_outer_error() -> None:
         pytest.raises(RuntimeError, match="boom"),
     ):
         async for _ in client.subscribe_trades(["BTC-USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -3041,6 +3064,7 @@ async def test_subscribe_executions_raises_on_outer_error() -> None:
         pytest.raises(RuntimeError, match="boom"),
     ):
         async for _ in client.subscribe_executions():
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -3060,6 +3084,7 @@ async def test_subscribe_instruments_raises_on_outer_error() -> None:
         pytest.raises(RuntimeError, match="boom"),
     ):
         async for _ in client.subscribe_instruments():
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -3609,7 +3634,7 @@ class TestKrakenAdditionalCoverage:
             candle_data = mock_queue_1m.put.call_args[0][0]
             assert isinstance(candle_data, CandleUpdate)
             assert candle_data.symbol == "BTC-USD"
-            assert candle_data.open == 50000.0
+            assert candle_data.open == pytest.approx(50000.0)
             assert candle_data.interval == 1
 
     async def test_on_message_ohlc_broadcast(self, kraken_client: KrakenExchangeClient) -> None:
@@ -3998,17 +4023,20 @@ class TestKrakenAdditionalCoverage:
         ws_client = _StubWs()
         kraken_client._ws_connected = True
 
-        async def _wait_for(
-            fut: asyncio.Future[dict[str, Any]], timeout: float | None = None
-        ) -> dict[str, Any]:
-            fut.set_result({"result": {"order_id": "OID", "cl_ord_id": "CID"}})
-            return fut.result()
+        original_send = ws_client.send_message
 
-        with (
-            patch.object(
-                kraken_client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)
-            ),
-            patch("asyncio.wait_for", _wait_for),
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in kraken_client._ws_order_requests:
+                kraken_client._ws_order_requests[req_id].set_result(
+                    {"result": {"order_id": "OID", "cl_ord_id": "CID"}}
+                )
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(
+            kraken_client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)
         ):
             request = ExchangeOrderRequest(
                 symbol="ETH-USD",
@@ -4018,8 +4046,8 @@ class TestKrakenAdditionalCoverage:
                 price=1500,
                 client_order_id="cid-123",
             )
-            snapshot = await kraken_client.create_order_ws(request, timeout=0.01)
-        assert ws_client.sent[0]["params"]["limit_price"] == 1500.0
+            snapshot = await kraken_client.create_order_ws(request)
+        assert ws_client.sent[0]["params"]["limit_price"] == pytest.approx(1500.0)
         assert ws_client.sent[0]["params"]["cl_ord_id"] == "cid-123"
         assert isinstance(snapshot, ExchangeOrderSnapshot)
         assert snapshot.status == OrderStatusEnum.PENDING
@@ -4049,7 +4077,6 @@ class TestKrakenAdditionalCoverage:
                     type=OrderTypeEnum.MARKET,
                     amount=1,
                 ),
-                timeout=0.01,
             )
         assert kraken_client._ws_order_requests == {}
 
@@ -4092,7 +4119,7 @@ class TestKrakenAdditionalCoverage:
             patch("asyncio.wait_for", AsyncMock(side_effect=TimeoutError())),
             pytest.raises(TimeoutError),
         ):
-            await kraken_client.cancel_order_ws("OID", timeout=0.01)
+            await kraken_client.cancel_order_ws("OID")
         assert kraken_client._ws_order_requests == {}
 
     @pytest.mark.asyncio

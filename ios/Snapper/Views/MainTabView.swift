@@ -10,19 +10,9 @@ struct MainTabView: View {
                     Label("Dashboard", systemImage: "chart.bar.fill")
                 }
 
-            OrdersView()
+            TradingView()
                 .tabItem {
-                    Label("Orders", systemImage: "list.bullet.rectangle")
-                }
-
-            PortfolioView()
-                .tabItem {
-                    Label("Portfolio", systemImage: "briefcase.fill")
-                }
-
-            StrategiesView()
-                .tabItem {
-                    Label("Strategies", systemImage: "brain.head.profile")
+                    Label("Trading", systemImage: "arrow.left.arrow.right")
                 }
 
             SettingsView()
@@ -31,11 +21,9 @@ struct MainTabView: View {
                 }
         }
         .onAppear {
-
             webSocketManager.connect()
         }
         .onDisappear {
-
             webSocketManager.disconnect()
         }
     }

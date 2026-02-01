@@ -216,7 +216,7 @@ async def test_start_without_file_logging(monkeypatch: pytest.MonkeyPatch) -> No
 
     Given: Logger with file logging disabled,
     When: Starting and cancelling,
-    Then: Completes without error.
+    Then: CancelledError propagates after cleanup.
     """
     logger = ZmqMessageLogger(log_to_file=False, log_payload=False)
 
@@ -239,7 +239,8 @@ async def test_start_without_file_logging(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr("snapper.messaging.infrastructure.logger.zmq.asyncio.Context", DummyCtx)
     monkeypatch.setattr(logger, "_logging_loop", AsyncMock(side_effect=asyncio.CancelledError()))
-    await logger.start()
+    with pytest.raises(asyncio.CancelledError):
+        await logger.start()
     assert not logger.running
 
 

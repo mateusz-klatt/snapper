@@ -1,5 +1,7 @@
 """Unit tests for risk management models."""
 
+import pytest
+
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 
@@ -61,12 +63,12 @@ def test_round_down_to_step() -> None:
     When round_down_to_step is called,
     Then value is rounded down to nearest step (edge cases: step=0 or negative).
     """
-    assert RiskEvaluator.round_down_to_step(10.5, 1.0) == 10.0
-    assert RiskEvaluator.round_down_to_step(10.9, 1.0) == 10.0
-    assert RiskEvaluator.round_down_to_step(15.7, 5.0) == 15.0
-    assert RiskEvaluator.round_down_to_step(10.0, 0.0) == 10.0
-    assert RiskEvaluator.round_down_to_step(-5.0, 0.0) == 0.0
-    assert RiskEvaluator.round_down_to_step(10.0, -1.0) == 10.0
+    assert RiskEvaluator.round_down_to_step(10.5, 1.0) == pytest.approx(10.0)
+    assert RiskEvaluator.round_down_to_step(10.9, 1.0) == pytest.approx(10.0)
+    assert RiskEvaluator.round_down_to_step(15.7, 5.0) == pytest.approx(15.0)
+    assert RiskEvaluator.round_down_to_step(10.0, 0.0) == pytest.approx(10.0)
+    assert RiskEvaluator.round_down_to_step(-5.0, 0.0) == pytest.approx(0.0)
+    assert RiskEvaluator.round_down_to_step(10.0, -1.0) == pytest.approx(10.0)
 
 
 def test_round_size() -> None:
@@ -78,11 +80,11 @@ def test_round_size() -> None:
     """
     r = RiskEvaluator(RiskConfigModel())
     rounded = r.round_size(desired_size=10.7, lot_size=1.0, price=100.0, tick_size=0.01)
-    assert rounded == 10.0
+    assert rounded == pytest.approx(10.0)
     rounded = r.round_size(desired_size=0.5, lot_size=1.0, price=100.0, tick_size=0.01)
-    assert rounded == 0.0
+    assert rounded == pytest.approx(0.0)
     rounded = r.round_size(desired_size=10.5, lot_size=1.0, price=100.0, tick_size=0.0)
-    assert rounded == 10.0
+    assert rounded == pytest.approx(10.0)
 
 
 def test_risk_model_core_behaviour() -> None:
@@ -100,4 +102,4 @@ def test_risk_model_core_behaviour() -> None:
     assert r.can_open_new_trade(equity=950, peak_equity=1000) is True
     assert r.can_open_new_trade(equity=800, peak_equity=1000) is False
     capped = r.cap_size_by_leverage(current_notional=500, equity=1000, price=100, desired_size=5)
-    assert capped == 0.0
+    assert capped == pytest.approx(0.0)

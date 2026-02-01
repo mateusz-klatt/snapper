@@ -50,6 +50,8 @@ interface RequestOptions {
   body?: string | FormData | URLSearchParams | null
 }
 
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH'])
+
 class APIClient {
   private static instance: APIClient
   private isLoggingOut = false
@@ -64,20 +66,67 @@ class APIClient {
   private getCSRFToken(): string {
     return getCookie('csrf_token')
   }
+  private applyCSRFHeader(headers: Headers, skipCSRF: boolean, method: string | undefined): void {
+    if (skipCSRF) {
+      return
+    }
+
+    if (!MUTATING_METHODS.has(method?.toUpperCase() || 'GET')) {
+      return
+    }
+
+    const csrfToken = this.getCSRFToken()
+
+    if (csrfToken) {
+      headers.set('X-CSRF-Token', csrfToken)
+    }
+  }
+  private async refreshAndRetry(url: string, options: RequestOptions): Promise<Response> {
+    try {
+      const csrfToken = this.getCSRFToken()
+      const refreshResponse = await fetch('/snapper/api/auth/refresh', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'X-CSRF-Token': csrfToken,
+          'Content-Type': 'application/json',
+        },
+      })
+
+      if (refreshResponse.ok) {
+        await cacheWsTicketFromResponse(refreshResponse)
+
+        return this.request(url, { ...options, skipRetry: true })
+      }
+
+      this.handleAuthenticationFailure()
+      throw new Error('Authentication required')
+    } catch {
+      this.handleAuthenticationFailure()
+      throw new Error('Authentication required')
+    }
+  }
+  private async handleCSRFError(
+    url: string,
+    options: RequestOptions,
+    response: Response
+  ): Promise<Response> {
+    const errorData = await response
+      .clone()
+      .json()
+      .catch(() => ({}))
+
+    if (errorData.detail?.includes('CSRF')) {
+      return this.request(url, { ...options, skipRetry: true, skipCSRF: true })
+    }
+
+    throw new Error('Access denied')
+  }
   public async request(url: string, options: RequestOptions = {}): Promise<Response> {
     const { skipCSRF = false, skipRetry = false, ...fetchOptions } = options
     const headers = new Headers(fetchOptions.headers)
 
-    if (
-      !skipCSRF &&
-      ['POST', 'PUT', 'DELETE', 'PATCH'].includes(options.method?.toUpperCase() || 'GET')
-    ) {
-      const csrfToken = this.getCSRFToken()
-
-      if (csrfToken) {
-        headers.set('X-CSRF-Token', csrfToken)
-      }
-    }
+    this.applyCSRFHeader(headers, skipCSRF, options.method)
 
     if (fetchOptions.body && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
@@ -90,42 +139,11 @@ class APIClient {
     })
 
     if (response.status === 401 && !skipRetry) {
-      try {
-        const csrfToken = this.getCSRFToken()
-        const refreshResponse = await fetch('/snapper/api/auth/refresh', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'X-CSRF-Token': csrfToken,
-            'Content-Type': 'application/json',
-          },
-        })
-
-        if (refreshResponse.ok) {
-          await cacheWsTicketFromResponse(refreshResponse)
-
-          return this.request(url, { ...options, skipRetry: true })
-        } else {
-          this.handleAuthenticationFailure()
-          throw new Error('Authentication required')
-        }
-      } catch {
-        this.handleAuthenticationFailure()
-        throw new Error('Authentication required')
-      }
+      return this.refreshAndRetry(url, options)
     }
 
     if (response.status === 403 && !skipCSRF && !skipRetry) {
-      const errorData = await response
-        .clone()
-        .json()
-        .catch(() => ({}))
-
-      if (errorData.detail?.includes('CSRF')) {
-        return this.request(url, { ...options, skipRetry: true, skipCSRF: true })
-      } else {
-        throw new Error('Access denied')
-      }
+      return this.handleCSRFError(url, options, response)
     }
 
     return response
@@ -138,12 +156,10 @@ class APIClient {
     this.isLoggingOut = true
     this.clearCSRFToken()
 
-    if (typeof window !== 'undefined') {
-      const authCallback = (window as { authLogoutCallback?: () => void }).authLogoutCallback
+    const authCallback = (globalThis as { authLogoutCallback?: () => void }).authLogoutCallback
 
-      if (authCallback) {
-        authCallback()
-      }
+    if (authCallback) {
+      authCallback()
     }
 
     setTimeout(() => {
@@ -225,8 +241,22 @@ class APIClient {
 
     return response.json()
   }
-  public clearCSRFToken(): void {}
-  public setCsrfToken(_token: string | null): void {}
+  public clearCSRFToken(): void {
+    this.setCsrfToken(null)
+  }
+  public setCsrfToken(token: string | null): void {
+    const name = 'csrf_token'
+
+    if (!token) {
+      document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`
+
+      return
+    }
+
+    const encoded = encodeURIComponent(token)
+
+    document.cookie = `${name}=${encoded}; Path=/; SameSite=Lax`
+  }
   public hasAuthCookies(): boolean {
     const cookies = document.cookie.split(';')
 
@@ -405,7 +435,7 @@ export async function api(path: string, init: RequestInit = {}): Promise<Respons
   const csrf = getCookie('csrf_token')
   const headers = new Headers(init.headers)
 
-  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(init.method?.toUpperCase() || 'GET')) {
+  if (MUTATING_METHODS.has(init.method?.toUpperCase() || 'GET')) {
     if (csrf) {
       headers.set('X-CSRF-Token', csrf)
     }

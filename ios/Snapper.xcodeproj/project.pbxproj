@@ -7,28 +7,22 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		01A2B3C4D5E6F70809ABCDEF /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEDCBA9876543210ABCDEF01 /* AnyCodable.swift */; };
-		021CC17385D663F978FA1167 /* StrategiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E341EFD5AB3BD56A8765D918 /* StrategiesView.swift */; };
 		09218B2634404709C960AFBA /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 442D4323A9B7C8B7A02A5B08 /* APIClient.swift */; };
 		13E8D50DB0D86D78A2BF31DB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F7849605786039354D6A6590 /* Assets.xcassets */; };
 		1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */; };
 		3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A50EF856475775A1EEA07E0 /* MainTabView.swift */; };
 		3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */; };
 		4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1499AF1C8B116093A1A9426D /* WebSocketManager.swift */; };
-		56F3E6E370F0017D26D4DE52 /* OrdersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6535894EE04ECF4410862D9 /* OrdersView.swift */; };
-		5F22AC535D1BA69E4CCD38FB /* PortfolioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1585A72FF4AB78BD6D921520 /* PortfolioView.swift */; };
 		60AFA2E0E27171B26CEA49C7 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4EDEB8970703709AC631633 /* DashboardView.swift */; };
-		65EBAD17651094B41508D69B /* MarketData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D141F161D89A0A2E517D22 /* MarketData.swift */; };
 		7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C33334091D91D43D43B1C3 /* Environment.swift */; };
+		7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3AFFCD485E4541E995FC91CB /* Configuration.plist */; };
 		8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C866C094E8868C0EF03F6809 /* AuthService.swift */; };
-		A218917943504E8181634BF6 /* Portfolio.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B02F35020CB19DCF380FCCE /* Portfolio.swift */; };
-		A78E3BE92B3922D1F7146CB8 /* User.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1488622F465D071D924BC9C0 /* User.swift */; };
-		AD49D971734AEECFBE0C11F5 /* Strategy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C99BC2B3298EF8290BDF224 /* Strategy.swift */; };
-		B0153FCD5A306E2D20E2AC1E /* Order.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23FFA5EC9E26991AF32F0AAC /* Order.swift */; };
+		B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */; };
 		D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6605FA90A650CA70270A857 /* SettingsView.swift */; };
 		D4D538F756906829CC4ECC61 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9948BCE1220922C26E1E5D5 /* LoginView.swift */; };
 		D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6798D055E36E2A96D2575882 /* LoginViewModel.swift */; };
 		E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC42AFF6C9070E52403CC6A /* WSMessages.swift */; };
+		F1234567890ABCDEF1234567 /* TradingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1234567890ABCDEF1234568 /* TradingView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -42,29 +36,23 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		FEDCBA9876543210ABCDEF01 /* AnyCodable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnyCodable.swift; sourceTree = "<group>"; };
 		10C33334091D91D43D43B1C3 /* Environment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Environment.swift; sourceTree = "<group>"; };
-		1488622F465D071D924BC9C0 /* User.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = User.swift; sourceTree = "<group>"; };
 		1499AF1C8B116093A1A9426D /* WebSocketManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketManager.swift; sourceTree = "<group>"; };
-		1585A72FF4AB78BD6D921520 /* PortfolioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioView.swift; sourceTree = "<group>"; };
-		15D141F161D89A0A2E517D22 /* MarketData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarketData.swift; sourceTree = "<group>"; };
 		1FC42AFF6C9070E52403CC6A /* WSMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSMessages.swift; sourceTree = "<group>"; };
-		23FFA5EC9E26991AF32F0AAC /* Order.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Order.swift; sourceTree = "<group>"; };
-		3B02F35020CB19DCF380FCCE /* Portfolio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Portfolio.swift; sourceTree = "<group>"; };
+		34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnyCodable.swift; sourceTree = "<group>"; };
+		3AFFCD485E4541E995FC91CB /* Configuration.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Configuration.plist; sourceTree = "<group>"; };
 		40BE9EE10BEF49D1DCA0F3C5 /* Snapper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Snapper.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		442D4323A9B7C8B7A02A5B08 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		578078843FA532A83EBA1C53 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5A50EF856475775A1EEA07E0 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		6798D055E36E2A96D2575882 /* LoginViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewModel.swift; sourceTree = "<group>"; };
-		6C99BC2B3298EF8290BDF224 /* Strategy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Strategy.swift; sourceTree = "<group>"; };
 		A9948BCE1220922C26E1E5D5 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		C866C094E8868C0EF03F6809 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		CB3EEEA02ED3924700201EC3 /* SnapperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SnapperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		E341EFD5AB3BD56A8765D918 /* StrategiesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrategiesView.swift; sourceTree = "<group>"; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F1234567890ABCDEF1234568 /* TradingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradingView.swift; sourceTree = "<group>"; };
 		F4EDEB8970703709AC631633 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
-		F6535894EE04ECF4410862D9 /* OrdersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrdersView.swift; sourceTree = "<group>"; };
 		F7849605786039354D6A6590 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapperApp.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -87,7 +75,7 @@
 		2F3059558ED94F48FA60BC05 /* Generated */ = {
 			isa = PBXGroup;
 			children = (
-				FEDCBA9876543210ABCDEF01 /* AnyCodable.swift */,
+				34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */,
 				C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */,
 				1FC42AFF6C9070E52403CC6A /* WSMessages.swift */,
 			);
@@ -128,10 +116,8 @@
 				F4EDEB8970703709AC631633 /* DashboardView.swift */,
 				A9948BCE1220922C26E1E5D5 /* LoginView.swift */,
 				5A50EF856475775A1EEA07E0 /* MainTabView.swift */,
-				F6535894EE04ECF4410862D9 /* OrdersView.swift */,
-				1585A72FF4AB78BD6D921520 /* PortfolioView.swift */,
 				E6605FA90A650CA70270A857 /* SettingsView.swift */,
-				E341EFD5AB3BD56A8765D918 /* StrategiesView.swift */,
+				F1234567890ABCDEF1234568 /* TradingView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -139,11 +125,6 @@
 		61A2140930BAAD98423AB5D0 /* Models */ = {
 			isa = PBXGroup;
 			children = (
-				15D141F161D89A0A2E517D22 /* MarketData.swift */,
-				23FFA5EC9E26991AF32F0AAC /* Order.swift */,
-				3B02F35020CB19DCF380FCCE /* Portfolio.swift */,
-				6C99BC2B3298EF8290BDF224 /* Strategy.swift */,
-				1488622F465D071D924BC9C0 /* User.swift */,
 				2F3059558ED94F48FA60BC05 /* Generated */,
 			);
 			path = Models;
@@ -152,6 +133,7 @@
 		7DCDB04B0AE0FAE0B341EC3B /* Config */ = {
 			isa = PBXGroup;
 			children = (
+				3AFFCD485E4541E995FC91CB /* Configuration.plist */,
 				10C33334091D91D43D43B1C3 /* Environment.swift */,
 			);
 			path = Config;
@@ -261,6 +243,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				13E8D50DB0D86D78A2BF31DB /* Assets.xcassets in Resources */,
+				7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -285,25 +268,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				01A2B3C4D5E6F70809ABCDEF /* AnyCodable.swift in Sources */,
 				09218B2634404709C960AFBA /* APIClient.swift in Sources */,
 				1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */,
+				B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */,
 				8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */,
 				60AFA2E0E27171B26CEA49C7 /* DashboardView.swift in Sources */,
 				7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */,
 				D4D538F756906829CC4ECC61 /* LoginView.swift in Sources */,
 				D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */,
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
-				65EBAD17651094B41508D69B /* MarketData.swift in Sources */,
-				B0153FCD5A306E2D20E2AC1E /* Order.swift in Sources */,
-				56F3E6E370F0017D26D4DE52 /* OrdersView.swift in Sources */,
-				A218917943504E8181634BF6 /* Portfolio.swift in Sources */,
-				5F22AC535D1BA69E4CCD38FB /* PortfolioView.swift in Sources */,
 				D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */,
 				3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */,
-				021CC17385D663F978FA1167 /* StrategiesView.swift in Sources */,
-				AD49D971734AEECFBE0C11F5 /* Strategy.swift in Sources */,
-				A78E3BE92B3922D1F7146CB8 /* User.swift in Sources */,
+				F1234567890ABCDEF1234567 /* TradingView.swift in Sources */,
 				E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */,
 				4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */,
 			);

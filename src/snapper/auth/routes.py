@@ -35,6 +35,8 @@ from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import User
 
+_AUTH_API_PATH = "/snapper/api/auth"
+
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
@@ -81,7 +83,7 @@ async def login(
         httponly=True,
         secure=cookie_secure,
         samesite=cookie_samesite,
-        path="/snapper/api/auth",
+        path=_AUTH_API_PATH,
         max_age=7 * 24 * 60 * 60,
     )
     response.set_cookie(
@@ -160,7 +162,7 @@ async def refresh_token(
         httponly=True,
         secure=cookie_secure,
         samesite=cookie_samesite,
-        path="/snapper/api/auth",
+        path=_AUTH_API_PATH,
         max_age=7 * 24 * 60 * 60,
     )
     response.set_cookie(
@@ -243,7 +245,7 @@ async def logout(
         httponly=True,
         secure=cookie_secure,
         samesite=cookie_samesite,
-        path="/snapper/api/auth",
+        path=_AUTH_API_PATH,
         max_age=0,
     )
     response.set_cookie(

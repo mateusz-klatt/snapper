@@ -521,23 +521,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/health": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Health Check */
-        get: operations["health_check_snapper_api_health_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/snapper/api/candles": {
         parameters: {
             query?: never;
@@ -555,23 +538,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/orders": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Orders */
-        get: operations["get_orders_snapper_api_orders_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/snapper/api/signals": {
         parameters: {
             query?: never;
@@ -581,6 +547,23 @@ export interface paths {
         };
         /** Get Signals */
         get: operations["get_signals_snapper_api_signals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/snapper/api/orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Orders */
+        get: operations["get_orders_snapper_api_orders_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -615,6 +598,23 @@ export interface paths {
         };
         /** Get Positions */
         get: operations["get_positions_snapper_api_positions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/snapper/api/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Health Check */
+        get: operations["health_check_snapper_api_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2782,26 +2782,6 @@ export interface operations {
             };
         };
     };
-    health_check_snapper_api_health_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HealthCheckResponse"];
-                };
-            };
-        };
-    };
     get_candles_snapper_api_candles_get: {
         parameters: {
             query: {
@@ -2825,42 +2805,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CandleSnapshot"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_orders_snapper_api_orders_get: {
-        parameters: {
-            query?: {
-                /** @description Symbol to filter by */
-                symbol?: string | null;
-                /** @description Number of orders to return */
-                limit?: number;
-                /** @description Number of orders to skip */
-                offset?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OrderStatus"][];
                 };
             };
             /** @description Validation Error */
@@ -2899,6 +2843,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TradingSignal"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_orders_snapper_api_orders_get: {
+        parameters: {
+            query?: {
+                /** @description Symbol to filter by */
+                symbol?: string | null;
+                /** @description Number of orders to return */
+                limit?: number;
+                /** @description Number of orders to skip */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrderStatus"][];
                 };
             };
             /** @description Validation Error */
@@ -2960,6 +2940,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PositionSnapshot"][];
+                };
+            };
+        };
+    };
+    health_check_snapper_api_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthCheckResponse"];
                 };
             };
         };

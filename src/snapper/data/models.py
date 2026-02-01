@@ -61,6 +61,9 @@ __all__ = [
 ]
 
 
+_INSTRUMENT_FK = "instruments.id"
+
+
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
 
@@ -88,7 +91,7 @@ class Candle(Base):
         Index("ix_candle_instrument_ts", "instrument_id", "timestamp"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     timeframe: Mapped[str] = mapped_column(String(8))
     open: Mapped[float] = mapped_column(Float)
@@ -110,7 +113,7 @@ class Trade(Base):
         Index("ix_trade_instrument_ts", "instrument_id", "timestamp"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
@@ -124,7 +127,7 @@ class OrderRecord(Base):
 
     __tablename__ = "orders"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     exchange: Mapped[str] = mapped_column(String(32), default="", server_default="")
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -159,7 +162,7 @@ class Position(Base):
 
     __tablename__ = "positions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     exchange: Mapped[str] = mapped_column(String(32), default="", server_default="")
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
@@ -185,7 +188,7 @@ class SignalEvent(Base):
 
     __tablename__ = "signal_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     exchange: Mapped[str] = mapped_column(String(32), default="", server_default="")
     timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     side: Mapped[str] = mapped_column(String(4))

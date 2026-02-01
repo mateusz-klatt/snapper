@@ -28,7 +28,7 @@ describe('main', () => {
   })
   afterEach(() => {
     if (rootElement) {
-      document.body.removeChild(rootElement)
+      rootElement.remove()
       rootElement = null
     }
   })
@@ -39,7 +39,7 @@ describe('main', () => {
   }, 10000)
   it('throws error when root element is not found', async () => {
     if (rootElement) {
-      document.body.removeChild(rootElement)
+      rootElement.remove()
       rootElement = null
     }
 

@@ -3,6 +3,8 @@
 from datetime import UTC
 from datetime import datetime
 
+import pytest
+
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatDayExchange
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatLastExchange
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
@@ -126,4 +128,4 @@ class TestWalutomatMarketResponse:
         pairs_dict = response.to_dict()
         assert "EUR_PLN" in pairs_dict
         assert "USD_PLN" in pairs_dict
-        assert pairs_dict["EUR_PLN"].best_offers.bid_now == 4.2161
+        assert pairs_dict["EUR_PLN"].best_offers.bid_now == pytest.approx(4.2161)

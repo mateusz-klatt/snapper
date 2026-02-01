@@ -39,6 +39,7 @@ from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -173,6 +174,85 @@ class PolygonHistoricalLoader:
         self._cache_root = Path(cache_root)
         self._rate_delay = rate_delay_seconds
 
+    def _parse_aggregate_response(
+        self,
+        response: list[Any],
+        ticker: str,
+        resume_from: datetime | None,
+    ) -> list[AggregateCandle]:
+        """Parse raw aggregate response items into AggregateCandle list.
+
+        Args:
+            response: Raw aggregate items from Polygon API.
+            ticker: Ticker symbol for the candles.
+            resume_from: Skip candles at or before this timestamp.
+
+        Returns:
+            Sorted list of AggregateCandle objects.
+        """
+        candles: list[AggregateCandle] = []
+        for item in response:
+            if item.timestamp is None:
+                continue
+            ts = datetime.fromtimestamp(item.timestamp / 1000, tz=UTC)
+            if resume_from is not None and ts <= resume_from:
+                continue
+            candles.append(
+                AggregateCandle(
+                    ticker=ticker,
+                    timestamp=ts,
+                    open=Decimal(str(item.open or 0.0)),
+                    high=Decimal(str(item.high or 0.0)),
+                    low=Decimal(str(item.low or 0.0)),
+                    close=Decimal(str(item.close or 0.0)),
+                    volume=Decimal(str(item.volume or 0.0)),
+                    vwap=(Decimal(str(item.vwap)) if item.vwap is not None else None),
+                    transactions=item.transactions,
+                )
+            )
+        candles.sort(key=lambda candle: candle.timestamp)
+        return candles
+
+    def _save_candles_to_csv(
+        self,
+        candles: list[AggregateCandle],
+        ticker: str,
+        timespan: str,
+        from_ts: datetime,
+        to_ts: datetime,
+    ) -> None:
+        """Save aggregate candles to per-day CSV files.
+
+        Creates CSV files for each day in the date range. Days without
+        data get an empty marker file.
+
+        Args:
+            candles: List of candles to save.
+            ticker: Ticker symbol for path resolution.
+            timespan: Timespan for path resolution.
+            from_ts: Start of the full date range.
+            to_ts: End of the full date range.
+        """
+        candles_by_day: dict[date, list[AggregateCandle]] = defaultdict(list)
+        for candle in candles:
+            day = candle.timestamp.date()
+            candles_by_day[day].append(candle)
+        all_days: set[date] = set()
+        current_day = from_ts.date()
+        end_day = to_ts.date()
+        while current_day <= end_day:
+            all_days.add(current_day)
+            current_day += timedelta(days=1)
+        for day in sorted(all_days):
+            csv_path = self._resolve_csv_path(ticker, timespan, day)
+            if day in candles_by_day:
+                day_candles = candles_by_day[day]
+                day_candles.sort(key=lambda c: c.timestamp)
+                self._write_csv(csv_path, day_candles)
+            elif not csv_path.exists():
+                self._write_csv(csv_path, [])
+                logger.debug(f"Created empty marker file for {day}")
+
     async def fetch_aggregates(
         self,
         ticker: str,
@@ -225,49 +305,12 @@ class PolygonHistoricalLoader:
             sort=sort,
             limit=limit,
         )
-        candles: list[AggregateCandle] = []
-        for item in response:
-            if item.timestamp is None:
-                continue
-            ts = datetime.fromtimestamp(item.timestamp / 1000, tz=UTC)
-            if resume_from is not None and ts <= resume_from:
-                continue
-            candles.append(
-                AggregateCandle(
-                    ticker=ticker,
-                    timestamp=ts,
-                    open=Decimal(str(item.open or 0.0)),
-                    high=Decimal(str(item.high or 0.0)),
-                    low=Decimal(str(item.low or 0.0)),
-                    close=Decimal(str(item.close or 0.0)),
-                    volume=Decimal(str(item.volume or 0.0)),
-                    vwap=(Decimal(str(item.vwap)) if item.vwap is not None else None),
-                    transactions=item.transactions,
-                )
-            )
-        candles.sort(key=lambda candle: candle.timestamp)
+        candles = self._parse_aggregate_response(response, ticker, resume_from)
         logger.info(f"Received {len(candles)} candles")
         if save_csv:
-            candles_by_day: dict[date, list[AggregateCandle]] = defaultdict(list)
-            for candle in candles:
-                day = candle.timestamp.date()
-                candles_by_day[day].append(candle)
-            all_days: set[date] = set()
-            current_day = from_ts.date()
-            end_day = to_ts.date()
-            while current_day <= end_day:
-                all_days.add(current_day)
-                current_day += timedelta(days=1)
-            for day in sorted(all_days):
-                csv_path = self._resolve_csv_path(ticker, timespan, day)
-                if day in candles_by_day:
-
-                    day_candles = candles_by_day[day]
-                    day_candles.sort(key=lambda c: c.timestamp)
-                    self._write_csv(csv_path, day_candles)
-                elif not csv_path.exists():
-                    self._write_csv(csv_path, [])
-                    logger.debug(f"Created empty marker file for {day}")
+            await asyncio.to_thread(
+                self._save_candles_to_csv, candles, ticker, timespan, from_ts, to_ts
+            )
         await asyncio.sleep(self._rate_delay)
         return candles
 
@@ -329,13 +372,19 @@ class PolygonHistoricalLoader:
         if save_csv:
             csv_path = self._resolve_grouped_csv_path(target_date, market_type, locale)
             if rows:
-                self._write_grouped_csv(csv_path, rows)
+                await asyncio.to_thread(self._write_grouped_csv, csv_path, rows)
             else:
-                csv_path.parent.mkdir(parents=True, exist_ok=True)
-                with csv_path.open("w", encoding="utf-8", newline="") as f:
-                    f.write(
-                        "ticker,open,high,low,close,volume,vwap,total_trades,closing_timestamp\n"
-                    )
+                await asyncio.to_thread(csv_path.parent.mkdir, parents=True, exist_ok=True)
+
+                def _write_empty_marker() -> None:
+                    """Write CSV header as empty marker file."""
+                    with csv_path.open("w", encoding="utf-8", newline="") as f:
+                        f.write(
+                            "ticker,open,high,low,close,volume,vwap,"
+                            "total_trades,closing_timestamp\n"
+                        )
+
+                await asyncio.to_thread(_write_empty_marker)
                 logger.debug(f"Created empty marker: {csv_path}")
         if rows:
             await asyncio.sleep(self._rate_delay)

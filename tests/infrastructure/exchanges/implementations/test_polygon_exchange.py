@@ -316,7 +316,7 @@ async def test_get_last_quote_no_data(
 
     monkeypatch.setattr(stubbed_client, "_make_request_with_retry", fake_request)
     ticker = await stubbed_client.get_last_quote("C:EURUSD")
-    assert ticker.bid == ticker.ask == 0.0
+    assert ticker.bid == ticker.ask == pytest.approx(0.0)
     assert ticker.symbol == "C:EURUSD"
 
 
@@ -364,7 +364,7 @@ async def test_get_ticker_without_agg_data(
     monkeypatch.setattr(stubbed_client, "_make_request_with_retry", fake_request)
     data = await stubbed_client.get_ticker("I:SPX")
     assert math.isclose(data.last, 1.25, rel_tol=1e-9)
-    assert data.high == data.low == 0.0
+    assert data.high == data.low == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio()
@@ -390,8 +390,8 @@ async def test_get_ticker_with_data(
     monkeypatch.setattr(stubbed_client, "get_last_quote", fake_quote)
     monkeypatch.setattr(stubbed_client, "_make_request_with_retry", fake_request)
     data = await stubbed_client.get_ticker("C:GBPUSD")
-    assert data.high == 120.0
-    assert data.low == 80.0
+    assert data.high == pytest.approx(120.0)
+    assert data.low == pytest.approx(80.0)
     assert data.volume == 10_000.0
     assert math.isclose(data.change, 10.0, rel_tol=1e-9)
     assert math.isclose(data.change_pct, 11.111, rel_tol=1e-3)

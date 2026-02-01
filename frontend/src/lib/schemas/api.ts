@@ -14,7 +14,7 @@ export function validateResponse<T>(data: unknown, schema: ZodType<T>, endpoint:
   const result = schema.safeParse(data)
 
   if (!result.success) {
-    console.error(`API validation failed for ${endpoint}:`, result.error.format())
+    console.error(`API validation failed for ${endpoint}:`, result.error.issues)
     throw new ApiValidationError(endpoint, result.error)
   }
 

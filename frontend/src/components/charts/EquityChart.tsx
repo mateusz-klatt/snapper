@@ -12,7 +12,7 @@ interface EquityChartProps {
   height?: number
 }
 
-export const EquityChart: React.FC<EquityChartProps> = ({
+export const EquityChart: React.FC<Readonly<EquityChartProps>> = ({
   data,
   title = 'Equity Curve',
   height = 500,

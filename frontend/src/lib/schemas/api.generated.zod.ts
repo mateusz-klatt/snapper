@@ -28,7 +28,7 @@ export const CandleSnapshotSchema = z
   .object({
     instrument: z.string(),
     timeframe: z.string(),
-    timestamp: z.string().datetime(),
+    timestamp: z.iso.datetime(),
     open: z.number(),
     high: z.number(),
     low: z.number(),
@@ -70,7 +70,7 @@ export const ExecutionRecordSchema = z
   .object({
     id: z.number().int(),
     order_id: z.number().int(),
-    timestamp: z.string().datetime(),
+    timestamp: z.iso.datetime(),
     price: z.number(),
     size: z.number(),
     fee: z.number(),
@@ -109,8 +109,8 @@ export const OrderStatusSchema = z
     exchange: z.string(),
     client_order_id: z.string().nullable(),
     exchange_order_id: z.string().nullable(),
-    created_at: z.string().datetime(),
-    updated_at: z.string().datetime().nullable(),
+    created_at: z.iso.datetime(),
+    updated_at: z.iso.datetime().nullable(),
     side: z.enum(['buy', 'sell']),
     type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
     price: z.number().nullable(),
@@ -138,7 +138,7 @@ export const PositionSnapshotSchema = z
     average_price: z.number(),
     unrealized_pnl: z.number(),
     realized_pnl: z.number(),
-    updated_at: z.string().datetime(),
+    updated_at: z.iso.datetime(),
   })
   .strict()
 
@@ -240,7 +240,7 @@ export const SettingReadSchema = z
     value: z.string(),
     category: z.string(),
     description: z.string().nullable().optional(),
-    updated_at: z.string().datetime(),
+    updated_at: z.iso.datetime(),
     updated_by: z.string().nullable().optional(),
   })
   .strict()
@@ -265,7 +265,7 @@ export const TradingSignalSchema = z
     id: z.number().int(),
     instrument: z.string(),
     exchange: z.string(),
-    timestamp: z.string().datetime(),
+    timestamp: z.iso.datetime(),
     side: z.enum(['buy', 'sell']),
     strength: z.number(),
     reason: z.string(),
@@ -338,7 +338,7 @@ export const ConfiguredProcessesResponseSchema = z
 export const HealthCheckResponseSchema = z
   .object({
     status: z.string(),
-    timestamp: z.string().datetime(),
+    timestamp: z.iso.datetime(),
     version: z.string(),
     connections: z.record(z.string(), z.unknown()),
     topics: HealthTopicsSchema,
@@ -392,8 +392,8 @@ export const UserProfileSchema = z
     email: z.string().nullable().optional(),
     role: UserRoleSchema,
     is_active: z.boolean(),
-    created_at: z.string().datetime().optional(),
-    last_login: z.string().datetime().nullable().optional(),
+    created_at: z.iso.datetime().optional(),
+    last_login: z.iso.datetime().nullable().optional(),
   })
   .strict()
 
@@ -417,7 +417,7 @@ export const WsStatsResponseSchema = z
 export const ZmqHealthResponseSchema = z
   .object({
     status: z.string(),
-    timestamp: z.string().datetime(),
+    timestamp: z.iso.datetime(),
     components: ZmqComponentsSchema,
     config: ZmqConfigSchema,
     connections: z.record(z.string(), z.unknown()),
@@ -438,7 +438,7 @@ export const RefreshResponseSchema = z
   .object({
     message: z.string(),
     ws_token: z.string(),
-    ws_token_exp: z.string().datetime(),
+    ws_token_exp: z.iso.datetime(),
     csrf_token: z.string(),
     user: UserProfileSchema,
   })

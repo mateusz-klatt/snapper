@@ -639,6 +639,31 @@ def test_is_pytest_fixture_returns_false_for_non_fixture_decorators() -> None:
     assert check_docstrings.is_pytest_fixture(node) is False
 
 
+def test_is_fixture_decorator_returns_false_for_call_with_subscript_func() -> None:
+    """Verify _is_fixture_decorator returns False for Call wrapping Subscript.
+
+    Given: A decorator that is a Call node whose func is a Subscript
+        (e.g., ``@decorators[0]()``),
+    When: _is_fixture_decorator is called,
+    Then: It returns False because Subscript is not Attribute or Name.
+    """
+    tree = ast.parse("decorators = [None]\n@decorators[0]()\ndef f():\n    pass\n")
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+    assert check_docstrings._is_fixture_decorator(node.decorator_list[0]) is False
+
+
+def test_is_fixture_decorator_returns_false_for_subscript_decorator() -> None:
+    """Verify _is_fixture_decorator returns False for Subscript decorator.
+
+    Given: A decorator that is a Subscript node (e.g., ``@decorators[0]``),
+    When: _is_fixture_decorator is called,
+    Then: It returns False because Subscript is not Attribute, Call, or Name.
+    """
+    tree = ast.parse("decorators = [None]\n@decorators[0]\ndef f():\n    pass\n")
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+    assert check_docstrings._is_fixture_decorator(node.decorator_list[0]) is False
+
+
 def test_check_function_skips_fixtures_in_google_validation() -> None:
     """Verify fixtures are skipped in Google docstring validation.
 

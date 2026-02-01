@@ -212,7 +212,7 @@ class ZmqWebSocketBridgeService:
             socket.connect(topic_config.endpoint)
             socket.setsockopt(zmq.SUBSCRIBE, topic_config.pattern.encode("utf-8"))
             self.zmq_subscribers[topic] = socket
-            task = asyncio.create_task(self._zmq_subscription_loop(topic, socket, topic_config))
+            task = asyncio.create_task(self._zmq_subscription_loop(topic, socket))
             self.subscriber_tasks[topic] = task
             logger.info(f"ZMQ subscription started for {topic} on {topic_config.endpoint}")
         except Exception as e:
@@ -243,42 +243,57 @@ class ZmqWebSocketBridgeService:
             del self.zmq_subscribers[topic]
         logger.info(f"ZMQ subscription stopped for topic: {topic}")
 
-    async def _zmq_subscription_loop(
-        self, topic: str, socket: zmq.asyncio.Socket, config: TopicConfigurationModel
-    ) -> None:
+    async def _process_zmq_message(self, topic: str, message_parts: list[bytes]) -> None:
+        """Process a single received ZMQ multipart message.
+
+        Args:
+            topic: The topic being subscribed to.
+            message_parts: Raw multipart message bytes from ZMQ.
+        """
+        if len(message_parts) != 2:
+            logger.warning(
+                f"Invalid message format for {topic}: expected 2 parts, "
+                f"got {len(message_parts)}"
+            )
+            return
+        topic_bytes, payload_bytes = message_parts
+        received_topic = topic_bytes.decode("utf-8")
+        payload_str = payload_bytes.decode("utf-8")
+        if topic in self.topic_metrics:
+            self.topic_metrics[topic].received_count += 1
+            self.topic_metrics[topic].last_message_ts = time.time()
+        await self._forward_to_clients(topic, received_topic, payload_str)
+
+    async def _zmq_receive_loop(self, topic: str, socket: zmq.asyncio.Socket) -> None:
+        """Inner receive loop that processes messages until cancelled.
+
+        Args:
+            topic: The topic being subscribed to.
+            socket: The ZMQ socket to receive from.
+        """
+        while True:
+            try:
+                message_parts = await socket.recv_multipart()
+                await self._process_zmq_message(topic, message_parts)
+            except zmq.ZMQError as e:
+                logger.error(f"ZMQ error in subscription loop for {topic}: {e}")
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Unexpected error in subscription loop for {topic}: {e}")
+                if topic in self.topic_metrics:
+                    self.topic_metrics[topic].error_count += 1
+                await asyncio.sleep(1)
+
+    async def _zmq_subscription_loop(self, topic: str, socket: zmq.asyncio.Socket) -> None:
         """Main loop for receiving ZMQ messages and forwarding to clients.
 
         Args:
             topic: The topic being subscribed to.
             socket: The ZMQ socket to receive from.
-            config: Topic configuration with throttle settings.
         """
         logger.info(f"ZMQ subscription loop started for {topic}")
         try:
-            while True:
-                try:
-                    message_parts = await socket.recv_multipart()
-                    if len(message_parts) != 2:
-                        logger.warning(
-                            f"Invalid message format for {topic}: expected 2 parts, "
-                            f"got {len(message_parts)}"
-                        )
-                        continue
-                    topic_bytes, payload_bytes = message_parts
-                    received_topic = topic_bytes.decode("utf-8")
-                    payload_str = payload_bytes.decode("utf-8")
-                    if topic in self.topic_metrics:
-                        self.topic_metrics[topic].received_count += 1
-                        self.topic_metrics[topic].last_message_ts = time.time()
-                    await self._forward_to_clients(topic, received_topic, payload_str)
-                except zmq.ZMQError as e:
-                    logger.error(f"ZMQ error in subscription loop for {topic}: {e}")
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    logger.error(f"Unexpected error in subscription loop for {topic}: {e}")
-                    if topic in self.topic_metrics:
-                        self.topic_metrics[topic].error_count += 1
-                    await asyncio.sleep(1)
+            await self._zmq_receive_loop(topic, socket)
         except asyncio.CancelledError:
             logger.info(f"ZMQ subscription loop cancelled for {topic}")
             raise
@@ -312,7 +327,99 @@ class ZmqWebSocketBridgeService:
             return MAX_PENDING_MESSAGES_TRADE
         return MAX_PENDING_MESSAGES_MARKET
 
-    async def _forward_to_clients(self, topic: str, received_topic: str, message_str: str) -> None:
+    def _is_throttled(
+        self, subscription: TopicSubscriptionModel, current_time: float, topic: str
+    ) -> bool:
+        """Check if a subscription should be throttled.
+
+        Args:
+            subscription: The subscription to check.
+            current_time: Current timestamp.
+            topic: Topic name for metrics tracking.
+
+        Returns:
+            True if the message should be throttled.
+        """
+        if current_time - subscription.last_sent < (subscription.throttle_ms / 1000.0):
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].throttled_count += 1
+            return True
+        return False
+
+    async def _handle_backpressure(
+        self,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        max_pending: int,
+        is_trade: bool,
+    ) -> bool:
+        """Handle backpressure for a subscription that exceeded pending limit.
+
+        Args:
+            subscription: The subscription exceeding limits.
+            topic: Topic name for metrics and logging.
+            max_pending: Maximum allowed pending messages.
+            is_trade: Whether this is a trade topic.
+
+        Returns:
+            True if the message should be dropped (backpressure applied).
+        """
+        if subscription.pending_count < max_pending:
+            return False
+        if topic in self.topic_metrics:
+            self.topic_metrics[topic].dropped_count += 1
+        if is_trade:
+            logger.error(
+                f"Backpressure overflow for trade topic {topic}, "
+                f"client {subscription.client_id}: "
+                f"pending={subscription.pending_count}, max={max_pending}. "
+                f"Closing connection to prevent data loss."
+            )
+            with contextlib.suppress(Exception):
+                await self.disconnect_client(subscription.websocket)
+        else:
+            logger.debug(
+                f"Backpressure: dropping market data for client "
+                f"{subscription.client_id}, pending={subscription.pending_count}"
+            )
+        return True
+
+    async def _try_send_message(
+        self,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        message_str: str,
+        current_time: float,
+    ) -> None:
+        """Attempt to send a message to a single subscriber.
+
+        Args:
+            subscription: Target subscription.
+            topic: Topic name for metrics.
+            message_str: Message payload to send.
+            current_time: Current timestamp for last_sent update.
+        """
+        subscription.pending_count += 1
+        try:
+            async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
+                await subscription.websocket.send_text(message_str)
+        except TimeoutError:
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].timeout_count += 1
+            logger.warning(
+                f"Send timeout for client {subscription.client_id} on topic {topic}, "
+                f"disconnecting slow client"
+            )
+            subscription.pending_count = max(0, subscription.pending_count - 1)
+            with contextlib.suppress(Exception):
+                await self.disconnect_client(subscription.websocket)
+            return
+        subscription.last_sent = current_time
+        subscription.pending_count = max(0, subscription.pending_count - 1)
+        if topic in self.topic_metrics:
+            self.topic_metrics[topic].forwarded_count += 1
+
+    async def _forward_to_clients(self, topic: str, _received_topic: str, message_str: str) -> None:
         """Forward a message to all subscribed WebSocket clients.
 
         Implements throttling and backpressure control. Trade topics
@@ -320,7 +427,7 @@ class ZmqWebSocketBridgeService:
 
         Args:
             topic: The subscription topic.
-            received_topic: The actual topic from ZMQ message.
+            _received_topic: The actual topic from ZMQ message (reserved for future use).
             message_str: The message payload string.
         """
         if topic not in self.topic_subscriptions:
@@ -330,50 +437,11 @@ class ZmqWebSocketBridgeService:
         is_trade = self._is_trade_topic(topic)
         for subscription in self.topic_subscriptions[topic][:]:
             try:
-                if current_time - subscription.last_sent < (subscription.throttle_ms / 1000.0):
-                    if topic in self.topic_metrics:
-                        self.topic_metrics[topic].throttled_count += 1
+                if self._is_throttled(subscription, current_time, topic):
                     continue
-                if subscription.pending_count >= max_pending:
-                    if topic in self.topic_metrics:
-                        self.topic_metrics[topic].dropped_count += 1
-                    if is_trade:
-                        logger.error(
-                            f"Backpressure overflow for trade topic {topic}, "
-                            f"client {subscription.client_id}: "
-                            f"pending={subscription.pending_count}, max={max_pending}. "
-                            f"Closing connection to prevent data loss."
-                        )
-                        with contextlib.suppress(Exception):
-                            await self.disconnect_client(subscription.websocket)
-                        continue
-                    else:
-                        logger.debug(
-                            f"Backpressure: dropping market data for client "
-                            f"{subscription.client_id}, pending={subscription.pending_count}"
-                        )
-                        continue
-                subscription.pending_count += 1
-                try:
-                    await asyncio.wait_for(
-                        subscription.websocket.send_text(message_str),
-                        timeout=SEND_TIMEOUT_SECONDS,
-                    )
-                except TimeoutError:
-                    if topic in self.topic_metrics:
-                        self.topic_metrics[topic].timeout_count += 1
-                    logger.warning(
-                        f"Send timeout for client {subscription.client_id} on topic {topic}, "
-                        f"disconnecting slow client"
-                    )
-                    subscription.pending_count = max(0, subscription.pending_count - 1)
-                    with contextlib.suppress(Exception):
-                        await self.disconnect_client(subscription.websocket)
+                if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
                     continue
-                subscription.last_sent = current_time
-                subscription.pending_count = max(0, subscription.pending_count - 1)
-                if topic in self.topic_metrics:
-                    self.topic_metrics[topic].forwarded_count += 1
+                await self._try_send_message(subscription, topic, message_str, current_time)
             except Exception as e:
                 logger.warning(f"Failed to send message to client {subscription.client_id}: {e}")
                 with contextlib.suppress(Exception):
@@ -421,14 +489,14 @@ class ZmqWebSocketBridgeService:
         logger.info(f"Stopped ZMQ subscriber for topic: {topic}")
 
     async def _handle_zmq_messages(
-        self, topic: str, socket: zmq.asyncio.Socket, config: TopicConfigurationModel
+        self, topic: str, socket: zmq.asyncio.Socket, _config: TopicConfigurationModel
     ) -> None:
         """Handle incoming ZMQ messages for a topic.
 
         Args:
             topic: The topic being handled.
             socket: The ZMQ socket to receive from.
-            config: Topic configuration.
+            _config: Topic configuration (unused; reserved for future filtering).
         """
         try:
             while True:
@@ -441,15 +509,16 @@ class ZmqWebSocketBridgeService:
                     logger.error(f"Error processing ZMQ message for {topic}: {e}")
         except asyncio.CancelledError:
             logger.info(f"ZMQ message handler for {topic} cancelled")
+            raise
         except Exception as e:
             logger.error(f"ZMQ message handler for {topic} failed: {e}")
 
-    async def _forward_to_websockets(self, topic: str, zmq_topic: str, message_str: str) -> None:
+    async def _forward_to_websockets(self, topic: str, _zmq_topic: str, message_str: str) -> None:
         """Forward a message to subscribed WebSockets with throttling.
 
         Args:
             topic: The subscription topic.
-            zmq_topic: The actual ZMQ topic.
+            _zmq_topic: The actual ZMQ topic (unused; reserved for future routing).
             message_str: The message payload string.
         """
         if topic not in self.topic_subscriptions:
@@ -457,14 +526,11 @@ class ZmqWebSocketBridgeService:
         current_time = time.time()
         disconnected: list[TopicSubscriptionModel] = []
         for subscription in self.topic_subscriptions[topic].copy():
-            throttle_ms = subscription.throttle_ms
-            if current_time - subscription.last_sent < (throttle_ms / 1000):
+            if self._is_throttled(subscription, current_time, topic):
                 continue
             try:
-                await asyncio.wait_for(
-                    subscription.websocket.send_text(message_str),
-                    timeout=SEND_TIMEOUT_SECONDS,
-                )
+                async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
+                    await subscription.websocket.send_text(message_str)
                 subscription.last_sent = current_time
             except TimeoutError:
                 if topic in self.topic_metrics:
@@ -476,8 +542,19 @@ class ZmqWebSocketBridgeService:
                 disconnected.append(subscription)
             except Exception:
                 disconnected.append(subscription)
+        await self._cleanup_disconnected_subscribers(topic, disconnected)
+
+    async def _cleanup_disconnected_subscribers(
+        self, topic: str, disconnected: list[TopicSubscriptionModel]
+    ) -> None:
+        """Remove disconnected subscribers and clean up metrics.
+
+        Args:
+            topic: The topic to clean up subscribers for.
+            disconnected: List of subscriptions to remove.
+        """
         for sub in disconnected:
-            if sub in self.topic_subscriptions[topic]:
+            if sub in self.topic_subscriptions.get(topic, []):
                 self.topic_subscriptions[topic].remove(sub)
             if topic in self.topic_metrics:
                 self.topic_metrics[topic].active_subscribers = max(
@@ -501,7 +578,7 @@ class ZmqWebSocketBridgeService:
         """
         topic_config = self._find_matching_pattern(topic)
         if not topic_config:
-            available = list(self.available_topics.keys())
+            available = list(self.available_topics)
             error_msg = (
                 f"Topic '{topic}' does not match any known pattern. Available patterns: {available}"
             )
@@ -621,7 +698,7 @@ class ZmqWebSocketBridgeService:
         Returns:
             List of topic names from registry.
         """
-        return list(self.available_topics.keys())
+        return list(self.available_topics)
 
     def get_connection_stats(self) -> dict[str, int]:
         """Get connection-related statistics.

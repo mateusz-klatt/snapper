@@ -34,8 +34,8 @@ class TestMessages:
         data = json.loads(json_str)
         assert data["type"] == "tick"
         assert data["instrument"] == "BTCUSD"
-        assert data["last"] == 50000.0
-        assert data["volume"] == 0.1
+        assert data["last"] == pytest.approx(50000.0)
+        assert data["volume"] == pytest.approx(0.1)
         assert "timestamp" in data
 
     def test_market_data_bar_message(self) -> None:
@@ -63,10 +63,10 @@ class TestMessages:
         assert parsed.type == "bar"
         assert parsed.instrument == "ETHUSD"
         assert parsed.timeframe == "1m"
-        assert parsed.open == 2990.0
-        assert parsed.high == 3010.0
-        assert parsed.low == 2985.0
-        assert parsed.close == 3000.0
+        assert parsed.open == pytest.approx(2990.0)
+        assert parsed.high == pytest.approx(3010.0)
+        assert parsed.low == pytest.approx(2985.0)
+        assert parsed.close == pytest.approx(3000.0)
         assert parsed.trades == 42
 
     def test_signal_message(self) -> None:
@@ -89,7 +89,7 @@ class TestMessages:
         assert isinstance(parsed, SignalEnvelope)
         assert parsed.strategy_name == "rsi_reversion#1"
         assert parsed.side == "buy"
-        assert parsed.strength == 0.85
+        assert parsed.strength == pytest.approx(0.85)
 
     def test_order_request_message(self) -> None:
         """Test OrderRequestEnvelope serialization.
@@ -114,7 +114,7 @@ class TestMessages:
         assert parsed.strategy_id == "strategy_1"
         assert parsed.mode == "paper"
         assert parsed.side == "buy"
-        assert parsed.quantity == 0.01
+        assert parsed.quantity == pytest.approx(0.01)
 
     def test_fill_message(self) -> None:
         """Test FillEnvelope serialization.
@@ -140,8 +140,8 @@ class TestMessages:
         parsed = FillEnvelope.from_json(json_str)
         assert isinstance(parsed, FillEnvelope)
         assert parsed.client_order_id == "test_order_123"
-        assert parsed.size == 0.01
-        assert parsed.price == 50000.0
+        assert parsed.size == pytest.approx(0.01)
+        assert parsed.price == pytest.approx(50000.0)
         assert parsed.status == "filled"
 
     def test_heartbeat_message(self) -> None:
@@ -243,7 +243,7 @@ class TestMessages:
         msg = SignalEnvelope(
             instrument="BTCUSD", exchange="kraken", side="buy", strength=0.5, reason="test"
         )
-        assert msg.strength == 0.5
+        assert msg.strength == pytest.approx(0.5)
         with pytest.raises(ValueError):
             SignalEnvelope(
                 instrument="BTCUSD",
@@ -270,7 +270,7 @@ class TestMessages:
             client_order_id="test",
             exchange="kraken",
         )
-        assert msg.quantity == 0.01
+        assert msg.quantity == pytest.approx(0.01)
         with pytest.raises(ValueError):
             OrderRequestEnvelope(
                 strategy_id="test",
@@ -345,8 +345,8 @@ class TestMessages:
         assert parsed.exchange == "kraken"
         assert parsed.instrument == "BTC-USD"
         assert parsed.exchange_order_id == "KRAKEN-ABC123"
-        assert parsed.new_quantity == 0.5
-        assert parsed.new_price == 48000.0
+        assert parsed.new_quantity == pytest.approx(0.5)
+        assert parsed.new_price == pytest.approx(48000.0)
 
     def test_order_replace_partial_update(self) -> None:
         """Test OrderReplaceEnvelope with only quantity update.
@@ -362,7 +362,7 @@ class TestMessages:
             client_order_id="client_456",
             new_quantity=1.0,
         )
-        assert msg.new_quantity == 1.0
+        assert msg.new_quantity == pytest.approx(1.0)
         assert msg.new_price is None
 
     def test_order_replace_parse_message(self) -> None:
@@ -382,7 +382,7 @@ class TestMessages:
         }
         msg = parse_message(json.dumps(json_data))
         assert isinstance(msg, OrderReplaceEnvelope)
-        assert msg.new_price == 200000.0
+        assert msg.new_price == pytest.approx(200000.0)
         assert msg.new_quantity is None
 
     def test_order_event_message(self) -> None:

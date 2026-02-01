@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonAgg
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonGroupedAgg
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonPreviousClose
@@ -30,12 +32,12 @@ class TestPolygonAgg:
             otc=False,
         )
         result = PolygonAgg.from_sdk_agg(sdk_agg)
-        assert result.open == 100.5
-        assert result.high == 105.0
-        assert result.low == 99.0
-        assert result.close == 103.0
-        assert result.volume == 1000000.0
-        assert result.vwap == 102.0
+        assert result.open == pytest.approx(100.5)
+        assert result.high == pytest.approx(105.0)
+        assert result.low == pytest.approx(99.0)
+        assert result.close == pytest.approx(103.0)
+        assert result.volume == pytest.approx(1000000.0)
+        assert result.vwap == pytest.approx(102.0)
         assert result.timestamp == 1640000000000
         assert result.transactions == 500
         assert result.otc is False
@@ -52,8 +54,8 @@ class TestPolygonAgg:
             close=103.0,
         )
         result = PolygonAgg.from_sdk_agg(sdk_agg)
-        assert result.open == 100.5
-        assert result.close == 103.0
+        assert result.open == pytest.approx(100.5)
+        assert result.close == pytest.approx(103.0)
         assert result.high is None
         assert result.low is None
         assert result.volume is None
@@ -86,12 +88,12 @@ class TestPolygonGroupedAgg:
         )
         result = PolygonGroupedAgg.from_sdk_agg(sdk_agg)
         assert result.ticker == "X:BTCUSD"
-        assert result.open == 50000.0
-        assert result.high == 51000.0
-        assert result.low == 49000.0
-        assert result.close == 50500.0
-        assert result.volume == 100.0
-        assert result.vwap == 50250.0
+        assert result.open == pytest.approx(50000.0)
+        assert result.high == pytest.approx(51000.0)
+        assert result.low == pytest.approx(49000.0)
+        assert result.close == pytest.approx(50500.0)
+        assert result.volume == pytest.approx(100.0)
+        assert result.vwap == pytest.approx(50250.0)
         assert result.timestamp == 1640000000000
         assert result.transactions == 1000
 
@@ -115,12 +117,12 @@ class TestPolygonGroupedAgg:
         )
         result = PolygonGroupedAgg.from_sdk_agg(sdk_agg)
         assert result.ticker == "X:ETHUSD"
-        assert result.open == 3000.0
-        assert result.high == 3100.0
-        assert result.low == 2900.0
-        assert result.close == 3050.0
-        assert result.volume == 500.0
-        assert result.vwap == 3025.0
+        assert result.open == pytest.approx(3000.0)
+        assert result.high == pytest.approx(3100.0)
+        assert result.low == pytest.approx(2900.0)
+        assert result.close == pytest.approx(3050.0)
+        assert result.volume == pytest.approx(500.0)
+        assert result.vwap == pytest.approx(3025.0)
         assert result.timestamp == 1640000000000
         assert result.transactions == 2000
 
@@ -139,7 +141,7 @@ class TestPolygonGroupedAgg:
         )
         result = PolygonGroupedAgg.from_sdk_agg(sdk_agg)
         assert result.ticker == "X:BTCUSD"
-        assert result.open == 50000.0
+        assert result.open == pytest.approx(50000.0)
 
 
 class TestPolygonPreviousClose:
@@ -164,12 +166,12 @@ class TestPolygonPreviousClose:
         )
         result = PolygonPreviousClose.from_sdk_agg(ticker, sdk_agg)
         assert result.ticker == "X:BTCUSD"
-        assert result.open == 50000.0
-        assert result.high == 51000.0
-        assert result.low == 49000.0
-        assert result.close == 50500.0
-        assert result.volume == 100.0
-        assert result.vwap == 50250.0
+        assert result.open == pytest.approx(50000.0)
+        assert result.high == pytest.approx(51000.0)
+        assert result.low == pytest.approx(49000.0)
+        assert result.close == pytest.approx(50500.0)
+        assert result.volume == pytest.approx(100.0)
+        assert result.vwap == pytest.approx(50250.0)
         assert result.timestamp == 1640000000000
 
     def test_from_sdk_agg_with_missing_fields(self) -> None:
@@ -185,7 +187,7 @@ class TestPolygonPreviousClose:
         )
         result = PolygonPreviousClose.from_sdk_agg(ticker, sdk_agg)
         assert result.ticker == "C:EURUSD"
-        assert result.close == 1.1850
+        assert result.close == pytest.approx(1.1850)
         assert result.open is None
         assert result.high is None
         assert result.low is None

@@ -40,35 +40,35 @@ describe('EquityChart', () => {
   it('uses default title when not provided', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const layout = JSON.parse(chart.getAttribute('data-plot-layout') || '{}')
+    const layout = JSON.parse(chart.dataset.plotLayout || '{}')
 
     expect(layout.title.text).toBe('Equity Curve')
   })
   it('uses custom title when provided', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} title='My Custom Equity Chart' />)
     const chart = getByTestId('plotly-chart')
-    const layout = JSON.parse(chart.getAttribute('data-plot-layout') || '{}')
+    const layout = JSON.parse(chart.dataset.plotLayout || '{}')
 
     expect(layout.title.text).toBe('My Custom Equity Chart')
   })
   it('uses default height when not provided', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const layout = JSON.parse(chart.getAttribute('data-plot-layout') || '{}')
+    const layout = JSON.parse(chart.dataset.plotLayout || '{}')
 
     expect(layout.height).toBe(500)
   })
   it('uses custom height when provided', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} height={800} />)
     const chart = getByTestId('plotly-chart')
-    const layout = JSON.parse(chart.getAttribute('data-plot-layout') || '{}')
+    const layout = JSON.parse(chart.dataset.plotLayout || '{}')
 
     expect(layout.height).toBe(800)
   })
   it('maps data to plotly format', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const plotData = JSON.parse(chart.getAttribute('data-plot-data') || '[]')
+    const plotData = JSON.parse(chart.dataset.plotData || '[]')
 
     expect(plotData).toHaveLength(1)
     expect(plotData[0].x).toEqual(['2024-01-01 00:00', '2024-01-02 00:00', '2024-01-03 00:00'])
@@ -77,7 +77,7 @@ describe('EquityChart', () => {
   it('configures scatter plot with lines', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const plotData = JSON.parse(chart.getAttribute('data-plot-data') || '[]')
+    const plotData = JSON.parse(chart.dataset.plotData || '[]')
 
     expect(plotData[0].type).toBe('scatter')
     expect(plotData[0].mode).toBe('lines')
@@ -85,7 +85,7 @@ describe('EquityChart', () => {
   it('adds break-even line at initial equity', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const layout = JSON.parse(chart.getAttribute('data-plot-layout') || '{}')
+    const layout = JSON.parse(chart.dataset.plotLayout || '{}')
 
     expect(layout.shapes).toHaveLength(1)
     expect(layout.shapes[0].type).toBe('line')
@@ -95,7 +95,7 @@ describe('EquityChart', () => {
   it('adds break-even annotation', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const layout = JSON.parse(chart.getAttribute('data-plot-layout') || '{}')
+    const layout = JSON.parse(chart.dataset.plotLayout || '{}')
 
     expect(layout.annotations).toHaveLength(1)
     expect(layout.annotations[0].text).toBe('Break-even')
@@ -103,7 +103,7 @@ describe('EquityChart', () => {
   it('configures plot with responsive mode', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const config = JSON.parse(chart.getAttribute('data-plot-config') || '{}')
+    const config = JSON.parse(chart.dataset.plotConfig || '{}')
 
     expect(config.responsive).toBe(true)
     expect(config.displaylogo).toBe(false)
@@ -111,14 +111,14 @@ describe('EquityChart', () => {
   it('sets full width style', () => {
     const { getByTestId } = render(<EquityChart data={sampleData} />)
     const chart = getByTestId('plotly-chart')
-    const style = JSON.parse(chart.getAttribute('data-plot-style') || '{}')
+    const style = JSON.parse(chart.dataset.plotStyle || '{}')
 
     expect(style.width).toBe('100%')
   })
   it('handles empty data gracefully', () => {
     const { getByTestId } = render(<EquityChart data={[]} />)
     const chart = getByTestId('plotly-chart')
-    const plotData = JSON.parse(chart.getAttribute('data-plot-data') || '[]')
+    const plotData = JSON.parse(chart.dataset.plotData || '[]')
 
     expect(plotData[0].x).toEqual([])
     expect(plotData[0].y).toEqual([])

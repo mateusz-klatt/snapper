@@ -94,7 +94,7 @@ class TestPaperOrderClientCoverage:
         result = await client.create_order(request)
         assert result.symbol == "BTC-USD"
         assert result.side == OrderSideEnum.BUY
-        assert result.amount == 0.5
+        assert result.amount == pytest.approx(0.5)
         assert result.status == OrderStatusEnum.OPEN
         assert result.client_order_id == "test_order_123"
         await client.disconnect()
@@ -121,9 +121,9 @@ class TestPaperOrderClientCoverage:
         result = await client.create_order(request)
         assert result.symbol == "ETH-USD"
         assert result.side == OrderSideEnum.SELL
-        assert result.amount == 2.0
+        assert result.amount == pytest.approx(2.0)
         assert result.status == OrderStatusEnum.OPEN
-        assert result.price == 3500.50
+        assert result.price == pytest.approx(3500.50)
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -228,7 +228,7 @@ class TestPaperOrderClientCoverage:
         result = await client.get_balance("USD")
         assert "USD" in result
         assert result["USD"].currency == "USD"
-        assert result["USD"].total == 10000.0
+        assert result["USD"].total == pytest.approx(10000.0)
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -262,7 +262,7 @@ class TestPaperOrderClientCoverage:
         result = await client.get_balance("XYZ")
         assert "XYZ" in result
         assert result["XYZ"].currency == "XYZ"
-        assert result["XYZ"].total == 0.0
+        assert result["XYZ"].total == pytest.approx(0.0)
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -327,7 +327,7 @@ class TestPaperOrderClientCoverage:
         async for execution in client.subscribe_executions():
             assert execution.symbol == "BTC-USD"
             assert execution.order_status == OrderStatusEnum.CLOSED
-            assert execution.cum_qty == 0.1
+            assert execution.cum_qty == pytest.approx(0.1)
             break
         await client.disconnect()
 
@@ -426,9 +426,9 @@ class TestPaperMarketDataMethods:
         await client.connect()
         ticker = await client.get_ticker("BTC-USD")
         assert ticker.symbol == "BTC-USD"
-        assert ticker.bid == 50000.0
-        assert ticker.ask == 50100.0
-        assert ticker.last == 50050.0
+        assert ticker.bid == pytest.approx(50000.0)
+        assert ticker.ask == pytest.approx(50100.0)
+        assert ticker.last == pytest.approx(50050.0)
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -458,8 +458,8 @@ class TestPaperMarketDataMethods:
         await client.connect()
         candles = await client.get_ohlcv("BTC-USD", "1m", limit=10)
         assert len(candles) == 1
-        assert candles[0].open == 50000.0
-        assert candles[0].close == 50500.0
+        assert candles[0].open == pytest.approx(50000.0)
+        assert candles[0].close == pytest.approx(50500.0)
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -495,7 +495,7 @@ class TestPaperMarketDataMethods:
         await client.connect()
         async for ticker in client.subscribe_ticker(["BTC-USD"]):
             assert ticker.symbol == "BTC-USD"
-            assert ticker.bid == 50000.0
+            assert ticker.bid == pytest.approx(50000.0)
             break
         await client.disconnect()
 
@@ -534,7 +534,7 @@ class TestPaperMarketDataMethods:
         await client.connect()
         async for candle in client.subscribe_candles(["BTC-USD"], "1m"):
             assert candle.symbol == "BTC-USD"
-            assert candle.open == 50000.0
+            assert candle.open == pytest.approx(50000.0)
             break
         await client.disconnect()
 
@@ -557,7 +557,7 @@ class TestPaperMarketDataMethods:
         await client.connect()
         async for trade in client.subscribe_trades(["BTC-USD"]):
             assert trade.symbol == "BTC-USD"
-            assert trade.price == 50000.0
+            assert trade.price == pytest.approx(50000.0)
             break
         await client.disconnect()
 

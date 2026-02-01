@@ -27,6 +27,7 @@ patterns for real-time data streaming.
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
 from typing import Literal
@@ -72,6 +73,10 @@ from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
+
+_CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
+_WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
+_WS_ORDER_TIMEOUT_SECONDS = 10.0
 
 
 class KrakenExchangeClient(ExchangeClientBase):
@@ -287,58 +292,85 @@ class KrakenExchangeClient(ExchangeClientBase):
             Exception: If order creation fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
-            ccxt_symbol = native_to_ccxt(request.symbol)
-            ccxt_params = {}
-            if request.client_order_id:
-                ccxt_params["clientOrderId"] = request.client_order_id
-            order_data = await self._with_retry(
-                self._ccxt_client.create_order,
-                ccxt_symbol,
-                request.type.value,
-                request.side.value,
-                float(request.amount),
-                float(request.price) if request.price else None,
-                ccxt_params,
-            )
-            order = self._convert_ccxt_order(order_data)
-            await self._log_order_to_db(request, order)
-            return order
+            return await self._create_order_via_ccxt(request)
         except ValueError as e:
             if "Unknown native symbol" not in str(e):
                 raise
             logger.info(
                 f"Symbol {request.symbol} not supported by CCXT, using native Kraken API fallback"
             )
-            try:
-                kraken_rest_symbol = native_to_kraken_rest(request.symbol)
-                trade_client = self._get_trade_client()
-                kraken_params: dict[str, Any] = {
-                    "ordertype": request.type.value,
-                    "side": request.side.value,
-                    "pair": kraken_rest_symbol,
-                    "volume": str(request.amount),
-                }
-                if request.price:
-                    kraken_params["price"] = str(request.price)
-                extra_params: dict[str, Any] = {}
-                if request.client_order_id:
-                    extra_params["cl_ord_id"] = str(request.client_order_id)
-                if kraken_rest_symbol.endswith("x/USD") or kraken_rest_symbol.endswith("x/EUR"):
-                    extra_params["asset_class"] = "tokenized_asset"
-                result = trade_client.create_order(
-                    **kraken_params,
-                    extra_params=extra_params or None,
-                )
-                order = self._convert_kraken_native_order(result, request)
-                await self._log_order_to_db(request, order)
-                return order
-            except Exception as fallback_error:
-                logger.error(f"Failed to create order with native Kraken API: {fallback_error}")
-                raise
+            return await self._create_order_via_native(request)
         except Exception as e:
             logger.error(f"Failed to create order: {e}")
+            raise
+
+    async def _create_order_via_ccxt(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
+        """Create order using CCXT client.
+
+        Args:
+            request: Order parameters.
+
+        Returns:
+            Created order snapshot.
+        """
+        ccxt_symbol = native_to_ccxt(request.symbol)
+        ccxt_params: dict[str, str] = {}
+        if request.client_order_id:
+            ccxt_params["clientOrderId"] = request.client_order_id
+        order_data = await self._with_retry(
+            self._ccxt_client.create_order,
+            ccxt_symbol,
+            request.type.value,
+            request.side.value,
+            float(request.amount),
+            float(request.price) if request.price else None,
+            ccxt_params,
+        )
+        order = self._convert_ccxt_order(order_data)
+        await self._log_order_to_db(request, order)
+        return order
+
+    async def _create_order_via_native(
+        self, request: ExchangeOrderRequest
+    ) -> ExchangeOrderSnapshot:
+        """Create order using native Kraken Trade API (fallback for unsupported CCXT symbols).
+
+        Args:
+            request: Order parameters.
+
+        Returns:
+            Created order snapshot.
+
+        Raises:
+            Exception: If native API order creation fails.
+        """
+        try:
+            kraken_rest_symbol = native_to_kraken_rest(request.symbol)
+            trade_client = self._get_trade_client()
+            kraken_params: dict[str, Any] = {
+                "ordertype": request.type.value,
+                "side": request.side.value,
+                "pair": kraken_rest_symbol,
+                "volume": str(request.amount),
+            }
+            if request.price:
+                kraken_params["price"] = str(request.price)
+            extra_params: dict[str, Any] = {}
+            if request.client_order_id:
+                extra_params["cl_ord_id"] = str(request.client_order_id)
+            if kraken_rest_symbol.endswith("x/USD") or kraken_rest_symbol.endswith("x/EUR"):
+                extra_params["asset_class"] = "tokenized_asset"
+            result = trade_client.create_order(
+                **kraken_params,
+                extra_params=extra_params or None,
+            )
+            order = self._convert_kraken_native_order(result, request)
+            await self._log_order_to_db(request, order)
+            return order
+        except Exception as fallback_error:
+            logger.error(f"Failed to create order with native Kraken API: {fallback_error}")
             raise
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
@@ -356,7 +388,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             Exception: If cancellation fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
             order_data = await self._with_retry(
@@ -397,13 +429,14 @@ class KrakenExchangeClient(ExchangeClientBase):
     async def create_order_ws(
         self,
         request: ExchangeOrderRequest,
-        timeout: float = 10.0,
     ) -> ExchangeOrderSnapshot:
         """Create order via WebSocket for lower latency.
 
+        Uses ``_WS_ORDER_TIMEOUT_SECONDS`` as the timeout; callers that need a
+        different deadline should wrap the call with ``asyncio.timeout()``.
+
         Args:
             request: Order parameters.
-            timeout: Maximum wait time for response in seconds.
 
         Returns:
             Created order snapshot.
@@ -413,7 +446,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             TimeoutError: If order creation times out.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         ws = await self._get_or_create_ws_client()
         if not ws or not self._ws_connected:
             raise RuntimeError("WebSocket not connected - call connect() first")
@@ -440,24 +473,55 @@ class KrakenExchangeClient(ExchangeClientBase):
                     "req_id": req_id,
                 },
             )
-            result = await asyncio.wait_for(future, timeout=timeout)
+            async with asyncio.timeout(_WS_ORDER_TIMEOUT_SECONDS):
+                result = await future
             return self._convert_ws_order_response(result, request)
         except TimeoutError as e:
-            logger.error(f"WebSocket order timeout after {timeout}s (req_id={req_id})")
-            raise TimeoutError(f"ExchangeOrderSnapshot creation timeout after {timeout}s") from e
+            logger.error(
+                f"WebSocket order timeout after {_WS_ORDER_TIMEOUT_SECONDS}s (req_id={req_id})"
+            )
+            raise TimeoutError(
+                f"ExchangeOrderSnapshot creation timeout after {_WS_ORDER_TIMEOUT_SECONDS}s"
+            ) from e
         finally:
             self._ws_order_requests.pop(req_id, None)
+
+    @staticmethod
+    def _build_canceled_order_snapshot(order_id: str) -> ExchangeOrderSnapshot:
+        """Build a canceled order snapshot with default values.
+
+        Args:
+            order_id: The cancelled order ID.
+
+        Returns:
+            ExchangeOrderSnapshot with CANCELED status.
+        """
+        return ExchangeOrderSnapshot(
+            id=order_id,
+            client_order_id=None,
+            symbol="",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=float("0"),
+            price=None,
+            status=OrderStatusEnum.CANCELED,
+            filled=float("0"),
+            remaining=float("0"),
+            timestamp=time.time(),
+            fee=None,
+        )
 
     async def cancel_order_ws(
         self,
         order_id: str,
-        timeout: float = 10.0,
     ) -> ExchangeOrderSnapshot:
         """Cancel order via WebSocket for lower latency.
 
+        Uses ``_WS_ORDER_TIMEOUT_SECONDS`` as the timeout; callers that need a
+        different deadline should wrap the call with ``asyncio.timeout()``.
+
         Args:
             order_id: Exchange order ID to cancel.
-            timeout: Maximum wait time for response in seconds.
 
         Returns:
             Cancelled order snapshot.
@@ -467,44 +531,31 @@ class KrakenExchangeClient(ExchangeClientBase):
             TimeoutError: If cancellation times out.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         ws = await self._get_or_create_ws_client()
         if not ws or not self._ws_connected:
             raise RuntimeError("WebSocket not connected - call connect() first")
         req_id = self._ws_req_id_counter
         self._ws_req_id_counter += 1
-        params: dict[str, Any] = {
-            "order_id": [order_id],
-        }
         future: asyncio.Future[dict[str, Any]] = asyncio.Future()
         self._ws_order_requests[req_id] = future
         try:
             await ws.send_message(
                 message={
                     "method": "cancel_order",
-                    "params": params,
+                    "params": {"order_id": [order_id]},
                     "req_id": req_id,
                 },
             )
-            await asyncio.wait_for(future, timeout=timeout)
-            return ExchangeOrderSnapshot(
-                id=order_id,
-                client_order_id=None,
-                symbol="",
-                side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
-                amount=float("0"),
-                price=None,
-                status=OrderStatusEnum.CANCELED,
-                filled=float("0"),
-                remaining=float("0"),
-                timestamp=time.time(),
-                fee=None,
-            )
+            async with asyncio.timeout(_WS_ORDER_TIMEOUT_SECONDS):
+                await future
+            return self._build_canceled_order_snapshot(order_id)
         except TimeoutError as e:
-            logger.error(f"WebSocket cancel timeout after {timeout}s (req_id={req_id})")
+            logger.error(
+                f"WebSocket cancel timeout after {_WS_ORDER_TIMEOUT_SECONDS}s (req_id={req_id})"
+            )
             raise TimeoutError(
-                f"ExchangeOrderSnapshot cancellation timeout after {timeout}s"
+                f"ExchangeOrderSnapshot cancellation timeout after {_WS_ORDER_TIMEOUT_SECONDS}s"
             ) from e
         finally:
             self._ws_order_requests.pop(req_id, None)
@@ -524,7 +575,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             Exception: If order fetch fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
             order_data = await self._with_retry(
@@ -536,6 +587,31 @@ class KrakenExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
             raise
+
+    async def _fetch_orders_from_exchange(
+        self,
+        symbol: str | None,
+        status: OrderStatusEnum | None,
+        limit: int | None,
+    ) -> list[dict[str, Any]]:
+        """Fetch raw order data from exchange via CCXT.
+
+        Args:
+            symbol: Filter by trading pair (native format).
+            status: If OPEN, fetches only open orders.
+            limit: Maximum number of orders to return.
+
+        Returns:
+            List of raw CCXT order dictionaries.
+        """
+        ccxt_symbol = native_to_ccxt(symbol) if symbol else None
+        fetch_func = (
+            self._ccxt_client.fetch_open_orders
+            if status == OrderStatusEnum.OPEN
+            else self._ccxt_client.fetch_orders
+        )
+        result: list[dict[str, Any]] = await self._with_retry(fetch_func, ccxt_symbol, None, limit)
+        return result
 
     async def get_orders(
         self,
@@ -558,24 +634,9 @@ class KrakenExchangeClient(ExchangeClientBase):
             Exception: If orders fetch fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
-            if status == OrderStatusEnum.OPEN:
-                ccxt_symbol = native_to_ccxt(symbol) if symbol else None
-                orders_data = await self._with_retry(
-                    self._ccxt_client.fetch_open_orders,
-                    ccxt_symbol,
-                    None,
-                    limit,
-                )
-            else:
-                ccxt_symbol = native_to_ccxt(symbol) if symbol else None
-                orders_data = await self._with_retry(
-                    self._ccxt_client.fetch_orders,
-                    ccxt_symbol,
-                    None,
-                    limit,
-                )
+            orders_data = await self._fetch_orders_from_exchange(symbol, status, limit)
             orders = [self._convert_ccxt_order(order) for order in orders_data]
             if status:
                 orders = [order for order in orders if order.status == status]
@@ -641,7 +702,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             await self._ensure_ws_connected()
-            assert self._ws_client is not None, "WebSocket client should be connected"
+            assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
             if symbols == ["*"]:
                 ws_symbols = ["*"]
             else:
@@ -685,7 +746,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             await self._ensure_ws_connected()
-            assert self._ws_client is not None, "WebSocket client should be connected"
+            assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
             if symbols == ["*"]:
                 ws_symbols = ["*"]
             else:
@@ -740,7 +801,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             await self._ensure_ws_connected()
-            assert self._ws_client is not None, "WebSocket client should be connected"
+            assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
             if symbols == ["*"]:
                 ws_symbols = ["*"]
             else:
@@ -835,7 +896,7 @@ class KrakenExchangeClient(ExchangeClientBase):
     ) -> AsyncIterator[dict[str, Any]]:
         try:
             await self._ensure_ws_connected()
-            assert self._ws_client is not None, "WebSocket client should be connected"
+            assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
             logger.info("Subscribing to instruments (public channel, raw={})", raw)
             async with self._ws_client as ws:
                 params = KrakenInstrumentSubscribeParamsSchema(snapshot=True).as_params()
@@ -863,146 +924,248 @@ class KrakenExchangeClient(ExchangeClientBase):
             raise
 
     async def _on_message(self, message: dict[str, Any] | list[Any]) -> None:
+        """Route incoming WebSocket messages to appropriate handlers.
+
+        Dispatches based on message structure:
+        - Order request responses (req_id present)
+        - Subscription acknowledgements (method=subscribe)
+        - Channel data messages (channel + data present)
+
+        Args:
+            message: Raw WebSocket message (dict or list).
+        """
         try:
-            if isinstance(message, dict) and "req_id" in message:
-                req_id = message["req_id"]
-                if req_id in self._ws_order_requests:
-                    future = self._ws_order_requests[req_id]
-                    if not future.done():
-                        if message.get("success"):
-                            future.set_result(message)
-                        else:
-                            error_msg = message.get("error", "Unknown error")
-                            future.set_exception(
-                                Exception(f"ExchangeOrderSnapshot request failed: {error_msg}")
-                            )
-                    return
-            if (
-                isinstance(message, dict)
-                and message.get("method") == "subscribe"
-                and isinstance(message.get("result"), dict)
-            ):
-                result_dict = cast(dict[str, Any], message["result"])
-                channel_name = result_dict.get("channel")
-                if channel_name == "trade":
-                    try:
-                        trade_ack = KrakenTradeSubscriptionAckSchema.model_validate(message)
-                        if not trade_ack.success:
-                            logger.warning(
-                                "Trade subscription failed symbol={} error={}",
-                                result_dict.get("symbol"),
-                                trade_ack.error,
-                            )
-                    except ValidationError:
-                        logger.debug(
-                            "Received non-standard trade control message: {}",
-                            message,
-                        )
-                    return
-                if channel_name == "executions":
-                    try:
-                        execution_ack = KrakenExecutionSubscriptionAckSchema.model_validate(message)
-                        if not execution_ack.success:
-                            logger.warning(
-                                "Executions subscription failed (orders={} trades={}) error={}",
-                                execution_ack.result.snap_orders,
-                                execution_ack.result.snap_trades,
-                                execution_ack.error,
-                            )
-                        if execution_ack.warnings:
-                            for warning in execution_ack.warnings:
-                                logger.warning("Execution subscription warning: {}", warning)
-                    except ValidationError:
-                        logger.debug(
-                            "Received non-standard executions control message: {}",
-                            message,
-                        )
-                    return
-                if channel_name == "ohlc":
-                    try:
-                        ohlc_ack = KrakenOhlcSubscriptionAckSchema.model_validate(message)
-                        if not ohlc_ack.success:
-                            logger.warning(
-                                "OHLC subscription failed symbol={} interval={} error={}",
-                                ohlc_ack.result.symbol,
-                                ohlc_ack.result.interval,
-                                ohlc_ack.error,
-                            )
-                        if ohlc_ack.result.warnings:
-                            for warning in ohlc_ack.result.warnings:
-                                logger.warning(f"OHLC subscription warning: {warning}")
-                    except ValidationError:
-                        logger.debug(
-                            "Received non-standard OHLC control message: {}",
-                            message,
-                        )
-                    return
-            if isinstance(message, dict) and "channel" in message and "data" in message:
-                message_dict: dict[str, Any] = message
-                channel = message_dict["channel"]
-                data = message_dict["data"]
-                if channel == "ohlc":
-                    try:
-                        if isinstance(data, list):
-                            candle_list = parse_kraken_candle_list(data)
-                        else:
-                            candle_list = []
-                        for candle_data in candle_list:
-                            if candle_data.interval in self._candle_queues:
-                                await self._candle_queues[candle_data.interval].put(candle_data)
-                            else:
-                                for queue in self._candle_queues.values():
-                                    await queue.put(candle_data)
-                    except (ValidationError, ValueError) as e:
-                        logger.warning(f"Failed to parse candle data: {e}")
-                elif channel == "ticker":
-                    try:
-                        ticker_list = parse_kraken_ticker_list(data)
-                        for ticker_data in ticker_list:
-                            await self._tick_queue.put(ticker_data)
-                    except (ValidationError, ValueError) as e:
-                        logger.warning(f"Failed to parse ticker data: {e}")
-                elif channel == "trade":
-                    try:
-                        trade_list = parse_kraken_trade_list(data)
-                        for trade_data in trade_list:
-                            await self._trade_queue.put(trade_data)
-                    except (ValidationError, ValueError) as e:
-                        logger.warning(f"Failed to parse trade data: {e}")
-                elif channel == "executions":
-                    try:
-                        execution_list = parse_kraken_execution_list(data)
-                        for execution_data in execution_list:
-                            await self._execution_queue.put(execution_data)
-                    except (ValidationError, ValueError) as e:
-                        logger.warning(f"Failed to parse execution data: {e}")
-                elif channel == "instrument":
-                    try:
-                        data = message_dict.get("data")
-                        if data is None:
-                            return
-                        if not isinstance(data, dict):
-                            logger.warning(f"Unexpected instrument data format: {type(data)}")
-                            return
-                        pairs_data: list[dict[str, Any]] = data.get("pairs", [])
-                        for pair_dict in pairs_data:
-                            try:
-                                validated = KrakenInstrumentPairSchema.model_validate(pair_dict)
-                                await self._raw_instrument_queue.put(
-                                    validated.model_dump(by_alias=True)
-                                )
-                            except ValidationError as e:
-                                logger.warning(f"Invalid instrument data, skipping: {e}")
-                                continue
-                            try:
-                                instrument_pair = parse_kraken_instrument_list([pair_dict])[0]
-                                await self._instrument_queue.put(instrument_pair)
-                            except (ValidationError, ValueError, IndexError) as e:
-                                logger.debug(f"Skipping instrument parse (raw available): {e}")
-                    except Exception as e:
-                        logger.warning(f"Failed to process instrument data: {e}")
+            if not isinstance(message, dict):
+                return
+            if "req_id" in message:
+                self._handle_order_request_response(message)
+                return
+            if message.get("method") == "subscribe" and isinstance(message.get("result"), dict):
+                self._handle_subscription_ack(message)
+                return
+            if "channel" in message and "data" in message:
+                await self._handle_channel_data(message)
         except Exception as e:
             logger.error(f"Error processing WebSocket message: {e}")
+
+    def _handle_order_request_response(self, message: dict[str, Any]) -> None:
+        """Resolve pending order request future from WebSocket response.
+
+        Args:
+            message: WebSocket message containing req_id.
+        """
+        req_id = message["req_id"]
+        if req_id not in self._ws_order_requests:
+            return
+        future = self._ws_order_requests[req_id]
+        if future.done():
+            return
+        if message.get("success"):
+            future.set_result(message)
+        else:
+            error_msg = message.get("error", "Unknown error")
+            future.set_exception(Exception(f"ExchangeOrderSnapshot request failed: {error_msg}"))
+
+    def _handle_subscription_ack(self, message: dict[str, Any]) -> None:
+        """Process subscription acknowledgement messages by channel type.
+
+        Args:
+            message: WebSocket subscription ack message.
+        """
+        result_dict = cast(dict[str, Any], message["result"])
+        channel_name = result_dict.get("channel")
+        ack_handlers: dict[str, Callable[..., None]] = {
+            "trade": lambda: self._handle_trade_subscription_ack(message, result_dict),
+            "executions": lambda: self._handle_execution_subscription_ack(message),
+            "ohlc": lambda: self._handle_ohlc_subscription_ack(message),
+        }
+        handler = ack_handlers.get(channel_name or "")
+        if handler:
+            handler()
+
+    def _handle_trade_subscription_ack(
+        self, message: dict[str, Any], result_dict: dict[str, Any]
+    ) -> None:
+        """Log trade subscription acknowledgement result.
+
+        Args:
+            message: Full subscription ack message.
+            result_dict: The result sub-dict from the ack.
+        """
+        try:
+            trade_ack = KrakenTradeSubscriptionAckSchema.model_validate(message)
+            if not trade_ack.success:
+                logger.warning(
+                    "Trade subscription failed symbol={} error={}",
+                    result_dict.get("symbol"),
+                    trade_ack.error,
+                )
+        except ValidationError:
+            logger.debug(
+                "Received non-standard trade control message: {}",
+                message,
+            )
+
+    def _handle_execution_subscription_ack(self, message: dict[str, Any]) -> None:
+        """Log execution subscription acknowledgement result.
+
+        Args:
+            message: Full subscription ack message.
+        """
+        try:
+            execution_ack = KrakenExecutionSubscriptionAckSchema.model_validate(message)
+            if not execution_ack.success:
+                logger.warning(
+                    "Executions subscription failed (orders={} trades={}) error={}",
+                    execution_ack.result.snap_orders,
+                    execution_ack.result.snap_trades,
+                    execution_ack.error,
+                )
+            if execution_ack.warnings:
+                for warning in execution_ack.warnings:
+                    logger.warning("Execution subscription warning: {}", warning)
+        except ValidationError:
+            logger.debug(
+                "Received non-standard executions control message: {}",
+                message,
+            )
+
+    def _handle_ohlc_subscription_ack(self, message: dict[str, Any]) -> None:
+        """Log OHLC subscription acknowledgement result.
+
+        Args:
+            message: Full subscription ack message.
+        """
+        try:
+            ohlc_ack = KrakenOhlcSubscriptionAckSchema.model_validate(message)
+            if not ohlc_ack.success:
+                logger.warning(
+                    "OHLC subscription failed symbol={} interval={} error={}",
+                    ohlc_ack.result.symbol,
+                    ohlc_ack.result.interval,
+                    ohlc_ack.error,
+                )
+            if ohlc_ack.result.warnings:
+                for warning in ohlc_ack.result.warnings:
+                    logger.warning(f"OHLC subscription warning: {warning}")
+        except ValidationError:
+            logger.debug(
+                "Received non-standard OHLC control message: {}",
+                message,
+            )
+
+    async def _handle_channel_data(self, message_dict: dict[str, Any]) -> None:
+        """Dispatch channel data messages to channel-specific handlers.
+
+        Args:
+            message_dict: WebSocket message with channel and data fields.
+        """
+        channel = message_dict["channel"]
+        data = message_dict["data"]
+        data_handlers: dict[str, Callable[[Any], Awaitable[None]]] = {
+            "ohlc": self._handle_ohlc_data,
+            "ticker": self._handle_ticker_data,
+            "trade": self._handle_trade_data,
+            "executions": self._handle_executions_data,
+        }
+        handler = data_handlers.get(channel)
+        if handler:
+            await handler(data)
+        elif channel == "instrument":
+            await self._handle_instrument_data(message_dict)
+
+    async def _handle_ohlc_data(self, data: Any) -> None:
+        """Parse and enqueue OHLC candle data.
+
+        Args:
+            data: Raw OHLC data from WebSocket.
+        """
+        try:
+            candle_list = parse_kraken_candle_list(data) if isinstance(data, list) else []
+            for candle_data in candle_list:
+                if candle_data.interval in self._candle_queues:
+                    await self._candle_queues[candle_data.interval].put(candle_data)
+                else:
+                    for queue in self._candle_queues.values():
+                        await queue.put(candle_data)
+        except ValueError as e:
+            logger.warning(f"Failed to parse candle data: {e}")
+
+    async def _handle_ticker_data(self, data: Any) -> None:
+        """Parse and enqueue ticker data.
+
+        Args:
+            data: Raw ticker data from WebSocket.
+        """
+        try:
+            ticker_list = parse_kraken_ticker_list(data)
+            for ticker_data in ticker_list:
+                await self._tick_queue.put(ticker_data)
+        except ValueError as e:
+            logger.warning(f"Failed to parse ticker data: {e}")
+
+    async def _handle_trade_data(self, data: Any) -> None:
+        """Parse and enqueue trade data.
+
+        Args:
+            data: Raw trade data from WebSocket.
+        """
+        try:
+            trade_list = parse_kraken_trade_list(data)
+            for trade_data in trade_list:
+                await self._trade_queue.put(trade_data)
+        except ValueError as e:
+            logger.warning(f"Failed to parse trade data: {e}")
+
+    async def _handle_executions_data(self, data: Any) -> None:
+        """Parse and enqueue execution data.
+
+        Args:
+            data: Raw execution data from WebSocket.
+        """
+        try:
+            execution_list = parse_kraken_execution_list(data)
+            for execution_data in execution_list:
+                await self._execution_queue.put(execution_data)
+        except ValueError as e:
+            logger.warning(f"Failed to parse execution data: {e}")
+
+    async def _handle_instrument_data(self, message_dict: dict[str, Any]) -> None:
+        """Parse and enqueue instrument pair data.
+
+        Args:
+            message_dict: Full WebSocket message with instrument data.
+        """
+        try:
+            data = message_dict.get("data")
+            if data is None:
+                return
+            if not isinstance(data, dict):
+                logger.warning(f"Unexpected instrument data format: {type(data)}")
+                return
+            pairs_data: list[dict[str, Any]] = data.get("pairs", [])
+            for pair_dict in pairs_data:
+                await self._process_instrument_pair(pair_dict)
+        except Exception as e:
+            logger.warning(f"Failed to process instrument data: {e}")
+
+    async def _process_instrument_pair(self, pair_dict: dict[str, Any]) -> None:
+        """Validate and enqueue a single instrument pair.
+
+        Args:
+            pair_dict: Raw instrument pair dictionary from WebSocket.
+        """
+        try:
+            validated = KrakenInstrumentPairSchema.model_validate(pair_dict)
+            await self._raw_instrument_queue.put(validated.model_dump(by_alias=True))
+        except ValidationError as e:
+            logger.warning(f"Invalid instrument data, skipping: {e}")
+            return
+        try:
+            instrument_pair = parse_kraken_instrument_list([pair_dict])[0]
+            await self._instrument_queue.put(instrument_pair)
+        except (ValueError, IndexError) as e:
+            logger.debug(f"Skipping instrument parse (raw available): {e}")
 
     async def _get_or_create_ws_client(self) -> Any:
         if not self.api_key or not self.api_secret:
@@ -1052,6 +1215,20 @@ class KrakenExchangeClient(ExchangeClientBase):
         return self._trade_client
 
     async def _with_retry(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Execute function with retry and circuit breaker logic.
+
+        Args:
+            func: Function to call (sync or async).
+            *args: Positional arguments for func.
+            **kwargs: Keyword arguments for func.
+
+        Returns:
+            Result of the function call.
+
+        Raises:
+            RuntimeError: If circuit breaker is open.
+            Exception: If all retries exhausted or unexpected error.
+        """
         if time.time() < self._circuit_open_until:
             raise RuntimeError("Circuit breaker open")
         max_retries = 3
@@ -1059,33 +1236,82 @@ class KrakenExchangeClient(ExchangeClientBase):
         attempt = 0
         while True:
             try:
-                if asyncio.iscoroutinefunction(func):
-                    result = await func(*args, **kwargs)
-                else:
-                    result = func(*args, **kwargs)
+                result = await self._invoke_func(func, *args, **kwargs)
                 self._circuit_failures = 0
                 return result
             except ccxt.RateLimitExceeded:
-                logger.warning(f"Rate limit exceeded, retrying in {base_delay * (2 ** attempt)}s")
-                if attempt < max_retries - 1:
-                    attempt += 1
-                    await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-                    continue
-                raise
+                attempt = await self._handle_rate_limit(attempt, max_retries, base_delay)
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
-                logger.warning(f"Network error: {e}, retrying in {base_delay * (2 ** attempt)}s")
-                self._circuit_failures += 1
-                if attempt < max_retries - 1:
-                    attempt += 1
-                    await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-                    continue
-                if self._circuit_failures >= self._max_failures:
-                    self._circuit_open_until = time.time() + self._circuit_timeout
-                    logger.error("Circuit breaker opened due to repeated failures")
-                raise
+                attempt = await self._handle_network_error(e, attempt, max_retries, base_delay)
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
                 raise
+
+    @staticmethod
+    async def _invoke_func(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Invoke a function, awaiting if it is a coroutine.
+
+        Args:
+            func: Function to call.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
+
+        Returns:
+            Result of the function call.
+        """
+        if asyncio.iscoroutinefunction(func):
+            return await func(*args, **kwargs)
+        return func(*args, **kwargs)
+
+    @staticmethod
+    async def _handle_rate_limit(attempt: int, max_retries: int, base_delay: float) -> int:
+        """Handle rate limit exceeded by sleeping with exponential backoff.
+
+        Args:
+            attempt: Current attempt number.
+            max_retries: Maximum number of retries.
+            base_delay: Base delay in seconds.
+
+        Returns:
+            Incremented attempt number.
+
+        Raises:
+            ccxt.RateLimitExceeded: If max retries exhausted.
+        """
+        logger.warning(f"Rate limit exceeded, retrying in {base_delay * (2 ** attempt)}s")
+        if attempt < max_retries - 1:
+            attempt += 1
+            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            return attempt
+        raise ccxt.RateLimitExceeded("Rate limit exceeded after max retries")
+
+    async def _handle_network_error(
+        self, error: Exception, attempt: int, max_retries: int, base_delay: float
+    ) -> int:
+        """Handle network errors with retry and circuit breaker.
+
+        Args:
+            error: The network error that occurred.
+            attempt: Current attempt number.
+            max_retries: Maximum number of retries.
+            base_delay: Base delay in seconds.
+
+        Returns:
+            Incremented attempt number.
+
+        Raises:
+            Exception: If max retries exhausted (re-raises original).
+        """
+        logger.warning(f"Network error: {error}, retrying in {base_delay * (2 ** attempt)}s")
+        self._circuit_failures += 1
+        if attempt < max_retries - 1:
+            attempt += 1
+            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            return attempt
+        if self._circuit_failures >= self._max_failures:
+            self._circuit_open_until = time.time() + self._circuit_timeout
+            logger.error("Circuit breaker opened due to repeated failures")
+        raise
 
     def _convert_ccxt_order(self, ccxt_order: dict[str, Any]) -> ExchangeOrderSnapshot:
         status_map = {

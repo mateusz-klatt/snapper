@@ -44,7 +44,7 @@ describe('QueryErrorFallback', () => {
     expect(screen.getByText('The requested resource was not found.')).toBeInTheDocument()
   })
   it('uses default message when error message is empty', () => {
-    const error = new Error('')
+    const error = { message: '', name: 'EmptyMessageError' } as Error
     const refetch = vi.fn()
 
     render(<QueryErrorFallback error={error} refetch={refetch} />)

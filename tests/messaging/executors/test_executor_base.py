@@ -670,8 +670,9 @@ async def test_execution_handler_runtime_error_logs(monkeypatch: pytest.MonkeyPa
 
         def subscribe_executions(self) -> AsyncIterator[Any]:
             async def _gen() -> AsyncIterator[Any]:
+                for _ in []:
+                    yield
                 raise RuntimeError("ws fail")
-                yield None
 
             return _gen()
 
@@ -880,7 +881,7 @@ async def test_orphan_duplicate_updates_timestamp_without_relogging() -> None:
     await ex._process_execution(new_execution)
     assert "dup_ex" in ex.orphaned_executions
     stored_execution, stored_time = ex.orphaned_executions["dup_ex"]
-    assert stored_execution.cum_qty == 2.0
+    assert stored_execution.cum_qty == pytest.approx(2.0)
     assert stored_time >= initial_time
 
 
@@ -1188,8 +1189,9 @@ class TestExecutionHandler:
         mock_exchange_client = AsyncMock()
 
         async def raise_not_implemented() -> Any:
+            for _ in []:
+                yield
             raise NotImplementedError("subscribe_executions not supported")
-            yield
 
         mock_exchange_client.subscribe_executions = raise_not_implemented
         service_any.exchange_client = mock_exchange_client
@@ -1212,8 +1214,9 @@ class TestExecutionHandler:
         mock_exchange_client = AsyncMock()
 
         async def raise_error() -> Any:
+            for _ in []:
+                yield
             raise RuntimeError("Connection lost")
-            yield
 
         mock_exchange_client.subscribe_executions = raise_error
         service_any.exchange_client = mock_exchange_client
@@ -1336,6 +1339,7 @@ class TestProcessOrder:
         published_statuses: list[tuple[Any, str]] = []
 
         async def track_publish_fill(fill: Any) -> None:
+            """Intentionally empty async stub for testing."""
             pass
 
         async def track_publish_order_status(order: Any, status: str) -> None:
@@ -1806,8 +1810,9 @@ class TestExecutionHandlerEdgeCases:
         mock_client.supports_websocket_executions = True
 
         async def raising_generator() -> Any:
+            for _ in []:
+                yield
             raise NotImplementedError("subscribe_executions not supported")
-            yield
 
         mock_client.subscribe_executions = raising_generator
         service_any.exchange_client = mock_client
@@ -1976,10 +1981,11 @@ class TestStartWithAsyncContextManager:
                 return_value=mock_settings,
             ),
             patch("zmq.asyncio.Context"),
+            pytest.raises(asyncio.CancelledError),
         ):
             await service.start()
-            assert call_count == 1
-            assert mock_client._entered is False
+        assert call_count == 1
+        assert mock_client._entered is False
 
 
 class TestOrderHandlerWrongExchange:
@@ -2063,8 +2069,9 @@ class TestExecutionHandlerNotImplementedError:
         service_any.running = True
 
         async def subscribe_raises_not_implemented() -> Any:
+            for _ in []:
+                yield
             raise NotImplementedError("Exchange doesn't support execution streaming")
-            yield
 
         mock_exchange = MagicMock()
         mock_exchange.supports_websocket_executions = True
@@ -2102,8 +2109,9 @@ class TestExecutionHandlerGeneralException:
         service_any.running = True
 
         async def subscribe_raises_runtime_error() -> Any:
+            for _ in []:
+                yield
             raise RuntimeError("Connection lost")
-            yield
 
         mock_exchange = MagicMock()
         mock_exchange.supports_websocket_executions = True
@@ -2130,8 +2138,9 @@ class TestExecutionHandlerGeneralException:
         service_any.running = False
 
         async def subscribe_raises_runtime_error() -> Any:
+            for _ in []:
+                yield
             raise RuntimeError("Connection lost")
-            yield
 
         mock_exchange = MagicMock()
         mock_exchange.supports_websocket_executions = True
@@ -2933,6 +2942,7 @@ class TestExecutorCoverage:
                 exc: BaseException | None,
                 tb: TracebackType | None,
             ) -> None:
+                """No cleanup required on context exit."""
                 pass
 
         mock_exchange_client = MockExchangeClient()
@@ -3117,7 +3127,7 @@ class TestExecutorCoverage:
         service_any.subscriber = None
 
         async def sleep_side_effect(delay: float) -> None:
-            assert delay == 0.1
+            assert delay == pytest.approx(0.1)
             service_any.running = False
 
         with patch(
@@ -3629,9 +3639,9 @@ class TestExecutorWebSocketExecutions:
             assert fill.client_order_id == "test-order-123"
             assert fill.exchange_order_id == "KRAKEN-ORDER-ABC123"
             assert fill.instrument == "BTC-USD"
-            assert fill.size == 0.1
-            assert fill.price == 45123.50
-            assert fill.fee == 4.51
+            assert fill.size == pytest.approx(0.1)
+            assert fill.price == pytest.approx(45123.50)
+            assert fill.fee == pytest.approx(4.51)
             assert fill.fee_asset == "USD"
             assert fill.status == "filled"
             assert order.client_order_id not in service.pending_orders
@@ -3680,7 +3690,7 @@ class TestExecutorWebSocketExecutions:
         with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
             fill: FillEnvelope = mock_publish.call_args[0][0]
-            assert fill.size == 0.5
+            assert fill.size == pytest.approx(0.5)
             assert fill.status == "partial"
             assert order.client_order_id in service.pending_orders
 
@@ -3869,8 +3879,9 @@ class TestExecutorWebSocketExecutions:
         service_any.exchange_client = mock_exchange_client
 
         async def mock_subscribe_executions() -> AsyncIterator[Any]:
+            for _ in []:
+                yield
             raise NotImplementedError("Client does not support execution streaming")
-            yield
 
         mock_exchange_client.subscribe_executions = mock_subscribe_executions
         handler_task = asyncio.create_task(service_any._execution_handler())
@@ -3996,8 +4007,8 @@ class TestCancelReplaceHandlers:
         await service_any._handle_replace_command(payload, "kraken", "BTC-USD")
         service_any._process_replace.assert_awaited_once()
         replace_msg = service_any._process_replace.call_args[0][0]
-        assert replace_msg.new_quantity == 0.5
-        assert replace_msg.new_price == 48000.0
+        assert replace_msg.new_quantity == pytest.approx(0.5)
+        assert replace_msg.new_price == pytest.approx(48000.0)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")

@@ -6,12 +6,12 @@ interface LoginFormProps {
   className?: string
 }
 
-const LoginForm: React.FC<LoginFormProps> = ({ onSuccess, className = '' }) => {
+const LoginForm: React.FC<Readonly<LoginFormProps>> = ({ onSuccess, className = '' }) => {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const { login, isLoading, error, clearError } = useAuth()
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault()
     clearError()
 

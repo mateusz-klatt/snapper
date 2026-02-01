@@ -53,14 +53,14 @@ def test_ohlc_from_trades_basic() -> None:
     candles = ohlc_from_trades(trades, "1m")
     assert len(candles) == 2
     c0 = candles[0]
-    assert c0["open"] == 100.0
-    assert c0["high"] == 101.0
-    assert c0["low"] == 99.0
-    assert c0["close"] == 99.0
-    assert c0["volume"] == 4.5
+    assert c0["open"] == pytest.approx(100.0)
+    assert c0["high"] == pytest.approx(101.0)
+    assert c0["low"] == pytest.approx(99.0)
+    assert c0["close"] == pytest.approx(99.0)
+    assert c0["volume"] == pytest.approx(4.5)
     c1 = candles[1]
-    assert c1["open"] == 102.0
-    assert c1["close"] == 102.0
+    assert c1["open"] == pytest.approx(102.0)
+    assert c1["close"] == pytest.approx(102.0)
 
 
 def test_floor_ts_invalid_timeframe() -> None:
@@ -103,15 +103,15 @@ def test_ohlc_from_trades_multiple_timeframes() -> None:
     assert len(candles) == 2
     c0 = candles[0]
     assert c0["ts"] == datetime(2024, 1, 1, 12, 0, 0)
-    assert c0["open"] == 100.0
-    assert c0["high"] == 110.0
-    assert c0["low"] == 100.0
-    assert c0["close"] == 110.0
-    assert c0["volume"] == 3.0
+    assert c0["open"] == pytest.approx(100.0)
+    assert c0["high"] == pytest.approx(110.0)
+    assert c0["low"] == pytest.approx(100.0)
+    assert c0["close"] == pytest.approx(110.0)
+    assert c0["volume"] == pytest.approx(3.0)
     c1 = candles[1]
     assert c1["ts"] == datetime(2024, 1, 1, 12, 5, 0)
-    assert c1["open"] == 105.0
-    assert c1["close"] == 105.0
+    assert c1["open"] == pytest.approx(105.0)
+    assert c1["close"] == pytest.approx(105.0)
 
 
 class TestTimeBarUtilities:
@@ -211,11 +211,11 @@ class TestTimeBarUtilities:
         candle = candles[0]
         assert candle["ts"] == datetime(2023, 1, 1, 12, 0, 0, 0, tzinfo=UTC)
         assert candle["timeframe"] == "1m"
-        assert candle["open"] == 100.0
-        assert candle["high"] == 102.0
-        assert candle["low"] == 99.0
-        assert candle["close"] == 102.0
-        assert candle["volume"] == 5.0
+        assert candle["open"] == pytest.approx(100.0)
+        assert candle["high"] == pytest.approx(102.0)
+        assert candle["low"] == pytest.approx(99.0)
+        assert candle["close"] == pytest.approx(102.0)
+        assert candle["volume"] == pytest.approx(5.0)
 
     def test_ohlc_from_trades_multiple_buckets(self) -> None:
         """Test ohlc_from_trades with trades in multiple buckets.
@@ -244,17 +244,17 @@ class TestTimeBarUtilities:
         candles = ohlc_from_trades(trades, "1m")
         assert len(candles) == 3
         assert candles[0]["ts"] == datetime(2023, 1, 1, 12, 0, 0, 0, tzinfo=UTC)
-        assert candles[0]["open"] == 100.0
-        assert candles[0]["close"] == 100.0
-        assert candles[0]["volume"] == 1.0
+        assert candles[0]["open"] == pytest.approx(100.0)
+        assert candles[0]["close"] == pytest.approx(100.0)
+        assert candles[0]["volume"] == pytest.approx(1.0)
         assert candles[1]["ts"] == datetime(2023, 1, 1, 12, 1, 0, 0, tzinfo=UTC)
-        assert candles[1]["open"] == 101.0
-        assert candles[1]["close"] == 101.0
-        assert candles[1]["volume"] == 0.5
+        assert candles[1]["open"] == pytest.approx(101.0)
+        assert candles[1]["close"] == pytest.approx(101.0)
+        assert candles[1]["volume"] == pytest.approx(0.5)
         assert candles[2]["ts"] == datetime(2023, 1, 1, 12, 2, 0, 0, tzinfo=UTC)
-        assert candles[2]["open"] == 99.0
-        assert candles[2]["close"] == 99.0
-        assert candles[2]["volume"] == 2.0
+        assert candles[2]["open"] == pytest.approx(99.0)
+        assert candles[2]["close"] == pytest.approx(99.0)
+        assert candles[2]["volume"] == pytest.approx(2.0)
 
     def test_ohlc_from_trades_empty(self) -> None:
         """Test ohlc_from_trades returns empty for empty input.
@@ -283,11 +283,11 @@ class TestTimeBarUtilities:
         candles = ohlc_from_trades(trades, "1m")
         assert len(candles) == 1
         candle = candles[0]
-        assert candle["open"] == 100.0
-        assert candle["high"] == 100.0
-        assert candle["low"] == 100.0
-        assert candle["close"] == 100.0
-        assert candle["volume"] == 1.0
+        assert candle["open"] == pytest.approx(100.0)
+        assert candle["high"] == pytest.approx(100.0)
+        assert candle["low"] == pytest.approx(100.0)
+        assert candle["close"] == pytest.approx(100.0)
+        assert candle["volume"] == pytest.approx(1.0)
 
     def test_ohlc_from_trades_hour_timeframe(self) -> None:
         """Test ohlc_from_trades with 1h timeframe.
@@ -316,9 +316,9 @@ class TestTimeBarUtilities:
         candles = ohlc_from_trades(trades, "1h")
         assert len(candles) == 2
         assert candles[0]["ts"] == datetime(2023, 1, 1, 12, 0, 0, 0, tzinfo=UTC)
-        assert candles[0]["volume"] == 1.5
+        assert candles[0]["volume"] == pytest.approx(1.5)
         assert candles[1]["ts"] == datetime(2023, 1, 1, 13, 0, 0, 0, tzinfo=UTC)
-        assert candles[1]["volume"] == 2.0
+        assert candles[1]["volume"] == pytest.approx(2.0)
 
     def test_ohlc_from_trades_precision(self) -> None:
         """Test ohlc_from_trades preserves decimal precision.
@@ -342,10 +342,10 @@ class TestTimeBarUtilities:
         candles = ohlc_from_trades(trades, "1m")
         assert len(candles) == 1
         candle = candles[0]
-        assert candle["open"] == 100.123456
-        assert candle["high"] == 101.987654
-        assert candle["low"] == 100.123456
-        assert candle["close"] == 101.987654
+        assert candle["open"] == pytest.approx(100.123456)
+        assert candle["high"] == pytest.approx(101.987654)
+        assert candle["low"] == pytest.approx(100.123456)
+        assert candle["close"] == pytest.approx(101.987654)
 
     def test_ohlc_from_trades_large_values(self) -> None:
         """Test ohlc_from_trades handles large values.
@@ -369,9 +369,9 @@ class TestTimeBarUtilities:
         candles = ohlc_from_trades(trades, "1m")
         assert len(candles) == 1
         candle = candles[0]
-        assert candle["open"] == 50000.0
-        assert candle["high"] == 51000.0
-        assert candle["volume"] == 300.0
+        assert candle["open"] == pytest.approx(50000.0)
+        assert candle["high"] == pytest.approx(51000.0)
+        assert candle["volume"] == pytest.approx(300.0)
 
     def test_ohlc_from_trades_chronological_order(self) -> None:
         """Test ohlc_from_trades with out-of-order trades.
@@ -400,10 +400,10 @@ class TestTimeBarUtilities:
         candles = ohlc_from_trades(trades, "1m")
         assert len(candles) == 1
         candle = candles[0]
-        assert candle["open"] == 102.0
-        assert candle["close"] == 101.0
-        assert candle["high"] == 102.0
-        assert candle["low"] == 100.0
+        assert candle["open"] == pytest.approx(102.0)
+        assert candle["close"] == pytest.approx(101.0)
+        assert candle["high"] == pytest.approx(102.0)
+        assert candle["low"] == pytest.approx(100.0)
 
     def test_ohlc_from_trades_different_timeframes(self) -> None:
         """Test ohlc_from_trades with 1m vs 5m comparison.

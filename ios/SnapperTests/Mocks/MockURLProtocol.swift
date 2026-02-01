@@ -1,11 +1,13 @@
 import Foundation
+@testable import Snapper
 
 class MockURLProtocol: URLProtocol {
 
+    static let stubURL = "https://test.com"
     static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data?))?
 
     override class func canInit(with request: URLRequest) -> Bool {
-
+        /* Always intercept: all requests are handled by the mock */
         return true
     }
 
@@ -29,13 +31,13 @@ class MockURLProtocol: URLProtocol {
 
             client?.urlProtocolDidFinishLoading(self)
         } catch {
-
+            /* Forward the error to the URL loading system */
             client?.urlProtocol(self, didFailWithError: error)
         }
     }
 
     override func stopLoading() {
-
+        /* No-op: cancellation is not needed for mock responses */
     }
 }
 
@@ -44,10 +46,10 @@ extension MockURLProtocol {
     static func jsonResponse(statusCode: Int, json: [String: Any]) -> (HTTPURLResponse, Data?) {
         let data = try? JSONSerialization.data(withJSONObject: json)
         let response = HTTPURLResponse(
-            url: URL(string: "https://test.com")!,
+            url: URL(string: stubURL)!,
             statusCode: statusCode,
             httpVersion: nil,
-            headerFields: ["Content-Type": "application/json"]
+            headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
         )!
         return (response, data)
     }

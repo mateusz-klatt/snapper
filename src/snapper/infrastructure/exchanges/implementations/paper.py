@@ -53,6 +53,11 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 
+_NOT_CONNECTED_MSG = "PaperExchangeClient not connected"
+_REPO_REQUIRED_MSG = "Repository required for paper market data"
+_CALL_CONNECT_MSG = "Not connected - call connect() first"
+_TIME_RANGE_REQUIRED_MSG = "Time range (start_time, end_time) required for paper market data replay"
+
 
 class PaperExchangeClient(ExchangeClientBase):
     """Simulated exchange client for paper trading and backtesting.
@@ -141,7 +146,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If client not connected.
         """
         if not self._running:
-            raise RuntimeError("PaperExchangeClient not connected")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         order_id = str(uuid.uuid4())
         timestamp = request.signaled_at.timestamp() if request.signaled_at else time.time()
         logger.info(
@@ -165,7 +170,7 @@ class PaperExchangeClient(ExchangeClientBase):
         db_order_id = await self._log_order_to_db(request, order)
         if db_order_id is not None:
             order.db_order_id = db_order_id
-        asyncio.create_task(self._simulate_fill(order))
+        self._fill_simulator_task = asyncio.create_task(self._simulate_fill(order))
         return order
 
     async def _simulate_fill(self, order: ExchangeOrderSnapshot) -> None:
@@ -221,7 +226,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If client not connected.
         """
         if not self._running:
-            raise RuntimeError("PaperExchangeClient not connected")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         logger.info(f"PAPER CANCEL: {order_id} ({symbol})")
         if order_id in self._orders:
             order = self._orders[order_id]
@@ -261,7 +266,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If client not connected.
         """
         if not self._running:
-            raise RuntimeError("PaperExchangeClient not connected")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         if order_id in self._orders:
             return self._orders[order_id]
         return ExchangeOrderSnapshot(
@@ -299,7 +304,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If client not connected.
         """
         if not self._running:
-            raise RuntimeError("PaperExchangeClient not connected")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         orders = list(self._orders.values())
         if symbol:
             orders = [o for o in orders if o.symbol == symbol]
@@ -323,7 +328,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If client not connected.
         """
         if not self._running:
-            raise RuntimeError("PaperExchangeClient not connected")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         if currency:
             if currency in self._balances:
                 return {currency: self._balances[currency]}
@@ -347,7 +352,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If client not connected.
         """
         if not self._running:
-            raise RuntimeError("PaperExchangeClient not connected")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         logger.info("PAPER: Subscribed to execution updates (via queue)")
         while self._running:
             try:
@@ -373,7 +378,7 @@ class PaperExchangeClient(ExchangeClientBase):
             ValueError: If no data found for symbol.
         """
         if not self.repository:
-            raise RuntimeError("Repository required for paper market data")
+            raise RuntimeError(_REPO_REQUIRED_MSG)
         end_dt = datetime.now(tz=UTC)
         start_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         snapshots = await self.repository.get_market_snapshots("paper", [symbol], start_dt, end_dt)
@@ -410,7 +415,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured.
         """
         if not self.repository:
-            raise RuntimeError("Repository required for paper market data")
+            raise RuntimeError(_REPO_REQUIRED_MSG)
         end_dt = datetime.now(tz=UTC)
         if limit:
             interval_minutes = self._parse_interval_to_minutes(timeframe)
@@ -448,13 +453,11 @@ class PaperExchangeClient(ExchangeClientBase):
             ValueError: If time range not specified.
         """
         if not self.repository:
-            raise RuntimeError("Repository required for paper market data")
+            raise RuntimeError(_REPO_REQUIRED_MSG)
         if not self._running:
-            raise RuntimeError("Not connected - call connect() first")
+            raise RuntimeError(_CALL_CONNECT_MSG)
         if self.start_time is None or self.end_time is None:
-            raise ValueError(
-                "Time range (start_time, end_time) required for paper market data replay"
-            )
+            raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
         logger.info(f"Replaying ticker for {symbols} from {start_dt} to {end_dt}")
@@ -497,13 +500,11 @@ class PaperExchangeClient(ExchangeClientBase):
             return
         interval = timeframe
         if not self.repository:
-            raise RuntimeError("Repository required for paper market data - call connect() first")
+            raise RuntimeError(f"{_REPO_REQUIRED_MSG} - call connect() first")
         if not self._running:
-            raise RuntimeError("Not connected - call connect() first")
+            raise RuntimeError(_CALL_CONNECT_MSG)
         if self.start_time is None or self.end_time is None:
-            raise ValueError(
-                "Time range (start_time, end_time) required for paper market data replay"
-            )
+            raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
         logger.info(f"Replaying candles for {symbol}/{interval} from {start_dt} to {end_dt}")
@@ -559,13 +560,11 @@ class PaperExchangeClient(ExchangeClientBase):
             ValueError: If time range not specified.
         """
         if not self.repository:
-            raise RuntimeError("Repository required for paper market data")
+            raise RuntimeError(_REPO_REQUIRED_MSG)
         if not self._running:
-            raise RuntimeError("Not connected - call connect() first")
+            raise RuntimeError(_CALL_CONNECT_MSG)
         if self.start_time is None or self.end_time is None:
-            raise ValueError(
-                "Time range (start_time, end_time) required for paper market data replay"
-            )
+            raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
         logger.info(f"Replaying trades for {symbols} from {start_dt} to {end_dt}")
@@ -615,8 +614,8 @@ class PaperExchangeClient(ExchangeClientBase):
         Args:
             **kwargs: Ignored parameters.
 
-        Returns:
-            Empty async iterator.
+        Yields:
+            Nothing; the iterator is always empty.
         """
         return
         yield

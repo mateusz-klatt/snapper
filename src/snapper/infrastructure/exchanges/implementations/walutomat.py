@@ -59,6 +59,9 @@ from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
 from snapper.infrastructure.symbols.functions import walutomat_to_native
 
+_NOT_CONNECTED_MSG = "Not connected - call connect() first"
+_AUTH_REQUIRED_MSG = "Trading requires authentication - provide api_key and private_key"
+
 
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
@@ -128,6 +131,33 @@ class WalutomatExchangeClient(ExchangeClientBase):
         self._error_count = 0
         self._max_consecutive_errors = 5
         self._tick_buffers: dict[str, list[tuple[float, float]]] = {}
+
+    def _require_connected(self) -> httpx.AsyncClient:
+        """Verify HTTP client is connected and return it.
+
+        Returns:
+            The connected HTTP client.
+
+        Raises:
+            RuntimeError: If not connected.
+        """
+        if not self._http_client:
+            raise RuntimeError(_NOT_CONNECTED_MSG)
+        return self._http_client
+
+    def _require_authenticated(self) -> httpx.AsyncClient:
+        """Verify client is connected and has authentication credentials.
+
+        Returns:
+            The connected HTTP client.
+
+        Raises:
+            RuntimeError: If not connected or missing credentials.
+        """
+        client = self._require_connected()
+        if not self._api_key or not self._private_key:
+            raise RuntimeError(_AUTH_REQUIRED_MSG)
+        return client
 
     async def connect(self) -> None:
         """Connect to Walutomat API and verify connectivity.
@@ -241,6 +271,78 @@ class WalutomatExchangeClient(ExchangeClientBase):
             headers["X-API-Timestamp"] = timestamp
         return headers
 
+    def _build_ticker_from_pair(
+        self, native_symbol: str, pair_data: WalutomatMarketPair
+    ) -> TickerUpdate:
+        """Build a TickerUpdate from Walutomat pair data.
+
+        Args:
+            native_symbol: Native symbol string.
+            pair_data: Walutomat market pair data.
+
+        Returns:
+            TickerUpdate with current market data.
+        """
+        offer = pair_data.best_offers
+        return TickerUpdate(
+            symbol=native_symbol,
+            bid=offer.bid_now,
+            bid_qty=0.0,
+            ask=offer.ask_now,
+            ask_qty=0.0,
+            last=offer.forex_now,
+            volume=0.0,
+            vwap=offer.forex_now,
+            low=offer.forex_now,
+            high=offer.forex_now,
+            change=0.0,
+            change_pct=0.0,
+        )
+
+    async def _process_polling_data(
+        self, data: dict[str, WalutomatMarketPair], symbol_map: dict[str, str]
+    ) -> None:
+        """Process fetched market data and enqueue tickers.
+
+        Args:
+            data: Fetched market data keyed by Walutomat symbol.
+            symbol_map: Mapping of Walutomat symbol to native symbol.
+        """
+        for wal_symbol, native_symbol in symbol_map.items():
+            if wal_symbol not in data:
+                logger.debug(f"Symbol {wal_symbol} not in Walutomat data")
+                continue
+            pair_data = data[wal_symbol]
+            ticker = self._build_ticker_from_pair(native_symbol, pair_data)
+            await self._tick_queue.put(ticker)
+            ts = time.time()
+            mid_price = pair_data.best_offers.forex_now
+            if native_symbol not in self._tick_buffers:
+                self._tick_buffers[native_symbol] = []
+            self._tick_buffers[native_symbol].append((ts, mid_price))
+            logger.debug(f"{native_symbol}: bid={ticker.bid:.4f} ask={ticker.ask:.4f}")
+
+    def _handle_http_error(self, error: httpx.HTTPError) -> bool:
+        """Handle an HTTP error during polling.
+
+        Increments error count and checks threshold.
+
+        Args:
+            error: The HTTP error that occurred.
+
+        Returns:
+            True if polling should stop (max errors exceeded), False otherwise.
+        """
+        self._error_count += 1
+        logger.error(
+            f"Walutomat API error ({self._error_count}/{self._max_consecutive_errors}): {error}"
+        )
+        if self._error_count >= self._max_consecutive_errors:
+            logger.error("Max consecutive errors reached - stopping polling")
+            self._running = False
+            return True
+        return False
+
     async def _polling_loop(self, symbols: list[str]) -> None:
         """Run the market data polling loop.
 
@@ -254,46 +356,53 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 data = await self._fetch_market_data()
                 self._last_data = data
                 self._error_count = 0
-                for wal_symbol, native_symbol in symbol_map.items():
-                    if wal_symbol not in data:
-                        logger.debug(f"Symbol {wal_symbol} not in Walutomat data")
-                        continue
-                    pair_data = data[wal_symbol]
-                    offer = pair_data.best_offers
-                    ticker = TickerUpdate(
-                        symbol=native_symbol,
-                        bid=offer.bid_now,
-                        bid_qty=0.0,
-                        ask=offer.ask_now,
-                        ask_qty=0.0,
-                        last=offer.forex_now,
-                        volume=0.0,
-                        vwap=offer.forex_now,
-                        low=offer.forex_now,
-                        high=offer.forex_now,
-                        change=0.0,
-                        change_pct=0.0,
-                    )
-                    await self._tick_queue.put(ticker)
-                    ts = time.time()
-                    mid_price = offer.forex_now
-                    if native_symbol not in self._tick_buffers:
-                        self._tick_buffers[native_symbol] = []
-                    self._tick_buffers[native_symbol].append((ts, mid_price))
-                    logger.debug(f"{native_symbol}: bid={ticker.bid:.4f} ask={ticker.ask:.4f}")
+                await self._process_polling_data(data, symbol_map)
             except httpx.HTTPError as e:
-                self._error_count += 1
-                logger.error(
-                    f"Walutomat API error ({self._error_count}/{self._max_consecutive_errors}): {e}"
-                )
-                if self._error_count >= self._max_consecutive_errors:
-                    logger.error("Max consecutive errors reached - stopping polling")
-                    self._running = False
+                if self._handle_http_error(e):
                     break
             except Exception as e:
                 logger.exception(f"Unexpected error in polling loop: {e}")
             await asyncio.sleep(self.polling_interval)
         logger.info("Walutomat polling stopped")
+
+    async def _build_candle_for_symbol(
+        self,
+        symbol: str,
+        ticks: list[tuple[float, float]],
+        prev_minute_start: int,
+        current_minute: int,
+    ) -> None:
+        """Build and emit a 1-minute candle for a single symbol.
+
+        Args:
+            symbol: Native symbol string.
+            ticks: List of (timestamp, price) tick tuples.
+            prev_minute_start: Start timestamp of the previous minute.
+            current_minute: Start timestamp of the current minute.
+        """
+        minute_ticks = [
+            (ts, price) for ts, price in ticks if prev_minute_start <= ts < current_minute
+        ]
+        if minute_ticks:
+            prices = [price for _, price in minute_ticks]
+            candle = CandleUpdate(
+                symbol=symbol,
+                open=prices[0],
+                high=max(prices),
+                low=min(prices),
+                close=prices[-1],
+                volume=0.0,
+                vwap=sum(prices) / len(prices),
+                trades=len(prices),
+                interval_begin=datetime.fromtimestamp(prev_minute_start, UTC),
+                interval=1,
+            )
+            await self._candle_queue.put(candle)
+            logger.debug(
+                f"{symbol} 1m candle: O={candle.open:.4f} H={candle.high:.4f} "
+                f"L={candle.low:.4f} C={candle.close:.4f} ({len(prices)} ticks)"
+            )
+        self._tick_buffers[symbol] = [(ts, price) for ts, price in ticks if ts >= current_minute]
 
     async def _candle_builder_loop(self) -> None:
         """Build 1-minute candles from accumulated tick data."""
@@ -305,36 +414,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
             if not self._running:
                 break
             current_minute = int(time.time() // 60) * 60
-            for symbol in list(self._tick_buffers.keys()):
+            prev_minute_start = current_minute - 60
+            for symbol in list(self._tick_buffers):
                 ticks = self._tick_buffers.get(symbol, [])
                 if not ticks:
                     continue
-                prev_minute_start = current_minute - 60
-                minute_ticks = [
-                    (ts, price) for ts, price in ticks if prev_minute_start <= ts < current_minute
-                ]
-                if minute_ticks:
-                    prices = [price for _, price in minute_ticks]
-                    candle = CandleUpdate(
-                        symbol=symbol,
-                        open=prices[0],
-                        high=max(prices),
-                        low=min(prices),
-                        close=prices[-1],
-                        volume=0.0,
-                        vwap=sum(prices) / len(prices),
-                        trades=len(prices),
-                        interval_begin=datetime.fromtimestamp(prev_minute_start, UTC),
-                        interval=1,
-                    )
-                    await self._candle_queue.put(candle)
-                    logger.debug(
-                        f"{symbol} 1m candle: O={candle.open:.4f} H={candle.high:.4f} "
-                        f"L={candle.low:.4f} C={candle.close:.4f} ({len(prices)} ticks)"
-                    )
-                self._tick_buffers[symbol] = [
-                    (ts, price) for ts, price in ticks if ts >= current_minute
-                ]
+                await self._build_candle_for_symbol(
+                    symbol, ticks, prev_minute_start, current_minute
+                )
         logger.info("Walutomat candle builder stopped")
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
@@ -350,8 +437,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             RuntimeError: If not connected.
             ValueError: If symbol not found.
         """
-        if not self._http_client:
-            raise RuntimeError("Not connected - call connect() first")
+        self._require_connected()
         data = await self._fetch_market_data()
         wal_symbol = native_to_walutomat(symbol)
         if wal_symbol not in data:
@@ -401,7 +487,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             RuntimeError: If not connected.
         """
         if not self._running:
-            raise RuntimeError("Not connected - call connect() first")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         if symbols == ["*"]:
             symbols = self.get_supported_pairs()
             logger.info(f"Wildcard subscription - monitoring {len(symbols)} pairs")
@@ -413,8 +499,6 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 yield ticker
             except TimeoutError:
                 continue
-            except asyncio.CancelledError:
-                break
 
     async def subscribe_candles(
         self,
@@ -435,7 +519,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             NotImplementedError: If timeframe is not '1m'.
         """
         if not self._running:
-            raise RuntimeError("Not connected - call connect() first")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         if timeframe != "1m":
             raise NotImplementedError(f"Walutomat only supports 1m candles, not {timeframe}")
         if symbols == ["*"]:
@@ -452,8 +536,6 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     yield candle
             except TimeoutError:
                 continue
-            except asyncio.CancelledError:
-                break
 
     async def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Not implemented - Walutomat does not provide public trade feed.
@@ -462,7 +544,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             symbols: List of symbols (unused).
 
         Yields:
-            Never yields, always raises NotImplementedError.
+            Never yields; raises before producing any value.
 
         Raises:
             NotImplementedError: Always raised.
@@ -474,7 +556,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         """Not implemented - Walutomat is market data only.
 
         Yields:
-            Never yields, always raises NotImplementedError.
+            Never yields; raises before producing any value.
 
         Raises:
             NotImplementedError: Always raised.
@@ -495,7 +577,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             RuntimeError: If not connected.
         """
         if not self._running:
-            raise RuntimeError("Not connected - call connect() first")
+            raise RuntimeError(_NOT_CONNECTED_MSG)
         try:
             data = await self._fetch_market_data()
             for wal_symbol in data:
@@ -528,10 +610,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected or not authenticated.
         """
-        if not self._http_client:
-            raise RuntimeError("Not connected - call connect() first")
-        if not self._api_key or not self._private_key:
-            raise RuntimeError("Trading requires authentication - provide api_key and private_key")
+        client = self._require_authenticated()
         walutomat_rest_symbol = native_to_walutomat_rest(request.symbol)
         base_currency = request.symbol.split("-")[0]
         submit_id = str(uuid.uuid4())
@@ -550,7 +629,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         headers = self._get_auth_headers(endpoint, body)
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         url = f"{self.api_base_url}/market_fx/orders"
-        response = await self._http_client.post(url, content=body, headers=headers)
+        response = await client.post(url, content=body, headers=headers)
         response.raise_for_status()
         result = response.json()
         if not result.get("success"):
@@ -588,14 +667,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected or not authenticated.
         """
-        if not self._http_client:
-            raise RuntimeError("Not connected - call connect() first")
-        if not self._api_key or not self._private_key:
-            raise RuntimeError("Trading requires authentication - provide api_key and private_key")
+        client = self._require_authenticated()
         endpoint = f"/api/v2.0.0/market_fx/orders/{order_id}/cancel"
         headers = self._get_auth_headers(endpoint, "")
         url = f"{self.api_base_url}/market_fx/orders/{order_id}/cancel"
-        response = await self._http_client.post(url, headers=headers)
+        response = await client.post(url, headers=headers)
         response.raise_for_status()
         result = response.json()
         if not result.get("success"):
@@ -617,15 +693,39 @@ class WalutomatExchangeClient(ExchangeClientBase):
             RuntimeError: If not connected or not authenticated.
             ValueError: If order not found.
         """
-        if not self._http_client:
-            raise RuntimeError("Not connected - call connect() first")
-        if not self._api_key or not self._private_key:
-            raise RuntimeError("Trading requires authentication - provide api_key and private_key")
+        self._require_authenticated()
         orders = await self.get_orders()
         for order in orders:
             if order.id == order_id:
                 return order
         raise ValueError(f"ExchangeOrderSnapshot {order_id} not found")
+
+    @staticmethod
+    def _parse_walutomat_order(order_data: dict[str, Any]) -> ExchangeOrderSnapshot:
+        """Parse a single Walutomat order response into an ExchangeOrderSnapshot.
+
+        Args:
+            order_data: Raw order data dictionary from Walutomat API.
+
+        Returns:
+            Parsed ExchangeOrderSnapshot.
+        """
+        return ExchangeOrderSnapshot(
+            id=order_data["orderId"],
+            client_order_id=order_data.get("submitId"),
+            symbol=walutomat_rest_to_native(order_data["currencyPair"]),
+            side=OrderSideEnum.BUY if order_data["buySell"] == "BUY" else OrderSideEnum.SELL,
+            type=OrderTypeEnum.LIMIT,
+            amount=float(order_data["volume"]),
+            price=float(order_data["limitPrice"]),
+            status=(
+                OrderStatusEnum.OPEN if order_data["status"] == "ACTIVE" else OrderStatusEnum.CLOSED
+            ),
+            filled=float(order_data.get("boughtAmount", 0)),
+            remaining=float(order_data["volume"]) - float(order_data.get("boughtAmount", 0)),
+            timestamp=time.time(),
+            fee=None,
+        )
 
     async def get_orders(
         self,
@@ -646,38 +746,18 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected or not authenticated.
         """
-        if not self._http_client:
-            raise RuntimeError("Not connected - call connect() first")
-        if not self._api_key or not self._private_key:
-            raise RuntimeError("Trading requires authentication - provide api_key and private_key")
+        client = self._require_authenticated()
         endpoint = "/api/v2.0.0/market_fx/orders/active"
         headers = self._get_auth_headers(endpoint, "")
         url = f"{self.api_base_url}/market_fx/orders/active"
-        response = await self._http_client.get(url, headers=headers)
+        response = await client.get(url, headers=headers)
         response.raise_for_status()
         result = response.json()
         if not result.get("success"):
             raise RuntimeError(f"Failed to fetch orders: {result}")
         orders = []
         for order_data in result["result"]:
-            order = ExchangeOrderSnapshot(
-                id=order_data["orderId"],
-                client_order_id=order_data.get("submitId"),
-                symbol=walutomat_rest_to_native(order_data["currencyPair"]),
-                side=OrderSideEnum.BUY if order_data["buySell"] == "BUY" else OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
-                amount=float(order_data["volume"]),
-                price=float(order_data["limitPrice"]),
-                status=(
-                    OrderStatusEnum.OPEN
-                    if order_data["status"] == "ACTIVE"
-                    else OrderStatusEnum.CLOSED
-                ),
-                filled=float(order_data.get("boughtAmount", 0)),
-                remaining=float(order_data["volume"]) - float(order_data.get("boughtAmount", 0)),
-                timestamp=time.time(),
-                fee=None,
-            )
+            order = self._parse_walutomat_order(order_data)
             if symbol and order.symbol != symbol:
                 continue
             if status and order.status != status:
@@ -699,14 +779,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected or not authenticated.
         """
-        if not self._http_client:
-            raise RuntimeError("Not connected - call connect() first")
+        client = self._require_connected()
         if not self._api_key:
             raise RuntimeError("Trading requires authentication - provide api_key")
         endpoint = "/api/v2.0.0/account/balances"
         headers = self._get_auth_headers(endpoint, "")
         url = f"{self.api_base_url}/account/balances"
-        response = await self._http_client.get(url, headers=headers)
+        response = await client.get(url, headers=headers)
         response.raise_for_status()
         result = response.json()
         if not result.get("success"):

@@ -423,9 +423,9 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     mock_repo.insert_execution.assert_called_once()
     call_args = mock_repo.insert_execution.call_args[1]
     assert call_args["order_id"] == 123
-    assert call_args["price"] == 50000.0
-    assert call_args["size"] == 1.0
-    assert call_args["fee"] == 10.0
+    assert call_args["price"] == pytest.approx(50000.0)
+    assert call_args["size"] == pytest.approx(1.0)
+    assert call_args["fee"] == pytest.approx(10.0)
     assert call_args["fee_asset"] == "USD"
 
 
@@ -457,9 +457,9 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
     await client._log_execution_to_db(db_order_id=123, execution=execution)
     mock_repo.insert_execution.assert_called_once()
     call_args = mock_repo.insert_execution.call_args[1]
-    assert call_args["price"] == 49500.0
-    assert call_args["size"] == 2.5
-    assert call_args["fee"] == 0.0
+    assert call_args["price"] == pytest.approx(49500.0)
+    assert call_args["size"] == pytest.approx(2.5)
+    assert call_args["fee"] == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio()

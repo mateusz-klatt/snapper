@@ -40,8 +40,8 @@ export function flushThrottledMessages<T>(
 }
 
 export function buildWebSocketUrl(endpoint: string = '/snapper/api/ws'): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = window.location.host
+  const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = globalThis.location.host
 
   return `${protocol}//${host}${endpoint}`
 }

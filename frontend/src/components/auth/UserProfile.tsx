@@ -6,7 +6,7 @@ interface UserProfileProps {
   className?: string
 }
 
-const UserProfile: React.FC<UserProfileProps> = ({ className = '' }) => {
+const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) => {
   const [showDropdown, setShowDropdown] = useState(false)
   const [showPasswordForm, setShowPasswordForm] = useState(false)
   const [currentPassword, setCurrentPassword] = useState('')
@@ -34,7 +34,7 @@ const UserProfile: React.FC<UserProfileProps> = ({ className = '' }) => {
     setPasswordError('')
   }
 
-  const handleChangePassword = async (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault()
     setPasswordError('')
     setPasswordSuccess('')
@@ -275,7 +275,12 @@ const UserProfile: React.FC<UserProfileProps> = ({ className = '' }) => {
       )}
       {}
       {showDropdown && (
-        <div className='fixed inset-0 z-40' onClick={() => setShowDropdown(false)} />
+        <button
+          type='button'
+          className='fixed inset-0 z-40 w-full h-full cursor-default bg-transparent border-none'
+          onClick={() => setShowDropdown(false)}
+          aria-label='Close dropdown'
+        />
       )}
     </div>
   )

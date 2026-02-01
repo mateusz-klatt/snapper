@@ -11,13 +11,14 @@ import pytest
 
 from scripts.generate_types import ENTITY_EXCLUDE_FIELDS
 from scripts.generate_types import ENTITY_UNION_ID_FIELDS
-from scripts.generate_types import SWIFT_KEYWORDS
+from scripts.generate_types import SWIFT_KEYWORD_RENAMES
 from scripts.generate_types import camel_to_lower
 from scripts.generate_types import derive_entity_name
 from scripts.generate_types import discover_ws_schemas
 from scripts.generate_types import export_openapi_schemas
 from scripts.generate_types import export_openapi_spec
 from scripts.generate_types import export_ws_schemas
+from scripts.generate_types import extract_repeated_unions
 from scripts.generate_types import fix_refs_openapi
 from scripts.generate_types import fix_refs_pydantic
 from scripts.generate_types import generate_entities
@@ -37,6 +38,7 @@ from scripts.generate_types import json_type_to_zod
 from scripts.generate_types import main
 from scripts.generate_types import make_const_fields_required
 from scripts.generate_types import snake_to_camel
+from scripts.generate_types import strip_primitive_titles
 from scripts.generate_types import to_camel_case
 from scripts.generate_types import topological_sort_schemas
 
@@ -231,6 +233,98 @@ class TestMakeConstFieldsRequired:
         }
         result = make_const_fields_required(schema)
         assert result["required"] == "invalid"
+
+
+class TestStripPrimitiveTitles:
+    """Tests for strip_primitive_titles function."""
+
+    def test_strips_title_from_bare_string(self) -> None:
+        """Strips title from a property that is just a string."""
+        schema: dict[str, Any] = {"title": "Instrument", "type": "string"}
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert "title" not in result
+        assert result == {"type": "string"}
+
+    def test_strips_title_from_bare_number(self) -> None:
+        """Strips title from a property that is just a number."""
+        schema: dict[str, Any] = {"title": "Open", "type": "number"}
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert "title" not in result
+        assert result == {"type": "number"}
+
+    def test_preserves_title_with_const(self) -> None:
+        """Preserves title when const is present."""
+        schema: dict[str, Any] = {"title": "Type", "type": "string", "const": "bar"}
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert result["title"] == "Type"
+
+    def test_preserves_title_with_enum(self) -> None:
+        """Preserves title when enum is present."""
+        schema: dict[str, Any] = {"title": "Side", "type": "string", "enum": ["buy", "sell"]}
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert result["title"] == "Side"
+
+    def test_preserves_title_on_object_type(self) -> None:
+        """Does not strip title from object type definitions."""
+        schema: dict[str, Any] = {
+            "title": "BarEnvelope",
+            "type": "object",
+            "properties": {"open": {"title": "Open", "type": "number"}},
+        }
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert result["title"] == "BarEnvelope"
+        props = result["properties"]
+        assert isinstance(props, dict)
+        assert "title" not in props["open"]
+
+    def test_recurses_into_lists(self) -> None:
+        """Recurses into list items."""
+        schema: list[Any] = [{"title": "X", "type": "string"}]
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, list)
+        assert "title" not in result[0]
+
+    def test_passes_through_scalars(self) -> None:
+        """Returns scalar values unchanged."""
+        assert strip_primitive_titles("hello") == "hello"
+        assert strip_primitive_titles(42) == 42
+        assert strip_primitive_titles(None) is None
+
+    def test_handles_non_string_type_value(self) -> None:
+        """Handles type values that are not strings."""
+        schema: dict[str, Any] = {"title": "Mixed", "type": {"nested": True}}
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert result["title"] == "Mixed"
+
+    def test_strips_title_with_format(self) -> None:
+        """Strips title from datetime properties since json2ts ignores format."""
+        schema: dict[str, Any] = {
+            "title": "Timestamp",
+            "type": "string",
+            "format": "date-time",
+        }
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert "title" not in result
+        assert result == {"type": "string", "format": "date-time"}
+
+    def test_strips_title_with_min_max(self) -> None:
+        """Strips title from properties with min/max constraints."""
+        schema: dict[str, Any] = {
+            "title": "Strength",
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+        }
+        result = strip_primitive_titles(schema)
+        assert isinstance(result, dict)
+        assert "title" not in result
 
 
 class TestToCamelCase:
@@ -455,12 +549,12 @@ class TestGenerateSwiftEnum:
         result = "\n".join(lines)
         assert 'case inProgress = "in_progress"' in result
 
-    def test_escapes_swift_keywords(self) -> None:
-        """Escapes Swift keywords."""
+    def test_renames_swift_keywords(self) -> None:
+        """Renames Swift keywords to safe identifiers with raw values."""
         lines = generate_swift_enum("Type", ["class", "default"])
         result = "\n".join(lines)
-        assert "case `class`" in result
-        assert "case `default`" in result
+        assert 'case classValue = "class"' in result
+        assert 'case defaultValue = "default"' in result
 
 
 class TestGetAnyCodableHelper:
@@ -638,7 +732,7 @@ class TestJsonTypeToZod:
         """Handles date-time format."""
         prop = {"type": "string", "format": "date-time"}
         result = json_type_to_zod(prop, True, {})
-        assert result == "z.string().datetime()"
+        assert result == "z.iso.datetime()"
 
     def test_handles_uuid(self) -> None:
         """Handles uuid format."""
@@ -1452,11 +1546,11 @@ class TestMain:
 class TestConstants:
     """Tests for module constants."""
 
-    def test_swift_keywords_is_set(self) -> None:
-        """SWIFT_KEYWORDS is a set."""
-        assert isinstance(SWIFT_KEYWORDS, set)
-        assert "class" in SWIFT_KEYWORDS
-        assert "func" in SWIFT_KEYWORDS
+    def test_swift_keyword_renames_is_dict(self) -> None:
+        """SWIFT_KEYWORD_RENAMES is a dict mapping keywords to safe names."""
+        assert isinstance(SWIFT_KEYWORD_RENAMES, dict)
+        assert "class" in SWIFT_KEYWORD_RENAMES
+        assert "func" in SWIFT_KEYWORD_RENAMES
 
     def test_entity_exclude_fields(self) -> None:
         """ENTITY_EXCLUDE_FIELDS contains expected fields."""
@@ -1467,3 +1561,149 @@ class TestConstants:
         """ENTITY_UNION_ID_FIELDS contains expected fields."""
         assert "id" in ENTITY_UNION_ID_FIELDS
         assert "order_id" in ENTITY_UNION_ID_FIELDS
+
+
+class TestExtractRepeatedUnions:
+    """Tests for extract_repeated_unions."""
+
+    def test_returns_lines_unchanged_when_no_repeats(self) -> None:
+        """Lines without repeated unions are returned as-is."""
+        lines = [
+            "/**",
+            " * Header",
+            " */",
+            "export interface Foo {",
+            "  side: 'buy' | 'sell'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        assert result == lines
+
+    def test_extracts_union_above_threshold(self) -> None:
+        """Unions appearing >= 3 times are extracted as type aliases."""
+        lines = [
+            "/**",
+            " * Header",
+            " */",
+            "export interface A {",
+            "  side: 'buy' | 'sell'",
+            "}",
+            "export interface B {",
+            "  side: 'buy' | 'sell'",
+            "}",
+            "export interface C {",
+            "  side: 'buy' | 'sell'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        assert "type Side = 'buy' | 'sell'" in result
+        assert all(
+            "  side: Side" in line for line in result if "side:" in line and "type" not in line
+        )
+
+    def test_alias_placed_before_first_interface(self) -> None:
+        """Type alias is placed before the first interface JSDoc."""
+        lines = [
+            "/** header */",
+            "",
+            "/**",
+            " * Doc A",
+            " */",
+            "export interface A {",
+            "  side: 'buy' | 'sell'",
+            "}",
+            "export interface B {",
+            "  side: 'buy' | 'sell'",
+            "}",
+            "export interface C {",
+            "  side: 'buy' | 'sell'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        alias_idx = next(i for i, line in enumerate(result) if line.startswith("type Side"))
+        first_iface = next(
+            i for i, line in enumerate(result) if line.startswith("export interface")
+        )
+        assert alias_idx < first_iface
+
+    def test_multiple_unions_extracted(self) -> None:
+        """Multiple repeated unions are each extracted."""
+        lines = [
+            "export interface A {",
+            "  side: 'buy' | 'sell'",
+            "  exchange: 'paper' | 'kraken' | 'zonda'",
+            "}",
+            "export interface B {",
+            "  side: 'buy' | 'sell'",
+            "  exchange: 'paper' | 'kraken' | 'zonda'",
+            "}",
+            "export interface C {",
+            "  side: 'buy' | 'sell'",
+            "  exchange: 'paper' | 'kraken' | 'zonda'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        joined = "\n".join(result)
+        assert "type Side = 'buy' | 'sell'" in joined
+        assert "type Exchange = 'paper' | 'kraken' | 'zonda'" in joined
+
+    def test_does_not_extract_below_threshold(self) -> None:
+        """Unions appearing < 3 times are not extracted."""
+        lines = [
+            "export interface A {",
+            "  side: 'buy' | 'sell'",
+            "}",
+            "export interface B {",
+            "  side: 'buy' | 'sell'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        assert result == lines
+
+    def test_optional_fields_are_matched(self) -> None:
+        """Optional fields (with ?) are also detected and replaced."""
+        lines = [
+            "export interface A {",
+            "  side?: 'buy' | 'sell'",
+            "}",
+            "export interface B {",
+            "  side?: 'buy' | 'sell'",
+            "}",
+            "export interface C {",
+            "  side: 'buy' | 'sell'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        assert "type Side = 'buy' | 'sell'" in result
+
+    def test_snake_case_field_produces_pascal_alias(self) -> None:
+        """Snake_case field names produce PascalCase aliases."""
+        lines = [
+            "export interface A {",
+            "  orderType: 'market' | 'limit'",
+            "}",
+            "export interface B {",
+            "  orderType: 'market' | 'limit'",
+            "}",
+            "export interface C {",
+            "  orderType: 'market' | 'limit'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        assert "type OrderType = 'market' | 'limit'" in result
+
+    def test_no_export_interface_inserts_at_start(self) -> None:
+        """Aliases are inserted at position 0 when no export interface exists."""
+        lines = [
+            "interface A {",
+            "  side: 'buy' | 'sell'",
+            "}",
+            "interface B {",
+            "  side: 'buy' | 'sell'",
+            "}",
+            "interface C {",
+            "  side: 'buy' | 'sell'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        assert result[0] == "type Side = 'buy' | 'sell'"

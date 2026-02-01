@@ -129,8 +129,9 @@ describe('JsonEditor', () => {
 
     await userEvent.click(rawJsonButton)
     const textarea = await screen.findByRole('textbox')
+    const nonErrorObj = { code: 'PARSE_FAIL' }
     const parseSpy = vi.spyOn(JSON, 'parse').mockImplementation(() => {
-      throw 'not-an-error'
+      throw nonErrorObj
     })
 
     fireEvent.change(textarea, { target: { value: '{bad' } })
@@ -172,7 +173,7 @@ describe('JsonEditor', () => {
       .spyOn(JSON, 'parse')
       .mockImplementationOnce((value: string) => originalParse(value))
       .mockImplementationOnce(() => {
-        throw 'not-an-error'
+        throw { code: 'PARSE_FAIL' }
       })
       .mockImplementation((value: string) => originalParse(value))
 

@@ -298,7 +298,7 @@ class TestTraderCoverage:
         with patch("snapper.application.engine.trader.time.time", return_value=1234567890.0):
             await trader._on_signal(signal_msg)
         assert mock_engine.execute_desired_units.called
-        assert trader.last_signal_time["BTC-USD@kraken-live"] == 1234567890.0
+        assert trader.last_signal_time["BTC-USD@kraken-live"] == pytest.approx(1234567890.0)
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -341,7 +341,7 @@ class TestTraderCoverage:
         await trader._on_signal(signal_msg)
         mock_engine.execute_desired_units.assert_called_once()
         args = mock_engine.execute_desired_units.call_args[0]
-        assert args[0] == 0.0
+        assert args[0] == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -460,7 +460,7 @@ class TestTraderCoverage:
         trader._current_topic = "signals.kraken.BTC-USD.live"
         with patch("snapper.application.engine.trader.time.time", return_value=1234567890.0):
             await trader._on_signal(signal_msg)
-        assert trader.last_signal_time["BTC-USD@kraken-live"] == 1234567890.0
+        assert trader.last_signal_time["BTC-USD@kraken-live"] == pytest.approx(1234567890.0)
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -605,6 +605,7 @@ class _PublisherStub:
         self._socket = socket
 
     def setsockopt(self, _option: int, _value: int) -> None:
+        """Socket option intentionally ignored in stub."""
         pass
 
     def close(self) -> None:
@@ -623,6 +624,7 @@ class _SubscriberStub:
         self.topics.append(topic)
 
     def setsockopt(self, _option: int, _value: int) -> None:
+        """Socket option intentionally ignored in stub."""
         pass
 
     def close(self) -> None:
@@ -925,7 +927,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     assert engine_key in coord.engines
     engine = cast(_EngineStub, coord.engines[engine_key])
     assert repository.calls[0]["symbol"] == "BTC-USD"
-    assert engine.execute_calls[0]["desired_units"] == 0.5
+    assert engine.execute_calls[0]["desired_units"] == pytest.approx(0.5)
     signal_sell = SignalEnvelope(
         instrument="BTC-USD",
         side="sell",
@@ -935,7 +937,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         reason="test",
     )
     await coord_any._on_signal(signal_sell)
-    assert engine.execute_calls[1]["desired_units"] == 0.0
+    assert engine.execute_calls[1]["desired_units"] == pytest.approx(0.0)
     assert coord.last_signal_time[engine_key] <= time.time()
 
 
@@ -1790,7 +1792,8 @@ async def test_run_trading_loop_cancels_pending_tasks(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(asyncio, "create_task", _fake_create_task, raising=False)
     monkeypatch.setattr(asyncio, "gather", _fake_gather, raising=False)
-    await cast(Any, coord)._run_trading_loop()
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._run_trading_loop()
     assert [task.cancelled() for task in created_tasks] == [True, True]
 
 

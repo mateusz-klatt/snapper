@@ -20,13 +20,13 @@ class WebSocketManager: ObservableObject {
         case error(String)
     }
 
-    private init() {}
+    private init() { /* Singleton: use WebSocketManager.shared */ }
 
     func connect() {
         guard case .connected = connectionState else { return }
 
-        guard let token = AuthService.shared.getAccessToken() else {
-            print("No access token available")
+        guard let token = AuthService.shared.getWsToken() else {
+            print("No WebSocket token available")
             return
         }
 

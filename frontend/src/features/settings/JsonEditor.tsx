@@ -9,7 +9,7 @@ interface JsonEditorProps {
   className?: string
 }
 
-export const JsonEditor: React.FC<JsonEditorProps> = ({
+export const JsonEditor: React.FC<Readonly<JsonEditorProps>> = ({
   value,
   onChange,
   readOnly = false,
@@ -126,7 +126,12 @@ interface JsonValueEditorProps {
   path: string
 }
 
-const JsonValueEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnly, path }) => {
+const JsonValueEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
+  value,
+  onChange,
+  readOnly,
+  path,
+}) => {
   if (Array.isArray(value)) {
     return <ArrayEditor value={value} onChange={onChange} readOnly={readOnly} path={path} />
   }
@@ -138,7 +143,12 @@ const JsonValueEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, read
   return <PrimitiveEditor value={value} onChange={onChange} readOnly={readOnly} path={path} />
 }
 
-const ArrayEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnly, path }) => {
+const ArrayEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
+  value,
+  onChange,
+  readOnly,
+  path,
+}) => {
   const arrayValue = value as JsonValue[]
 
   const handleItemChange = (index: number, newValue: JsonValue) => {
@@ -176,7 +186,7 @@ const ArrayEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnly
       </div>
       <div className='space-y-2 pl-4 border-l-2 border-dark-700'>
         {arrayValue.map((item, index) => (
-          <div key={index} className='flex items-start gap-2'>
+          <div key={`${path}-array-item-${index}`} className='flex items-start gap-2'>
             <div className='flex-1'>
               <div className='text-xs text-dark-500 mb-1'>[{index}]</div>
               <JsonValueEditor
@@ -202,7 +212,12 @@ const ArrayEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnly
   )
 }
 
-const ObjectEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnly, path }) => {
+const ObjectEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
+  value,
+  onChange,
+  readOnly,
+  path,
+}) => {
   const objectValue = value as { [key: string]: JsonValue }
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
@@ -230,11 +245,12 @@ const ObjectEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnl
                 {isComplex && <span className='text-dark-500'>{isExpanded ? '▼' : '▶'}</span>}
                 <span>{key}</span>
                 <span className='text-xs text-dark-500'>
-                  {Array.isArray(val)
-                    ? `(array)`
-                    : typeof val === 'object'
-                      ? `(object)`
-                      : `(${typeof val})`}
+                  {(() => {
+                    if (Array.isArray(val)) return '(array)'
+                    if (typeof val === 'object') return '(object)'
+
+                    return `(${typeof val})`
+                  })()}
                 </span>
               </button>
             </div>
@@ -255,7 +271,11 @@ const ObjectEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnl
   )
 }
 
-const PrimitiveEditor: React.FC<JsonValueEditorProps> = ({ value, onChange, readOnly }) => {
+const PrimitiveEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
+  value,
+  onChange,
+  readOnly,
+}) => {
   if (typeof value === 'boolean') {
     return (
       <label className='flex items-center gap-2 cursor-pointer'>

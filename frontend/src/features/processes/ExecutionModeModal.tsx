@@ -10,7 +10,7 @@ interface ExecutionModeModalProps {
   defaultAutostart: boolean
 }
 
-export const ExecutionModeModal: React.FC<ExecutionModeModalProps> = ({
+export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = ({
   open,
   onClose,
   onStart,
@@ -40,8 +40,13 @@ export const ExecutionModeModal: React.FC<ExecutionModeModalProps> = ({
         <div className='space-y-4'>
           <h4 className='text-sm font-medium text-gray-200'>Execution Mode:</h4>
           <div className='space-y-3'>
-            <label className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'>
+            <label
+              htmlFor='exec-mode-thread'
+              aria-label='Thread Mode'
+              className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'
+            >
               <input
+                id='exec-mode-thread'
                 type='radio'
                 value='thread'
                 checked={executionMode === 'thread'}
@@ -57,8 +62,13 @@ export const ExecutionModeModal: React.FC<ExecutionModeModalProps> = ({
                 </div>
               </div>
             </label>
-            <label className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'>
+            <label
+              htmlFor='exec-mode-process'
+              aria-label='Process Mode'
+              className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'
+            >
               <input
+                id='exec-mode-process'
                 type='radio'
                 value='process'
                 checked={executionMode === 'process'}
@@ -78,8 +88,13 @@ export const ExecutionModeModal: React.FC<ExecutionModeModalProps> = ({
         </div>
         <div className='space-y-2'>
           <h4 className='text-sm font-medium text-gray-200'>Autostart:</h4>
-          <label className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'>
+          <label
+            htmlFor='exec-mode-autostart'
+            aria-label='Enable automatic restart'
+            className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'
+          >
             <input
+              id='exec-mode-autostart'
               type='checkbox'
               checked={autostart}
               onChange={(event: React.ChangeEvent<HTMLInputElement>) =>

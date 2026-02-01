@@ -70,7 +70,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => {
           })
         }
 
-        const activeClient = client as WebSocketClient
+        const activeClient = client
 
         activeClient.onConnection((connected: boolean) => {
           set({ isConnected: connected })
@@ -80,10 +80,6 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => {
             if (activeClient.isConnected()) {
               resolve()
             }
-          }
-
-          const handleError = (error: Error | unknown) => {
-            reject(error)
           }
 
           const unsubscribe = activeClient.onConnection(handleConnect)
@@ -98,7 +94,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => {
             }, 10000)
           } catch (error) {
             unsubscribe()
-            handleError(error)
+            reject(error)
           }
         })
         set({ isConnecting: false })
@@ -190,7 +186,7 @@ export function useWebSocketConnection(url?: string, options?: WebSocketConnecti
         console.error('Failed to connect to WebSocket:', connectError)
 
         if (isMounted && useAuthStore.getState().isAuthenticated) {
-          retryTimeout = window.setTimeout(() => {
+          retryTimeout = setTimeout(() => {
             attemptConnection()
           }, retryDelay)
         }

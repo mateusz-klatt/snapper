@@ -9,6 +9,160 @@ import {
 } from '../../hooks/queries'
 import { useProcessStore } from '../../stores/process'
 import { useTradeStore } from '../../stores/trade'
+import type { ProcessStatus } from '../../types/ui'
+import type { Signal, Fill } from '../../types/entities'
+
+const CURRENCY_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+
+const formatCurrency = (value: number): string => value.toLocaleString(undefined, CURRENCY_FORMAT)
+
+const pnlColorClass = (value: number): string => (value >= 0 ? 'text-green-400' : 'text-red-400')
+
+const pnlSign = (value: number): string => (value >= 0 ? '+' : '')
+
+const runningBadgeStatus = (count: number): 'connected' | 'disconnected' =>
+  count > 0 ? 'connected' : 'disconnected'
+
+const countChangeType = (count: number): 'positive' | 'neutral' =>
+  count > 0 ? 'positive' : 'neutral'
+
+const countRunning = (processes: Record<string, ProcessStatus>): number =>
+  Object.values(processes).filter(p => p.running).length
+
+const countTotal = (processes: Record<string, ProcessStatus>): number =>
+  Object.keys(processes).length
+
+const sideStatus = (side: string): 'connected' | 'error' => (side === 'buy' ? 'connected' : 'error')
+
+const statusBadgeLabel = (
+  running: number,
+  total: number | undefined,
+  activeLabel: string
+): string => {
+  if (running <= 0) return 'Stopped'
+  if (total !== undefined) return `${running}/${total} ${activeLabel}`
+
+  return `${running} ${activeLabel}`
+}
+
+const ProcessStatusRow: React.FC<
+  Readonly<{ label: string; running: number; total?: number; activeLabel: string }>
+> = ({ label, running, total, activeLabel }) => (
+  <div className='flex items-center justify-between'>
+    <span className='text-sm font-medium'>{label}</span>
+    <StatusBadge status={runningBadgeStatus(running)}>
+      {statusBadgeLabel(running, total, activeLabel)}
+    </StatusBadge>
+  </div>
+)
+
+interface PortfolioContentProps {
+  readonly totalValue: number
+  readonly totalPnL: number
+  readonly pnlPercent: number
+  readonly count: number
+}
+
+const PortfolioContent: React.FC<PortfolioContentProps> = ({
+  totalValue,
+  totalPnL,
+  pnlPercent,
+  count,
+}) => (
+  <div className='space-y-3'>
+    <div className='flex items-center justify-between'>
+      <span className='text-sm font-medium'>Total Value</span>
+      <span className='font-mono text-right'>${formatCurrency(totalValue)}</span>
+    </div>
+    <div className='flex items-center justify-between'>
+      <span className='text-sm font-medium'>Unrealized P&L</span>
+      <span className={`font-mono text-right ${pnlColorClass(totalPnL)}`}>
+        {pnlSign(totalPnL)}${formatCurrency(totalPnL)}
+      </span>
+    </div>
+    <div className='flex items-center justify-between'>
+      <span className='text-sm font-medium'>P&L %</span>
+      <span className={`font-mono text-right ${pnlColorClass(pnlPercent)}`}>
+        {pnlSign(pnlPercent)}
+        {pnlPercent.toFixed(2)}%
+      </span>
+    </div>
+    <div className='flex items-center justify-between'>
+      <span className='text-sm font-medium'>Positions</span>
+      <span className='font-mono text-right'>{count} instruments</span>
+    </div>
+  </div>
+)
+
+const signalKey = (signal: Signal, index: number): string | number =>
+  signal.id ?? signal.timestamp?.getTime() ?? `signal-${index}`
+
+const SignalRow: React.FC<Readonly<{ signal: Signal; index: number }>> = ({ signal, index }) => {
+  const normalizedSide = signal.side.toLowerCase()
+
+  return (
+    <div
+      key={signalKey(signal, index)}
+      className='flex items-center justify-between p-2 bg-dark-700 rounded-sm'
+    >
+      <div className='flex items-center gap-3'>
+        <StatusBadge status={sideStatus(normalizedSide)}>
+          {normalizedSide.toUpperCase()}
+        </StatusBadge>
+        <span className='text-sm font-medium'>{signal.instrument}</span>
+      </div>
+      <div className='text-xs text-dark-300'>{signal.timestamp?.toLocaleTimeString() ?? 'N/A'}</div>
+    </div>
+  )
+}
+
+const ExecutionRow: React.FC<Readonly<{ execution: Fill }>> = ({ execution }) => (
+  <div className='flex items-center justify-between p-2 bg-dark-700 rounded-sm'>
+    <div className='flex items-center gap-3'>
+      <StatusBadge status={execution.side === 'sell' ? 'error' : 'connected'}>
+        {execution.side.toUpperCase()}
+      </StatusBadge>
+      <span className='text-sm font-medium'>{execution.instrument}</span>
+      <span className='text-xs text-dark-300'>
+        {execution.size} @ ${execution.price}
+      </span>
+    </div>
+    <div className='text-xs text-dark-300'>
+      {execution.executedAt?.toLocaleTimeString() ?? 'N/A'}
+    </div>
+  </div>
+)
+
+const PortfolioCardContent: React.FC<
+  Readonly<{
+    loading: boolean
+    summary: PortfolioContentProps | null
+  }>
+> = ({ loading, summary }) => {
+  if (loading) return <CardSkeleton showTitle={false} contentLines={4} className='border-0 p-0' />
+  if (summary) return <PortfolioContent {...summary} />
+
+  return <div className='text-center py-8 text-dark-400'>No positions data available</div>
+}
+
+const SignalsCardContent: React.FC<
+  Readonly<{
+    loading: boolean
+    signals: readonly Signal[] | undefined
+  }>
+> = ({ loading, signals }) => {
+  if (loading) return <CardSkeleton showTitle={false} contentLines={5} className='border-0 p-0' />
+  if (signals && signals.length > 0)
+    return (
+      <div className='space-y-2'>
+        {signals.map((signal, index) => (
+          <SignalRow key={signalKey(signal, index)} signal={signal} index={index} />
+        ))}
+      </div>
+    )
+
+  return <div className='text-center py-8 text-dark-400'>No recent signals</div>
+}
 
 export const Overview: React.FC = () => {
   const { isLoading: processLoading } = useConfiguredProcesses()
@@ -17,22 +171,20 @@ export const Overview: React.FC = () => {
   const { data: ordersGrouped } = useOrdersGrouped({ limit: 50 })
   const { feeds = {}, strategies = {}, executors = {}, brokers = {} } = useProcessStore()
   const { executions = [] } = useTradeStore()
-  const runningFeeds = Object.values(feeds).filter(f => f.running).length
-  const totalFeeds = Object.keys(feeds).length
-  const runningStrategies = Object.values(strategies).filter(s => s.running).length
-  const totalStrategies = Object.keys(strategies).length
-  const runningExecutors = Object.values(executors).filter(e => e.running).length
-  const totalExecutors = Object.keys(executors).length
-  const runningBrokers = Object.values(brokers).filter(b => b.running).length
-  const totalBrokers = Object.keys(brokers).length
+  const runningFeeds = countRunning(feeds)
+  const totalFeeds = countTotal(feeds)
+  const runningStrategies = countRunning(strategies)
+  const totalStrategies = countTotal(strategies)
+  const runningExecutors = countRunning(executors)
+  const totalExecutors = countTotal(executors)
+  const runningBrokers = countRunning(brokers)
+  const totalBrokers = countTotal(brokers)
   const recentExecutions = executions.slice(0, 5)
   const openOrdersCount = ordersGrouped?.open?.length || 0
-  const todayExecutionsCount = executions.filter(e => {
-    const dateStr = e.executedAt?.toDateString()
-    const today = new Date().toDateString()
-
-    return dateStr === today
-  }).length
+  const todayStr = new Date().toDateString()
+  const todayExecutionsCount = executions.filter(
+    e => e.executedAt?.toDateString() === todayStr
+  ).length
 
   return (
     <div className='h-full overflow-auto'>
@@ -42,12 +194,12 @@ export const Overview: React.FC = () => {
           <MetricCard
             label='Feeds Running'
             value={`${runningFeeds}/${totalFeeds}`}
-            changeType={runningFeeds > 0 ? 'positive' : 'neutral'}
+            changeType={countChangeType(runningFeeds)}
           />
           <MetricCard
             label='Strategies Active'
             value={`${runningStrategies}/${totalStrategies}`}
-            changeType={runningStrategies > 0 ? 'positive' : 'neutral'}
+            changeType={countChangeType(runningStrategies)}
           />
           <MetricCard label='Open Orders' value={openOrdersCount} changeType='neutral' />
           <MetricCard
@@ -63,140 +215,43 @@ export const Overview: React.FC = () => {
               <CardSkeleton showTitle={false} contentLines={4} className='border-0 p-0' />
             ) : (
               <div className='space-y-3'>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>Feeds</span>
-                  <StatusBadge status={runningFeeds > 0 ? 'connected' : 'disconnected'}>
-                    {runningFeeds > 0 ? `${runningFeeds} Running` : 'Stopped'}
-                  </StatusBadge>
-                </div>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>Strategies</span>
-                  <StatusBadge status={runningStrategies > 0 ? 'connected' : 'disconnected'}>
-                    {runningStrategies > 0 ? `${runningStrategies} Active` : 'Stopped'}
-                  </StatusBadge>
-                </div>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>Executors</span>
-                  <StatusBadge status={runningExecutors > 0 ? 'connected' : 'disconnected'}>
-                    {runningExecutors > 0
-                      ? `${runningExecutors}/${totalExecutors} Running`
-                      : 'Stopped'}
-                  </StatusBadge>
-                </div>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>Brokers</span>
-                  <StatusBadge status={runningBrokers > 0 ? 'connected' : 'disconnected'}>
-                    {runningBrokers > 0 ? `${runningBrokers}/${totalBrokers} Running` : 'Stopped'}
-                  </StatusBadge>
-                </div>
+                <ProcessStatusRow label='Feeds' running={runningFeeds} activeLabel='Running' />
+                <ProcessStatusRow
+                  label='Strategies'
+                  running={runningStrategies}
+                  activeLabel='Active'
+                />
+                <ProcessStatusRow
+                  label='Executors'
+                  running={runningExecutors}
+                  total={totalExecutors}
+                  activeLabel='Running'
+                />
+                <ProcessStatusRow
+                  label='Brokers'
+                  running={runningBrokers}
+                  total={totalBrokers}
+                  activeLabel='Running'
+                />
               </div>
             )}
           </Card>
           {}
           <Card title='Portfolio Summary'>
-            {positionsLoading ? (
-              <CardSkeleton showTitle={false} contentLines={4} className='border-0 p-0' />
-            ) : positionsSummary ? (
-              <div className='space-y-3'>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>Total Value</span>
-                  <span className='font-mono text-right'>
-                    $
-                    {positionsSummary.totalValue.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </span>
-                </div>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>Unrealized P&L</span>
-                  <span
-                    className={`font-mono text-right ${
-                      positionsSummary.totalPnL >= 0 ? 'text-green-400' : 'text-red-400'
-                    }`}
-                  >
-                    {positionsSummary.totalPnL >= 0 ? '+' : ''}$
-                    {positionsSummary.totalPnL.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </span>
-                </div>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>P&L %</span>
-                  <span
-                    className={`font-mono text-right ${
-                      positionsSummary.pnlPercent >= 0 ? 'text-green-400' : 'text-red-400'
-                    }`}
-                  >
-                    {positionsSummary.pnlPercent >= 0 ? '+' : ''}
-                    {positionsSummary.pnlPercent.toFixed(2)}%
-                  </span>
-                </div>
-                <div className='flex items-center justify-between'>
-                  <span className='text-sm font-medium'>Positions</span>
-                  <span className='font-mono text-right'>{positionsSummary.count} instruments</span>
-                </div>
-              </div>
-            ) : (
-              <div className='text-center py-8 text-dark-400'>No positions data available</div>
-            )}
+            <PortfolioCardContent loading={positionsLoading} summary={positionsSummary ?? null} />
           </Card>
         </div>
         <div className='grid grid-cols-1 lg:grid-cols-2 gap-6'>
           {}
           <Card title='Recent Signals'>
-            {signalsLoading ? (
-              <CardSkeleton showTitle={false} contentLines={5} className='border-0 p-0' />
-            ) : latestSignals && latestSignals.length > 0 ? (
-              <div className='space-y-2'>
-                {latestSignals.map((signal, index) => {
-                  const normalizedSide = signal.side.toLowerCase()
-
-                  return (
-                    <div
-                      key={signal.id ?? signal.timestamp?.getTime() ?? `signal-${index}`}
-                      className='flex items-center justify-between p-2 bg-dark-700 rounded-sm'
-                    >
-                      <div className='flex items-center gap-3'>
-                        <StatusBadge status={normalizedSide === 'buy' ? 'connected' : 'error'}>
-                          {normalizedSide.toUpperCase()}
-                        </StatusBadge>
-                        <span className='text-sm font-medium'>{signal.instrument}</span>
-                      </div>
-                      <div className='text-xs text-dark-300'>
-                        {signal.timestamp?.toLocaleTimeString() ?? 'N/A'}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className='text-center py-8 text-dark-400'>No recent signals</div>
-            )}
+            <SignalsCardContent loading={signalsLoading} signals={latestSignals} />
           </Card>
           {}
           <Card title='Recent Executions'>
             {recentExecutions.length > 0 ? (
               <div className='space-y-2'>
                 {recentExecutions.map(execution => (
-                  <div
-                    key={execution.id}
-                    className='flex items-center justify-between p-2 bg-dark-700 rounded-sm'
-                  >
-                    <div className='flex items-center gap-3'>
-                      <StatusBadge status={execution.side === 'sell' ? 'error' : 'connected'}>
-                        {execution.side.toUpperCase()}
-                      </StatusBadge>
-                      <span className='text-sm font-medium'>{execution.instrument}</span>
-                      <span className='text-xs text-dark-300'>
-                        {execution.size} @ ${execution.price}
-                      </span>
-                    </div>
-                    <div className='text-xs text-dark-300'>
-                      {execution.executedAt?.toLocaleTimeString() ?? 'N/A'}
-                    </div>
-                  </div>
+                  <ExecutionRow key={execution.clientOrderId} execution={execution} />
                 ))}
               </div>
             ) : (

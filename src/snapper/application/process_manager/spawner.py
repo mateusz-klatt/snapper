@@ -105,6 +105,155 @@ class ProcessSpawnerService:
         self._startup_grace_period = 0.1
         self._capture_output = capture_output
 
+    def _validate_class_path(self, name: str, class_path: str) -> None:
+        """Validate that a class path is importable.
+
+        Temporarily adds cwd to sys.path if needed for import resolution.
+
+        Args:
+            name: Process name for error messages.
+            class_path: Fully qualified class path.
+
+        Raises:
+            RuntimeError: If class cannot be imported.
+        """
+        validation_path_added = False
+        cwd = os.getcwd()
+        if cwd not in sys.path:
+            sys.path.insert(0, cwd)
+            validation_path_added = True
+        try:
+            module_path, class_name = class_path.rsplit(".", 1)
+            module = importlib.import_module(module_path)
+            getattr(module, class_name)
+        except (ValueError, ModuleNotFoundError, AttributeError) as exc:
+            raise RuntimeError(
+                f"Process '{name}' failed to start (invalid class '{class_path}')"
+            ) from exc
+        finally:
+            if validation_path_added:
+                with contextlib.suppress(ValueError):
+                    sys.path.remove(cwd)
+
+    def _build_process_info(
+        self,
+        name: str,
+        class_path: str,
+        method: str,
+        args: list[Any],
+        kwargs: dict[str, Any],
+        process: "subprocess.Popen[bytes]",
+        exit_code: int | None = None,
+    ) -> ProcessInstanceInfo:
+        """Build a ProcessInstanceInfo instance.
+
+        Args:
+            name: Process name.
+            class_path: Fully qualified class path.
+            method: Entry method name.
+            args: Positional arguments.
+            kwargs: Keyword arguments.
+            process: Subprocess handle.
+            exit_code: Optional exit code if process already exited.
+
+        Returns:
+            ProcessInstanceInfo with all fields populated.
+        """
+        info = ProcessInstanceInfo(
+            name=name,
+            pid=process.pid,
+            started_at=datetime.now(UTC),
+            config={
+                "class_path": class_path,
+                "method": method,
+                "args": args,
+                "kwargs": kwargs,
+            },
+            process=process,
+            spawner=self,
+            last_heartbeat=datetime.now(UTC),
+        )
+        if exit_code is not None:
+            info.exit_code = exit_code
+        return info
+
+    def _build_early_exit_detail(
+        self,
+        process: "subprocess.Popen[bytes]",
+        status: int,
+    ) -> str:
+        """Build detail suffix for a process that exited immediately.
+
+        Args:
+            process: Subprocess handle.
+            status: Exit code.
+
+        Returns:
+            Detail suffix string for error messages.
+        """
+        stdout_msg = ""
+        stderr_msg = ""
+        if self._capture_output:
+            stdout, stderr = process.communicate()
+            stdout_msg = stdout.decode().strip() if stdout else ""
+            stderr_msg = stderr.decode().strip() if stderr else ""
+        detail_parts = [part for part in [stdout_msg, stderr_msg] if part]
+        detail_suffix = f": {' '.join(detail_parts)}" if detail_parts else ""
+        if not self._capture_output and detail_suffix == "" and status != 0:
+            detail_suffix = "; see console output for details"
+        return detail_suffix
+
+    def _launch_subprocess(self, cmd: list[str]) -> "subprocess.Popen[bytes]":
+        """Create and start a subprocess with platform-appropriate settings.
+
+        Args:
+            cmd: Command list for subprocess.Popen.
+
+        Returns:
+            Started Popen handle.
+        """
+        preexec_fn: Callable[[], None] | None = _preexec_setsid
+        creation_flags = CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
+        stdout_stream: int | None = subprocess.PIPE if self._capture_output else None
+        stderr_stream: int | None = subprocess.PIPE if self._capture_output else None
+        return subprocess.Popen(
+            cmd,
+            stdout=stdout_stream,
+            stderr=stderr_stream,
+            preexec_fn=preexec_fn,
+            creationflags=creation_flags,
+        )
+
+    def _register_spawned_process(
+        self,
+        name: str,
+        class_path: str,
+        method: str,
+        args: list[Any],
+        kwargs: dict[str, Any],
+        process: "subprocess.Popen[bytes]",
+        exit_code: int | None = None,
+    ) -> ProcessInstanceInfo:
+        """Build process info, store it in the registry, and return it.
+
+        Args:
+            name: Process name.
+            class_path: Fully qualified class path.
+            method: Entry method name.
+            args: Positional arguments.
+            kwargs: Keyword arguments.
+            process: Subprocess handle.
+            exit_code: Optional exit code if process already exited.
+
+        Returns:
+            Registered ProcessInstanceInfo.
+        """
+        info = self._build_process_info(
+            name, class_path, method, args, kwargs, process, exit_code=exit_code
+        )
+        self.processes[name] = info
+        return info
+
     def spawn(
         self,
         name: str,
@@ -134,87 +283,88 @@ class ProcessSpawnerService:
         if name in self.processes:
             raise RuntimeError(f"Process '{name}' already exists")
         logger.info(f"Spawning process '{name}' (class: {class_path}, method: {method})")
-        validation_path_added = False
-        cwd = os.getcwd()
-        if cwd not in sys.path:
-            sys.path.insert(0, cwd)
-            validation_path_added = True
-        try:
-            module_path, class_name = class_path.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            getattr(module, class_name)
-        except (ValueError, ModuleNotFoundError, AttributeError) as exc:
-            raise RuntimeError(
-                f"Process '{name}' failed to start (invalid class '{class_path}')"
-            ) from exc
-        finally:
-            if validation_path_added:
-                with contextlib.suppress(ValueError):
-                    sys.path.remove(cwd)
+        self._validate_class_path(name, class_path)
         cmd = _build_process_command(name, class_path, method, args, kwargs)
-        preexec_fn: Callable[[], None] | None = _preexec_setsid
-        creation_flags = CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
-        stdout_stream: int | None = subprocess.PIPE if self._capture_output else None
-        stderr_stream: int | None = subprocess.PIPE if self._capture_output else None
-        process = subprocess.Popen(
-            cmd,
-            stdout=stdout_stream,
-            stderr=stderr_stream,
-            preexec_fn=preexec_fn,
-            creationflags=creation_flags,
-        )
+        process = self._launch_subprocess(cmd)
         time.sleep(0.1)
         status = process.poll()
-        if status is not None:
-            stdout_msg = ""
-            stderr_msg = ""
-            if self._capture_output:
-                stdout, stderr = process.communicate()
-                stdout_msg = stdout.decode().strip() if stdout else ""
-                stderr_msg = stderr.decode().strip() if stderr else ""
-            detail_parts = [part for part in [stdout_msg, stderr_msg] if part]
-            detail_suffix = f": {' '.join(detail_parts)}" if detail_parts else ""
-            if not self._capture_output and detail_suffix == "" and status != 0:
-                detail_suffix = "; see console output for details"
-            if status == 0:
-                logger.info("Process '{}' exited immediately after start", name)
-                info = ProcessInstanceInfo(
-                    name=name,
-                    pid=process.pid,
-                    started_at=datetime.now(UTC),
-                    config={
-                        "class_path": class_path,
-                        "method": method,
-                        "args": args,
-                        "kwargs": kwargs,
-                    },
-                    process=process,
-                    spawner=self,
-                    exit_code=status,
-                    last_heartbeat=datetime.now(UTC),
-                )
-                self.processes[name] = info
-                return info
-            raise RuntimeError(
-                f"Process '{name}' failed to start (exit code: {status}){detail_suffix}"
+        if status is None:
+            info = self._register_spawned_process(name, class_path, method, args, kwargs, process)
+            logger.info(f"Process '{name}' spawned with PID {info.pid}")
+            return info
+        if status == 0:
+            logger.info("Process '{}' exited immediately after start", name)
+            return self._register_spawned_process(
+                name, class_path, method, args, kwargs, process, exit_code=status
             )
-        info = ProcessInstanceInfo(
-            name=name,
-            pid=process.pid,
-            started_at=datetime.now(UTC),
-            config={
-                "class_path": class_path,
-                "method": method,
-                "args": args,
-                "kwargs": kwargs,
-            },
-            process=process,
-            spawner=self,
-            last_heartbeat=datetime.now(UTC),
-        )
-        self.processes[name] = info
-        logger.info(f"Process '{name}' spawned with PID {info.pid}")
-        return info
+        detail_suffix = self._build_early_exit_detail(process, status)
+        raise RuntimeError(f"Process '{name}' failed to start (exit code: {status}){detail_suffix}")
+
+    @staticmethod
+    def _send_signal_to_process(
+        process: "subprocess.Popen[bytes]",
+        sig: int,
+        name: str,
+    ) -> None:
+        """Send a signal to a process or its process group.
+
+        On POSIX, sends to the process group. On Windows, sends
+        directly to the process. Falls back to process.terminate()
+        or process.kill() on OSError.
+
+        Args:
+            process: Subprocess handle.
+            sig: Signal number to send.
+            name: Process name for logging.
+        """
+        use_kill_fallback = sig == SIGKILL_SIGNAL
+        try:
+            if IS_WINDOWS:
+                if use_kill_fallback:
+                    process.kill()
+                else:
+                    process.send_signal(CTRL_BREAK_EVENT)
+            else:
+                assert _posix_killpg is not None
+                assert _posix_getpgid is not None
+                _posix_killpg(_posix_getpgid(process.pid), sig)
+        except OSError as e:
+            fallback_name = "kill" if use_kill_fallback else "terminate"
+            logger.debug(
+                f"Signal {sig} failed for '{name}': {e}, falling back to {fallback_name}()"
+            )
+            if use_kill_fallback:
+                process.kill()
+            else:
+                process.terminate()
+
+    def _wait_for_graceful_exit(
+        self,
+        name: str,
+        info: ProcessInstanceInfo,
+        timeout: float,
+    ) -> bool:
+        """Wait for process to exit gracefully within timeout.
+
+        Args:
+            name: Process name for logging.
+            info: Process info with subprocess handle.
+            timeout: Seconds to wait.
+
+        Returns:
+            True if process exited within timeout, False otherwise.
+        """
+        process = info.process
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if process.poll() is not None:
+                info.exit_code = process.returncode
+                logger.info(
+                    f"Process '{name}' terminated gracefully (exit code: {process.returncode})"
+                )
+                return True
+            time.sleep(0.1)
+        return False
 
     def terminate(self, name: str, timeout: float | None = None) -> bool:
         """Terminate a process gracefully.
@@ -242,38 +392,15 @@ class ProcessSpawnerService:
             logger.info(f"Process '{name}' already dead (exit code: {process.returncode})")
             info.exit_code = process.returncode
             return True
-        timeout = timeout or self._shutdown_timeout
+        effective_timeout = timeout or self._shutdown_timeout
         logger.info(f"Terminating process '{name}' (PID: {info.pid})")
-        try:
-            if IS_WINDOWS:
-                process.send_signal(CTRL_BREAK_EVENT)
-            else:
-                assert _posix_killpg is not None
-                assert _posix_getpgid is not None
-                _posix_killpg(_posix_getpgid(process.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError) as e:
-            logger.debug(f"SIGTERM failed for '{name}': {e}, falling back to terminate()")
-            process.terminate()
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            if process.poll() is not None:
-                info.exit_code = process.returncode
-                logger.info(
-                    f"Process '{name}' terminated gracefully (exit code: {process.returncode})"
-                )
-                return True
-            time.sleep(0.1)
-        logger.warning(f"Process '{name}' didn't stop within {timeout}s, force killing (SIGKILL)")
-        try:
-            if IS_WINDOWS:
-                process.kill()
-            else:
-                assert _posix_killpg is not None
-                assert _posix_getpgid is not None
-                _posix_killpg(_posix_getpgid(process.pid), SIGKILL_SIGNAL)
-        except (ProcessLookupError, PermissionError, OSError) as e:
-            logger.debug(f"SIGKILL failed for '{name}': {e}, falling back to kill()")
-            process.kill()
+        self._send_signal_to_process(process, signal.SIGTERM, name)
+        if self._wait_for_graceful_exit(name, info, effective_timeout):
+            return True
+        logger.warning(
+            f"Process '{name}' didn't stop within {effective_timeout}s, force killing (SIGKILL)"
+        )
+        self._send_signal_to_process(process, SIGKILL_SIGNAL, name)
         try:
             process.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
@@ -340,7 +467,7 @@ class ProcessSpawnerService:
         Continues on errors to ensure all processes are attempted.
         """
         logger.info(f"Cleaning up {len(self.processes)} processes")
-        for name in list(self.processes.keys()):
+        for name in tuple(self.processes):
             try:
                 self.terminate(name)
                 self.cleanup(name)

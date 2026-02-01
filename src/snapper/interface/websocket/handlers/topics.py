@@ -22,7 +22,7 @@ __all__ = [
 
 async def handle_get_topic_suggestions(
     websocket: WebSocket,
-    manager: WebSocketConnectionManager,
+    _manager: WebSocketConnectionManager,
     message: WSGetTopicSuggestionsRequest,
     role: UserRole,
 ) -> None:
@@ -33,7 +33,7 @@ async def handle_get_topic_suggestions(
 
     Args:
         websocket: The WebSocket connection.
-        manager: WebSocket connection manager.
+        _manager: WebSocket connection manager (reserved for interface compatibility).
         message: The suggestions request with prefix.
         role: User's role for permission filtering.
     """

@@ -34,25 +34,21 @@ final class APIClientNetworkTests: XCTestCase {
                 url: request.url!,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
             )!
 
             let json: [[String: Any]] = [
                 [
-                    "id": "order-1",
-                    "symbol": "BTCUSD",
+                    "id": 1,
+                    "instrument": "BTCUSD",
                     "side": "buy",
-                    "order_type": "limit",
-                    "quantity": 1.0,
-                    "price": 50000.0,
+                    "type": "limit",
+                    "size": 1.0,
                     "status": "open",
-                    "filled_quantity": 0.0,
-                    "average_price": NSNull(),
-                    "created_at": "2025-11-22T10:00:00Z",
-                    "updated_at": "2025-11-22T10:00:00Z"
+                    "created_at": "2025-11-22T10:00:00Z"
                 ]
             ]
-            let data = try! JSONSerialization.data(withJSONObject: json)
+            let data = try JSONSerialization.data(withJSONObject: json)
 
             return (response, data)
         }
@@ -60,8 +56,8 @@ final class APIClientNetworkTests: XCTestCase {
         let orders = try await apiClient.fetchOrders()
 
         XCTAssertEqual(orders.count, 1)
-        XCTAssertEqual(orders[0].id, "order-1")
-        XCTAssertEqual(orders[0].symbol, "BTCUSD")
+        XCTAssertEqual(orders[0].id, 1)
+        XCTAssertEqual(orders[0].instrument, "BTCUSD")
     }
 
     func testFetchOrders401Error() async throws {
@@ -97,156 +93,104 @@ final class APIClientNetworkTests: XCTestCase {
         }
     }
 
-    func testCreateOrderSuccess() async throws {
+    func testFetchPositionsSuccess() async throws {
 
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
             )!
 
-            let json: [String: Any] = [
-                "id": "order-123",
-                "symbol": "BTCUSD",
-                "side": "buy",
-                "order_type": "limit",
-                "quantity": 1.5,
-                "price": 50000.0,
-                "status": "pending",
-                "filled_quantity": 0.0,
-                "average_price": NSNull(),
-                "created_at": "2025-11-22T10:00:00Z",
-                "updated_at": "2025-11-22T10:00:00Z"
-            ]
-            let data = try! JSONSerialization.data(withJSONObject: json)
-
-            return (response, data)
-        }
-
-        let orderRequest = CreateOrderRequest(
-            symbol: "BTCUSD",
-            side: "buy",
-            quantity: 1.5,
-            orderType: "limit",
-            price: 50000.0
-        )
-        let order = try await apiClient.createOrder(orderRequest)
-
-        XCTAssertEqual(order.id, "order-123")
-        XCTAssertEqual(order.symbol, "BTCUSD")
-        XCTAssertEqual(order.quantity, 1.5)
-        XCTAssertEqual(order.status, "pending")
-    }
-
-    func testCreateOrderValidation() async throws {
-
-        MockURLProtocol.requestHandler = { request in
-            MockURLProtocol.errorResponse(
-                statusCode: 422,
-                message: "Invalid quantity"
-            )
-        }
-
-        do {
-            let orderRequest = CreateOrderRequest(
-                symbol: "BTCUSD",
-                side: "buy",
-                quantity: -1.0,
-                orderType: "limit",
-                price: 50000.0
-            )
-            _ = try await apiClient.createOrder(orderRequest)
-            XCTFail("Should throw error")
-        } catch let error as APIError {
-            if case .serverError(let message) = error {
-                XCTAssertEqual(message, "Invalid quantity")
-            } else {
-                XCTFail("Wrong error type")
-            }
-        }
-    }
-
-    func testFetchPortfolioSuccess() async throws {
-
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )!
-
-            let json: [String: Any] = [
-                "total_value": 100000.0,
-                "cash_balance": 50000.0,
-                "positions_value": 50000.0,
-                "unrealized_pnl": 5000.0,
-                "realized_pnl": 3000.0,
-                "today_pnl": 1500.0,
-                "today_pnl_percent": 1.5
-            ]
-            let data = try! JSONSerialization.data(withJSONObject: json)
-
-            return (response, data)
-        }
-
-        let portfolio = try await apiClient.fetchPortfolio()
-
-        XCTAssertEqual(portfolio.totalValue, 100000.0)
-        XCTAssertEqual(portfolio.cashBalance, 50000.0)
-        XCTAssertEqual(portfolio.unrealizedPnL, 5000.0)
-    }
-
-    func testRequestIncludesAuthHeader() async throws {
-
-        var requestCount = 0
-        MockURLProtocol.requestHandler = { request in
-            requestCount += 1
-
-            if requestCount == 1 {
-
-                let json: [String: Any] = [
-                    "access_token": "test_token_123",
-                    "refresh_token": "refresh",
-                    "token_type": "bearer"
-                ]
-                return MockURLProtocol.jsonResponse(statusCode: 200, json: json)
-            } else if requestCount == 2 {
-
-                let json: [String: Any] = [
+            let json: [[String: Any]] = [
+                [
                     "id": 1,
-                    "username": "test",
-                    "email": "test@example.com",
-                    "is_active": true,
-                    "is_admin": false
+                    "instrument": "BTCUSD",
+                    "quantity": 1.5,
+                    "average_price": 50000.0,
+                    "unrealized_pnl": 500.0,
+                    "realized_pnl": 0.0,
+                    "updated_at": "2025-11-22T10:00:00Z"
                 ]
-                return MockURLProtocol.jsonResponse(statusCode: 200, json: json)
-            } else {
+            ]
+            let data = try JSONSerialization.data(withJSONObject: json)
 
-                return MockURLProtocol.jsonResponse(statusCode: 200, json: ["items": []])
-            }
+            return (response, data)
         }
 
-        await mockAuthService.login(username: "test", password: "test")
+        let positions = try await apiClient.fetchPositions()
 
-        requestCount = 0
+        XCTAssertEqual(positions.count, 1)
+        XCTAssertEqual(positions[0].instrument, "BTCUSD")
+        XCTAssertEqual(positions[0].quantity, 1.5)
+        XCTAssertEqual(positions[0].averagePrice, 50000.0)
+    }
+
+    func testFetchSignalsSuccess() async throws {
+
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
+            )!
+
+            let json: [[String: Any]] = [
+                [
+                    "id": 1,
+                    "instrument": "ETHUSD",
+                    "side": "buy",
+                    "strength": 0.8,
+                    "reason": "Strategy triggered",
+                    "timestamp": "2025-11-22T10:00:00Z"
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: json)
+
+            return (response, data)
+        }
+
+        let signals = try await apiClient.fetchSignals()
+
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals[0].id, 1)
+        XCTAssertEqual(signals[0].instrument, "ETHUSD")
+    }
+
+    func testRequestSetsCorrectContentType() async throws {
+
         var capturedRequest: URLRequest?
         MockURLProtocol.requestHandler = { request in
             capturedRequest = request
-            return MockURLProtocol.jsonResponse(statusCode: 200, json: ["items": []])
+
+            let json: [[String: Any]] = [
+                [
+                    "id": 1,
+                    "instrument": "BTCUSD",
+                    "side": "buy",
+                    "type": "limit",
+                    "size": 1.0,
+                    "status": "open",
+                    "created_at": "2025-11-22T10:00:00Z"
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: json)
+
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
+            )!
+            return (response, data)
         }
 
-        do {
-            let _: [Order] = try await apiClient.fetchOrders()
-        } catch {
-
-        }
+        _ = try await apiClient.fetchOrders()
 
         XCTAssertNotNil(capturedRequest)
-        let authHeader = capturedRequest?.value(forHTTPHeaderField: "Authorization")
-        XCTAssertNotNil(authHeader)
-        XCTAssertTrue(authHeader?.starts(with: "Bearer ") ?? false)
+        let contentType = capturedRequest?.value(forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
+        XCTAssertEqual(contentType, AppConfig.ContentType.json)
     }
 }

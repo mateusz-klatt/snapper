@@ -26,10 +26,10 @@ interface DispatcherConfig {
 
 export class WSDispatcher {
   private wsClient: WebSocketClient | null = null
-  private queryClient: QueryClient
+  private readonly queryClient: QueryClient
   private unsubscribers: UnsubscribeFn[] = []
-  private topics: string[]
-  private directStoreUpdates: boolean
+  private readonly topics: string[]
+  private readonly directStoreUpdates: boolean
   constructor(config: DispatcherConfig) {
     this.queryClient = config.queryClient
     this.topics = config.topics ?? [
@@ -44,14 +44,14 @@ export class WSDispatcher {
   attach(client: WebSocketClient): void {
     this.detach()
     this.wsClient = client
-    this.unsubscribers.push(client.onMessage('order_status', this.handleOrderMessage.bind(this)))
-    this.unsubscribers.push(client.onMessage('fill', this.handleExecutionMessage.bind(this)))
-    this.unsubscribers.push(client.onMessage('signal', this.handleSignalMessage.bind(this)))
-    this.unsubscribers.push(client.onMessage('bar', this.handleCandleMessage.bind(this)))
-    this.unsubscribers.push(client.onMessage('tick', this.handleTickMessage.bind(this)))
-    this.unsubscribers.push(client.onMessage('trade', this.handleTradeMessage.bind(this)))
-    this.unsubscribers.push(client.onMessage('heartbeat', this.handleHeartbeatMessage.bind(this)))
     this.unsubscribers.push(
+      client.onMessage('order_status', this.handleOrderMessage.bind(this)),
+      client.onMessage('fill', this.handleExecutionMessage.bind(this)),
+      client.onMessage('signal', this.handleSignalMessage.bind(this)),
+      client.onMessage('bar', this.handleCandleMessage.bind(this)),
+      client.onMessage('tick', this.handleTickMessage.bind(this)),
+      client.onMessage('trade', this.handleTradeMessage.bind(this)),
+      client.onMessage('heartbeat', this.handleHeartbeatMessage.bind(this)),
       client.onConnection((connected: boolean) => {
         if (connected && this.topics.length > 0) {
           client.subscribe(this.topics)
@@ -194,12 +194,13 @@ export class WSDispatcher {
         lastHeartbeat: message.timestamp ? new Date(message.timestamp).getTime() : Date.now(),
         details: { lag_ms: message.lag_ms ?? undefined },
       }
-      const separatorIndex =
-        component.indexOf('_') !== -1 ? component.indexOf('_') : component.indexOf('.')
+      const separatorIndex = component.includes('_')
+        ? component.indexOf('_')
+        : component.indexOf('.')
       const baseComponent =
-        separatorIndex !== -1 ? component.substring(0, separatorIndex) : component
-      const suffix = separatorIndex !== -1 ? component.substring(separatorIndex + 1) : 'default'
-      const componentKey = suffix !== 'default' ? `${baseComponent}_${suffix}` : baseComponent
+        separatorIndex === -1 ? component : component.substring(0, separatorIndex)
+      const suffix = separatorIndex === -1 ? 'default' : component.substring(separatorIndex + 1)
+      const componentKey = suffix === 'default' ? baseComponent : `${baseComponent}_${suffix}`
 
       switch (baseComponent) {
         case 'feed':
@@ -229,9 +230,7 @@ export class WSDispatcher {
 let dispatcherInstance: WSDispatcher | null = null
 
 export function getDispatcher(queryClient: QueryClient): WSDispatcher {
-  if (!dispatcherInstance) {
-    dispatcherInstance = new WSDispatcher({ queryClient })
-  }
+  dispatcherInstance ??= new WSDispatcher({ queryClient })
 
   return dispatcherInstance
 }

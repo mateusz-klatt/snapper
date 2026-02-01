@@ -14,14 +14,8 @@ interface AppRoutesProps {
   activeTab: string
 }
 
-export function AppRoutes({ activeTab }: AppRoutesProps): React.ReactElement {
+export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactElement {
   switch (activeTab) {
-    case 'overview':
-      return (
-        <ErrorBoundary componentName='Overview'>
-          <Overview />
-        </ErrorBoundary>
-      )
     case 'market':
       return (
         <ErrorBoundary componentName='Market Data'>
@@ -70,6 +64,7 @@ export function AppRoutes({ activeTab }: AppRoutesProps): React.ReactElement {
           <Settings />
         </ErrorBoundary>
       )
+    case 'overview':
     default:
       return (
         <ErrorBoundary componentName='Overview'>

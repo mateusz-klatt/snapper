@@ -10,7 +10,7 @@ interface ProtectedRouteProps {
   fallback?: React.ReactNode
 }
 
-const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
+const ProtectedRoute: React.FC<Readonly<ProtectedRouteProps>> = ({
   children,
   requiredRole,
   requiredPermission,

@@ -56,11 +56,11 @@ vi.mock('./auth', () => ({
 }))
 
 class MockWebSocket {
-  static CONNECTING = 0
-  static OPEN = 1
-  static CLOSING = 2
-  static CLOSED = 3
-  url: string
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+  static readonly CLOSING = 2
+  static readonly CLOSED = 3
+  readonly url: string
   readyState: number = MockWebSocket.CONNECTING
   onopen: ((this: WebSocket, ev: Event) => any) | null = null
   onclose: ((this: WebSocket, ev: CloseEvent) => any) | null = null
@@ -70,22 +70,16 @@ class MockWebSocket {
     this.url = url
     setTimeout(() => {
       this.readyState = MockWebSocket.OPEN
-      this.onopen?.call(this as unknown as WebSocket, new Event('open'))
+      this.onopen?.(new Event('open'))
     }, 10)
   }
   send = vi.fn()
   close = vi.fn(() => {
     this.readyState = MockWebSocket.CLOSED
-    this.onclose?.call(this as unknown as WebSocket, new CloseEvent('close'))
+    this.onclose?.(new CloseEvent('close'))
   })
 }
 
-Object.assign(MockWebSocket, {
-  CONNECTING: 0,
-  OPEN: 1,
-  CLOSING: 2,
-  CLOSED: 3,
-})
 describe('WebSocketClient', () => {
   let client: WebSocketClient
   let originalWebSocket: typeof WebSocket
@@ -236,8 +230,8 @@ describe('WebSocketClient', () => {
       client.disconnect()
       expect(clearIntervalSpy).not.toHaveBeenCalled()
       clearIntervalSpy.mockClear()
-      ;(client as any).heartbeatTimer = window.setInterval(() => {}, 1000)
-      ;(client as any).throttleTimer = window.setInterval(() => {}, 1000)
+      ;(client as any).heartbeatTimer = setInterval(() => {}, 1000)
+      ;(client as any).throttleTimer = setInterval(() => {}, 1000)
       client.disconnect()
       expect(clearIntervalSpy).toHaveBeenCalled()
       clearIntervalSpy.mockRestore()
@@ -261,7 +255,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
       const errorEvent = new Event('error')
 
-      mockWs.onerror?.call(mockWs, errorEvent)
+      mockWs.onerror?.(errorEvent)
       expect(consoleErrorSpy).toHaveBeenCalledWith('WebSocket error:', errorEvent)
       consoleErrorSpy.mockRestore()
     })
@@ -379,7 +373,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
       const heartbeatMsg = createHeartbeat()
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(heartbeatMsg) })
+      mockWs.onmessage?.({ data: JSON.stringify(heartbeatMsg) })
       expect(handler).toHaveBeenCalledWith(heartbeatMsg)
     })
     it('returns unsubscribe function', async () => {
@@ -391,7 +385,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createHeartbeat()) })
+      mockWs.onmessage?.({ data: JSON.stringify(createHeartbeat()) })
       expect(handler).not.toHaveBeenCalled()
     })
     it('supports multiple handlers for the same type', async () => {
@@ -405,7 +399,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
       const heartbeatMsg = createHeartbeat()
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(heartbeatMsg) })
+      mockWs.onmessage?.({ data: JSON.stringify(heartbeatMsg) })
       expect(handlerA).toHaveBeenCalledWith(heartbeatMsg)
       expect(handlerB).toHaveBeenCalledWith(heartbeatMsg)
     })
@@ -418,7 +412,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createHeartbeat()) })
+      mockWs.onmessage?.({ data: JSON.stringify(createHeartbeat()) })
       expect(handler).not.toHaveBeenCalled()
     })
     it('handles repeated unsubscription safely', () => {
@@ -455,7 +449,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
       const heartbeatMsg = createHeartbeat()
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(heartbeatMsg) })
+      mockWs.onmessage?.({ data: JSON.stringify(heartbeatMsg) })
       expect(handler).toHaveBeenCalled()
     })
   })
@@ -553,7 +547,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createCandle()) })
+      mockWs.onmessage?.({ data: JSON.stringify(createCandle()) })
       expect(authSpy).toHaveBeenCalled()
       authSpy.mockRestore()
     })
@@ -566,7 +560,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createAuthRequired()) })
+      mockWs.onmessage?.({ data: JSON.stringify(createAuthRequired()) })
       expect(handler).toHaveBeenCalled()
     })
     it('ignores JSON pong message', async () => {
@@ -577,7 +571,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createPong()) })
+      mockWs.onmessage?.({ data: JSON.stringify(createPong()) })
       expect(handler).not.toHaveBeenCalled()
     })
     it('handles non-string message data gracefully', async () => {
@@ -587,7 +581,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: new ArrayBuffer(8) })
+      mockWs.onmessage?.({ data: new ArrayBuffer(8) })
       expect(consoleErrorSpy).toHaveBeenCalledWith(
         'Failed to parse WebSocket message:',
         expect.any(Error)
@@ -600,7 +594,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
 
       expect(() => {
-        mockWs.onmessage?.call(mockWs, { data: 'invalid json {' })
+        mockWs.onmessage?.({ data: 'invalid json {' })
       }).not.toThrow()
     })
     it('ignores messages missing type', async () => {
@@ -611,7 +605,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify({ foo: 'bar' }) })
+      mockWs.onmessage?.({ data: JSON.stringify({ foo: 'bar' }) })
       expect(handler).not.toHaveBeenCalled()
     })
     it('drops messages that fail schema validation', async () => {
@@ -627,7 +621,7 @@ describe('WebSocketClient', () => {
         invalid: true,
       }
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(invalidMessage) })
+      mockWs.onmessage?.({ data: JSON.stringify(invalidMessage) })
       expect(handler).not.toHaveBeenCalled()
     })
     it('handles schema parser returning null', async () => {
@@ -638,7 +632,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createCandle()) })
+      mockWs.onmessage?.({ data: JSON.stringify(createCandle()) })
       expect(parseSpy).toHaveBeenCalled()
       parseSpy.mockRestore()
     })
@@ -658,7 +652,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
       const barMsg = createCandle()
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(barMsg) })
+      mockWs.onmessage?.({ data: JSON.stringify(barMsg) })
       const expectedTopic = 'market.test.BTC-USD.candles.1m'
 
       expect(handler).not.toHaveBeenCalled()
@@ -704,7 +698,7 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
 
-      mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createAuthRequired()) })
+      mockWs.onmessage?.({ data: JSON.stringify(createAuthRequired()) })
       expect(handler).toHaveBeenCalled()
       expect(vi.mocked(getWsToken)).not.toHaveBeenCalled()
     })
@@ -866,7 +860,7 @@ describe('WebSocketClient', () => {
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval')
 
       vi.mocked(shouldReconnect).mockReturnValueOnce(false).mockReturnValueOnce(false)
-      ;(client as any).heartbeatTimer = window.setInterval(() => {}, 1000)
+      ;(client as any).heartbeatTimer = setInterval(() => {}, 1000)
       ;(client as any).handleClose()
       ;(client as any).heartbeatTimer = null
       ;(client as any).handleClose()
@@ -884,7 +878,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
 
       mockWs.readyState = MockWebSocket.CLOSED
-      mockWs.onclose?.call(mockWs, new CloseEvent('close'))
+      mockWs.onclose?.(new CloseEvent('close'))
       expect((client as any).isReconnecting).toBe(false)
     })
     it('schedules reconnect on close', async () => {
@@ -893,7 +887,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
 
       mockWs.readyState = MockWebSocket.CLOSED
-      mockWs.onclose?.call(mockWs, new CloseEvent('close'))
+      mockWs.onclose?.(new CloseEvent('close'))
       expect((client as any).isReconnecting).toBe(true)
     })
     it('skips heartbeat cleanup when closing without heartbeat timer', async () => {
@@ -905,7 +899,7 @@ describe('WebSocketClient', () => {
       ;(client as any).heartbeatTimer = null
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval')
 
-      mockWs.onclose?.call(mockWs, new CloseEvent('close'))
+      mockWs.onclose?.(new CloseEvent('close'))
       expect(clearIntervalSpy).not.toHaveBeenCalled()
       clearIntervalSpy.mockRestore()
     })
@@ -923,7 +917,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
 
       mockWs.readyState = MockWebSocket.CLOSED
-      mockWs.onclose?.call(mockWs, new CloseEvent('close'))
+      mockWs.onclose?.(new CloseEvent('close'))
       ;(client as any).isReconnecting = false
       await vi.advanceTimersByTimeAsync(200)
       expect((client as any).ws).toBe(mockWs)
@@ -934,7 +928,7 @@ describe('WebSocketClient', () => {
       const oldWs = (client as any).ws
 
       oldWs.readyState = MockWebSocket.CLOSED
-      oldWs.onclose?.call(oldWs, new CloseEvent('close'))
+      oldWs.onclose?.(new CloseEvent('close'))
       await vi.advanceTimersByTimeAsync(200)
       expect((client as any).ws).not.toBe(oldWs)
     })
@@ -990,7 +984,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
 
       await vi.advanceTimersByTimeAsync(10)
-      mockWs.onmessage?.call(mockWs, {
+      mockWs.onmessage?.({
         data: JSON.stringify(
           createSubscriptionsList({ available_topics: ['topic1', 'topic2'], total_available: 2 })
         ),
@@ -1097,7 +1091,7 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
 
       expect(() => {
-        mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createHeartbeat()) })
+        mockWs.onmessage?.({ data: JSON.stringify(createHeartbeat()) })
       }).not.toThrow()
       expect(consoleSpy).toHaveBeenCalledWith('Error in message handler:', expect.any(Error))
       consoleSpy.mockRestore()
@@ -1164,7 +1158,7 @@ describe('WebSocketClient', () => {
       ;(client as any).startHeartbeat()
       const firstTimer = (client as any).heartbeatTimer
 
-      ;(client as any).heartbeatTimer = window.setInterval(() => {}, 1000)
+      ;(client as any).heartbeatTimer = setInterval(() => {}, 1000)
       ;(client as any).startHeartbeat()
       await vi.advanceTimersByTimeAsync(31000)
       await vi.advanceTimersByTimeAsync(31000)
@@ -1219,7 +1213,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, { data: JSON.stringify(createCandle()) })
+    mockWs.onmessage?.({ data: JSON.stringify(createCandle()) })
     expect(handler).not.toHaveBeenCalled()
   })
   it('handles auth_required message', async () => {
@@ -1227,7 +1221,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1241,7 +1235,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthComplete({ session_expires_at: '2024-01-01T00:00:00Z' })),
     })
     expect(connectionHandler).toHaveBeenCalledWith(true)
@@ -1262,7 +1256,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthFailed({ reason: 'Invalid token' })),
     })
     expect((client as any).isAuthenticated).toBe(false)
@@ -1273,7 +1267,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthOk()),
     })
     expect((client as any).reauthTimer).not.toBe(null)
@@ -1311,7 +1305,7 @@ describe('WebSocketClient secure mode', () => {
 
     ;(secureClient as any).isAuthenticated = true
     ;(secureClient as any).sessionExpiresAt = '2024-01-01T00:00:00Z'
-    ;(secureClient as any).reauthTimer = window.setTimeout(() => {}, 1000)
+    ;(secureClient as any).reauthTimer = setTimeout(() => {}, 1000)
     await (secureClient as any).handleAuthMessage({ type: 'auth_expired' })
     expect(clearSpy).toHaveBeenCalled()
     expect((secureClient as any).isAuthenticated).toBe(false)
@@ -1372,11 +1366,11 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthComplete()),
     })
     mockWs.send.mockClear()
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1390,7 +1384,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthOk()),
     })
     expect(handler).toHaveBeenCalled()
@@ -1417,10 +1411,10 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthComplete()),
     })
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthExpired()),
     })
     expect(handler).toHaveBeenCalled()
@@ -1434,7 +1428,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createCandle()),
     })
     expect(handler).not.toHaveBeenCalled()
@@ -1444,19 +1438,19 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthComplete()),
     })
     mockWs.send.mockClear()
     const deadline = new Date(Date.now() + 60 * 1000).toISOString()
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired({ deadline })),
     })
     await vi.advanceTimersByTimeAsync(100)
     const firstCallCount = mockWs.send.mock.calls.length
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired({ deadline })),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1474,17 +1468,17 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(10)
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthOk({ exp: new Date(Date.now() + 3600 * 1000).toISOString() })),
     })
     const initialCalls = vi.mocked(getWsToken).mock.calls.length
     const deadline = new Date(Date.now() + 7200 * 1000).toISOString()
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired({ deadline })),
     })
     await vi.advanceTimersByTimeAsync(10)
@@ -1526,7 +1520,7 @@ describe('WebSocketClient secure mode', () => {
       .spyOn(secureClient as any, 'performAuthentication')
       .mockResolvedValue(undefined)
 
-    ;(secureClient as any).reauthTimer = window.setTimeout(() => {}, 1000)
+    ;(secureClient as any).reauthTimer = setTimeout(() => {}, 1000)
     ;(secureClient as any).reauthScheduledAt = null
     ;(secureClient as any).lastReauthDeadlineMs = null
     await (secureClient as any).handleReauthRequired({
@@ -1541,11 +1535,11 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthComplete()),
     })
     mockWs.send.mockClear()
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1560,7 +1554,7 @@ describe('WebSocketClient secure mode', () => {
     ;(secureClient as any).lastReauthDeadlineMs = Date.now()
     await (secureClient as any).handleReauthRequired({
       type: 'reauth_required',
-      deadline: NaN,
+      deadline: Number.NaN,
     })
     expect((secureClient as any).lastReauthDeadlineMs).toBe(null)
     expect(performSpy).toHaveBeenCalledWith('reauth')
@@ -1571,7 +1565,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify({ type: 'auth_ok' }),
     })
     expect((client as any).reauthTimer).toBe(null)
@@ -1582,7 +1576,7 @@ describe('WebSocketClient secure mode', () => {
     const mockWs = (client as any).ws
     const pastExpiration = new Date(Date.now() - 60000).toISOString()
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify({ type: 'auth_ok', exp: pastExpiration }),
     })
     expect((client as any).reauthScheduledAt).toBe(null)
@@ -1593,7 +1587,7 @@ describe('WebSocketClient secure mode', () => {
     const mockWs = (client as any).ws
 
     mockWs.readyState = MockWebSocket.CLOSED
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthFailed({ reason: 'Test' })),
     })
     expect((client as any).reconnectAttempts).toBeGreaterThanOrEqual(10)
@@ -1606,7 +1600,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthFailed({ reason: 'Invalid' })),
     })
     expect(authLogoutCallback).toHaveBeenCalled()
@@ -1623,7 +1617,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1648,11 +1642,11 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(10)
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1675,7 +1669,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1697,11 +1691,11 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(10)
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthOk({ exp: new Date(Date.now() + 50000).toISOString() })),
     })
     await vi.advanceTimersByTimeAsync(10000)
@@ -1714,7 +1708,7 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthFailed({ reason: 'Server error' })),
     })
     expect((client as any).isAuthenticated).toBe(false)
@@ -1762,7 +1756,7 @@ describe('WebSocketClient secure mode', () => {
     const mockWs = (secureClient as any).ws
 
     mockWs.readyState = MockWebSocket.CLOSED
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1785,14 +1779,14 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(0)
     expect((secureClient as any).reauthInProgress).toBe(true)
     vi.mocked(getWsToken).mockClear()
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(0)
@@ -1810,7 +1804,7 @@ describe('WebSocketClient secure mode', () => {
     const mockWs = (nonSecureClient as any).ws
 
     mockWs.send.mockClear()
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired()),
     })
     await vi.advanceTimersByTimeAsync(100)
@@ -1833,12 +1827,12 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(10)
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthOk()),
     })
     await vi.advanceTimersByTimeAsync(0)
@@ -1847,7 +1841,7 @@ describe('WebSocketClient secure mode', () => {
     expect((secureClient as any).reauthScheduledAt).toBe(null)
     ;(secureClient as any).lastReauthDeadlineMs = null
     vi.mocked(getWsToken).mockClear()
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createReauthRequired()),
     })
     await vi.advanceTimersByTimeAsync(0)
@@ -1873,16 +1867,16 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(10)
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthOk()),
     })
     expect((secureClient as any).reauthTimer).not.toBe(null)
     vi.mocked(getWsToken).mockClear()
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(
         createReauthRequired({ deadline: new Date(Date.now() + 5 * 1000).toISOString() })
       ),
@@ -1904,17 +1898,17 @@ describe('WebSocketClient secure mode', () => {
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (secureClient as any).ws
 
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthRequired()),
     })
     await vi.advanceTimersByTimeAsync(10)
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(createAuthOk()),
     })
     expect((secureClient as any).reauthTimer).not.toBe(null)
     vi.mocked(getWsToken).mockClear()
     mockWs.send.mockClear()
-    mockWs.onmessage?.call(mockWs, {
+    mockWs.onmessage?.({
       data: JSON.stringify(
         createReauthRequired({ deadline: new Date(Date.now() + 10 * 1000).toISOString() })
       ),

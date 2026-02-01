@@ -365,6 +365,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
             return fake_session
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            """No cleanup required on context exit."""
             pass
 
     repo: Any = DummyRepo()

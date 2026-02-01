@@ -29,7 +29,7 @@ function useHashRouting<T extends string>(
   defaultRoute: T
 ): [T, (route: T) => void] {
   const getRouteFromHash = useCallback((): T => {
-    const hash = window.location.hash.slice(1)
+    const hash = globalThis.location.hash.slice(1)
 
     return validRoutes.includes(hash as T) ? (hash as T) : defaultRoute
   }, [validRoutes, defaultRoute])
@@ -37,7 +37,7 @@ function useHashRouting<T extends string>(
 
   const navigateToRoute = (route: T) => {
     setCurrentRoute(route)
-    window.location.hash = route
+    globalThis.location.hash = route
   }
 
   useEffect(() => {
@@ -45,13 +45,13 @@ function useHashRouting<T extends string>(
       setCurrentRoute(getRouteFromHash())
     }
 
-    if (!window.location.hash && defaultRoute) {
-      window.location.hash = defaultRoute
+    if (!globalThis.location.hash && defaultRoute) {
+      globalThis.location.hash = defaultRoute
     }
 
-    window.addEventListener('hashchange', handleHashChange)
+    globalThis.addEventListener('hashchange', handleHashChange)
 
-    return () => window.removeEventListener('hashchange', handleHashChange)
+    return () => globalThis.removeEventListener('hashchange', handleHashChange)
   }, [defaultRoute, validRoutes, getRouteFromHash])
 
   return [currentRoute, navigateToRoute]

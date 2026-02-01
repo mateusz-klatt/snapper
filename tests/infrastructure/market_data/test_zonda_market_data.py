@@ -4,7 +4,6 @@ import asyncio
 import logging
 import math
 from collections.abc import AsyncIterator
-from collections.abc import Awaitable
 from collections.abc import Coroutine
 from datetime import UTC
 from datetime import datetime
@@ -183,17 +182,22 @@ async def test_collect_snapshots_with_timeout_returns_partial_results(
     async def fake_load_all_symbols() -> list[str]:
         return ["BTC-PLN", "ETH-PLN"]
 
-    async def fake_wait_for(
-        awaitable: Awaitable[object], *, timeout: int | float | None = None
-    ) -> object:
-        if hasattr(awaitable, "close"):
-            cast(Any, awaitable).close()
-        raise TimeoutError
+    class _ImmediateTimeout:
+        """Context manager that immediately raises TimeoutError."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_ImmediateTimeout":
+            raise TimeoutError
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     monkeypatch.setattr(service, "load_all_symbols", fake_load_all_symbols)
     monkeypatch.setattr(
-        "snapper.infrastructure.market_data.zonda.asyncio.wait_for",
-        fake_wait_for,
+        "snapper.infrastructure.market_data.zonda.asyncio.timeout",
+        _ImmediateTimeout,
     )
     result = await service._collect_snapshots_with_timeout(timeout_seconds=1)
     assert result == []

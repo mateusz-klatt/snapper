@@ -125,7 +125,7 @@ async def test_start_invokes_fetch_for_previous_days(
     When: start method called,
     Then: _fetch_day called for each day in range.
     """
-    service_instance, loader = service_fixture
+    service_instance, _loader = service_fixture
     fixed_now = datetime(2024, 1, 10, 12, tzinfo=UTC)
     monkeypatch.setattr(
         "snapper.application.updaters.historical.grouped.datetime",

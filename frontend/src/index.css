@@ -1,7 +1,5 @@
 @import 'tailwindcss';
 
-@custom-variant dark (&:is(.dark *));
-
 @theme {
   --color-primary-50: #f0fdfa;
   --color-primary-100: #ccfbf1;
@@ -47,62 +45,62 @@
   }
 }
 
-@utility panel {
-  @apply bg-dark-800 border border-dark-700 rounded-lg p-4;
-}
+@layer utilities {
+  .panel {
+    @apply bg-dark-800 border border-dark-700 rounded-lg p-4;
+  }
 
-@utility btn {
-  @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900;
-}
+  .btn {
+    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900;
+  }
 
-@utility btn-primary {
-  @apply btn bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500;
-}
+  .btn-primary {
+    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900 bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500;
+  }
 
-@utility btn-secondary {
-  @apply btn bg-dark-700 text-white hover:bg-dark-600 focus:ring-dark-500;
-}
+  .btn-secondary {
+    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900 bg-dark-700 text-white hover:bg-dark-600 focus:ring-dark-500;
+  }
 
-@utility btn-danger {
-  @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
-}
+  .btn-danger {
+    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900 bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+  }
 
-@utility btn-sm {
-  @apply px-3 py-1 text-sm;
-}
+  .btn-sm {
+    @apply px-3 py-1 text-sm;
+  }
 
-@utility status-badge {
-  @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
-}
+  .status-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
 
-@utility status-connected {
-  @apply status-badge bg-green-100 text-green-800;
-}
+  .status-connected {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800;
+  }
 
-@utility status-disconnected {
-  @apply status-badge bg-red-100 text-red-800;
-}
+  .status-disconnected {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800;
+  }
 
-@utility status-pending {
-  @apply status-badge bg-yellow-100 text-yellow-800;
-}
+  .status-pending {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800;
+  }
 
-@utility table-auto {
-  & th {
+  .table-auto th {
     @apply bg-dark-700 text-primary-400 text-xs font-semibold uppercase tracking-wider px-4 py-2;
   }
 
-  & td {
+  .table-auto td {
     @apply px-4 py-2 text-sm border-b border-dark-700;
   }
-}
 
-@utility input {
-  @apply w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white placeholder-dark-400 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-transparent;
-}
+  .input {
+    @apply w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white placeholder-dark-400 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-transparent;
+  }
 
-@utility select {
-  @apply input cursor-pointer;
+  .select {
+    @apply w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white placeholder-dark-400 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-transparent cursor-pointer;
+  }
 }
 
 @layer base {

@@ -10,7 +10,13 @@ interface ModalProps {
   size?: 'sm' | 'md' | 'lg' | 'xl'
 }
 
-export const Modal: React.FC<ModalProps> = ({ open, onClose, title, children, size = 'md' }) => {
+export const Modal: React.FC<Readonly<ModalProps>> = ({
+  open,
+  onClose,
+  title,
+  children,
+  size = 'md',
+}) => {
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -38,7 +44,12 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, title, children, si
   const modalContent = (
     <div className='fixed inset-0 z-50 overflow-y-auto'>
       {}
-      <div className='fixed inset-0 bg-black bg-opacity-50 transition-opacity' onClick={onClose} />
+      <button
+        type='button'
+        className='fixed inset-0 w-full h-full bg-black bg-opacity-50 transition-opacity cursor-default border-none'
+        onClick={onClose}
+        aria-label='Close modal'
+      />
       {}
       <div className='flex min-h-full items-center justify-center p-4'>
         <div
@@ -46,7 +57,6 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, title, children, si
             'relative w-full bg-dark-800 rounded-lg shadow-xl border border-dark-700',
             sizeClasses[size]
           )}
-          onClick={e => e.stopPropagation()}
         >
           {}
           {title && (
@@ -55,6 +65,7 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, title, children, si
               <button
                 onClick={onClose}
                 className='text-dark-400 hover:text-dark-200 transition-colors'
+                aria-label='Close'
               >
                 <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
                   <path

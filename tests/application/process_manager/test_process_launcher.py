@@ -2443,7 +2443,8 @@ async def test_monitor_native_processes_handles_cancelled(monkeypatch: pytest.Mo
         raise asyncio.CancelledError()
 
     monkeypatch.setattr("snapper.application.process_manager.launcher.asyncio.sleep", sleep_cancel)
-    await factory._monitor_native_processes()
+    with pytest.raises(asyncio.CancelledError):
+        await factory._monitor_native_processes()
     assert "_native_monitor" not in factory.process_tasks
 
 

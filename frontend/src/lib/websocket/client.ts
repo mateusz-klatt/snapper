@@ -40,12 +40,12 @@ import { getWsToken, isAuthControlMessage } from './auth'
 
 class WebSocketClient {
   private ws: WebSocket | null = null
-  private url: string
-  private reconnectInterval: number
-  private maxReconnectAttempts: number
-  private heartbeatInterval: number
-  private throttleInterval: number
-  private secure: boolean
+  private readonly url: string
+  private readonly reconnectInterval: number
+  private readonly maxReconnectAttempts: number
+  private readonly heartbeatInterval: number
+  private readonly throttleInterval: number
+  private readonly secure: boolean
   private reconnectAttempts = 0
   private isReconnecting = false
   private intentionalDisconnect = false
@@ -59,11 +59,11 @@ class WebSocketClient {
   private lastReauthDeadlineMs: number | null = null
   private reauthInProgress = false
   private readonly reauthLeadTimeMs = 45000
-  private messageHandlers = new Map<string, MessageHandler[]>()
-  private connectionHandlers: ConnectionHandler[] = []
-  private subscribedTopics = new Set<string>()
-  private pendingMessages = new Map<string, WebSocketMessages>()
-  private lastMessageTime = new Map<string, number>()
+  private readonly messageHandlers = new Map<string, MessageHandler[]>()
+  private readonly connectionHandlers: ConnectionHandler[] = []
+  private readonly subscribedTopics = new Set<string>()
+  private readonly pendingMessages = new Map<string, WebSocketMessages>()
+  private readonly lastMessageTime = new Map<string, number>()
   constructor(options: WebSocketClientOptions = {}) {
     this.secure = options.secure || false
     this.url = options.url || buildWebSocketUrl()
@@ -74,7 +74,7 @@ class WebSocketClient {
     this.setupThrottling()
   }
   private setupThrottling(): void {
-    this.throttleTimer = window.setInterval(() => {
+    this.throttleTimer = setInterval(() => {
       flushThrottledMessages(
         this.pendingMessages,
         this.lastMessageTime,
@@ -260,17 +260,18 @@ class WebSocketClient {
 
     await this.performAuthentication('authenticate')
   }
+  private resolveExpirationMs(exp: unknown): number | null {
+    if (typeof exp === 'string') return new Date(exp).getTime()
+    if (typeof this.pendingWsTokenExp === 'number') return this.pendingWsTokenExp * 1000
+
+    return null
+  }
   private handleAuthOk(message: WSAuthOkResponse): void {
-    const expirationMs =
-      typeof message.exp === 'string'
-        ? new Date(message.exp).getTime()
-        : typeof this.pendingWsTokenExp === 'number'
-          ? this.pendingWsTokenExp * 1000
-          : null
+    const expirationMs = this.resolveExpirationMs(message.exp)
 
     this.pendingWsTokenExp = null
 
-    if (typeof expirationMs === 'number' && !isNaN(expirationMs)) {
+    if (typeof expirationMs === 'number' && !Number.isNaN(expirationMs)) {
       this.scheduleReauthFromMs(expirationMs)
     }
 
@@ -290,12 +291,10 @@ class WebSocketClient {
     this.reconnectAttempts = this.maxReconnectAttempts
     this.notifyHandlers({ ...message, type: 'auth_failed' } as WebSocketMessages)
 
-    if (typeof window !== 'undefined') {
-      const authCallback = (window as { authLogoutCallback?: () => void }).authLogoutCallback
+    const authCallback = (globalThis as { authLogoutCallback?: () => void }).authLogoutCallback
 
-      if (authCallback) {
-        authCallback()
-      }
+    if (authCallback) {
+      authCallback()
     }
 
     this.closeForAuthFailure()
@@ -308,7 +307,7 @@ class WebSocketClient {
     const deadlineMs =
       typeof message.deadline === 'string' ? new Date(message.deadline).getTime() : null
 
-    if (deadlineMs !== null && !isNaN(deadlineMs)) {
+    if (deadlineMs !== null && !Number.isNaN(deadlineMs)) {
       if (this.lastReauthDeadlineMs !== null && deadlineMs <= this.lastReauthDeadlineMs) {
         return
       }
@@ -337,16 +336,11 @@ class WebSocketClient {
     await this.performAuthentication('reauth')
   }
   private handleReauthOk(message: WSReauthOkResponse): void {
-    const expirationMs =
-      typeof message.exp === 'string'
-        ? new Date(message.exp).getTime()
-        : typeof this.pendingWsTokenExp === 'number'
-          ? this.pendingWsTokenExp * 1000
-          : null
+    const expirationMs = this.resolveExpirationMs(message.exp)
 
     this.pendingWsTokenExp = null
 
-    if (typeof expirationMs === 'number' && !isNaN(expirationMs)) {
+    if (typeof expirationMs === 'number' && !Number.isNaN(expirationMs)) {
       this.scheduleReauthFromMs(expirationMs)
     }
 
@@ -411,7 +405,7 @@ class WebSocketClient {
     }
 
     this.reauthScheduledAt = expirationMs - this.reauthLeadTimeMs
-    this.reauthTimer = window.setTimeout(() => {
+    this.reauthTimer = setTimeout(() => {
       this.reauthTimer = null
       this.reauthScheduledAt = null
       void this.performAuthentication('reauth')
@@ -452,7 +446,7 @@ class WebSocketClient {
       clearInterval(this.heartbeatTimer)
     }
 
-    this.heartbeatTimer = window.setInterval(() => {
+    this.heartbeatTimer = setInterval(() => {
       if (this.isConnected()) {
         this.send(createHeartbeatMessage())
       }

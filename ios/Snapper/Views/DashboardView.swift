@@ -2,7 +2,9 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject var webSocketManager: WebSocketManager
-    @State private var portfolio: Portfolio?
+    @State private var systemStatus: SystemStatus?
+    @State private var positions: [PositionSnapshot] = []
+    @State private var orders: [OrderStatus] = []
     @State private var isLoading = true
     @State private var errorMessage: String?
 
@@ -13,10 +15,10 @@ struct DashboardView: View {
 
                     connectionStatusView
 
-                    if let portfolio = portfolio {
-                        portfolioSummaryView(portfolio: portfolio)
+                    if let status = systemStatus {
+                        systemStatusView(status: status)
                     } else if isLoading {
-                        ProgressView("Loading portfolio...")
+                        ProgressView("Loading status...")
                             .padding()
                     } else if let error = errorMessage {
                         Text("Error: \(error)")
@@ -24,11 +26,11 @@ struct DashboardView: View {
                             .padding()
                     }
 
-                    if !webSocketManager.marketData.isEmpty {
-                        marketDataView
+                    if !positions.isEmpty {
+                        positionsView
                     }
 
-                    if !webSocketManager.orderUpdates.isEmpty {
+                    if !orders.isEmpty {
                         recentOrdersView
                     }
                 }
@@ -36,14 +38,11 @@ struct DashboardView: View {
             }
             .navigationTitle("Dashboard")
             .refreshable {
-                await loadPortfolio()
+                await loadData()
             }
         }
         .task {
-            await loadPortfolio()
-
-            webSocketManager.subscribeToMarketData(symbols: ["BTCUSD", "ETHUSD", "PLNUSD"])
-            webSocketManager.subscribeToOrders()
+            await loadData()
         }
     }
 
@@ -86,45 +85,37 @@ struct DashboardView: View {
         }
     }
 
-    private func portfolioSummaryView(portfolio: Portfolio) -> some View {
+    private func systemStatusView(status: SystemStatus) -> some View {
         VStack(spacing: 16) {
-
-            VStack(spacing: 4) {
-                Text("Total Value")
+            HStack {
+                Text("Trader Status")
+                    .font(.headline)
+                Spacer()
+                Text(status.trader.status)
                     .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Text(String(format: "$%.2f", portfolio.totalValue))
-                    .font(.system(size: 36, weight: .bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(status.trader.status == "running" ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
+                    .cornerRadius(4)
             }
 
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Today's P&L")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Text(String(format: "$%.2f", portfolio.todayPnL))
-                        .font(.title3)
+            if let strategies = status.strategies, !strategies.isEmpty {
+                Divider()
+                HStack {
+                    Text("Active Strategies")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(strategies.count)")
+                        .font(.subheadline)
                         .fontWeight(.semibold)
-                        .foregroundColor(portfolio.todayPnL >= 0 ? .green : .red)
                 }
-
-                Spacer()
-
-                Text(String(format: "%@%.2f%%", portfolio.todayPnLPercent >= 0 ? "+" : "", portfolio.todayPnLPercent))
-                    .font(.title3)
-                    .fontWeight(.semibold)
-                    .foregroundColor(portfolio.todayPnLPercent >= 0 ? .green : .red)
             }
 
             Divider()
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                statView(title: "Cash", value: String(format: "$%.2f", portfolio.cashBalance))
-                statView(title: "Positions", value: String(format: "$%.2f", portfolio.positionsValue))
-                statView(title: "Unrealized P&L", value: String(format: "$%.2f", portfolio.unrealizedPnL), color: portfolio.unrealizedPnL >= 0 ? .green : .red)
-                statView(title: "Realized P&L", value: String(format: "$%.2f", portfolio.realizedPnL), color: portfolio.realizedPnL >= 0 ? .green : .red)
+                statView(title: "Open Positions", value: "\(positions.count)")
+                statView(title: "Active Orders", value: "\(orders.filter { $0.status == "open" || $0.status == "pending" }.count)")
             }
         }
         .padding()
@@ -145,25 +136,32 @@ struct DashboardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var marketDataView: some View {
+    private var positionsView: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Market Data")
+            Text("Open Positions")
                 .font(.headline)
 
-            ForEach(Array(webSocketManager.marketData.values.prefix(5)), id: \.symbol) { data in
+            ForEach(positions, id: \.id) { position in
                 HStack {
-                    Text(data.symbol)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(position.instrument)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+
+                        Text(String(format: "Qty: %.4f @ %.2f", position.quantity, position.averagePrice))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
 
                     Spacer()
 
-                    Text(String(format: "$%.2f", data.price))
-                        .font(.subheadline)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text(String(format: "$%.2f", position.unrealizedPnl))
+                            .font(.subheadline)
+                            .foregroundColor(position.unrealizedPnl >= 0 ? .green : .red)
 
-                    if let volume = data.volume {
-                        Text(String(format: "Vol: %.0f", volume))
-                            .font(.caption)
+                        Text("Unrealized P&L")
+                            .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                 }
@@ -181,25 +179,25 @@ struct DashboardView: View {
             Text("Recent Orders")
                 .font(.headline)
 
-            ForEach(webSocketManager.orderUpdates.prefix(5)) { update in
+            ForEach(orders.prefix(5), id: \.id) { order in
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(update.symbol)
+                        Text(order.instrument)
                             .font(.subheadline)
                             .fontWeight(.medium)
 
-                        Text(String(format: "%@ %.4f", update.side.uppercased(), update.quantity))
+                        Text(String(format: "%@ %.4f", order.side.uppercased(), order.size))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
 
                     Spacer()
 
-                    Text(update.status)
+                    Text(order.status)
                         .font(.caption)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(statusColor(for: update.status))
+                        .background(statusColor(for: order.status))
                         .foregroundColor(.white)
                         .cornerRadius(4)
                 }
@@ -212,17 +210,33 @@ struct DashboardView: View {
         .cornerRadius(12)
     }
 
-    private func loadPortfolio() async {
+    private func loadData() async {
         isLoading = true
         errorMessage = nil
 
+        async let statusResult = APIClient.shared.fetchSystemStatus()
+        async let positionsResult = APIClient.shared.fetchPositions()
+        async let ordersResult = APIClient.shared.fetchOrders()
+
         do {
-            portfolio = try await APIClient.shared.fetchPortfolio()
-            isLoading = false
+            systemStatus = try await statusResult
         } catch {
             errorMessage = error.localizedDescription
-            isLoading = false
         }
+
+        do {
+            positions = try await positionsResult
+        } catch {
+            print("Failed to fetch positions: \(error)")
+        }
+
+        do {
+            orders = try await ordersResult
+        } catch {
+            print("Failed to fetch orders: \(error)")
+        }
+
+        isLoading = false
     }
 
     private func statusColor(for status: String) -> Color {

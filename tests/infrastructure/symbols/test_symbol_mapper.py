@@ -58,7 +58,7 @@ class TestDatabaseSymbolMapper:
         mapper = SymbolMapperService()
         assert mapper is not None
         assert mapper.repository is not None
-        assert len(mapper.native_to_ws) >= 0
+        assert mapper.native_to_ws is not None
 
     def test_cache_invalidation_pattern(self) -> None:
         """Cache invalidation preserves existing mappings.
@@ -682,9 +682,9 @@ class TestDatabaseSymbolMapperCore:
         ):
             mapper = SymbolMapperService()
             mapper.load_cache_if_needed()
-            assert len(mapper.native_to_ws) >= 0
+            assert mapper.native_to_ws is not None
             mapper.trigger_cache_invalidation(fail_fast=False)
-            assert len(mapper.native_to_ws) >= 0
+            assert mapper.native_to_ws is not None
 
     def test_load_cache_if_needed_populates_mappings(self) -> None:
         """Cache loading populates all mapping dictionaries.

@@ -184,6 +184,22 @@ class ZmqBrokerProcess(RegisterableProcess):
             self.context.term()
         logger.info("ZMQ Broker stopped")
 
+    async def _forward_polled_messages(self, events: dict[Any, int]) -> None:
+        """Forward messages based on poll results.
+
+        Args:
+            events: Dictionary mapping socket objects to event flags.
+        """
+        for socket, event in events.items():
+            if not (event & zmq.POLLIN):
+                continue
+            if socket == self.xsub_socket and self.xpub_socket:
+                message = await socket.recv_multipart(zmq.NOBLOCK)
+                await self.xpub_socket.send_multipart(message)
+            elif socket == self.xpub_socket and self.xsub_socket:
+                message = await socket.recv_multipart(zmq.NOBLOCK)
+                await self.xsub_socket.send_multipart(message)
+
     async def _proxy_loop(self) -> None:
         """Forward messages between XSUB and XPUB sockets.
 
@@ -196,21 +212,11 @@ class ZmqBrokerProcess(RegisterableProcess):
         try:
             while self.running:
                 try:
-                    events = await asyncio.wait_for(self._poll_sockets(), timeout=1.0)
-                    for socket, event in events.items():
-                        if event & zmq.POLLIN:
-                            if socket == self.xsub_socket and self.xpub_socket:
-                                message = await socket.recv_multipart(zmq.NOBLOCK)
-                                await self.xpub_socket.send_multipart(message)
-                            elif socket == self.xpub_socket and self.xsub_socket:
-                                message = await socket.recv_multipart(zmq.NOBLOCK)
-                                await self.xsub_socket.send_multipart(message)
-                except TimeoutError:
+                    async with asyncio.timeout(1.0):
+                        events = await self._poll_sockets()
+                    await self._forward_polled_messages(events)
+                except (TimeoutError, zmq.Again):
                     continue
-                except zmq.Again:
-                    continue
-        except asyncio.CancelledError:
-            pass
         except Exception as e:
             logger.error(f"Broker proxy error: {e}")
 

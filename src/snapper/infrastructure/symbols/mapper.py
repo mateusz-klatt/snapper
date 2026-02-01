@@ -181,6 +181,66 @@ class SymbolMapperService:
                 return []
             raise
 
+    _EXCHANGE_SYMBOL_ATTRS: tuple[tuple[str, str, str], ...] = (
+        ("kraken_websocket_symbol", "native_to_ws", "ws_to_native"),
+        ("kraken_rest_symbol", "native_to_rest", "rest_to_native"),
+        ("ccxt_symbol", "native_to_ccxt", "ccxt_to_native"),
+        ("zonda_symbol", "native_to_zonda", "zonda_to_native"),
+        ("walutomat_symbol", "native_to_walutomat", "walutomat_to_native"),
+        ("walutomat_rest_symbol", "native_to_walutomat_rest", "walutomat_rest_to_native"),
+        ("polygon_symbol", "native_to_polygon", "polygon_to_native"),
+    )
+
+    @staticmethod
+    def _resolve_native_symbol(mapping: SymbolMapping) -> str:
+        """Determine the native symbol for a given mapping row.
+
+        Currency pairs use ``BASE-QUOTE`` format. Single-ticker instruments
+        (e.g. stocks without a Polygon crypto/forex prefix) use just the
+        base currency.
+
+        Args:
+            mapping: Database mapping row.
+
+        Returns:
+            Native symbol string.
+        """
+        polygon_symbol = mapping.polygon_symbol or ""
+        is_polygon_pair = polygon_symbol.startswith(("C:", "X:"))
+        if mapping.quote_currency and (is_polygon_pair or not polygon_symbol):
+            return make_native_symbol(mapping.base_currency, mapping.quote_currency)
+        return mapping.base_currency
+
+    def _populate_maps_from_mappings(
+        self,
+        mappings: list[SymbolMapping],
+    ) -> None:
+        """Populate all bidirectional mapping dicts from database rows.
+
+        Builds fresh dicts for each exchange and assigns them to
+        instance attributes atomically.
+
+        Args:
+            mappings: List of SymbolMapping ORM objects.
+        """
+        forward_maps: dict[str, dict[str, str]] = {
+            attr[1]: {} for attr in self._EXCHANGE_SYMBOL_ATTRS
+        }
+        reverse_maps: dict[str, dict[str, str]] = {
+            attr[2]: {} for attr in self._EXCHANGE_SYMBOL_ATTRS
+        }
+        for mapping in mappings:
+            native_symbol = self._resolve_native_symbol(mapping)
+            for db_attr, fwd_name, rev_name in self._EXCHANGE_SYMBOL_ATTRS:
+                exchange_symbol = getattr(mapping, db_attr, None)
+                if exchange_symbol:
+                    forward_maps[fwd_name][native_symbol] = exchange_symbol
+                    reverse_maps[rev_name][exchange_symbol] = native_symbol
+        for attr_name, map_dict in forward_maps.items():
+            setattr(self, attr_name, map_dict)
+        for attr_name, map_dict in reverse_maps.items():
+            setattr(self, attr_name, map_dict)
+
     def load_cache_if_needed(self, fail_fast: bool = False) -> None:
         """Load symbol mappings into cache if not already loaded.
 
@@ -196,64 +256,7 @@ class SymbolMapperService:
             return
         try:
             mappings = self.load_mappings_from_db()
-            new_native_to_ws: dict[str, str] = {}
-            new_native_to_rest: dict[str, str] = {}
-            new_native_to_ccxt: dict[str, str] = {}
-            new_ws_to_native: dict[str, str] = {}
-            new_rest_to_native: dict[str, str] = {}
-            new_ccxt_to_native: dict[str, str] = {}
-            new_native_to_zonda: dict[str, str] = {}
-            new_zonda_to_native: dict[str, str] = {}
-            new_native_to_walutomat: dict[str, str] = {}
-            new_walutomat_to_native: dict[str, str] = {}
-            new_native_to_walutomat_rest: dict[str, str] = {}
-            new_walutomat_rest_to_native: dict[str, str] = {}
-            new_native_to_polygon: dict[str, str] = {}
-            new_polygon_to_native: dict[str, str] = {}
-            for mapping in mappings:
-                polygon_symbol = mapping.polygon_symbol or ""
-                is_polygon_pair = polygon_symbol.startswith(("C:", "X:"))
-                if mapping.quote_currency and (is_polygon_pair or not polygon_symbol):
-                    native_symbol = make_native_symbol(
-                        mapping.base_currency, mapping.quote_currency
-                    )
-                else:
-                    native_symbol = mapping.base_currency
-                if mapping.kraken_websocket_symbol:
-                    new_native_to_ws[native_symbol] = mapping.kraken_websocket_symbol
-                    new_ws_to_native[mapping.kraken_websocket_symbol] = native_symbol
-                if mapping.kraken_rest_symbol:
-                    new_native_to_rest[native_symbol] = mapping.kraken_rest_symbol
-                    new_rest_to_native[mapping.kraken_rest_symbol] = native_symbol
-                if mapping.ccxt_symbol:
-                    new_native_to_ccxt[native_symbol] = mapping.ccxt_symbol
-                    new_ccxt_to_native[mapping.ccxt_symbol] = native_symbol
-                if mapping.zonda_symbol:
-                    new_native_to_zonda[native_symbol] = mapping.zonda_symbol
-                    new_zonda_to_native[mapping.zonda_symbol] = native_symbol
-                if mapping.walutomat_symbol:
-                    new_native_to_walutomat[native_symbol] = mapping.walutomat_symbol
-                    new_walutomat_to_native[mapping.walutomat_symbol] = native_symbol
-                if mapping.walutomat_rest_symbol:
-                    new_native_to_walutomat_rest[native_symbol] = mapping.walutomat_rest_symbol
-                    new_walutomat_rest_to_native[mapping.walutomat_rest_symbol] = native_symbol
-                if mapping.polygon_symbol:
-                    new_native_to_polygon[native_symbol] = mapping.polygon_symbol
-                    new_polygon_to_native[mapping.polygon_symbol] = native_symbol
-            self.native_to_ws = new_native_to_ws
-            self.native_to_rest = new_native_to_rest
-            self.native_to_ccxt = new_native_to_ccxt
-            self.ws_to_native = new_ws_to_native
-            self.rest_to_native = new_rest_to_native
-            self.ccxt_to_native = new_ccxt_to_native
-            self.native_to_zonda = new_native_to_zonda
-            self.zonda_to_native = new_zonda_to_native
-            self.native_to_walutomat = new_native_to_walutomat
-            self.walutomat_to_native = new_walutomat_to_native
-            self.native_to_walutomat_rest = new_native_to_walutomat_rest
-            self.walutomat_rest_to_native = new_walutomat_rest_to_native
-            self.native_to_polygon = new_native_to_polygon
-            self.polygon_to_native = new_polygon_to_native
+            self._populate_maps_from_mappings(mappings)
             logger.info(f"Loaded symbol maps cache with {len(self.native_to_ws)} native symbols")
         except Exception as e:
             logger.error(f"Error loading symbol maps cache: {e}")

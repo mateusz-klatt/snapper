@@ -3,7 +3,6 @@
 import asyncio
 import math
 from collections.abc import AsyncIterator
-from collections.abc import Awaitable
 from collections.abc import Coroutine
 from datetime import UTC
 from datetime import datetime
@@ -356,15 +355,20 @@ async def test_collect_snapshots_with_timeout_handles_asyncio_timeout(
     async def fake_load_all_symbols() -> list[str]:
         return ["EUR-PLN", "USD-PLN"]
 
-    async def fake_wait_for(
-        _awaitable: Awaitable[object], *, timeout: int | float | None = None
-    ) -> object:
-        if hasattr(_awaitable, "close"):
-            cast(Any, _awaitable).close()
-        raise TimeoutError
+    class _ImmediateTimeout:
+        """Context manager that immediately raises TimeoutError."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_ImmediateTimeout":
+            raise TimeoutError
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     monkeypatch.setattr(service, "load_all_symbols", fake_load_all_symbols)
-    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(asyncio, "timeout", _ImmediateTimeout)
     snapshots = await service._collect_snapshots_with_timeout(timeout_seconds=1)
     assert snapshots == []
 
@@ -525,16 +529,21 @@ async def test_collect_snapshots_handles_timeout(monkeypatch: pytest.MonkeyPatch
     """
     updater = _TimeoutUpdater()
 
-    async def fake_wait_for(coro: Any, timeout: int) -> Any:
-        task = asyncio.create_task(coro)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        raise TimeoutError
+    class _ImmediateTimeout:
+        """Context manager that immediately raises TimeoutError."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_ImmediateTimeout":
+            raise TimeoutError
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     monkeypatch.setattr(
-        "snapper.infrastructure.market_data.walutomat.asyncio.wait_for",
-        fake_wait_for,
+        "snapper.infrastructure.market_data.walutomat.asyncio.timeout",
+        _ImmediateTimeout,
     )
     snapshots = await updater._collect_snapshots_with_timeout(timeout_seconds=1)
     assert snapshots == []

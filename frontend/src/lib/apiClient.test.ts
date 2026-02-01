@@ -237,8 +237,8 @@ describe('APIClient', () => {
         const APIClientClass = (apiClient as any).constructor
         const instance = APIClientClass.getInstance()
 
-        ;(instance as any).isLoggingOut = false
-        expect(() => (instance as any).handleAuthenticationFailure()).not.toThrow()
+        instance.isLoggingOut = false
+        expect(() => instance.handleAuthenticationFailure()).not.toThrow()
         vi.runAllTimers()
       } finally {
         vi.stubGlobal('window', originalWindow)
@@ -619,7 +619,7 @@ describe('domain API methods', () => {
           instrument: 'BTC/USD',
           timeframe: '1h',
           timestamp: '2024-01-01T00:00:00Z',
-          open: 1.0,
+          open: 1,
           high: 1.1,
           low: 0.9,
           close: 1.05,

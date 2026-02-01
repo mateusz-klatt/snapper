@@ -184,6 +184,7 @@ class ZmqMessageLogger(RegisterableProcess):
             await self._logging_loop()
         except asyncio.CancelledError:
             logger.info("ZMQ Message Logger cancelled")
+            raise
         except Exception as e:
             logger.error(f"ZMQ Message Logger error: {e}")
             raise

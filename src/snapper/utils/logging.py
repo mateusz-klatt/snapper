@@ -50,6 +50,7 @@ __all__ = [
     "set_log_context",
     "get_log_context",
 ]
+_MSG_ONLY_FMT = "{message}"
 _RESET = "\033[0m"
 _WHITE = "\033[38;2;255;255;255m"
 _ACCENT = "\033[38;2;140;140;255m"
@@ -245,7 +246,7 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
             logger.add(
                 colorized_sink,
                 level=level,
-                format="{message}",
+                format=_MSG_ONLY_FMT,
                 colorize=False,
                 filter=_filter_cancelled_errors,
             )
@@ -253,7 +254,7 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
             logger.add(
                 lambda msg: print(_format_message(msg.record), end=""),
                 level=level,
-                format="{message}",
+                format=_MSG_ONLY_FMT,
                 filter=_filter_cancelled_errors,
             )
     if logfile:
@@ -267,6 +268,6 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
         logger.add(
             file_sink,
             level=level,
-            format="{message}",
+            format=_MSG_ONLY_FMT,
             filter=_filter_cancelled_errors,
         )

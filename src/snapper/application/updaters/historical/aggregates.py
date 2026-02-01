@@ -16,6 +16,7 @@ from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
@@ -217,19 +218,12 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             result = session.execute(stmt).scalars().all()
             return [str(symbol) for symbol in result if symbol]
 
-    async def _process_symbol(self, context: _SymbolContext) -> None:
-        """Process backfill for a single symbol.
+    def _compute_date_range(self) -> tuple[date, date, datetime]:
+        """Compute the backfill date range and max timestamp.
 
-        Handles chunked date ranges, resume optimization,
-        and database persistence.
-
-        Args:
-            context: Symbol context with native and Polygon symbols.
+        Returns:
+            Tuple of (start_date, end_date, max_timestamp).
         """
-        assert self._loader is not None
-        assert self._db_async is not None
-        timeframe = _timeframe_label(self._multiplier, self._timespan)
-        instrument_id = await self._ensure_instrument(context)
         now_utc = datetime.now(UTC)
         yesterday = (now_utc - timedelta(days=1)).date()
         max_ts = datetime.combine(yesterday, datetime.max.time(), tzinfo=UTC)
@@ -243,6 +237,307 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 f"({free_tier_limit_days} days). Capping to {oldest_allowed.isoformat()}"
             )
             start_date = oldest_allowed
+        return start_date, end_date, max_ts
+
+    def _compute_chunk_days(self, start_date: date, end_date: date) -> int:
+        """Compute the chunk size in days based on timespan.
+
+        Args:
+            start_date: Backfill start date.
+            end_date: Backfill end date.
+
+        Returns:
+            Number of days per chunk.
+        """
+        if self._timespan == "minute":
+            return 730
+        if self._timespan == "hour":
+            return 1825
+        return min((end_date - start_date).days + 1, 36500)
+
+    def _bars_per_day(self) -> int:
+        """Return estimated bars per day for the current timespan.
+
+        Returns:
+            Number of bars per day.
+        """
+        if self._timespan == "minute":
+            return 1440
+        if self._timespan == "hour":
+            return 24
+        return 1
+
+    def _all_csv_exist_in_range(self, polygon_symbol: str, day_start: date, day_end: date) -> bool:
+        """Check whether all daily CSV files exist in a date range.
+
+        Args:
+            polygon_symbol: Polygon symbol string.
+            day_start: First date to check.
+            day_end: Last date to check.
+
+        Returns:
+            True if every day in the range has a CSV file.
+        """
+        assert self._loader is not None
+        check_day = day_start
+        while check_day <= day_end:
+            csv_path = self._loader.get_aggregate_csv_path_for_day(
+                polygon_symbol, self._timespan, check_day
+            )
+            if not csv_path or not csv_path.exists():
+                return False
+            check_day += timedelta(days=1)
+        return True
+
+    def _find_missing_csv_boundary(
+        self, polygon_symbol: str, day_start: date, day_end: date, forward: bool
+    ) -> date:
+        """Scan from one end of a date range to find the first missing CSV.
+
+        Args:
+            polygon_symbol: Polygon symbol string.
+            day_start: Start of the search range.
+            day_end: End of the search range.
+            forward: If True scan from day_start forward, else from day_end backward.
+
+        Returns:
+            The date of the first missing CSV file.
+        """
+        assert self._loader is not None
+        current = day_start if forward else day_end
+        step = timedelta(days=1) if forward else timedelta(days=-1)
+        while (forward and current <= day_end) or (not forward and current >= day_start):
+            csv_path = self._loader.get_aggregate_csv_path_for_day(
+                polygon_symbol, self._timespan, current
+            )
+            if not csv_path or not csv_path.exists():
+                return current
+            current += step
+        return current
+
+    def _optimize_chunk_small(
+        self,
+        polygon_symbol: str,
+        chunk_start: date,
+        chunk_end: date,
+    ) -> date | None:
+        """Attempt skip optimization for small chunks where all CSVs may exist.
+
+        Args:
+            polygon_symbol: Polygon symbol string.
+            chunk_start: Chunk start date.
+            chunk_end: Chunk end date.
+
+        Returns:
+            None if the chunk should be skipped entirely, otherwise the chunk_end
+            value is unchanged (returns chunk_end as-is to indicate no skip).
+        """
+        chunk_days_count = (chunk_end - chunk_start).days + 1
+        estimated_bars = chunk_days_count * self._bars_per_day()
+        if self._all_csv_exist_in_range(polygon_symbol, chunk_start, chunk_end):
+            logger.info(
+                f" Skipping chunk {chunk_start.isoformat()} -> "
+                f"{chunk_end.isoformat()} ({chunk_days_count}d) - "
+                f"all CSV files exist",
+                symbol=polygon_symbol,
+            )
+            return None
+        logger.debug(
+            f"Chunk {chunk_start.isoformat()}->{chunk_end.isoformat()} "
+            f"({chunk_days_count}d ~ {estimated_bars} bars) fits in 1 API call - "
+            f"fetching all to capture adjustments",
+            symbol=polygon_symbol,
+        )
+        return chunk_end
+
+    def _optimize_chunk_large(
+        self,
+        polygon_symbol: str,
+        chunk_start: date,
+        chunk_end: date,
+        chunk_days: int,
+        start_date: date,
+    ) -> tuple[date, date] | None:
+        """Trim edges of a large chunk where CSVs already exist.
+
+        Args:
+            polygon_symbol: Polygon symbol string.
+            chunk_start: Original chunk start date.
+            chunk_end: Original chunk end date.
+            chunk_days: Chunk size in days.
+            start_date: Overall backfill start date.
+
+        Returns:
+            Tuple of (optimized_start, optimized_end) or None to skip entirely.
+        """
+        optimized_end = self._find_missing_csv_boundary(
+            polygon_symbol, chunk_start, chunk_end, forward=False
+        )
+        optimized_start = self._find_missing_csv_boundary(
+            polygon_symbol, chunk_start, optimized_end, forward=True
+        )
+        if optimized_end < chunk_start or optimized_start > optimized_end:
+            logger.info(
+                f" Skipping chunk {chunk_start.isoformat()} -> "
+                f"{chunk_end.isoformat()} - all CSV files exist",
+                symbol=polygon_symbol,
+            )
+            return None
+        original_chunk_end = chunk_end
+        original_start = max(original_chunk_end - timedelta(days=chunk_days - 1), start_date)
+        original_days = (original_chunk_end - original_start).days + 1
+        final_days = (optimized_end - optimized_start).days + 1
+        if final_days < original_days:
+            logger.info(
+                f"Optimized: {original_start.isoformat()}->"
+                f"{original_chunk_end.isoformat()} ({original_days}d) -> "
+                f"{optimized_start.isoformat()}->{optimized_end.isoformat()} "
+                f"({final_days}d) - skipping edge CSVs",
+                symbol=polygon_symbol,
+            )
+        return optimized_start, optimized_end
+
+    def _apply_resume_optimization(
+        self,
+        polygon_symbol: str,
+        chunk_start: date,
+        chunk_end: date,
+        chunk_days: int,
+        start_date: date,
+    ) -> tuple[date, date] | None:
+        """Apply CSV-based resume optimization to a chunk.
+
+        Args:
+            polygon_symbol: Polygon symbol string.
+            chunk_start: Chunk start date.
+            chunk_end: Chunk end date.
+            chunk_days: Chunk size in days.
+            start_date: Overall backfill start date.
+
+        Returns:
+            Optimized (chunk_start, chunk_end) or None to skip the chunk.
+        """
+        chunk_days_count = (chunk_end - chunk_start).days + 1
+        estimated_bars = chunk_days_count * self._bars_per_day()
+        skip_optimization = estimated_bars <= 50000
+        if skip_optimization:
+            result = self._optimize_chunk_small(polygon_symbol, chunk_start, chunk_end)
+            if result is None:
+                return None
+            return chunk_start, chunk_end
+        large_result = self._optimize_chunk_large(
+            polygon_symbol, chunk_start, chunk_end, chunk_days, start_date
+        )
+        if large_result is None:
+            return None
+        return large_result
+
+    async def _fetch_and_persist_chunk(
+        self,
+        context: _SymbolContext,
+        chunk_start: date,
+        chunk_end: date,
+        max_ts: datetime,
+        instrument_id: int,
+        timeframe: str,
+    ) -> None:
+        """Fetch candle data for a chunk and persist to database.
+
+        Args:
+            context: Symbol context.
+            chunk_start: Chunk start date.
+            chunk_end: Chunk end date.
+            max_ts: Maximum allowed timestamp.
+            instrument_id: Database instrument ID.
+            timeframe: Timeframe label string.
+        """
+        assert self._loader is not None
+        assert self._db_async is not None
+        from_ts = datetime.combine(chunk_start, datetime.min.time(), tzinfo=UTC)
+        to_ts = datetime.combine(chunk_end, datetime.max.time(), tzinfo=UTC)
+        if to_ts > max_ts:
+            to_ts = max_ts
+        range_days = (chunk_end - chunk_start).days + 1
+        logger.info(
+            f"Fetching chunk: {chunk_start.isoformat()} -> {chunk_end.isoformat()} "
+            f"({range_days} days, {from_ts.isoformat()} -> {to_ts.isoformat()})",
+            symbol=context.polygon_symbol,
+        )
+        candles = await self._loader.fetch_aggregates(
+            context.polygon_symbol,
+            self._multiplier,
+            self._timespan,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            resume_from=None,
+            save_csv=self._save_csv,
+            limit=50000,
+        )
+        if not candles:
+            logger.info(
+                f"No candles for chunk {chunk_start.isoformat()} -> {chunk_end.isoformat()}",
+                symbol=context.polygon_symbol,
+            )
+            return
+        rows = self._build_candle_rows(candles, instrument_id, timeframe)
+        batch_size = 3000
+        total_inserted = 0
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i : i + batch_size]
+            inserted = await self._db_async.upsert_candles(batch)
+            total_inserted += inserted
+            logger.debug(
+                f"Inserted batch {i // batch_size + 1}: {inserted}/{len(batch)} candles",
+                symbol=context.native_symbol,
+            )
+        logger.info(
+            f"Persisted {total_inserted}/{len(rows)} candles for "
+            f"{context.native_symbol} ({timeframe})",
+            chunk=f"{chunk_start.isoformat()} -> {chunk_end.isoformat()}",
+            first_ts=candles[0].timestamp.isoformat() if candles else None,
+            last_ts=candles[-1].timestamp.isoformat() if candles else None,
+        )
+
+    def _resolve_chunk_range(
+        self,
+        context: _SymbolContext,
+        chunk_start: date,
+        chunk_end: date,
+        chunk_days: int,
+        start_date: date,
+    ) -> tuple[date, date] | None:
+        """Resolve the effective chunk range after resume optimization.
+
+        Args:
+            context: Symbol context with Polygon symbol.
+            chunk_start: Initial chunk start date.
+            chunk_end: Initial chunk end date.
+            chunk_days: Chunk size in days.
+            start_date: Overall backfill start date.
+
+        Returns:
+            Tuple of (chunk_start, chunk_end) or None to skip this chunk.
+        """
+        if not (self._resume and self._save_csv):
+            return chunk_start, chunk_end
+        return self._apply_resume_optimization(
+            context.polygon_symbol, chunk_start, chunk_end, chunk_days, start_date
+        )
+
+    async def _process_symbol(self, context: _SymbolContext) -> None:
+        """Process backfill for a single symbol.
+
+        Handles chunked date ranges, resume optimization,
+        and database persistence.
+
+        Args:
+            context: Symbol context with native and Polygon symbols.
+        """
+        assert self._loader is not None
+        assert self._db_async is not None
+        timeframe = _timeframe_label(self._multiplier, self._timespan)
+        instrument_id = await self._ensure_instrument(context)
+        start_date, end_date, max_ts = self._compute_date_range()
         logger.info(
             f"Starting backfill for {context.polygon_symbol}",
             symbol=context.polygon_symbol,
@@ -251,137 +546,90 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             end_date=end_date.isoformat(),
             days_total=(end_date - start_date).days + 1,
         )
-        if self._timespan == "minute":
-            chunk_days = 730
-        elif self._timespan == "hour":
-            chunk_days = 1825
-        else:
-            chunk_days = min((end_date - start_date).days + 1, 36500)
+        chunk_days = self._compute_chunk_days(start_date, end_date)
         chunk_end: date = end_date
         while chunk_end >= start_date:
             chunk_start = max(chunk_end - timedelta(days=chunk_days - 1), start_date)
-            if self._resume and self._save_csv:
-                chunk_days_count = (chunk_end - chunk_start).days + 1
-                if self._timespan == "minute":
-                    bars_per_day = 1440
-                elif self._timespan == "hour":
-                    bars_per_day = 24
-                else:
-                    bars_per_day = 1
-                estimated_bars = chunk_days_count * bars_per_day
-                skip_optimization = estimated_bars <= 50000
-                if skip_optimization:
-                    all_exist = True
-                    check_day = chunk_start
-                    while check_day <= chunk_end:
-                        csv_path = self._loader.get_aggregate_csv_path_for_day(
-                            context.polygon_symbol, self._timespan, check_day
-                        )
-                        if not csv_path or not csv_path.exists():
-                            all_exist = False
-                            break
-                        check_day += timedelta(days=1)
-                    if all_exist:
-                        logger.info(
-                            f" Skipping chunk {chunk_start.isoformat()} -> "
-                            f"{chunk_end.isoformat()} ({chunk_days_count}d) - "
-                            f"all CSV files exist",
-                            symbol=context.polygon_symbol,
-                        )
-                        chunk_end = chunk_start - timedelta(days=1)
-                        continue
-                    logger.debug(
-                        f"Chunk {chunk_start.isoformat()}->{chunk_end.isoformat()} "
-                        f"({chunk_days_count}d ~ {estimated_bars} bars) fits in 1 API call - "
-                        f"fetching all to capture adjustments",
-                        symbol=context.polygon_symbol,
-                    )
-                else:
-                    optimized_end = chunk_end
-                    while optimized_end >= chunk_start:
-                        csv_path = self._loader.get_aggregate_csv_path_for_day(
-                            context.polygon_symbol, self._timespan, optimized_end
-                        )
-                        if not csv_path or not csv_path.exists():
-                            break
-                        optimized_end -= timedelta(days=1)
-                    optimized_start = chunk_start
-                    while optimized_start <= optimized_end:
-                        csv_path = self._loader.get_aggregate_csv_path_for_day(
-                            context.polygon_symbol, self._timespan, optimized_start
-                        )
-                        if not csv_path or not csv_path.exists():
-                            break
-                        optimized_start += timedelta(days=1)
-                    if optimized_end < chunk_start or optimized_start > optimized_end:
-                        logger.info(
-                            f" Skipping chunk {chunk_start.isoformat()} -> "
-                            f"{chunk_end.isoformat()} - all CSV files exist",
-                            symbol=context.polygon_symbol,
-                        )
-                        chunk_end = chunk_start - timedelta(days=1)
-                        continue
-                    original_chunk_end = chunk_end
-                    chunk_start = optimized_start
-                    chunk_end = optimized_end
-                    original_start = max(
-                        original_chunk_end - timedelta(days=chunk_days - 1), start_date
-                    )
-                    original_days = (original_chunk_end - original_start).days + 1
-                    final_days = (chunk_end - chunk_start).days + 1
-                    if final_days < original_days:
-                        logger.info(
-                            f"Optimized: {original_start.isoformat()}->"
-                            f"{original_chunk_end.isoformat()} ({original_days}d) -> "
-                            f"{chunk_start.isoformat()}->{chunk_end.isoformat()} "
-                            f"({final_days}d) - skipping edge CSVs",
-                            symbol=context.polygon_symbol,
-                        )
-            from_ts = datetime.combine(chunk_start, datetime.min.time(), tzinfo=UTC)
-            to_ts = datetime.combine(chunk_end, datetime.max.time(), tzinfo=UTC)
-            if to_ts > max_ts:
-                to_ts = max_ts
-            range_days = (chunk_end - chunk_start).days + 1
-            logger.info(
-                f"Fetching chunk: {chunk_start.isoformat()} -> {chunk_end.isoformat()} "
-                f"({range_days} days, {from_ts.isoformat()} -> {to_ts.isoformat()})",
-                symbol=context.polygon_symbol,
+            resolved = self._resolve_chunk_range(
+                context, chunk_start, chunk_end, chunk_days, start_date
             )
-            candles = await self._loader.fetch_aggregates(
-                context.polygon_symbol,
-                self._multiplier,
-                self._timespan,
-                from_ts=from_ts,
-                to_ts=to_ts,
-                resume_from=None,
-                save_csv=self._save_csv,
-                limit=50000,
+            if resolved is None:
+                chunk_end = chunk_start - timedelta(days=1)
+                continue
+            chunk_start, chunk_end = resolved
+            await self._fetch_and_persist_chunk(
+                context, chunk_start, chunk_end, max_ts, instrument_id, timeframe
             )
-            if not candles:
-                logger.info(
-                    f"No candles for chunk {chunk_start.isoformat()} -> {chunk_end.isoformat()}",
-                    symbol=context.polygon_symbol,
-                )
-            else:
-                rows = self._build_candle_rows(candles, instrument_id, timeframe)
-                batch_size = 3000
-                total_inserted = 0
-                for i in range(0, len(rows), batch_size):
-                    batch = rows[i : i + batch_size]
-                    inserted = await self._db_async.upsert_candles(batch)
-                    total_inserted += inserted
-                    logger.debug(
-                        f"Inserted batch {i // batch_size + 1}: {inserted}/{len(batch)} candles",
-                        symbol=context.native_symbol,
-                    )
-                logger.info(
-                    f"Persisted {total_inserted}/{len(rows)} candles for "
-                    f"{context.native_symbol} ({timeframe})",
-                    chunk=f"{chunk_start.isoformat()} -> {chunk_end.isoformat()}",
-                    first_ts=candles[0].timestamp.isoformat() if candles else None,
-                    last_ts=candles[-1].timestamp.isoformat() if candles else None,
-                )
             chunk_end = chunk_start - timedelta(days=1)
+
+    def _mapping_to_context(self, mapping: SymbolMapping) -> _SymbolContext | None:
+        """Convert a SymbolMapping row to a _SymbolContext if valid.
+
+        Args:
+            mapping: Database SymbolMapping instance.
+
+        Returns:
+            _SymbolContext or None if polygon_symbol is missing.
+        """
+        if not mapping.polygon_symbol:
+            return None
+        return _SymbolContext(
+            native_symbol=mapping.native_symbol,
+            polygon_symbol=mapping.polygon_symbol,
+            base_currency=mapping.base_currency,
+            quote_currency=mapping.quote_currency or mapping.base_currency,
+        )
+
+    def _lookup_mapping_by_column(self, column: Any, value: str) -> _SymbolContext | None:
+        """Query a single SymbolMapping row and convert to context.
+
+        Args:
+            column: SQLAlchemy column to filter on.
+            value: Filter value.
+
+        Returns:
+            _SymbolContext or None if not found.
+        """
+        assert self._db_sync is not None
+        with self._db_sync.get_session() as session:
+            stmt = select(SymbolMapping).where(column == value)
+            mapping = session.execute(stmt).scalar_one_or_none()
+            if mapping:
+                return self._mapping_to_context(mapping)
+        return None
+
+    def _resolve_polygon_symbol(self, symbol: str) -> _SymbolContext | None:
+        """Resolve a Polygon-format symbol (contains ':') to context.
+
+        Args:
+            symbol: Polygon symbol string.
+
+        Returns:
+            _SymbolContext or None.
+        """
+        native_symbol = self._symbol_mapper.polygon_to_native.get(symbol)
+        if native_symbol:
+            return self._lookup_mapping_by_column(SymbolMapping.native_symbol, native_symbol)
+        return None
+
+    def _resolve_native_symbol_context(self, symbol: str) -> _SymbolContext | None:
+        """Resolve a native-format symbol to context.
+
+        Tries direct polygon_symbol lookup, then mapper-based lookup.
+
+        Args:
+            symbol: Native symbol string.
+
+        Returns:
+            _SymbolContext or None.
+        """
+        context = self._lookup_mapping_by_column(SymbolMapping.polygon_symbol, symbol)
+        if context:
+            return context
+        polygon_symbol = self._symbol_mapper.native_to_polygon.get(symbol)
+        if polygon_symbol:
+            return self._lookup_mapping_by_column(SymbolMapping.polygon_symbol, polygon_symbol)
+        return None
 
     def _resolve_symbol_context(self, symbol: str) -> _SymbolContext | None:
         """Resolve symbol string to context with Polygon mapping.
@@ -395,49 +643,13 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         Returns:
             Symbol context or None if not found.
         """
-        assert self._db_sync is not None
         self._symbol_mapper.load_cache_if_needed()
         if ":" in symbol:
-            native_symbol = self._symbol_mapper.polygon_to_native.get(symbol)
-            if native_symbol:
-                with self._db_sync.get_session() as session:
-                    stmt = select(SymbolMapping).where(SymbolMapping.native_symbol == native_symbol)
-                    mapping = session.execute(stmt).scalar_one_or_none()
-                    if mapping and mapping.polygon_symbol:
-                        quote = mapping.quote_currency or mapping.base_currency
-                        return _SymbolContext(
-                            native_symbol=mapping.native_symbol,
-                            polygon_symbol=mapping.polygon_symbol,
-                            base_currency=mapping.base_currency,
-                            quote_currency=quote,
-                        )
+            context = self._resolve_polygon_symbol(symbol)
         else:
-            with self._db_sync.get_session() as session:
-                stmt = select(SymbolMapping).where(SymbolMapping.polygon_symbol == symbol)
-                mapping = session.execute(stmt).scalar_one_or_none()
-                if mapping and mapping.polygon_symbol:
-                    quote = mapping.quote_currency or mapping.base_currency
-                    return _SymbolContext(
-                        native_symbol=mapping.native_symbol,
-                        polygon_symbol=mapping.polygon_symbol,
-                        base_currency=mapping.base_currency,
-                        quote_currency=quote,
-                    )
-            polygon_symbol = self._symbol_mapper.native_to_polygon.get(symbol)
-            if polygon_symbol:
-                with self._db_sync.get_session() as session:
-                    stmt = select(SymbolMapping).where(
-                        SymbolMapping.polygon_symbol == polygon_symbol
-                    )
-                    mapping = session.execute(stmt).scalar_one_or_none()
-                    if mapping and mapping.polygon_symbol:
-                        quote = mapping.quote_currency or mapping.base_currency
-                        return _SymbolContext(
-                            native_symbol=mapping.native_symbol,
-                            polygon_symbol=mapping.polygon_symbol,
-                            base_currency=mapping.base_currency,
-                            quote_currency=quote,
-                        )
+            context = self._resolve_native_symbol_context(symbol)
+        if context:
+            return context
         logger.warning(
             f"Symbol '{symbol}' not found in symbol mappings - skipping. "
             "Add symbol to database via symbol mapper before backfilling.",

@@ -147,6 +147,7 @@ class TestSettingsService:
             self.messages.append((topic, payload))
 
         def close(self) -> None:
+            """No-op close for test stub."""
             pass
 
     def test_init_service(self) -> None:
@@ -925,9 +926,9 @@ def test_parse_value_for_float() -> None:
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password=None,
     )
-    assert service._parse_value("123.45") == 123.45
-    assert service._parse_value("-67.89") == -67.89
-    assert service._parse_value("0.0") == 0.0
+    assert service._parse_value("123.45") == pytest.approx(123.45)
+    assert service._parse_value("-67.89") == pytest.approx(-67.89)
+    assert service._parse_value("0.0") == pytest.approx(0.0)
 
 
 def test_parse_value_for_string() -> None:
@@ -1112,10 +1113,10 @@ class TestCointegrationInstrument2Hedges:
         await self._build_history_for_short_spread(strategy)
         strategy._position = "short_spread"
         signal = await feed_bar_to_strategy(strategy, "BTC-USD", 50350.0)
-        if signal and signal.strength == 0.0:
+        if signal and signal.strength == pytest.approx(0.0):
             strategy._position = "short_spread"
         signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3017.5)
-        if signal and signal.strength == 0.0:
+        if signal and signal.strength == pytest.approx(0.0):
             assert signal.instrument == "ETH-USD"
             assert signal.side == "sell"
             assert "exit" in signal.reason.lower()
@@ -1132,10 +1133,10 @@ class TestCointegrationInstrument2Hedges:
         strategy._position = "long_spread"
         for i in range(10):
             signal_btc = await feed_bar_to_strategy(strategy, "BTC-USD", 45000.0 + i * 500)
-            if signal_btc and signal_btc.strength == 0.0:
+            if signal_btc and signal_btc.strength == pytest.approx(0.0):
                 strategy._position = "long_spread"
             signal_eth = await feed_bar_to_strategy(strategy, "ETH-USD", 3175.0 - i * 10)
-            if signal_eth and signal_eth.strength == 0.0:
+            if signal_eth and signal_eth.strength == pytest.approx(0.0):
                 assert signal_eth.instrument == "ETH-USD"
                 assert signal_eth.side == "buy"
                 assert "exit" in signal_eth.reason.lower()

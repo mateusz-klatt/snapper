@@ -55,6 +55,7 @@ Validate subscription pattern::
 
 import logging
 import re
+from collections.abc import Callable
 
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols
@@ -71,6 +72,22 @@ class TopicValidationError(ValueError):
     """
 
     pass
+
+
+def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool, str]]]]:
+    """Return the ordered list of (prefix, validator) pairs for topic dispatch.
+
+    Returns:
+        List of tuples mapping topic prefixes to their validator functions.
+    """
+    return [
+        ("market.", _validate_market_topic),
+        ("orders.commands.", _validate_orders_commands_topic),
+        ("orders.events.", _validate_orders_events_topic),
+        ("signals.", _validate_signal_topic),
+        ("system.", _validate_system_topic),
+        ("admin.", _validate_admin_topic),
+    ]
 
 
 def validate_topic(topic: str) -> tuple[bool, str]:
@@ -95,22 +112,12 @@ def validate_topic(topic: str) -> tuple[bool, str]:
     """
     if not topic:
         return False, "Topic cannot be empty"
-    if topic.startswith("market."):
-        return _validate_market_topic(topic)
-    elif topic.startswith("orders.commands."):
-        return _validate_orders_commands_topic(topic)
-    elif topic.startswith("orders.events."):
-        return _validate_orders_events_topic(topic)
-    elif topic.startswith("orders."):
+    if topic.startswith("orders.") and not topic.startswith(("orders.commands.", "orders.events.")):
         return False, "Orders topics must use 'orders.commands.' or 'orders.events.' prefix"
-    elif topic.startswith("signals."):
-        return _validate_signal_topic(topic)
-    elif topic.startswith("system."):
-        return _validate_system_topic(topic)
-    elif topic.startswith("admin."):
-        return _validate_admin_topic(topic)
-    else:
-        return False, f"Unknown topic category: {topic.split('.', maxsplit=1)[0]}"
+    for prefix, validator in _get_topic_prefix_validators():
+        if topic.startswith(prefix):
+            return validator(topic)
+    return False, f"Unknown topic category: {topic.split('.', maxsplit=1)[0]}"
 
 
 def validate_subscription_pattern(pattern: str) -> tuple[bool, str]:
@@ -147,6 +154,39 @@ def validate_subscription_pattern(pattern: str) -> tuple[bool, str]:
     return validate_topic(pattern)
 
 
+_MARKET_TOPIC_FMT = (
+    "Market topic must have 4-5 segments: "
+    "market.{exchange}.{instrument}.{data_type}[.{timeframe}]"
+)
+
+
+def _validate_candle_timeframe(
+    segments: list[str], exchange: str, instrument: str
+) -> tuple[bool, str]:
+    """Validate the timeframe segment of a candles market topic.
+
+    Args:
+        segments: Split topic segments.
+        exchange: Exchange name.
+        instrument: Instrument symbol.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if len(segments) != 5:
+        return (
+            False,
+            f"Candles topic must include timeframe: market.{exchange}.{instrument}.candles.<timeframe>",
+        )
+    candle_timeframe = segments[4]
+    if not _is_valid_timeframe(candle_timeframe):
+        return (
+            False,
+            f"Invalid timeframe '{candle_timeframe}'. Must match pattern like: 1m, 5m, 15m, 1h, 4h, 1d",
+        )
+    return True, ""
+
+
 def _validate_market_topic(topic: str) -> tuple[bool, str]:
     """Validate market data topic structure.
 
@@ -159,20 +199,9 @@ def _validate_market_topic(topic: str) -> tuple[bool, str]:
         Tuple of (is_valid, error_message).
     """
     segments = topic.split(".")
-    if topic.endswith("."):
-        return (
-            False,
-            "Market topic must have 4-5 segments: market.{exchange}.{instrument}.{data_type}[.{timeframe}]",
-        )
-    if len(segments) not in (4, 5):
-        return (
-            False,
-            "Market topic must have 4-5 segments: market.{exchange}.{instrument}.{data_type}[.{timeframe}]",
-        )
-    category = segments[0]
-    exchange = segments[1]
-    instrument = segments[2]
-    data_type = segments[3]
+    if topic.endswith(".") or len(segments) not in (4, 5):
+        return False, _MARKET_TOPIC_FMT
+    category, exchange, instrument, data_type = segments[0], segments[1], segments[2], segments[3]
     if category != "market":
         return False, f"Expected 'market' category, got '{category}'"
     valid_inst, err_inst = _validate_instrument(instrument)
@@ -187,23 +216,69 @@ def _validate_market_topic(topic: str) -> tuple[bool, str]:
             f"Invalid market data type '{data_type}'. Must be: candles, ticks, trades",
         )
     if data_type == "candles":
-        if len(segments) != 5:
-            return (
-                False,
-                f"Candles topic must include timeframe: market.{exchange}.{instrument}.candles.<timeframe>",
-            )
-        candle_timeframe = segments[4]
-        if not _is_valid_timeframe(candle_timeframe):
-            return (
-                False,
-                f"Invalid timeframe '{candle_timeframe}'. Must match pattern like: 1m, 5m, 15m, 1h, 4h, 1d",
-            )
-    if data_type != "candles" and len(segments) == 5:
+        return _validate_candle_timeframe(segments, exchange, instrument)
+    if len(segments) == 5:
         return (
             False,
             f"Only candles topics support timeframe. Remove '.{segments[4]}' from {data_type} topic",
         )
     return True, ""
+
+
+def _validate_orders_topic_base(
+    topic: str,
+    expected_subcategory: str,
+    valid_suffixes: set[str],
+    suffix_label: str,
+) -> tuple[bool, str]:
+    """Validate an orders topic (commands or events).
+
+    Args:
+        topic: Topic string to validate.
+        expected_subcategory: Expected second segment ("commands" or "events").
+        valid_suffixes: Set of valid 5th-segment values.
+        suffix_label: Human-readable label for the suffix (e.g., "command" or "event").
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    fmt_msg = (
+        f"Orders {suffix_label} topic must have 5 segments: "
+        f"orders.{expected_subcategory}.{{exchange}}.{{instrument}}.{{{suffix_label}}}"
+    )
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 5:
+        return False, fmt_msg
+    category, subcategory, exchange, instrument, suffix = segments
+    if category != "orders" or subcategory != expected_subcategory:
+        return (
+            False,
+            f"Expected 'orders.{expected_subcategory}' prefix, got '{category}.{subcategory}'",
+        )
+    valid_exch, err_exch = _validate_exchange(exchange)
+    if not valid_exch:
+        return False, err_exch
+    valid_inst, err_inst = _validate_instrument(instrument)
+    if not valid_inst:
+        return False, err_inst
+    if suffix not in valid_suffixes:
+        return (
+            False,
+            f"Invalid order {suffix_label} '{suffix}'. Must be: {', '.join(sorted(valid_suffixes))}",
+        )
+    return True, ""
+
+
+_ORDER_COMMANDS: set[str] = {"submit", "cancel", "replace"}
+_ORDER_EVENTS: set[str] = {
+    "submitted",
+    "accepted",
+    "rejected",
+    "fill",
+    "cancelled",
+    "expired",
+    "replaced",
+}
 
 
 def _validate_orders_commands_topic(topic: str) -> tuple[bool, str]:
@@ -218,31 +293,7 @@ def _validate_orders_commands_topic(topic: str) -> tuple[bool, str]:
     Returns:
         Tuple of (is_valid, error_message).
     """
-    segments = topic.split(".")
-    if topic.endswith("."):
-        return (
-            False,
-            "Orders command topic must have 5 segments: "
-            "orders.commands.{exchange}.{instrument}.{command}",
-        )
-    if len(segments) != 5:
-        return (
-            False,
-            "Orders command topic must have 5 segments: "
-            "orders.commands.{exchange}.{instrument}.{command}",
-        )
-    category, subcategory, exchange, instrument, command = segments
-    if category != "orders" or subcategory != "commands":
-        return False, f"Expected 'orders.commands' prefix, got '{category}.{subcategory}'"
-    valid_exch, err_exch = _validate_exchange(exchange)
-    if not valid_exch:
-        return False, err_exch
-    valid_inst, err_inst = _validate_instrument(instrument)
-    if not valid_inst:
-        return False, err_inst
-    if command not in {"submit", "cancel", "replace"}:
-        return False, f"Invalid order command '{command}'. Must be: submit, cancel, replace"
-    return True, ""
+    return _validate_orders_topic_base(topic, "commands", _ORDER_COMMANDS, "command")
 
 
 def _validate_orders_events_topic(topic: str) -> tuple[bool, str]:
@@ -257,35 +308,13 @@ def _validate_orders_events_topic(topic: str) -> tuple[bool, str]:
     Returns:
         Tuple of (is_valid, error_message).
     """
-    segments = topic.split(".")
-    if topic.endswith("."):
-        return (
-            False,
-            "Orders event topic must have 5 segments: "
-            "orders.events.{exchange}.{instrument}.{event}",
-        )
-    if len(segments) != 5:
-        return (
-            False,
-            "Orders event topic must have 5 segments: "
-            "orders.events.{exchange}.{instrument}.{event}",
-        )
-    category, subcategory, exchange, instrument, event = segments
-    if category != "orders" or subcategory != "events":
-        return False, f"Expected 'orders.events' prefix, got '{category}.{subcategory}'"
-    valid_exch, err_exch = _validate_exchange(exchange)
-    if not valid_exch:
-        return False, err_exch
-    valid_inst, err_inst = _validate_instrument(instrument)
-    if not valid_inst:
-        return False, err_inst
-    valid_events = {"submitted", "accepted", "rejected", "fill", "cancelled", "expired", "replaced"}
-    if event not in valid_events:
-        return (
-            False,
-            f"Invalid order event '{event}'. Must be: {', '.join(sorted(valid_events))}",
-        )
-    return True, ""
+    return _validate_orders_topic_base(topic, "events", _ORDER_EVENTS, "event")
+
+
+_SIGNAL_TOPIC_FORMAT_MSG = (
+    "Signal topic must have 4 segments: signals.{exchange}.{instrument}.live (LIVE) "
+    "or signals.paper.{instrument}.{strategy_id} (PAPER)"
+)
 
 
 def _validate_signal_topic(topic: str) -> tuple[bool, str]:
@@ -302,40 +331,22 @@ def _validate_signal_topic(topic: str) -> tuple[bool, str]:
         Tuple of (is_valid, error_message).
     """
     segments = topic.split(".")
-    if topic.endswith("."):
-        return (
-            False,
-            (
-                "Signal topic must have 4 segments: signals.{exchange}.{instrument}.live (LIVE) "
-                "or signals.paper.{instrument}.{strategy_id} (PAPER)"
-            ),
-        )
-    if len(segments) != 4:
-        return (
-            False,
-            (
-                "Signal topic must have 4 segments: signals.{exchange}.{instrument}.live (LIVE) "
-                "or signals.paper.{instrument}.{strategy_id} (PAPER)"
-            ),
-        )
+    if topic.endswith(".") or len(segments) != 4:
+        return False, _SIGNAL_TOPIC_FORMAT_MSG
     if segments[0] != "signals":
         return False, f"Expected 'signals' category, got '{segments[0]}'"
-    exchange = segments[1]
-    instrument = segments[2]
-    type_or_strategy = segments[3]
+    exchange, instrument, type_or_strategy = segments[1], segments[2], segments[3]
     valid, msg = _validate_signal_exchange(exchange)
     if not valid:
         return False, msg
     valid, msg = _validate_instrument(instrument)
     if not valid:
         return False, msg
-    if exchange != "paper":
-        if type_or_strategy != "live":
-            return (
-                False,
-                f"LIVE signal topics must use '.live' as 4th segment, got '.{type_or_strategy}'",
-            )
-        return True, ""
+    if exchange != "paper" and type_or_strategy != "live":
+        return (
+            False,
+            f"LIVE signal topics must use '.live' as 4th segment, got '.{type_or_strategy}'",
+        )
     return True, ""
 
 
@@ -357,6 +368,31 @@ def _validate_signal_exchange(exchange: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
+    """Validate heartbeat topic structure.
+
+    Expected: system.heartbeats[.{component_type}[.{component_name}]]
+
+    Args:
+        segments: Split topic segments (first two are 'system.heartbeats').
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if len(segments) == 2:
+        return True, ""
+    component_type = segments[2]
+    if component_type in {"strategy", "executor"}:
+        if len(segments) >= 4:
+            return True, ""
+        return False, f"system.heartbeats.{component_type} requires component name"
+    if component_type == "feed":
+        if len(segments) == 4:
+            return True, ""
+        return False, "system.heartbeats.feed requires exactly exchange (4 segments)"
+    return False, f"Invalid heartbeat component type '{component_type}'"
+
+
 def _validate_system_topic(topic: str) -> tuple[bool, str]:
     """Validate system topic structure.
 
@@ -372,38 +408,23 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
         Tuple of (is_valid, error_message).
     """
     segments = topic.split(".")
-    if topic == "system.heartbeats.":
-        return False, "System topic cannot end with '.'"
-    if topic.endswith(".") and len(segments) == 2:
-        return False, "System topic cannot end with '.'"
+    if topic.endswith("."):
+        return False, "System topic cannot end with '.'; check segments"
     if len(segments) < 2:
         return False, "System topic must have at least 2 segments: system.{type}"
     category, system_type = segments[0], segments[1]
     if category != "system":
         return False, f"Expected 'system' category, got '{category}'"
     if system_type == "heartbeats":
-        if len(segments) == 2:
-            return True, ""
-        component_type = segments[2]
-        if component_type in {"strategy", "executor"}:
-            if len(segments) >= 4:
-                return True, ""
-            return False, f"system.heartbeats.{component_type} requires component name"
-        elif component_type == "feed":
-            if len(segments) == 4:
-                return True, ""
-            return False, "system.heartbeats.feed requires exactly exchange (4 segments)"
-        else:
-            return False, f"Invalid heartbeat component type '{component_type}'"
-    elif system_type in {"symbol_mappings", "settings"}:
+        return _validate_heartbeat_topic(segments)
+    if system_type in {"symbol_mappings", "settings"}:
         if len(segments) != 2:
             return False, f"system.{system_type} must have exactly 2 segments"
         return True, ""
-    else:
-        return (
-            False,
-            f"Invalid system type '{system_type}'. Must be: heartbeats, settings, symbol_mappings",
-        )
+    return (
+        False,
+        f"Invalid system type '{system_type}'. Must be: heartbeats, settings, symbol_mappings",
+    )
 
 
 def _validate_admin_topic(topic: str) -> tuple[bool, str]:
@@ -422,10 +443,64 @@ def _validate_admin_topic(topic: str) -> tuple[bool, str]:
         return False, "Admin topic must have 2 segments: admin.{resource}"
     if len(segments) != 2:
         return False, "Admin topic must have 2 segments: admin.{resource}"
-    category, resource = segments
+    category, _resource = segments
     if category != "admin":
         return False, f"Expected 'admin' category, got '{category}'"
     return True, ""
+
+
+_ExchangeValidatorType = Callable[[str], tuple[bool, str]]
+
+
+def _validate_exchange_instrument_segments(
+    segments: list[str],
+    exchange_offset: int,
+    exchange_validator: _ExchangeValidatorType,
+) -> tuple[bool, str]:
+    """Validate optional exchange and instrument segments in a prefix.
+
+    Args:
+        segments: Prefix segments (without trailing dot).
+        exchange_offset: Index of the exchange segment.
+        exchange_validator: Callable that validates an exchange name.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    validator = exchange_validator
+    if len(segments) > exchange_offset:
+        valid, err = validator(segments[exchange_offset])
+        if not valid:
+            return False, err
+    instrument_offset = exchange_offset + 1
+    if len(segments) > instrument_offset:
+        valid, err = _validate_instrument(segments[instrument_offset])
+        if not valid:
+            return False, err
+    return True, ""
+
+
+def _validate_orders_prefix(segments: list[str]) -> tuple[bool, str]:
+    """Validate orders prefix pattern segments.
+
+    Args:
+        segments: Prefix segments (without trailing dot).
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if len(segments) < 2:
+        return (
+            False,
+            "Orders prefix requires subcategory: use 'orders.commands.' or 'orders.events.'",
+        )
+    subcategory = segments[1]
+    if subcategory not in {"commands", "events"}:
+        return (
+            False,
+            f"Invalid orders subcategory '{subcategory}'. Must be: commands, events",
+        )
+    return _validate_exchange_instrument_segments(segments, 2, _validate_exchange)
 
 
 def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
@@ -446,55 +521,18 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
     if not pattern.endswith("."):
         return False, "Prefix must end with dot"
     segments = pattern[:-1].split(".")
-    for segment in segments:
-        if not segment:
-            return False, "Prefix segments cannot be empty"
+    if any(not segment for segment in segments):
+        return False, "Prefix segments cannot be empty"
     category = segments[0]
     valid_categories = {"market", "orders", "signals", "strategy", "system", "admin"}
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"
     if category == "orders":
-        if len(segments) < 2:
-            return (
-                False,
-                "Orders prefix requires subcategory: use 'orders.commands.' or 'orders.events.'",
-            )
-        subcategory = segments[1]
-        if subcategory not in {"commands", "events"}:
-            return (
-                False,
-                f"Invalid orders subcategory '{subcategory}'. Must be: commands, events",
-            )
-        if len(segments) >= 3:
-            exchange = segments[2]
-            valid, err = _validate_exchange(exchange)
-            if not valid:
-                return False, err
-            if len(segments) >= 4:
-                instrument = segments[3]
-                valid, err = _validate_instrument(instrument)
-                if not valid:
-                    return False, err
-    elif category == "market" and len(segments) >= 2:
-        exchange = segments[1]
-        valid, err = _validate_exchange(exchange)
-        if not valid:
-            return False, err
-        if len(segments) >= 3:
-            instrument = segments[2]
-            valid, err = _validate_instrument(instrument)
-            if not valid:
-                return False, err
-    elif category == "signals" and len(segments) >= 2:
-        exchange = segments[1]
-        valid, err = _validate_signal_exchange(exchange)
-        if not valid:
-            return False, err
-        if len(segments) >= 3:
-            instrument = segments[2]
-            valid, err = _validate_instrument(instrument)
-            if not valid:
-                return False, err
+        return _validate_orders_prefix(segments)
+    if category == "market" and len(segments) >= 2:
+        return _validate_exchange_instrument_segments(segments, 1, _validate_exchange)
+    if category == "signals" and len(segments) >= 2:
+        return _validate_exchange_instrument_segments(segments, 1, _validate_signal_exchange)
     return True, ""
 
 

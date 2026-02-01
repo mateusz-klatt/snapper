@@ -837,7 +837,7 @@ class TestTokenizedAssetWarnings:
             patch.object(updater, "load_kraken_rest_symbols", return_value=kraken_rest_symbols),
             patch.object(updater, "verify_websocket_symbols", return_value=set()),
         ):
-            result, changed = await updater.build_verified_mappings()
+            result, _changed = await updater.build_verified_mappings()
         assert len(result) == 0
 
     async def test_tokenized_asset_unexpected_quote(
@@ -861,7 +861,7 @@ class TestTokenizedAssetWarnings:
             patch.object(updater, "load_kraken_rest_symbols", return_value=kraken_rest_symbols),
             patch.object(updater, "verify_websocket_symbols", return_value=set()),
         ):
-            result, changed = await updater.build_verified_mappings()
+            result, _changed = await updater.build_verified_mappings()
         assert len(result) == 0
 
 
@@ -1123,6 +1123,7 @@ class TestKrakenVerifyWebsocketSymbols:
             yield {"symbol": "BTC/USD"}
 
         async def mock_async_disconnect() -> None:
+            """Intentionally empty mock implementation."""
             pass
 
         mock_client = MagicMock()
@@ -1191,7 +1192,7 @@ class TestKrakenBuildVerifiedMappings:
         ):
             mock_load.return_value = mock_rest_symbols
             mock_verify.return_value = set()
-            mappings, success = await updater.build_verified_mappings()
+            mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 0
 
     @pytest.mark.asyncio
@@ -1220,7 +1221,7 @@ class TestKrakenBuildVerifiedMappings:
         ):
             mock_load.return_value = mock_rest_symbols
             mock_verify.return_value = set()
-            mappings, success = await updater.build_verified_mappings()
+            mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 0
 
     @pytest.mark.asyncio
@@ -1313,7 +1314,7 @@ class TestKrakenBuildVerifiedMappings:
         ):
             mock_load.return_value = mock_rest_symbols
             mock_verify.return_value = {"BTC/USD"}
-            mappings, success = await updater.build_verified_mappings()
+            mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 1
             assert "BTC-USD" in mappings
 

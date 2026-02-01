@@ -62,9 +62,9 @@ def test_parse_kraken_ticker_valid() -> None:
     result = parse_kraken_ticker(raw_data)
     assert isinstance(result, TickerUpdate)
     assert result.symbol == "BTC-USD"
-    assert result.bid == 45000.0
-    assert result.ask == 45100.0
-    assert result.last == 45050.0
+    assert result.bid == pytest.approx(45000.0)
+    assert result.ask == pytest.approx(45100.0)
+    assert result.last == pytest.approx(45050.0)
 
 
 def test_parse_kraken_ticker_list_valid() -> None:
@@ -159,10 +159,10 @@ def test_parse_kraken_candle_valid() -> None:
     result = parse_kraken_candle(raw_data)
     assert isinstance(result, CandleUpdate)
     assert result.symbol == "BTC-USD"
-    assert result.open == 45000.0
-    assert result.high == 46000.0
-    assert result.low == 44000.0
-    assert result.close == 45500.0
+    assert result.open == pytest.approx(45000.0)
+    assert result.high == pytest.approx(46000.0)
+    assert result.low == pytest.approx(44000.0)
+    assert result.close == pytest.approx(45500.0)
     assert result.interval == 5
     assert isinstance(result.interval_begin, datetime)
 
@@ -213,8 +213,8 @@ def test_parse_kraken_trade_valid() -> None:
     assert isinstance(result, TradeUpdate)
     assert result.symbol == "BTC-USD"
     assert result.side == "buy"
-    assert result.quantity == 0.5
-    assert result.price == 45000.0
+    assert result.quantity == pytest.approx(0.5)
+    assert result.price == pytest.approx(45000.0)
     assert result.ord_type == "limit"
     assert result.trade_id == 12345
 
@@ -249,9 +249,9 @@ def test_parse_kraken_trade_list_valid() -> None:
     result = parse_kraken_trade_list(raw_data)
     assert len(result) == 2
     assert result[0].symbol == "BTC-USD"
-    assert result[0].quantity == 0.5
+    assert result[0].quantity == pytest.approx(0.5)
     assert result[1].symbol == "ETH-USD"
-    assert result[1].quantity == 2.0
+    assert result[1].quantity == pytest.approx(2.0)
 
 
 def test_parse_kraken_execution_valid() -> None:
@@ -286,11 +286,11 @@ def test_parse_kraken_execution_valid() -> None:
     assert result.side == OrderSideEnum.BUY
     assert result.order_type == OrderTypeEnum.LIMIT
     assert result.order_status == OrderStatusEnum.OPEN
-    assert result.cum_qty == 0.5
+    assert result.cum_qty == pytest.approx(0.5)
     assert result.fees is not None
     assert len(result.fees) == 2
     assert result.fees[0].asset == "USD"
-    assert result.fees[0].quantity == 22.5
+    assert result.fees[0].quantity == pytest.approx(22.5)
 
 
 def test_parse_kraken_execution_list_valid() -> None:

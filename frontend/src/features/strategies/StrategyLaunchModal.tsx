@@ -24,10 +24,10 @@ interface StrategyLaunchModalProps {
 const sanitizeName = (value: string) =>
   value
     .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '')
+    .replaceAll(/[^a-z0-9_]+/g, '_')
+    .replaceAll(/(?:^_+)|(?:_+$)/g, '')
 
-export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
+export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> = ({
   open,
   onClose,
   templates,
@@ -48,14 +48,14 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
   const processSchema = useProcessSchema(selectedTemplate, {
     enabled: open && selectedTemplate.length > 0,
   })
-  const defaultArgs = (processSchema.data?.default_args ?? []) as unknown[]
+  const defaultArgs: unknown[] = processSchema.data?.default_args ?? []
   const defaultKwargs = useMemo(() => {
     const payload = processSchema.data?.default_kwargs ?? {}
 
     return typeof payload === 'object' && payload !== null ? { ...payload } : {}
   }, [processSchema.data?.default_kwargs])
   const defaultStrategyName =
-    typeof defaultKwargs.name === 'string' ? (defaultKwargs.name as string) : undefined
+    typeof defaultKwargs.name === 'string' ? defaultKwargs.name : undefined
 
   useEffect(() => {
     if (!open) {
@@ -103,9 +103,9 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
     }
   }, [selectedTemplate, defaultStrategyName, processName, strategyName])
 
-  const handleSubmit = async (event: React.FormEvent) => {
+  const handleSubmit = async (event: React.SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const template = selectedTemplate as string
+    const template = selectedTemplate
     const kwargs: Record<string, unknown> = {
       ...defaultKwargs,
       name: sanitizeName(strategyName),
@@ -156,10 +156,14 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
       ) : (
         <form onSubmit={handleSubmit} className='space-y-5'>
           <div>
-            <label className='block text-sm font-medium text-dark-200 mb-2'>
+            <label
+              htmlFor='strategy-template'
+              className='block text-sm font-medium text-dark-200 mb-2'
+            >
               Strategy template
             </label>
             <select
+              id='strategy-template'
               value={selectedTemplate}
               onChange={e => {
                 setSelectedTemplate(e.target.value)
@@ -193,8 +197,14 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
           </div>
           <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
             <div>
-              <label className='block text-sm font-medium text-dark-200 mb-2'>Process name</label>
+              <label
+                htmlFor='process-name'
+                className='block text-sm font-medium text-dark-200 mb-2'
+              >
+                Process name
+              </label>
               <input
+                id='process-name'
                 type='text'
                 value={processName}
                 onChange={e => setProcessName(e.target.value)}
@@ -207,10 +217,14 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
               </p>
             </div>
             <div>
-              <label className='block text-sm font-medium text-dark-200 mb-2'>
+              <label
+                htmlFor='strategy-instance-name'
+                className='block text-sm font-medium text-dark-200 mb-2'
+              >
                 Strategy instance name
               </label>
               <input
+                id='strategy-instance-name'
                 type='text'
                 value={strategyName}
                 onChange={e => setStrategyName(e.target.value)}
@@ -225,8 +239,14 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
           </div>
           <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
             <div>
-              <label className='block text-sm font-medium text-dark-200 mb-2'>Execution mode</label>
+              <label
+                htmlFor='execution-mode'
+                className='block text-sm font-medium text-dark-200 mb-2'
+              >
+                Execution mode
+              </label>
               <select
+                id='execution-mode'
                 value={executionMode}
                 onChange={e => setExecutionMode(e.target.value as 'thread' | 'process')}
                 className='w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500'
@@ -239,14 +259,14 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
               </p>
             </div>
             <div className='space-y-2'>
-              <label className='block text-sm font-medium text-dark-200 mb-2'>Flags</label>
+              <span className='block text-sm font-medium text-dark-200 mb-2'>Flags</span>
               <label className='flex items-center text-sm text-dark-300'>
                 <input
                   type='checkbox'
                   className='mr-2 text-blue-500 focus:ring-blue-500'
                   checked={autostart}
                   onChange={e => setAutostart(e.target.checked)}
-                />
+                />{' '}
                 Autostart on server boot
               </label>
               <label className='flex items-center text-sm text-dark-300'>
@@ -255,14 +275,17 @@ export const StrategyLaunchModal: React.FC<StrategyLaunchModalProps> = ({
                   className='mr-2 text-blue-500 focus:ring-blue-500'
                   checked={startImmediately}
                   onChange={e => setStartImmediately(e.target.checked)}
-                />
+                />{' '}
                 Start immediately after registration
               </label>
             </div>
           </div>
           <div>
-            <label className='block text-sm font-medium text-dark-200 mb-2'>Note (optional)</label>
+            <label htmlFor='strategy-note' className='block text-sm font-medium text-dark-200 mb-2'>
+              Note (optional)
+            </label>
             <textarea
+              id='strategy-note'
               value={note}
               onChange={e => setNote(e.target.value)}
               maxLength={512}

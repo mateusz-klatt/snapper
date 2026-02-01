@@ -1,5 +1,7 @@
 """Tests for Kraken exchange Pydantic schemas."""
 
+import pytest
+
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenAddOrderParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenAddOrderResponseSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenAddOrderResultSchema
@@ -115,7 +117,7 @@ class TestKrakenInstrumentSchemas:
         """
         fee = KrakenInstrumentFeeScheduleSchema(type="maker", percent=0.1, symbol="BTC/USD")
         assert fee.type == "maker"
-        assert fee.percent == 0.1
+        assert fee.percent == pytest.approx(0.1)
 
     def test_instrument_pair_schema_as_summary(self) -> None:
         """Export pair schema as summary dictionary.
@@ -254,7 +256,7 @@ class TestKrakenTickerSchemas:
         )
         result = ticker.model_dump(exclude_none=True)
         assert result["symbol"] == "BTC/USD"
-        assert result["bid"] == 50000.0
+        assert result["bid"] == pytest.approx(50000.0)
 
     def test_ticker_event_envelope_with_dict_data(self) -> None:
         """Handle ticker envelope with raw dict data.
@@ -271,7 +273,7 @@ class TestKrakenTickerSchemas:
         )
         assert envelope.symbol == "BTC/USD"
         assert isinstance(envelope.data, dict)
-        assert envelope.data.get("bid") == 50000.0
+        assert envelope.data.get("bid") == pytest.approx(50000.0)
 
     def test_ticker_event_envelope_with_ticker_schema(self) -> None:
         """Handle ticker envelope with schema data.
@@ -396,7 +398,7 @@ class TestKrakenTradeSchemas:
         )
         result = trade.as_dict()
         assert result["symbol"] == "BTC/USD"
-        assert result["qty"] == 0.5
+        assert result["qty"] == pytest.approx(0.5)
         assert result["trade_id"] == 12345
 
     def test_trade_event_envelope_symbol(self) -> None:
@@ -518,7 +520,7 @@ class TestKrakenExecutionSchemas:
         fee = KrakenExecutionFeeSchema(asset="USD", qty=10.5)
         result = fee.as_dict()
         assert result["asset"] == "USD"
-        assert result["qty"] == 10.5
+        assert result["qty"] == pytest.approx(10.5)
 
     def test_execution_schema_as_dict(self) -> None:
         """Export execution schema as dictionary.

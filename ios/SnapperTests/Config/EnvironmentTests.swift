@@ -3,23 +3,26 @@ import XCTest
 
 final class EnvironmentTests: XCTestCase {
 
+    private static let expectedAPIBaseURL = AppConfig.baseURL + AppConfig.apiPrefix
+    private static let httpsTestURL = AppConfig.URIScheme.https + "api.example.com"
+
     func testAPIBaseURL() {
-        let expected = "http://localhost:8000/snapper/api"
-        XCTAssertEqual(AppConfig.apiBaseURL, expected)
+        XCTAssertEqual(AppConfig.apiBaseURL, Self.expectedAPIBaseURL)
     }
 
     func testWebSocketBaseURL() {
 
         let wsURL = AppConfig.wsBaseURL
-        XCTAssertTrue(wsURL.starts(with: "ws://"))
+        XCTAssertTrue(wsURL.starts(with: AppConfig.URIScheme.ws))
         XCTAssertTrue(wsURL.contains("localhost:8000"))
-        XCTAssertTrue(wsURL.contains("/snapper/api/ws"))
+        let expectedWsPath = AppConfig.apiPrefix + AppConfig.wsPath
+        XCTAssertTrue(wsURL.contains(expectedWsPath))
     }
 
     func testWebSocketBaseURLWithHTTPS() {
 
-        let httpsURL = "https://api.example.com"
-        let wsProtocol = httpsURL.hasPrefix("https") ? "wss" : "ws"
+        let httpsURL = Self.httpsTestURL
+        let wsProtocol = httpsURL.hasPrefix(AppConfig.URIScheme.httpsPrefix) ? "wss" : "ws"
         XCTAssertEqual(wsProtocol, "wss")
     }
 
@@ -28,8 +31,10 @@ final class EnvironmentTests: XCTestCase {
         XCTAssertEqual(AppConfig.Endpoints.logout, "/auth/logout")
         XCTAssertEqual(AppConfig.Endpoints.me, "/auth/me")
         XCTAssertEqual(AppConfig.Endpoints.orders, "/orders")
-        XCTAssertEqual(AppConfig.Endpoints.portfolio, "/portfolio")
-        XCTAssertEqual(AppConfig.Endpoints.positions, "/portfolio/positions")
-        XCTAssertEqual(AppConfig.Endpoints.strategies, "/strategies")
+        XCTAssertEqual(AppConfig.Endpoints.positions, "/positions")
+        XCTAssertEqual(AppConfig.Endpoints.signals, "/signals")
+        XCTAssertEqual(AppConfig.Endpoints.executions, "/executions")
+        XCTAssertEqual(AppConfig.Endpoints.status, "/status")
+        XCTAssertEqual(AppConfig.Endpoints.health, "/health")
     }
 }

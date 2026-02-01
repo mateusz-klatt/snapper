@@ -28,6 +28,8 @@ Example:
         };
 """
 
+from typing import Any
+
 from fastapi import APIRouter
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
@@ -53,6 +55,67 @@ __all__ = [
 ]
 
 
+def _resolve_allowed_origins(
+    websocket: WebSocket, static_origins: set[str], server_port: int
+) -> set[str]:
+    """Resolve allowed origins using app state settings if available.
+
+    Args:
+        websocket: WebSocket connection instance.
+        static_origins: Default allowed origins from bootstrap settings.
+        server_port: Server port number.
+
+    Returns:
+        Set of allowed origin strings.
+    """
+    try:
+        app_settings = websocket.app.state.settings
+        return build_allowed_origins(app_settings, server_port)
+    except AttributeError:
+        return static_origins.copy()
+
+
+def _ensure_zmq_bridge(manager: WebSocketConnectionManager) -> None:
+    """Ensure the ZMQ bridge is attached to the connection manager.
+
+    Args:
+        manager: WebSocket connection manager.
+    """
+    if manager.zmq_bridge is None:
+        bridge = ZmqWebSocketBridgeService(manager)
+        manager.attach_bridge(bridge)
+
+
+async def _authenticate_and_dispatch(
+    websocket: WebSocket,
+    manager: WebSocketConnectionManager,
+    ws_auth_manager: Any,
+    ws_token_service: Any,
+    state: list[bool],
+) -> None:
+    """Authenticate, connect, and run the WebSocket dispatch loop.
+
+    Sets state[0] to True once the websocket is connected to the manager,
+    so the caller knows cleanup is needed even if an exception occurs later.
+
+    Args:
+        websocket: Accepted WebSocket connection.
+        manager: WebSocket connection manager.
+        ws_auth_manager: WebSocket authentication manager.
+        ws_token_service: WebSocket token service.
+        state: Single-element list; set to [True] once connected.
+    """
+    auth_result = await authenticate_websocket(websocket, ws_auth_manager, ws_token_service)
+    if not auth_result.success or auth_result.user is None:
+        return
+    user = auth_result.user
+    state[0] = True
+    await manager.connect(websocket, accept=False)
+    if auth_result.ws_payload is not None:
+        await send_auth_complete(websocket, manager, user, auth_result.ws_payload, ws_auth_manager)
+    await dispatch_messages(websocket, manager, user, ws_auth_manager, ws_token_service)
+
+
 def create_authenticated_websocket_router(manager: WebSocketConnectionManager) -> APIRouter:
     """Create WebSocket router with authentication.
 
@@ -73,40 +136,23 @@ def create_authenticated_websocket_router(manager: WebSocketConnectionManager) -
     @router.websocket("/ws")
     async def authenticated_websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
-        allowed_origins = static_allowed_origins.copy()
-        try:
-            app_settings = websocket.app.state.settings
-            allowed_origins = build_allowed_origins(app_settings, settings.server_port)
-        except AttributeError:
-            pass
+        allowed_origins = _resolve_allowed_origins(
+            websocket, static_allowed_origins, settings.server_port
+        )
         if not await validate_origin(websocket, allowed_origins):
             return
-        zmq_bridge = manager.zmq_bridge
-        if zmq_bridge is None:
-            zmq_bridge = ZmqWebSocketBridgeService(manager)
-            manager.attach_bridge(zmq_bridge)
-        authenticated = False
-        user = None
+        _ensure_zmq_bridge(manager)
+        authenticated: list[bool] = [False]
         try:
-            auth_result = await authenticate_websocket(websocket, ws_auth_manager, ws_token_service)
-            if not auth_result.success or auth_result.user is None:
-                return
-            user = auth_result.user
-            authenticated = True
-            await manager.connect(websocket, accept=False)
-            if auth_result.ws_payload is not None:
-                await send_auth_complete(
-                    websocket, manager, user, auth_result.ws_payload, ws_auth_manager
-                )
-            await dispatch_messages(websocket, manager, user, ws_auth_manager, ws_token_service)
-        except WebSocketDisconnect:
-            logger.info(
-                f"WebSocket disconnected for user {user.username if user else 'unauthenticated'}"
+            await _authenticate_and_dispatch(
+                websocket, manager, ws_auth_manager, ws_token_service, authenticated
             )
+        except WebSocketDisconnect:
+            logger.info("WebSocket disconnected for user unauthenticated")
         except Exception as exc:
             logger.exception("WebSocket error: {}", exc)
         finally:
-            if authenticated:
+            if authenticated[0]:
                 await manager.disconnect(websocket)
             ws_auth_manager.disconnect(websocket)
 

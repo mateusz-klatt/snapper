@@ -394,6 +394,7 @@ class TraderCoordinator(RegisterableProcess):
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Trading loop cancelled")
+            raise
         finally:
             for task in tasks:
                 if not task.done():

@@ -31,7 +31,7 @@ struct SettingsView: View {
                         HStack {
                             Text("Role")
                             Spacer()
-                            Text(user.isAdmin ? "Admin" : "User")
+                            Text(user.role.rawValue.capitalized)
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -82,7 +82,7 @@ struct SettingsView: View {
             .navigationTitle("Settings")
         }
         .alert("Logout", isPresented: $showingLogoutAlert) {
-            Button("Cancel", role: .cancel) { }
+            Button("Cancel", role: .cancel) { /* Dismiss alert with no action */ }
             Button("Logout", role: .destructive) {
                 logout()
             }

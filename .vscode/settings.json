@@ -58,5 +58,9 @@
   ],
   "chatgpt.runCodexInWindowsSubsystemForLinux": true,
   "claudeCode.allowDangerouslySkipPermissions": true,
-  "claudeCode.useTerminal": false
+  "claudeCode.useTerminal": false,
+  "sonarlint.connectedMode.project": {
+    "connectionId": "mateusz-klatt",
+    "projectKey": "mateusz-klatt_snapper"
+  }
 }

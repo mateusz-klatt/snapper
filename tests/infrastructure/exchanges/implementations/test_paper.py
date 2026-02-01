@@ -132,6 +132,7 @@ async def test_subscribe_executions_requires_connection() -> None:
     client = PaperExchangeClient()
     with pytest.raises(RuntimeError):
         async for _ in client.subscribe_executions():
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -162,6 +163,7 @@ async def test_subscribe_ticker_requires_repository() -> None:
     client.end_time = 1
     with pytest.raises(RuntimeError):
         async for _ in client.subscribe_ticker(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -179,6 +181,7 @@ async def test_subscribe_ticker_requires_running_and_timerange() -> None:
     client._running = True
     with pytest.raises(ValueError):
         async for _ in client.subscribe_ticker(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -312,6 +315,7 @@ async def test_subscribe_executions_timeout_exits(monkeypatch: pytest.MonkeyPatc
         sleep_mock,
     )
     async for _ in client.subscribe_executions():
+        """Consumed by iteration to trigger exception."""
         pass
 
 
@@ -336,6 +340,7 @@ async def test_subscribe_executions_handles_error(monkeypatch: pytest.MonkeyPatc
         "snapper.infrastructure.exchanges.implementations.paper.asyncio.wait_for", boom
     )
     async for _ in client.subscribe_executions():
+        """Consumed by iteration to trigger exception."""
         pass
 
 
@@ -352,6 +357,7 @@ async def test_subscribe_ticker_requires_running() -> None:
     client.end_time = 1
     with pytest.raises(RuntimeError, match="Not connected"):
         async for _ in client.subscribe_ticker(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -369,6 +375,7 @@ async def test_subscribe_candles_requires_repository() -> None:
     client.end_time = 1
     with pytest.raises(RuntimeError, match="Repository required"):
         async for _ in client.subscribe_candles(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -385,6 +392,7 @@ async def test_subscribe_candles_requires_running() -> None:
     client.end_time = 1
     with pytest.raises(RuntimeError, match="Not connected"):
         async for _ in client.subscribe_candles(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -400,6 +408,7 @@ async def test_subscribe_candles_requires_time_range() -> None:
     client._running = True
     with pytest.raises(ValueError, match="Time range"):
         async for _ in client.subscribe_candles(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -417,6 +426,7 @@ async def test_subscribe_trades_requires_repository() -> None:
     client.end_time = 1
     with pytest.raises(RuntimeError, match="Repository required"):
         async for _ in client.subscribe_trades(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -433,6 +443,7 @@ async def test_subscribe_trades_requires_running() -> None:
     client.end_time = 1
     with pytest.raises(RuntimeError, match="Not connected"):
         async for _ in client.subscribe_trades(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
             pass
 
 
@@ -447,8 +458,8 @@ async def test_subscribe_trades_requires_time_range() -> None:
     client = PaperExchangeClient(repository=DummyRepo())
     client._running = True
     with pytest.raises(ValueError, match="Time range"):
-        async for _ in client.subscribe_trades(["BTC/USD"]):
-            pass
+        async for _item in client.subscribe_trades(["BTC/USD"]):
+            """Consumed by iteration to trigger exception."""
 
 
 @pytest.mark.asyncio
@@ -460,7 +471,10 @@ async def test_subscribe_instruments_noop() -> None:
     Then: Empty list is yielded.
     """
     client = PaperExchangeClient()
-    assert [item async for item in client.subscribe_instruments()] == []
+    instruments: list[Any] = []
+    async for item in client.subscribe_instruments():
+        instruments.append(item)
+    assert instruments == []
 
 
 @pytest.fixture
@@ -598,7 +612,7 @@ class TestPaperBalanceManagement:
         assert len(balances) == 5
         assert "USD" in balances
         assert "BTC" in balances
-        assert balances["USD"].total == 10000.0
+        assert balances["USD"].total == pytest.approx(10000.0)
 
 
 class TestPaperDisconnection:
@@ -826,7 +840,7 @@ async def test_get_ticker_success_and_empty() -> None:
     client = PaperExchangeClient(repository=cast(Repository, repo))
     await client.connect()
     snapshot = await client.get_ticker("BTC/USD")
-    assert snapshot.bid == 10.0
+    assert snapshot.bid == pytest.approx(10.0)
     repo.snapshots = []
     with pytest.raises(ValueError):
         await client.get_ticker("BTC/USD")
@@ -851,7 +865,7 @@ async def test_get_ohlcv_limits_results() -> None:
     await client.connect()
     candles = await client.get_ohlcv("BTC/USD", timeframe="1m", limit=2)
     assert len(candles) == 2
-    assert candles[-1].close == 3.5
+    assert candles[-1].close == pytest.approx(3.5)
 
 
 @pytest.mark.asyncio
@@ -910,7 +924,10 @@ async def test_subscribe_candles_returns_on_empty_symbols() -> None:
     client._running = True
     client.start_time = 0
     client.end_time = 1
-    assert [c async for c in client.subscribe_candles([])] == []
+    candles: list[Any] = []
+    async for c in client.subscribe_candles([]):
+        candles.append(c)
+    assert candles == []
 
 
 @pytest.mark.asyncio
@@ -955,7 +972,10 @@ async def test_subscribe_ticker_empty_snapshots() -> None:
     client._running = True
     client.start_time = 0
     client.end_time = 1
-    assert [tick async for tick in client.subscribe_ticker(["BTC/USD"])] == []
+    ticks: list[Any] = []
+    async for tick in client.subscribe_ticker(["BTC/USD"]):
+        ticks.append(tick)
+    assert ticks == []
 
 
 @pytest.mark.asyncio
@@ -972,7 +992,10 @@ async def test_subscribe_candles_empty_repo() -> None:
     client._running = True
     client.start_time = 0
     client.end_time = 1
-    assert [candle async for candle in client.subscribe_candles(["BTC/USD"])] == []
+    candles: list[Any] = []
+    async for candle in client.subscribe_candles(["BTC/USD"]):
+        candles.append(candle)
+    assert candles == []
 
 
 @pytest.mark.asyncio
@@ -987,7 +1010,10 @@ async def test_subscribe_trades_empty_symbols() -> None:
     client._running = True
     client.start_time = 0
     client.end_time = 1
-    assert [trade async for trade in client.subscribe_trades([])] == []
+    trades: list[Any] = []
+    async for trade in client.subscribe_trades([]):
+        trades.append(trade)
+    assert trades == []
 
 
 @pytest.mark.asyncio
@@ -1017,7 +1043,9 @@ async def test_subscribe_trades_with_empty_result_for_symbol() -> None:
     client._running = True
     client.start_time = 0
     client.end_time = 1
-    trades = [trade async for trade in client.subscribe_trades(["BTC/USD", "ETH/USD"])]
+    trades: list[Any] = []
+    async for trade in client.subscribe_trades(["BTC/USD", "ETH/USD"]):
+        trades.append(trade)
     assert len(trades) == 1
     assert trades[0].symbol == "BTC/USD"
 
@@ -1034,5 +1062,7 @@ async def test_subscribe_ticks_alias_replays_snapshots() -> None:
     client._running = True
     client.start_time = 0
     client.end_time = 1
-    updates = [tick async for tick in client.subscribe_ticks(["BTC/USD"])]
+    updates: list[Any] = []
+    async for tick in client.subscribe_ticks(["BTC/USD"]):
+        updates.append(tick)
     assert updates and isinstance(updates[0], TickerUpdate)

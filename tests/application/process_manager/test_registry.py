@@ -23,6 +23,7 @@ class TestRegisterProcess:
         @register_process(name="test_basic", description="Basic test process")
         class BasicProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for BasicProcess test stub."""
                 pass
 
         metadata = get_process_metadata("test_basic")
@@ -60,9 +61,11 @@ class TestRegisterProcess:
         )
         class CustomProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for CustomProcess test stub."""
                 pass
 
             async def run(self) -> None:
+                """No-op run for CustomProcess test stub."""
                 pass
 
         metadata = get_process_metadata("test_custom")
@@ -94,6 +97,7 @@ class TestRegisterProcess:
         )
         class StringEnumProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for StringEnumProcess test stub."""
                 pass
 
         metadata = get_process_metadata("test_string_enums")
@@ -112,6 +116,7 @@ class TestRegisterProcess:
         @register_process(name="test_no_tags", tags=None)
         class NoTagsProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for NoTagsProcess test stub."""
                 pass
 
         metadata = get_process_metadata("test_no_tags")
@@ -129,6 +134,7 @@ class TestRegisterProcess:
         @register_process(name="test_no_args", args=None)
         class NoArgsProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for NoArgsProcess test stub."""
                 pass
 
         metadata = get_process_metadata("test_no_args")
@@ -146,6 +152,7 @@ class TestRegisterProcess:
         @register_process(name="test_class_path")
         class ClassPathProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for ClassPathProcess test stub."""
                 pass
 
         metadata = get_process_metadata("test_class_path")
@@ -179,6 +186,7 @@ class TestGetRegisteredProcesses:
         @register_process(name="test_copy")
         class CopyTestProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for CopyTestProcess test stub."""
                 pass
 
         processes1 = get_registered_processes()
@@ -197,6 +205,7 @@ class TestGetRegisteredProcesses:
         @register_process(name="test_metadata_keys")
         class MetadataKeysProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for MetadataKeysProcess test stub."""
                 pass
 
         processes = get_registered_processes()
@@ -233,6 +242,7 @@ class TestGetProcessMetadata:
         @register_process(name="test_existing")
         class ExistingProcess(RegisterableProcess):
             async def start(self) -> None:
+                """No-op start for ExistingProcess test stub."""
                 pass
 
         metadata = get_process_metadata("test_existing")

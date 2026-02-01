@@ -95,19 +95,33 @@ final class LoginViewModelTests: XCTestCase {
             if requestCount == 1 {
 
                 let json: [String: Any] = [
-                    "access_token": "test_token",
-                    "refresh_token": "refresh_token",
-                    "token_type": "bearer"
+                    "message": "Login successful",
+                    "expires_in": 900,
+                    "user": [
+                        "id": "1",
+                        "username": "testuser",
+                        "email": "test@example.com",
+                        "role": "viewer",
+                        "is_active": true,
+                        "created_at": "2025-01-01T00:00:00Z"
+                    ]
                 ]
                 return MockURLProtocol.jsonResponse(statusCode: 200, json: json)
             } else {
 
                 let json: [String: Any] = [
-                    "id": 1,
-                    "username": "testuser",
-                    "email": "test@example.com",
-                    "is_active": true,
-                    "is_admin": false
+                    "message": "Token refreshed",
+                    "ws_token": "ws_token_value",
+                    "ws_token_exp": "2025-11-22T11:00:00Z",
+                    "csrf_token": "csrf_value",
+                    "user": [
+                        "id": "1",
+                        "username": "testuser",
+                        "email": "test@example.com",
+                        "role": "viewer",
+                        "is_active": true,
+                        "created_at": "2025-01-01T00:00:00Z"
+                    ]
                 ]
                 return MockURLProtocol.jsonResponse(statusCode: 200, json: json)
             }
@@ -176,9 +190,16 @@ final class LoginViewModelTests: XCTestCase {
         MockURLProtocol.requestHandler = { request in
             Thread.sleep(forTimeInterval: 0.1)
             return MockURLProtocol.jsonResponse(statusCode: 200, json: [
-                "access_token": "test_token",
-                "refresh_token": "refresh_token",
-                "token_type": "bearer"
+                "message": "Login successful",
+                "expires_in": 900,
+                "user": [
+                    "id": "1",
+                    "username": "testuser",
+                    "email": "test@example.com",
+                    "role": "viewer",
+                    "is_active": true,
+                    "created_at": "2025-01-01T00:00:00Z"
+                ]
             ])
         }
 

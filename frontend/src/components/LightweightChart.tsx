@@ -20,7 +20,7 @@ export const LightweightChart = ({
   height = 400,
   width,
   className = '',
-}: LightweightChartProps) => {
+}: Readonly<LightweightChartProps>) => {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -74,10 +74,10 @@ export const LightweightChart = ({
       }
     }
 
-    window.addEventListener('resize', handleResize)
+    globalThis.addEventListener('resize', handleResize)
 
     return () => {
-      window.removeEventListener('resize', handleResize)
+      globalThis.removeEventListener('resize', handleResize)
       chartRef.current?.remove()
       chartRef.current = null
       seriesRef.current = null

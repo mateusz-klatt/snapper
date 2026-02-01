@@ -82,6 +82,8 @@ from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.server.app import create_app
 
+_FORCE_UPDATE_HELP = "Force update even if recently updated"
+
 app = typer.Typer(add_completion=False, help="Snapper CLI")
 
 
@@ -402,7 +404,7 @@ def zmq_logger(
         except KeyboardInterrupt:
             typer.echo("\nZMQ Logger stopped by user")
         finally:
-            pass
+            """No cleanup action required."""
 
     asyncio.run(run_logger())
 
@@ -544,9 +546,7 @@ def reset_password(
 
 @app.command(name="update-kraken-symbols")
 def update_kraken_symbols(
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Force update even if recently updated"
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help=_FORCE_UPDATE_HELP),
 ) -> None:
     """Sync Kraken symbol mappings from exchange API.
 
@@ -581,9 +581,7 @@ def update_kraken_market_snapshot() -> None:
 
 @app.command(name="update-zonda-symbols")
 def update_zonda_symbols(
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Force update even if recently updated"
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help=_FORCE_UPDATE_HELP),
 ) -> None:
     """Sync Zonda symbol mappings from exchange API.
 
@@ -618,9 +616,7 @@ def update_zonda_market_snapshot() -> None:
 
 @app.command(name="update-walutomat-symbols")
 def update_walutomat_symbols(
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Force update even if recently updated"
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help=_FORCE_UPDATE_HELP),
 ) -> None:
     """Sync Walutomat symbol mappings from exchange API.
 
@@ -643,9 +639,7 @@ def update_walutomat_symbols(
 
 @app.command(name="update-polygon-symbols")
 def update_polygon_symbols(
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Force update even if recently updated"
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help=_FORCE_UPDATE_HELP),
     insert_new: bool = typer.Option(
         False, "--insert-new", help="Insert new symbols (default: UPDATE existing only)"
     ),
@@ -685,6 +679,161 @@ def update_walutomat_market_snapshot() -> None:
         raise typer.Exit(code=1) from e
 
 
+def _verify_encryption_services(
+    old_encryption: SettingsEncryptionService,
+    new_encryption: SettingsEncryptionService,
+) -> None:
+    """Verify both old and new encryption services can round-trip a test value.
+
+    Args:
+        old_encryption: Current encryption service.
+        new_encryption: New encryption service.
+
+    Raises:
+        ValueError: If either service fails the round-trip verification.
+    """
+    test_value = "test-rotation-verification"
+    old_decrypted = old_encryption.decrypt(old_encryption.encrypt(test_value))
+    new_decrypted = new_encryption.decrypt(new_encryption.encrypt(test_value))
+    if old_decrypted != test_value or new_decrypted != test_value:
+        raise ValueError("Encryption verification failed - check your passwords/salts")
+
+
+def _rotate_single_setting(
+    setting: Any,
+    old_encryption: SettingsEncryptionService,
+    new_encryption: SettingsEncryptionService,
+    dry_run: bool,
+) -> bool:
+    """Re-encrypt a single setting from old to new encryption.
+
+    Args:
+        setting: Database Setting row with key and value.
+        old_encryption: Current encryption service.
+        new_encryption: New encryption service.
+        dry_run: If True, skip writing back the new value.
+
+    Returns:
+        True if the setting was rotated, False if skipped.
+
+    Raises:
+        Exception: Propagates decryption/encryption errors when not in dry-run.
+    """
+    if not setting.value:
+        typer.echo(f"Skipping empty setting: {setting.key}")
+        return False
+    try:
+        decrypted_value = old_encryption.decrypt(setting.value)
+        new_encrypted_value = new_encryption.encrypt(decrypted_value)
+        typer.echo(f"Rotating: {setting.key}")
+        if not dry_run:
+            setting.value = new_encrypted_value
+        return not dry_run
+    except Exception as e:
+        typer.echo(f"Failed to rotate {setting.key}: {e}")
+        if not dry_run:
+            raise
+        return False
+
+
+async def _commit_rotation_results(
+    session: Any,
+    changes_made: int,
+    total_settings: int,
+    dry_run: bool,
+    new_master_password: str,
+    new_salt: str | None,
+    new_encryption_salt: str,
+) -> None:
+    """Commit rotation results and print summary.
+
+    Args:
+        session: Active database session.
+        changes_made: Number of settings successfully rotated.
+        total_settings: Total number of encrypted settings found.
+        dry_run: Whether this was a dry run.
+        new_master_password: New master password for display.
+        new_salt: New salt option (None if unchanged).
+        new_encryption_salt: Resolved new encryption salt.
+    """
+    if not dry_run and changes_made > 0:
+        await session.commit()
+        typer.echo(f"Successfully rotated {changes_made} encrypted settings")
+        typer.echo()
+        typer.echo("IMPORTANT: Update your environment variables with new credentials:")
+        typer.echo(f"   MASTER_PASSWORD={new_master_password}")
+        if new_salt:
+            typer.echo(f"   ENCRYPTION_SALT={new_encryption_salt}")
+        typer.echo()
+        typer.echo("Restart the application to use new encryption parameters")
+    elif dry_run:
+        typer.echo(f"DRY RUN: Would rotate {total_settings} settings")
+
+
+async def _run_encryption_rotation(
+    new_master_password: str,
+    new_salt: str | None,
+    old_master_password: str | None,
+    old_salt: str | None,
+    dry_run: bool,
+) -> None:
+    """Execute the encryption rotation workflow.
+
+    Args:
+        new_master_password: New master password for encryption.
+        new_salt: New encryption salt (None to keep current).
+        old_master_password: Current master password (None to read from bootstrap).
+        old_salt: Current encryption salt (None to read from bootstrap).
+        dry_run: Show changes without applying them.
+    """
+    try:
+        bootstrap = BootstrapSettingsLoader()
+        current_password = old_master_password or bootstrap.master_password
+        current_salt = old_salt or bootstrap.encryption_salt
+        typer.echo("Starting encryption rotation...")
+        typer.echo(f"Current password: {'***' if current_password else 'None'}")
+        typer.echo(f"Current salt: {current_salt}")
+        typer.echo(f"New password: {'***' if new_master_password else 'None'}")
+        typer.echo(f"New salt: {new_salt or 'Using same as current'}")
+        if dry_run:
+            typer.echo("DRY RUN MODE - No changes will be made")
+        old_encryption = SettingsEncryptionService(current_password, current_salt.encode())
+        new_encryption_salt = new_salt or current_salt
+        new_encryption = SettingsEncryptionService(
+            new_master_password, new_encryption_salt.encode()
+        )
+        _verify_encryption_services(old_encryption, new_encryption)
+        typer.echo("Encryption parameters verified")
+        poolclass = NullPool if "sqlite" in bootstrap.db_url else None
+        engine = create_async_engine(bootstrap.db_url, poolclass=poolclass)
+        session_factory = async_sessionmaker(engine)
+        async with session_factory() as session:
+            result = await session.execute(sa.select(Setting).where(Setting.is_encrypted))
+            encrypted_settings = result.scalars().all()
+            typer.echo(f"Found {len(encrypted_settings)} encrypted settings to rotate")
+            if not encrypted_settings:
+                typer.echo("No encrypted settings found - nothing to rotate")
+                return
+            changes_made = sum(
+                _rotate_single_setting(s, old_encryption, new_encryption, dry_run)
+                for s in encrypted_settings
+            )
+            await _commit_rotation_results(
+                session,
+                changes_made,
+                len(encrypted_settings),
+                dry_run,
+                new_master_password,
+                new_salt,
+                new_encryption_salt,
+            )
+        await engine.dispose()
+    except Exception as e:
+        typer.echo(f"Failed to rotate encryption: {e}")
+        if not dry_run:
+            typer.echo("Database may be in inconsistent state - restore from backup if needed")
+
+
 @app.command(name="settings-rotate-encryption")
 def settings_rotate_encryption(
     new_master_password: str = typer.Option(..., "--new-password", help="New master password"),
@@ -708,77 +857,11 @@ def settings_rotate_encryption(
         old_salt: Current encryption salt.
         dry_run: Show changes without applying them.
     """
-
-    async def rotate_encryption() -> None:
-        try:
-            bootstrap = BootstrapSettingsLoader()
-            current_password = old_master_password or bootstrap.master_password
-            current_salt = old_salt or bootstrap.encryption_salt
-            typer.echo("Starting encryption rotation...")
-            typer.echo(f"Current password: {'***' if current_password else 'None'}")
-            typer.echo(f"Current salt: {current_salt}")
-            typer.echo(f"New password: {'***' if new_master_password else 'None'}")
-            typer.echo(f"New salt: {new_salt or 'Using same as current'}")
-            if dry_run:
-                typer.echo("DRY RUN MODE - No changes will be made")
-            old_encryption = SettingsEncryptionService(current_password, current_salt.encode())
-            new_encryption_salt = new_salt or current_salt
-            new_encryption = SettingsEncryptionService(
-                new_master_password, new_encryption_salt.encode()
-            )
-            test_value = "test-rotation-verification"
-            old_encrypted = old_encryption.encrypt(test_value)
-            old_decrypted = old_encryption.decrypt(old_encrypted)
-            new_encrypted = new_encryption.encrypt(test_value)
-            new_decrypted = new_encryption.decrypt(new_encrypted)
-            if old_decrypted != test_value or new_decrypted != test_value:
-                raise ValueError("Encryption verification failed - check your passwords/salts")
-            typer.echo("Encryption parameters verified")
-            poolclass = NullPool if "sqlite" in bootstrap.db_url else None
-            engine = create_async_engine(bootstrap.db_url, poolclass=poolclass)
-            session_factory = async_sessionmaker(engine)
-            async with session_factory() as session:
-                result = await session.execute(sa.select(Setting).where(Setting.is_encrypted))
-                encrypted_settings = result.scalars().all()
-                typer.echo(f"Found {len(encrypted_settings)} encrypted settings to rotate")
-                if not encrypted_settings:
-                    typer.echo("No encrypted settings found - nothing to rotate")
-                    return
-                changes_made = 0
-                for setting in encrypted_settings:
-                    try:
-                        if not setting.value:
-                            typer.echo(f"Skipping empty setting: {setting.key}")
-                            continue
-                        decrypted_value = old_encryption.decrypt(setting.value)
-                        new_encrypted_value = new_encryption.encrypt(decrypted_value)
-                        typer.echo(f"Rotating: {setting.key}")
-                        if not dry_run:
-                            setting.value = new_encrypted_value
-                            changes_made += 1
-                    except Exception as e:
-                        typer.echo(f"Failed to rotate {setting.key}: {e}")
-                        if not dry_run:
-                            raise
-                if not dry_run and changes_made > 0:
-                    await session.commit()
-                    typer.echo(f"Successfully rotated {changes_made} encrypted settings")
-                    typer.echo()
-                    typer.echo("IMPORTANT: Update your environment variables with new credentials:")
-                    typer.echo(f"   MASTER_PASSWORD={new_master_password}")
-                    if new_salt:
-                        typer.echo(f"   ENCRYPTION_SALT={new_encryption_salt}")
-                    typer.echo()
-                    typer.echo("Restart the application to use new encryption parameters")
-                elif dry_run:
-                    typer.echo(f"DRY RUN: Would rotate {len(encrypted_settings)} settings")
-            await engine.dispose()
-        except Exception as e:
-            typer.echo(f"Failed to rotate encryption: {e}")
-            if not dry_run:
-                typer.echo("Database may be in inconsistent state - restore from backup if needed")
-
-    asyncio.run(rotate_encryption())
+    asyncio.run(
+        _run_encryption_rotation(
+            new_master_password, new_salt, old_master_password, old_salt, dry_run
+        )
+    )
 
 
 @app.command(name="polygon-backfill-aggregates")

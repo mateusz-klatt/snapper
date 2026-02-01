@@ -7,7 +7,6 @@ final class AuthServiceTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-
     }
 
     override func tearDown() {
@@ -18,18 +17,29 @@ final class AuthServiceTests: XCTestCase {
     func testLoginResponseDecoding() throws {
         let json = """
         {
-            "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-            "refresh_token": "refresh_token_value",
-            "token_type": "bearer"
+            "message": "Login successful",
+            "expires_in": 900,
+            "user": {
+                "id": "1",
+                "username": "testuser",
+                "email": "test@example.com",
+                "role": "viewer",
+                "is_active": true,
+                "created_at": "2025-01-01T00:00:00Z",
+                "last_login": null
+            }
         }
         """.data(using: .utf8)!
 
         let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
         let response = try decoder.decode(LoginResponse.self, from: json)
 
-        XCTAssertEqual(response.accessToken, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
-        XCTAssertEqual(response.refreshToken, "refresh_token_value")
-        XCTAssertEqual(response.tokenType, "bearer")
+        XCTAssertEqual(response.message, "Login successful")
+        XCTAssertEqual(response.expiresIn, 900)
+        XCTAssertEqual(response.user.username, "testuser")
+        XCTAssertEqual(response.user.email, "test@example.com")
+        XCTAssertEqual(response.user.role, .viewer)
     }
 
     func testErrorResponseDecoding() throws {

@@ -81,9 +81,7 @@ class DummyProcessWithWait:
     def kill(self) -> None:
         """Mark as killed and set returncode."""
         self.killed = True
-        if self._wait_raises:
-            pass
-        else:
+        if not self._wait_raises:
             self.returncode = -9
 
     def wait(self, timeout: float | None = None) -> int:
@@ -298,9 +296,7 @@ class TestTerminateEdgeCases:
 
         def fake_killpg(pgid: int, sig: int) -> None:
             call_count["total"] += 1
-            if call_count["total"] == 1:
-                pass
-            else:
+            if call_count["total"] != 1:
                 raise PermissionError("Operation not permitted")
 
         def fake_getpgid(pid: int) -> int:
@@ -343,6 +339,7 @@ class TestTerminateEdgeCases:
         dummy = DummyProcessWithWait(initial_returncode=None, wait_raises=True)
 
         def fake_killpg(pgid: int, sig: int) -> None:
+            """Intentionally empty mock implementation."""
             pass
 
         def fake_getpgid(pid: int) -> int:

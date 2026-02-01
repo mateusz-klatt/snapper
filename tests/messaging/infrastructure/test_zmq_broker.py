@@ -358,8 +358,8 @@ class TestZMQPubSub:
                 received_msg = TickEnvelope.from_json(payload)
                 assert isinstance(received_msg, TickEnvelope)
                 assert received_msg.instrument == "BTCUSD"
-                assert received_msg.last == 50000.0
-                assert received_msg.volume == 0.1
+                assert received_msg.last == pytest.approx(50000.0)
+                assert received_msg.volume == pytest.approx(0.1)
             except TimeoutError:
                 pytest.fail("Did not receive message within timeout")
         finally:
@@ -396,7 +396,7 @@ class TestZMQPubSub:
             received_topics = []
             try:
                 for _ in range(2):
-                    topic_bytes, payload_bytes = await asyncio.wait_for(
+                    topic_bytes, _payload_bytes = await asyncio.wait_for(
                         sub_socket.recv_multipart(), timeout=1.0
                     )
                     topic = topic_bytes.decode("utf-8")
@@ -469,12 +469,12 @@ class TestZMQPubSub:
             )
             await pub_socket.send_multipart([b"BTCUSD", late_msg.to_json().encode("utf-8")])
             try:
-                topic_bytes, payload_bytes = await asyncio.wait_for(
+                _topic_bytes, payload_bytes = await asyncio.wait_for(
                     sub_socket.recv_multipart(), timeout=1.0
                 )
                 received_msg = TickEnvelope.from_json(payload_bytes.decode("utf-8"))
                 assert isinstance(received_msg, TickEnvelope)
-                assert received_msg.last == 50000.0
+                assert received_msg.last == pytest.approx(50000.0)
                 with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(sub_socket.recv_multipart(), timeout=0.5)
             except TimeoutError:
@@ -833,6 +833,7 @@ def test_thread_stop_handles_alive_and_resources() -> None:
             self.closed = False
 
         def setsockopt(self, _option: int, _value: int) -> None:
+            """Socket option intentionally ignored in stub."""
             pass
 
         def close(self) -> None:
@@ -1076,7 +1077,7 @@ async def test_proxy_loop_handles_cancelled(monkeypatch: pytest.MonkeyPatch) -> 
 
     Given: A broker with poll that raises CancelledError,
     When: Proxy loop runs,
-    Then: Loop exits gracefully.
+    Then: CancelledError propagates from the loop.
     """
     broker = ZmqBrokerProcess("inproc://xsub", "inproc://xpub")
     broker.running = True
@@ -1085,8 +1086,8 @@ async def test_proxy_loop_handles_cancelled(monkeypatch: pytest.MonkeyPatch) -> 
         raise asyncio.CancelledError
 
     monkeypatch.setattr(broker, "_poll_sockets", fake_poll_sockets)
-    await broker._proxy_loop()
-    assert broker.running is True or broker.running is False
+    with pytest.raises(asyncio.CancelledError):
+        await broker._proxy_loop()
 
 
 @pytest.mark.asyncio

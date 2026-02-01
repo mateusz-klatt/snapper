@@ -1559,16 +1559,20 @@ async def test_ws_endpoint_timeout_during_auth(
         SimpleNamespace(sid="sid-1"),
     )
 
-    async def wait_for_timeout(
-        coro: Any, *args: Any, timeout: float | None = None, **kwargs: Any
-    ) -> Any:
-        close = getattr(coro, "close", None)
-        if callable(close):
-            close()
-        raise TimeoutError()
+    class _ImmediateTimeout:
+        """Context manager that immediately raises TimeoutError."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_ImmediateTimeout":
+            raise TimeoutError()
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     auth_handlers_asyncio = AUTH_HANDLERS_MODULE.asyncio
-    monkeypatch.setattr(auth_handlers_asyncio, "wait_for", cast(Any, wait_for_timeout))
+    monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _ImmediateTimeout))
     websocket = EndpointWebSocketStub(headers={"origin": "http://localhost:8000"})
     await endpoint(websocket)
     assert json.loads(websocket.sent[-1])["reason"] == "timeout"
@@ -1593,13 +1597,20 @@ async def test_ws_endpoint_rejects_invalid_json(
         SimpleNamespace(sid="sid-2"),
     )
 
-    async def wait_for_value(
-        coro: Any, *args: Any, timeout: float | None = None, **kwargs: Any
-    ) -> Any:
-        return await coro
+    class _PassthroughTimeout:
+        """Context manager that does not enforce any timeout."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_PassthroughTimeout":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     auth_handlers_asyncio = AUTH_HANDLERS_MODULE.asyncio
-    monkeypatch.setattr(auth_handlers_asyncio, "wait_for", cast(Any, wait_for_value))
+    monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=["{"],
@@ -1627,13 +1638,20 @@ async def test_ws_endpoint_rejects_invalid_message_type(
         SimpleNamespace(sid="sid-3"),
     )
 
-    async def wait_for_value(
-        coro: Any, *args: Any, timeout: float | None = None, **kwargs: Any
-    ) -> Any:
-        return await coro
+    class _PassthroughTimeout:
+        """Context manager that does not enforce any timeout."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_PassthroughTimeout":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     auth_handlers_asyncio = AUTH_HANDLERS_MODULE.asyncio
-    monkeypatch.setattr(auth_handlers_asyncio, "wait_for", cast(Any, wait_for_value))
+    monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=["{}"],
@@ -1661,13 +1679,20 @@ async def test_ws_endpoint_requires_ws_token(
         SimpleNamespace(sid="sid-4"),
     )
 
-    async def wait_for_value(
-        coro: Any, *args: Any, timeout: float | None = None, **kwargs: Any
-    ) -> Any:
-        return await coro
+    class _PassthroughTimeout:
+        """Context manager that does not enforce any timeout."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_PassthroughTimeout":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     auth_handlers_asyncio = AUTH_HANDLERS_MODULE.asyncio
-    monkeypatch.setattr(auth_handlers_asyncio, "wait_for", cast(Any, wait_for_value))
+    monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=['{"type": "authenticate"}'],
@@ -1696,13 +1721,20 @@ async def test_ws_endpoint_handles_token_replay(
     )
     token_stub.verify_handler = WsTokenAlreadyUsedError()
 
-    async def wait_for_value(
-        coro: Any, *args: Any, timeout: float | None = None, **kwargs: Any
-    ) -> Any:
-        return await coro
+    class _PassthroughTimeout:
+        """Context manager that does not enforce any timeout."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_PassthroughTimeout":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     auth_handlers_asyncio = AUTH_HANDLERS_MODULE.asyncio
-    monkeypatch.setattr(auth_handlers_asyncio, "wait_for", cast(Any, wait_for_value))
+    monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=['{"type": "authenticate", "ws_token": "token"}'],
@@ -1731,13 +1763,20 @@ async def test_ws_endpoint_handles_invalid_token(
     )
     token_stub.verify_handler = WsTokenError()
 
-    async def wait_for_value(
-        coro: Any, *args: Any, timeout: float | None = None, **kwargs: Any
-    ) -> Any:
-        return await coro
+    class _PassthroughTimeout:
+        """Context manager that does not enforce any timeout."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_PassthroughTimeout":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     auth_handlers_asyncio = AUTH_HANDLERS_MODULE.asyncio
-    monkeypatch.setattr(auth_handlers_asyncio, "wait_for", cast(Any, wait_for_value))
+    monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=['{"type": "authenticate", "ws_token": "token"}'],
@@ -1775,13 +1814,20 @@ async def test_ws_endpoint_success_and_reauth_flow(
 
     token_stub.verify_handler = verify_handler
 
-    async def wait_for_value(
-        coro: Any, *args: Any, timeout: float | None = None, **kwargs: Any
-    ) -> Any:
-        return await coro
+    class _PassthroughTimeout:
+        """Context manager that does not enforce any timeout."""
+
+        def __init__(self, _delay: float | None) -> None:
+            pass
+
+        async def __aenter__(self) -> "_PassthroughTimeout":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
 
     auth_handlers_asyncio = AUTH_HANDLERS_MODULE.asyncio
-    monkeypatch.setattr(auth_handlers_asyncio, "wait_for", cast(Any, wait_for_value))
+    monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=[

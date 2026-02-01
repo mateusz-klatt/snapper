@@ -396,7 +396,9 @@ async def test_subscribe_instruments_yields_pairs(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         client, "_fetch_market_data", AsyncMock(return_value=fake_market_response())
     )
-    items = [inst async for inst in client.subscribe_instruments()]
+    items: list[dict[str, Any]] = []
+    async for inst in client.subscribe_instruments():
+        items.append(inst)
     assert items and items[0]["native_symbol"] == "EUR-PLN"
 
 
@@ -507,7 +509,7 @@ async def test_get_balance_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
     balances = await client.get_balance(currency="USD")
-    assert list(balances.keys()) == ["USD"]
+    assert list(balances) == ["USD"]
 
 
 @pytest.mark.asyncio()
@@ -555,7 +557,9 @@ async def test_subscribe_instruments_yields_metadata(monkeypatch: pytest.MonkeyP
         }
 
     monkeypatch.setattr(client, "_fetch_market_data", fake_fetch)
-    results: list[dict[str, Any]] = [item async for item in client.subscribe_instruments()]
+    results: list[dict[str, Any]] = []
+    async for item in client.subscribe_instruments():
+        results.append(item)
     assert {entry["symbol"] for entry in results} == {"EUR_PLN", "USD_PLN"}
     assert {entry["native_symbol"] for entry in results} == {"EUR-PLN", "USD-PLN"}
 
@@ -1665,7 +1669,7 @@ async def test_candle_builder_loop_emits_from_buffer(monkeypatch: pytest.MonkeyP
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=0.1)
     assert candle.symbol == "EUR-PLN"
-    assert candle.open == 4.0
+    assert candle.open == pytest.approx(4.0)
     assert client._tick_buffers["EUR-PLN"] == []
 
 
@@ -1696,7 +1700,7 @@ async def test_subscribe_candles_handles_timeout_and_cancel() -> None:
 
     Given: A running client with timeout then cancel on queue,
     When: Iteration occurs,
-    Then: Iteration stops gracefully.
+    Then: CancelledError propagates after timeout retry.
     """
     client = WalutomatExchangeClient()
     client._running = True
@@ -1704,7 +1708,7 @@ async def test_subscribe_candles_handles_timeout_and_cancel() -> None:
     client._candle_builder_task = cast(Any, SimpleNamespace(done=lambda: False))
     client._candle_queue.get = AsyncMock(side_effect=[TimeoutError(), asyncio.CancelledError()])
     gen = client.subscribe_candles(["EUR-PLN"])
-    with pytest.raises(StopAsyncIteration):
+    with pytest.raises(asyncio.CancelledError):
         await gen.__anext__()
 
 
@@ -2001,6 +2005,7 @@ async def test_polling_loop_adds_to_new_tick_buffer(monkeypatch: pytest.MonkeyPa
             return StubResponse(market_data)
 
         async def aclose(self) -> None:
+            """No-op async close for test stub."""
             pass
 
     client._http_client = cast(httpx.AsyncClient, LimitedStubClient())

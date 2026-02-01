@@ -18,7 +18,7 @@ interface UserFormProps {
   onClose: () => void
 }
 
-const UserForm: React.FC<UserFormProps> = ({ user, open, onClose }) => {
+const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) => {
   const [formData, setFormData] = useState({
     username: user?.username || '',
     password: '',
@@ -159,7 +159,7 @@ const UserForm: React.FC<UserFormProps> = ({ user, open, onClose }) => {
     return Object.keys(newErrors).length === 0
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault()
 
     if (!validateForm()) {

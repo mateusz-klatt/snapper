@@ -284,9 +284,9 @@ class TestZondaExchangeClient:
         await client._parse_ticker_message(ticker_msg)
         ticker_cache = client._ticker_cache
         assert "BTC-PLN" in ticker_cache
-        assert ticker_cache["BTC-PLN"]["bid"] == 50000.0
-        assert ticker_cache["BTC-PLN"]["ask"] == 50100.0
-        assert ticker_cache["BTC-PLN"]["last"] == 50050.0
+        assert ticker_cache["BTC-PLN"]["bid"] == pytest.approx(50000.0)
+        assert ticker_cache["BTC-PLN"]["ask"] == pytest.approx(50100.0)
+        assert ticker_cache["BTC-PLN"]["last"] == pytest.approx(50050.0)
 
     @pytest.mark.asyncio
     async def test_parse_stats_message(self, client: ZondaExchangeClient) -> None:
@@ -313,10 +313,10 @@ class TestZondaExchangeClient:
         await client._parse_stats_message(stats_msg)
         stats_cache = client._stats_cache
         assert "BTC-PLN" in stats_cache
-        assert stats_cache["BTC-PLN"]["high"] == 51000.0
-        assert stats_cache["BTC-PLN"]["low"] == 49000.0
-        assert stats_cache["BTC-PLN"]["volume"] == 123.45
-        assert stats_cache["BTC-PLN"]["rate_24h"] == 49500.0
+        assert stats_cache["BTC-PLN"]["high"] == pytest.approx(51000.0)
+        assert stats_cache["BTC-PLN"]["low"] == pytest.approx(49000.0)
+        assert stats_cache["BTC-PLN"]["volume"] == pytest.approx(123.45)
+        assert stats_cache["BTC-PLN"]["rate_24h"] == pytest.approx(49500.0)
 
     @pytest.mark.asyncio
     async def test_try_merge_and_emit_with_stats(self, client: ZondaExchangeClient) -> None:
@@ -345,13 +345,13 @@ class TestZondaExchangeClient:
         ticker_data = await tick_queue.get()
         assert isinstance(ticker_data, TickerUpdate)
         assert ticker_data.symbol == "BTC-PLN"
-        assert ticker_data.bid == 50000.0
-        assert ticker_data.ask == 50100.0
-        assert ticker_data.last == 50050.0
-        assert ticker_data.high == 51000.0
-        assert ticker_data.low == 49000.0
-        assert ticker_data.volume == 123.45
-        assert ticker_data.change == 550.0
+        assert ticker_data.bid == pytest.approx(50000.0)
+        assert ticker_data.ask == pytest.approx(50100.0)
+        assert ticker_data.last == pytest.approx(50050.0)
+        assert ticker_data.high == pytest.approx(51000.0)
+        assert ticker_data.low == pytest.approx(49000.0)
+        assert ticker_data.volume == pytest.approx(123.45)
+        assert ticker_data.change == pytest.approx(550.0)
         assert abs(ticker_data.change_pct - 1.11) < 0.01
 
     @pytest.mark.asyncio
@@ -372,12 +372,12 @@ class TestZondaExchangeClient:
         tick_queue = client._tick_queue
         ticker_data = await tick_queue.get()
         assert ticker_data.symbol == "BTC-PLN"
-        assert ticker_data.bid == 50000.0
-        assert ticker_data.volume == 0.0
-        assert ticker_data.high == 0.0
-        assert ticker_data.low == 0.0
-        assert ticker_data.change == 0.0
-        assert ticker_data.change_pct == 0.0
+        assert ticker_data.bid == pytest.approx(50000.0)
+        assert ticker_data.volume == pytest.approx(0.0)
+        assert ticker_data.high == pytest.approx(0.0)
+        assert ticker_data.low == pytest.approx(0.0)
+        assert ticker_data.change == pytest.approx(0.0)
+        assert ticker_data.change_pct == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_try_merge_and_emit_no_ticker(self, client: ZondaExchangeClient) -> None:
@@ -438,7 +438,7 @@ class TestZondaExchangeClient:
         seq_no = client._seq_no
         assert seq_no.get("trading/ticker/btc-pln") == 101
         ticker_cache = client._ticker_cache
-        assert ticker_cache["BTC-PLN"]["bid"] == 50001.0
+        assert ticker_cache["BTC-PLN"]["bid"] == pytest.approx(50001.0)
 
     @pytest.mark.asyncio
     async def test_parse_ticker_message_invalid_data(self, client: ZondaExchangeClient) -> None:
@@ -456,7 +456,7 @@ class TestZondaExchangeClient:
         await client._parse_ticker_message(invalid_msg)
         ticker_cache = client._ticker_cache
         if "BTC-PLN" in ticker_cache:
-            assert ticker_cache["BTC-PLN"]["bid"] == 0.0
+            assert ticker_cache["BTC-PLN"]["bid"] == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_parse_stats_message_invalid_data(self, client: ZondaExchangeClient) -> None:
@@ -578,6 +578,7 @@ class TestZondaExchangeClient:
         """
         with pytest.raises(ValueError, match="proxy API does not support wildcard snapshot"):
             async for _ in client.subscribe_ticks(["*"], snapshot=True):
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @pytest.mark.asyncio
@@ -662,10 +663,10 @@ class TestZondaRestAPI:
         ):
             ticker = await client.get_ticker("BTC-EUR")
             assert ticker.symbol == "BTC-EUR"
-            assert ticker.bid == 50000.0
-            assert ticker.ask == 50100.0
-            assert ticker.last == 50050.0
-            assert ticker.timestamp == 1609459200.0
+            assert ticker.bid == pytest.approx(50000.0)
+            assert ticker.ask == pytest.approx(50100.0)
+            assert ticker.last == pytest.approx(50050.0)
+            assert ticker.timestamp == pytest.approx(1609459200.0)
 
     @pytest.mark.asyncio
     async def test_get_ohlcv(self, client: ZondaExchangeClient) -> None:
@@ -686,11 +687,11 @@ class TestZondaRestAPI:
         ):
             ohlcv = await client.get_ohlcv("BTC-EUR", "1m", None, 2)
             assert len(ohlcv) == 2
-            assert ohlcv[0].open == 50000.0
-            assert ohlcv[0].high == 51000.0
-            assert ohlcv[0].low == 49000.0
-            assert ohlcv[0].close == 50500.0
-            assert ohlcv[0].volume == 100.0
+            assert ohlcv[0].open == pytest.approx(50000.0)
+            assert ohlcv[0].high == pytest.approx(51000.0)
+            assert ohlcv[0].low == pytest.approx(49000.0)
+            assert ohlcv[0].close == pytest.approx(50500.0)
+            assert ohlcv[0].volume == pytest.approx(100.0)
 
     @pytest.mark.asyncio
     async def test_create_order(self, client: ZondaExchangeClient) -> None:
@@ -734,8 +735,8 @@ class TestZondaRestAPI:
             assert order.symbol == "BTC-EUR"
             assert order.side == OrderSideEnum.BUY
             assert order.type == OrderTypeEnum.LIMIT
-            assert order.amount == 1.0
-            assert order.price == 50000.0
+            assert order.amount == pytest.approx(1.0)
+            assert order.price == pytest.approx(50000.0)
             assert order.status == OrderStatusEnum.OPEN
 
     @pytest.mark.asyncio
@@ -779,9 +780,9 @@ class TestZondaRestAPI:
             balances = await client.get_balance()
             assert "BTC" in balances
             assert balances["BTC"].currency == "BTC"
-            assert balances["BTC"].free == 1.0
-            assert balances["BTC"].used == 0.5
-            assert balances["BTC"].total == 1.5
+            assert balances["BTC"].free == pytest.approx(1.0)
+            assert balances["BTC"].used == pytest.approx(0.5)
+            assert balances["BTC"].total == pytest.approx(1.5)
             assert "EUR" in balances
             assert "info" not in balances
 
@@ -845,8 +846,8 @@ class TestZondaRestAPI:
         ):
             order = await client.get_order("order123", "BTC-EUR")
             assert order.id == "order123"
-            assert order.filled == 0.5
-            assert order.remaining == 0.5
+            assert order.filled == pytest.approx(0.5)
+            assert order.remaining == pytest.approx(0.5)
 
     @pytest.mark.asyncio
     async def test_get_orders_open(self, client: ZondaExchangeClient) -> None:
@@ -971,6 +972,7 @@ class TestZondaTradesAndCandles:
         """
         with pytest.raises(ValueError, match="wildcard subscription for trades is not functional"):
             async for _ in client.subscribe_trades(["*"]):
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @pytest.mark.asyncio
@@ -983,6 +985,7 @@ class TestZondaTradesAndCandles:
         """
         with pytest.raises(ValueError, match="does not support wildcard"):
             async for _ in client.subscribe_candles(["*"]):
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @pytest.mark.asyncio
@@ -995,6 +998,7 @@ class TestZondaTradesAndCandles:
         """
         with pytest.raises(ValueError, match="only supports 1m candles"):
             async for _ in client.subscribe_candles(["BTC-PLN"], timeframe="5m"):
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @pytest.mark.asyncio
@@ -1107,6 +1111,7 @@ class TestZondaTradesAndCandles:
         """
         with pytest.raises(RuntimeError, match="API credentials required"):
             async for _ in client.subscribe_executions():
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @pytest.mark.asyncio
@@ -1139,8 +1144,8 @@ class TestZondaTradesAndCandles:
         trade = await client._trade_queue.get()
         assert trade.symbol == "BTC-PLN"
         assert trade.side == "buy"
-        assert trade.quantity == 0.03245411
-        assert trade.price == 27787.66
+        assert trade.quantity == pytest.approx(0.03245411)
+        assert trade.price == pytest.approx(27787.66)
         assert trade.ord_type == "unknown"
 
     @pytest.mark.asyncio
@@ -1174,11 +1179,11 @@ class TestZondaTradesAndCandles:
         trade1 = await client._trade_queue.get()
         assert trade1.symbol == "ETH-EUR"
         assert trade1.side == "buy"
-        assert trade1.quantity == 1.0
+        assert trade1.quantity == pytest.approx(1.0)
         trade2 = await client._trade_queue.get()
         assert trade2.symbol == "ETH-EUR"
         assert trade2.side == "sell"
-        assert trade2.quantity == 0.5
+        assert trade2.quantity == pytest.approx(0.5)
 
     @pytest.mark.asyncio
     async def test_parse_transactions_invalid_data(self, client: ZondaExchangeClient) -> None:
@@ -1199,8 +1204,8 @@ class TestZondaTradesAndCandles:
         assert client._trade_queue.qsize() == 1
         trade = await client._trade_queue.get()
         assert trade.symbol == "BTC-PLN"
-        assert trade.quantity == 0.0
-        assert trade.price == 0.0
+        assert trade.quantity == pytest.approx(0.0)
+        assert trade.price == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_subscribe_trades_basic_flow(self, client: ZondaExchangeClient) -> None:
@@ -1369,7 +1374,7 @@ class TestZondaSnapshots:
         real_sleep = asyncio.sleep
 
         async def fake_sleep(delay: float) -> None:
-            assert delay == 0.01
+            assert delay == pytest.approx(0.01)
             await real_sleep(0)
 
         monkeypatch.setattr(
@@ -1626,8 +1631,8 @@ class TestZondaExecutions:
         assert execution.order_id == "order_456"
         assert execution.symbol == "BTC-PLN"
         assert execution.exec_type == "trade"
-        assert execution.cum_qty == 0.5
-        assert execution.cum_cost == 25000.0
+        assert execution.cum_qty == pytest.approx(0.5)
+        assert execution.cum_cost == pytest.approx(25000.0)
 
     @pytest.mark.asyncio
     async def test_parse_executions_multiple(
@@ -1823,6 +1828,7 @@ class RaisingWs:
 async def _consume(generator: Any) -> None:
     """Consume all items from an async generator."""
     async for _ in generator:
+        """Consumed by iteration to trigger exception."""
         pass
 
 
@@ -2384,7 +2390,7 @@ async def test_get_balance_filters_currency() -> None:
     }
     with patch.object(client._ccxt_client, "fetch_balance", return_value=balance_data):
         balances = await client.get_balance("BTC")
-        assert list(balances.keys()) == ["BTC"]
+        assert list(balances) == ["BTC"]
 
 
 @pytest.mark.asyncio
@@ -2594,13 +2600,17 @@ async def test_subscribe_instruments_success_and_error() -> None:
         "load_markets",
         return_value={"BTC/USD": {"id": "BTC-USD", "symbol": "BTC/USD"}},
     ):
-        items = [item async for item in client.subscribe_instruments()]
+        items: list[Any] = []
+        async for item in client.subscribe_instruments():
+            items.append(item)
         assert items == [{"id": "BTC-USD", "symbol": "BTC/USD"}]
     with (
         patch.object(client._ccxt_client, "load_markets", return_value=[]),
         pytest.raises(RuntimeError),
     ):
-        items = [item async for item in client.subscribe_instruments()]
+        items = []
+        async for item in client.subscribe_instruments():
+            items.append(item)
         assert items == []
 
 
@@ -2623,7 +2633,9 @@ async def test_subscribe_instruments_skips_non_dict_market_data() -> None:
             "SOL/USD": {"id": "SOL-USD", "symbol": "SOL/USD"},
         },
     ):
-        items = [item async for item in client.subscribe_instruments()]
+        items: list[Any] = []
+        async for item in client.subscribe_instruments():
+            items.append(item)
         assert len(items) == 2
         assert {"id": "BTC-USD", "symbol": "BTC/USD"} in items
         assert {"id": "SOL-USD", "symbol": "SOL/USD"} in items

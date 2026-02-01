@@ -206,8 +206,9 @@ async def test_tick_loop_handles_exception(monkeypatch: pytest.MonkeyPatch) -> N
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
+        for _ in []:
+            yield
         raise RuntimeError("boom")
-        yield None
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["KNOWN"])
@@ -256,8 +257,9 @@ async def test_candle_loop_handles_errors(monkeypatch: pytest.MonkeyPatch) -> No
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
+        for _ in []:
+            yield
         raise RuntimeError("boom")
-        yield None
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
     await pub._candle_loop(["BTC-USD"], "1m")
@@ -492,7 +494,8 @@ async def test_start_handles_cancelled_tasks(monkeypatch: pytest.MonkeyPatch) ->
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(asyncio, "gather", raise_cancel)
-    await pub.start()
+    with pytest.raises(asyncio.CancelledError):
+        await pub.start()
     await pub.stop()
 
 
@@ -593,8 +596,9 @@ async def test_trade_loop_handles_exception(monkeypatch: pytest.MonkeyPatch) -> 
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
+        for _ in []:
+            yield
         raise RuntimeError("boom")
-        yield None
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
@@ -1875,19 +1879,19 @@ class TestFeedPublisherCandleLoop:
         assert isinstance(btc_msg, BarEnvelope)
         assert btc_msg.type == "bar"
         assert btc_msg.instrument == "BTC-USD"
-        assert btc_msg.close == 50000.0
-        assert btc_msg.volume == 100.5
-        assert btc_msg.open == 49900.0
-        assert btc_msg.high == 50100.0
-        assert btc_msg.low == 49800.0
-        assert btc_msg.vwap == 50000.0
+        assert btc_msg.close == pytest.approx(50000.0)
+        assert btc_msg.volume == pytest.approx(100.5)
+        assert btc_msg.open == pytest.approx(49900.0)
+        assert btc_msg.high == pytest.approx(50100.0)
+        assert btc_msg.low == pytest.approx(49800.0)
+        assert btc_msg.vwap == pytest.approx(50000.0)
         assert btc_msg.trades == 42
         second_topic, eth_msg = published_messages[1]
         assert second_topic == "market.kraken.ETH-USD.candles.1m"
         assert isinstance(eth_msg, BarEnvelope)
         assert eth_msg.type == "bar"
         assert eth_msg.instrument == "ETH-USD"
-        assert eth_msg.close == 3000.0
+        assert eth_msg.close == pytest.approx(3000.0)
         assert len(saved_payloads) == 2
         assert "BTC-USD" in publisher_any._last_data_timestamps
         assert "ETH-USD" in publisher_any._last_data_timestamps
@@ -1964,8 +1968,9 @@ class TestFeedPublisherCandleLoop:
         async def mock_subscribe_error(
             symbols: list[str], timeframe: str
         ) -> AsyncIterator[CandleUpdate]:
+            for _ in []:
+                yield
             raise RuntimeError("Subscription failed")
-            yield
 
         mock_exchange_client.subscribe_candles = mock_subscribe_error
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])

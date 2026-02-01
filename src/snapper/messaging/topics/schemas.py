@@ -215,7 +215,7 @@ def get_all_topic_names() -> list[str]:
     Returns:
         List of all topic names in the registry.
     """
-    return list(TOPIC_REGISTRY.keys())
+    return list(TOPIC_REGISTRY)
 
 
 def validate_message_schema(topic_name: str, message: dict[str, Any]) -> tuple[bool, list[str]]:

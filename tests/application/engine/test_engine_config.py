@@ -102,7 +102,7 @@ async def test_engine_execute_desired_units_buy_flow() -> None:
     assert message["instrument"] == "BTC-USD"
     assert message["strategy_id"] == "engine-buy"
     assert engine.position_qty > 0.0
-    assert engine.entry_price == 100.0
+    assert engine.entry_price == pytest.approx(100.0)
     assert risk.can_open_calls
 
 
@@ -127,7 +127,7 @@ async def test_engine_maybe_stop_triggers_sell() -> None:
     engine.portfolio.positions["BTC-USD"] = PositionStateModel(quantity=1.0, average_price=110.0)
     triggered: bool = await engine._maybe_stop(last_close=100.0, prev_close=120.0)
     assert triggered is True
-    assert engine.position_qty == 0.0
+    assert engine.position_qty == pytest.approx(0.0)
     assert engine.entry_price is None
     assert len(socket.sent) == 1
     _topic, payload, _flags = socket.sent[0]
@@ -252,8 +252,8 @@ class TestEngineExecuteDesiredUnits:
         order_msg = json.loads(payload)
         assert order_msg["instrument"] == "BTC-USD"
         assert order_msg["side"] == "sell"
-        assert order_msg["quantity"] == 0.1
-        assert engine.position_qty == 0.0
+        assert order_msg["quantity"] == pytest.approx(0.1)
+        assert engine.position_qty == pytest.approx(0.0)
         assert engine.entry_price is None
 
     @pytest.mark.asyncio
@@ -327,12 +327,12 @@ class TestEngineExecuteDesiredUnits:
             instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
             exchange="paper",
         )
-        assert engine.position_qty == 0.0
+        assert engine.position_qty == pytest.approx(0.0)
         desired_units = 0.0
         current_price = 50000.0
         await engine.execute_desired_units(desired_units, current_price)
         assert not mock_socket.send_string.called
-        assert engine.position_qty == 0.0
+        assert engine.position_qty == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_execute_with_lot_size_rounding(self) -> None:
@@ -361,7 +361,7 @@ class TestEngineExecuteDesiredUnits:
             order_msg = json.loads(call_args)
             lot_size = 0.001
             qty = order_msg["quantity"]
-            assert qty % lot_size == 0.0 or abs(qty % lot_size) < 1e-10
+            assert qty % lot_size == pytest.approx(0.0) or abs(qty % lot_size) < 1e-10
 
 
 @pytest.mark.asyncio
@@ -420,15 +420,15 @@ class TestTraderSignalHandling:
         call_args = mock_engine.execute_desired_units.call_args
         desired_units = call_args[0][0]
         price = call_args[0][1]
-        assert desired_units == 0.8
-        assert price == 50000.0
+        assert desired_units == pytest.approx(0.8)
+        assert price == pytest.approx(50000.0)
         await trader._on_signal(signal)
         assert mock_engine.execute_desired_units.called
         call_args = mock_engine.execute_desired_units.call_args
         desired_units = call_args[0][0]
         price = call_args[0][1]
-        assert desired_units == 0.8
-        assert price == 50000.0
+        assert desired_units == pytest.approx(0.8)
+        assert price == pytest.approx(50000.0)
 
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
@@ -482,8 +482,8 @@ class TestTraderSignalHandling:
         call_args = mock_engine.execute_desired_units.call_args
         desired_units = call_args[0][0]
         price = call_args[0][1]
-        assert desired_units == 0.0
-        assert price == 52000.0
+        assert desired_units == pytest.approx(0.0)
+        assert price == pytest.approx(52000.0)
 
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
@@ -723,7 +723,7 @@ async def test_maybe_stop_triggers_using_entry_price(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(engine, "_send_order", _capture_send)
     assert await engine._maybe_stop(last_close=90.0, prev_close=95.0) is True
     assert captured, "Stop order should be sent when threshold is breached"
-    assert engine.position_qty == 0.0
+    assert engine.position_qty == pytest.approx(0.0)
     assert engine.entry_price is None
 
 
@@ -738,7 +738,7 @@ async def test_execute_desired_units_respects_drawdown_guard() -> None:
     risk = _RiskStub(allow_trade=False)
     engine, socket = _make_engine(risk=risk)
     await engine.execute_desired_units(desired_units=2.0, current_price=50.0)
-    assert engine.position_qty == 0.0
+    assert engine.position_qty == pytest.approx(0.0)
     assert socket.sent == []
 
 
@@ -753,7 +753,7 @@ async def test_execute_desired_units_skips_when_rounding_zero() -> None:
     risk = _RiskStub(round_size_override=0.0)
     engine, socket = _make_engine(risk=risk, instrument_specs={"BTC-USD": {"lot_size": 1.0}})
     await engine.execute_desired_units(desired_units=5.0, current_price=10.0)
-    assert engine.position_qty == 0.0
+    assert engine.position_qty == pytest.approx(0.0)
     assert socket.sent == []
 
 
@@ -769,7 +769,7 @@ async def test_execute_desired_units_sell_branch_returns_on_zero_quantity() -> N
     engine, socket = _make_engine(risk=risk, instrument_specs={"BTC-USD": {"lot_size": 1.0}})
     engine.position_qty = 0.4
     await engine.execute_desired_units(desired_units=0.0, current_price=25.0)
-    assert engine.position_qty == 0.4
+    assert engine.position_qty == pytest.approx(0.4)
     assert socket.sent == []
 
 
@@ -787,7 +787,7 @@ async def test_execute_desired_units_sets_entry_price_when_opening_position() ->
         instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
     )
     await engine.execute_desired_units(desired_units=0.5, current_price=50.0)
-    assert engine.entry_price == 50.0
+    assert engine.entry_price == pytest.approx(50.0)
     assert engine.position_qty > 0.0
     assert socket.sent, "Engine should publish order on successful entry"
 
@@ -812,7 +812,7 @@ async def test_execute_desired_units_does_not_update_entry_when_position_still_s
     )
     await engine.execute_desired_units(desired_units=0.2, current_price=40.0)
     assert abs(engine.position_qty + 0.1) < 1e-9
-    assert engine.entry_price == 80.0
+    assert engine.entry_price == pytest.approx(80.0)
     assert socket.sent, "Engine should publish order even when reducing short exposure"
 
 

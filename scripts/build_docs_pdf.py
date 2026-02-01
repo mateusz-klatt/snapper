@@ -61,8 +61,7 @@ def default_font_candidates() -> tuple[Path, ...]:
     else:
         home_fonts = Path.home() / ".fonts"
         candidates.append(home_fonts / "DejaVuSans.ttf")
-    unique_candidates = list(dict.fromkeys(candidates))
-    return tuple(unique_candidates)
+    return tuple(dict.fromkeys(candidates))
 
 
 MARKDOWN_EXTENSIONS = ["fenced_code", "tables", "toc", "codehilite"]
@@ -605,49 +604,120 @@ class MarkdownToPdf:
             mapping[document.path.as_posix()] = document
         return mapping
 
+    @staticmethod
+    def _is_removable_first_line(first_line: str) -> bool:
+        """Check whether the first line of a pre block is a removable language hint.
+
+        Args:
+            first_line: Stripped first line of a pre block.
+
+        Returns:
+            True if the line is a fenced-code opener or bare language hint.
+        """
+        if first_line.startswith("```"):
+            language = first_line[3:].strip().lower()
+            return not language or language in CODE_LANGUAGE_HINTS
+        return first_line.lower() in CODE_LANGUAGE_HINTS
+
+    @staticmethod
+    def _strip_language_hint(content: str) -> str:
+        """Strip fenced-code language hints and dedent pre-block content.
+
+        Args:
+            content: Raw inner content of a ``<pre>`` block.
+
+        Returns:
+            Cleaned content with language hints removed and whitespace normalized.
+        """
+        working = content.lstrip("\n")
+        prefix_newlines = content[: len(content) - len(working)]
+        lines = working.splitlines()
+        if not lines:
+            return prefix_newlines
+        modified = False
+        first_line = lines[0].strip()
+        if MarkdownToPdf._is_removable_first_line(first_line):
+            lines = lines[1:]
+            modified = True
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+            modified = True
+        if modified:
+            while lines and not lines[0].strip():
+                lines.pop(0)
+        body = "\n".join(lines)
+        dedented = textwrap.dedent(body).lstrip("\n")
+        if modified or dedented != body:
+            return prefix_newlines + dedented
+        return content
+
     def _normalize_pre_blocks(self, html: str) -> str:
-        def _strip_language_hint(content: str) -> str:
-            working = content.lstrip("\n")
-            prefix_newlines = content[: len(content) - len(working)]
-            lines = working.splitlines()
-            if not lines:
-                return prefix_newlines
+        """Normalize ``<pre>`` blocks by stripping language hints and dedenting.
 
-            def _pop_leading_blank(target: list[str]) -> None:
-                while target and not target[0].strip():
-                    target.pop(0)
+        Args:
+            html: HTML string with ``<pre>`` blocks to normalize.
 
-            modified = False
-            first_line = lines[0].strip()
-            if first_line.startswith("```"):
-                language = first_line[3:].strip().lower()
-                if not language or language in CODE_LANGUAGE_HINTS:
-                    lines = lines[1:]
-                    modified = True
-            elif first_line.lower() in CODE_LANGUAGE_HINTS:
-                lines = lines[1:]
-                modified = True
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-                modified = True
-            if modified:
-                _pop_leading_blank(lines)
-            body = "\n".join(lines)
-            dedented = textwrap.dedent(body).lstrip("\n")
-            if modified or dedented != body:
-                return prefix_newlines + dedented
-            return content
-
+        Returns:
+            HTML with cleaned ``<pre>`` blocks.
+        """
         pattern = re.compile(r"<pre>(.*?)</pre>", flags=re.DOTALL)
 
         def repl(match: re.Match[str]) -> str:
             body = match.group(1)
-            cleaned = _strip_language_hint(body)
+            cleaned = self._strip_language_hint(body)
             return f"<pre>{cleaned}</pre>"
 
         return pattern.sub(repl, html)
 
+    def _resolve_heading_slug(self, source_slug: str, base_slug: str) -> str:
+        """Resolve a unique heading slug using occurrence tracking.
+
+        Increments the usage counter and appends a suffix for duplicates.
+
+        Args:
+            source_slug: Document slug for namespace isolation.
+            base_slug: Base slug derived from heading text.
+
+        Returns:
+            Final slug string (unique within the document).
+        """
+        usage_key = (source_slug, base_slug)
+        occurrence = self._heading_slug_usage[usage_key]
+        final_slug = base_slug if occurrence == 0 else f"{base_slug}-{occurrence + 1}"
+        self._heading_slug_usage[usage_key] = occurrence + 1
+        return final_slug
+
+    def _register_heading_aliases(
+        self, source_slug: str, base_slug: str, final_slug: str, final_id: str
+    ) -> str:
+        """Build alias anchor tags and register them in the anchor targets map.
+
+        Args:
+            source_slug: Document slug for namespace isolation.
+            base_slug: Base slug derived from heading text.
+            final_slug: Resolved unique slug.
+            final_id: Full anchor ID for the heading element.
+
+        Returns:
+            HTML string of alias anchor tags.
+        """
+        aliases = {base_slug, final_slug}
+        aliases.update(self._heading_anchor_aliases(base_slug))
+        aliases.update(self._heading_anchor_aliases(final_slug))
+        for alias in aliases:
+            self._anchor_targets[(source_slug, alias)] = final_id
+        return "".join(f'<a id="doc-{source_slug}--{alias}"></a>' for alias in sorted(aliases))
+
     def _inject_heading_anchors(self, html: str, source: DocumentSource) -> str:
+        """Inject unique anchor IDs and alias tags into heading elements.
+
+        Args:
+            html: HTML string containing heading elements.
+            source: Document source providing the slug namespace.
+
+        Returns:
+            HTML with heading anchors and alias tags injected.
+        """
         pattern = re.compile(r"<h([1-6])([^>]*)>(.*?)</h\1>", flags=re.DOTALL)
 
         def repl(match: re.Match[str]) -> str:
@@ -656,21 +726,11 @@ class MarkdownToPdf:
             content = match.group(3)
             attrs_without_id = re.sub(r"\s*id=\"[^\"]*\"", "", attrs)
             text_content = re.sub(r"<[^>]+>", "", content)
-            base_slug = self._slugify_fragment(text_content)
-            if not base_slug:
-                base_slug = f"section-{level}"
-            usage_key = (source.slug, base_slug)
-            occurrence = self._heading_slug_usage[usage_key]
-            final_slug = base_slug if occurrence == 0 else f"{base_slug}-{occurrence + 1}"
-            self._heading_slug_usage[usage_key] = occurrence + 1
+            base_slug = self._slugify_fragment(text_content) or f"section-{level}"
+            final_slug = self._resolve_heading_slug(source.slug, base_slug)
             final_id = f"doc-{source.slug}--{final_slug}"
-            aliases = {base_slug, final_slug}
-            aliases.update(self._heading_anchor_aliases(base_slug))
-            aliases.update(self._heading_anchor_aliases(final_slug))
-            for alias in aliases:
-                self._anchor_targets[(source.slug, alias)] = final_id
-            alias_tags = "".join(
-                f'<a id="doc-{source.slug}--{alias}"></a>' for alias in sorted(aliases)
+            alias_tags = self._register_heading_aliases(
+                source.slug, base_slug, final_slug, final_id
             )
             return f'{alias_tags}<h{level}{attrs_without_id} id="{final_id}">{content}</h{level}>'
 

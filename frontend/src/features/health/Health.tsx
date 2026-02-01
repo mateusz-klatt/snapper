@@ -11,10 +11,12 @@ interface ProcessStatus {
   exit_code?: number | null
   error?: string | null
 }
+type HealthStatus = 'healthy' | 'warning' | 'critical'
+
 interface HealthMetric {
   name: string
   value: string | number
-  status: 'healthy' | 'warning' | 'critical'
+  status: HealthStatus
   description: string
   icon: React.ReactNode
 }
@@ -163,9 +165,7 @@ export const Health: React.FC = () => {
   const backtestsList = Object.values(systemStatus?.backtests || {})
   const runningBacktests = backtestsList.filter(b => b.status === 'running').length
   const hasErroredBacktest = backtestsList.some(b => b.status === 'error')
-  const backtestStatus: 'healthy' | 'warning' | 'critical' = hasErroredBacktest
-    ? 'critical'
-    : 'healthy'
+  const backtestStatus: HealthStatus = hasErroredBacktest ? 'critical' : 'healthy'
   const healthMetrics: HealthMetric[] = [
     {
       name: 'Trading Engine',
@@ -200,11 +200,15 @@ export const Health: React.FC = () => {
       ),
     },
   ]
-  const overallHealth = healthMetrics.every(m => m.status === 'healthy')
-    ? 'healthy'
-    : healthMetrics.some(m => m.status === 'critical')
-      ? 'critical'
-      : 'warning'
+
+  const resolveOverallHealth = (): HealthStatus => {
+    if (healthMetrics.every(m => m.status === 'healthy')) return 'healthy'
+    if (healthMetrics.some(m => m.status === 'critical')) return 'critical'
+
+    return 'warning'
+  }
+
+  const overallHealth = resolveOverallHealth()
 
   return (
     <div className='p-4 space-y-6'>

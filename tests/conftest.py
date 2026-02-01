@@ -64,6 +64,8 @@ from snapper.data.repository import dispose_repositories
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 
+_background_tasks: set[asyncio.Task[None]] = set()
+
 
 @pytest.fixture(autouse=True)
 def block_external_requests(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,22 +81,58 @@ def block_external_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", assert_only_localhost)
 
 
-@pytest.fixture(autouse=True)
-def mock_settings_for_tests(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Provide mock application settings for tests."""
-    if "real_settings" in request.keywords:
-        return
+_SINGLETONS_TO_CLEAR: tuple[type[Any], ...] = (
+    TokenManager,
+    CSRFManager,
+    WsTokenService,
+    WebSocketAuthManager,
+    WebSocketTokenRotator,
+)
+
+_EXCHANGE_MAP_ATTRS: tuple[tuple[str, str], ...] = (
+    ("native_to_ws", "ws_to_native"),
+    ("native_to_rest", "rest_to_native"),
+    ("native_to_ccxt", "ccxt_to_native"),
+    ("native_to_zonda", "zonda_to_native"),
+    ("native_to_walutomat", "walutomat_to_native"),
+    ("native_to_walutomat_rest", "walutomat_rest_to_native"),
+    ("native_to_polygon", "polygon_to_native"),
+)
+
+_TEST_SYMBOL_MAPPINGS: dict[str, tuple[str | None, ...]] = {
+    "BTC-USD": ("BTC/USD", "XXBTZUSD", "BTC/USD", "BTC-USD", None, None, "X:BTCUSD"),
+    "ETH-USD": ("ETH/USD", "XETHZUSD", "ETH/USD", "ETH-USD", None, None, "X:ETHUSD"),
+    "BTC-EUR": ("BTC/EUR", "XXBTZEUR", "BTC/EUR", "BTC-EUR", None, None, "X:BTCEUR"),
+    "EUR-USD": ("EUR/USD", "ZEURZUSD", "EUR/USD", None, "EUR_USD", "EURUSD", "C:EURUSD"),
+    "EUR-PLN": (None, None, None, None, "EUR_PLN", "EURPLN", "C:EURPLN"),
+    "BTC-PLN": (None, None, "BTC/PLN", "BTC-PLN", None, None, None),
+    "USD-PLN": (None, None, None, None, "USD_PLN", "USDPLN", "C:USDPLN"),
+    "AAPL": ("AAPLx/USD", "AAPLxUSD", None, None, None, None, "AAPL"),
+}
+
+_SETTINGS_WITH_SERVICE_PATHS: tuple[str, ...] = (
+    "snapper.config.settings.get_settings_with_service",
+    "snapper.auth.tokens.get_settings_with_service",
+    "snapper.auth.dependencies.get_settings_with_service",
+    "snapper.api.auth.services.ws_token_service.get_settings_with_service",
+)
+
+
+def _clear_auth_singletons() -> None:
+    """Clear all authentication-related singleton instances."""
     try:
-        TokenManager.clear_instance()
-        CSRFManager.clear_instance()
-        WsTokenService.clear_instance()
-        WebSocketAuthManager.clear_instance()
-        WebSocketTokenRotator.clear_instance()
+        for cls in _SINGLETONS_TO_CLEAR:
+            cls.clear_instance()
     except Exception:
         pass
-    clear_repository_cache()
+
+
+def _build_mock_settings() -> Mock:
+    """Build a Mock object with all AppSettings attributes set to test defaults.
+
+    Returns:
+        Configured Mock instance.
+    """
     mock_settings = Mock()
     bootstrap = BootstrapSettingsLoader()
     mock_settings.db_url = bootstrap.db_url
@@ -142,6 +180,55 @@ def mock_settings_for_tests(
     mock_settings.ui_origin = ""
     mock_settings.session_same_site = "lax"
     mock_settings.session_domain = ""
+    return mock_settings
+
+
+def _mock_load_cache_if_needed(self: Any, fail_fast: bool = False) -> None:
+    """Populate symbol mapper cache with test mappings."""
+    if self._cache_loaded:
+        return
+    for native, exchange_symbols in _TEST_SYMBOL_MAPPINGS.items():
+        for idx, (fwd_attr, rev_attr) in enumerate(_EXCHANGE_MAP_ATTRS):
+            exchange_symbol = exchange_symbols[idx]
+            if exchange_symbol:
+                getattr(self, fwd_attr)[native] = exchange_symbol
+                getattr(self, rev_attr)[exchange_symbol] = native
+    self._cache_loaded = True
+
+
+def _patch_settings_functions(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_get_settings: Any,
+    mock_get_settings_with_service: Any,
+) -> None:
+    """Patch all get_settings and get_settings_with_service references.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        mock_get_settings: Replacement for get_settings.
+        mock_get_settings_with_service: Replacement for get_settings_with_service.
+    """
+    monkeypatch.setattr("snapper.config.settings.get_settings", mock_get_settings)
+    for path in _SETTINGS_WITH_SERVICE_PATHS:
+        monkeypatch.setattr(path, mock_get_settings_with_service)
+    for module_name in list(sys.modules):
+        if not module_name.startswith("snapper."):
+            continue
+        module = sys.modules[module_name]
+        if hasattr(module, "get_settings"):
+            monkeypatch.setattr(f"{module_name}.get_settings", mock_get_settings)
+
+
+@pytest.fixture(autouse=True)
+def mock_settings_for_tests(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provide mock application settings for tests."""
+    if "real_settings" in request.keywords:
+        return
+    _clear_auth_singletons()
+    clear_repository_cache()
+    mock_settings = _build_mock_settings()
 
     def mock_get_settings() -> AppSettings:
         return mock_settings
@@ -149,144 +236,14 @@ def mock_settings_for_tests(
     def mock_get_settings_with_service(settings_service: object) -> AppSettings:
         return mock_settings
 
-    monkeypatch.setattr("snapper.config.settings.get_settings", mock_get_settings)
-    monkeypatch.setattr(
-        "snapper.config.settings.get_settings_with_service", mock_get_settings_with_service
-    )
-    monkeypatch.setattr(
-        "snapper.auth.tokens.get_settings_with_service", mock_get_settings_with_service
-    )
-    monkeypatch.setattr(
-        "snapper.auth.dependencies.get_settings_with_service", mock_get_settings_with_service
-    )
-    monkeypatch.setattr(
-        "snapper.api.auth.services.ws_token_service.get_settings_with_service",
-        mock_get_settings_with_service,
-    )
-
-    def mock_load_cache_if_needed(self: Any, fail_fast: bool = False) -> None:
-        if self._cache_loaded:
-            return
-        test_mappings: dict[str, tuple[str | None, ...]] = {
-            "BTC-USD": (
-                "BTC/USD",
-                "XXBTZUSD",
-                "BTC/USD",
-                "BTC-USD",
-                None,
-                None,
-                "X:BTCUSD",
-            ),
-            "ETH-USD": (
-                "ETH/USD",
-                "XETHZUSD",
-                "ETH/USD",
-                "ETH-USD",
-                None,
-                None,
-                "X:ETHUSD",
-            ),
-            "BTC-EUR": (
-                "BTC/EUR",
-                "XXBTZEUR",
-                "BTC/EUR",
-                "BTC-EUR",
-                None,
-                None,
-                "X:BTCEUR",
-            ),
-            "EUR-USD": (
-                "EUR/USD",
-                "ZEURZUSD",
-                "EUR/USD",
-                None,
-                "EUR_USD",
-                "EURUSD",
-                "C:EURUSD",
-            ),
-            "EUR-PLN": (
-                None,
-                None,
-                None,
-                None,
-                "EUR_PLN",
-                "EURPLN",
-                "C:EURPLN",
-            ),
-            "BTC-PLN": (
-                None,
-                None,
-                "BTC/PLN",
-                "BTC-PLN",
-                None,
-                None,
-                None,
-            ),
-            "USD-PLN": (
-                None,
-                None,
-                None,
-                None,
-                "USD_PLN",
-                "USDPLN",
-                "C:USDPLN",
-            ),
-            "AAPL": (
-                "AAPLx/USD",
-                "AAPLxUSD",
-                None,
-                None,
-                None,
-                None,
-                "AAPL",
-            ),
-        }
-        for native, (
-            ws,
-            rest,
-            ccxt,
-            zonda,
-            walutomat_ws,
-            walutomat_rest,
-            polygon,
-        ) in test_mappings.items():
-            if ws:
-                self.native_to_ws[native] = ws
-            if rest:
-                self.native_to_rest[native] = rest
-            if ccxt:
-                self.native_to_ccxt[native] = ccxt
-            if zonda:
-                self.native_to_zonda[native] = zonda
-            if walutomat_ws:
-                self.native_to_walutomat[native] = walutomat_ws
-            if walutomat_rest:
-                self.native_to_walutomat_rest[native] = walutomat_rest
-            if polygon:
-                self.native_to_polygon[native] = polygon
-            if ws:
-                self.ws_to_native[ws] = native
-            if rest:
-                self.rest_to_native[rest] = native
-            if ccxt:
-                self.ccxt_to_native[ccxt] = native
-            if zonda:
-                self.zonda_to_native[zonda] = native
-            if walutomat_ws:
-                self.walutomat_to_native[walutomat_ws] = native
-            if walutomat_rest:
-                self.walutomat_rest_to_native[walutomat_rest] = native
-            if polygon:
-                self.polygon_to_native[polygon] = native
-        self._cache_loaded = True
-
+    _patch_settings_functions(monkeypatch, mock_get_settings, mock_get_settings_with_service)
     monkeypatch.setattr(
         "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
         mock_get_settings,
     )
     monkeypatch.setattr(
         "snapper.infrastructure.symbols.mapper.SymbolMapperService.load_cache_if_needed",
-        mock_load_cache_if_needed,
+        _mock_load_cache_if_needed,
     )
     mock_settings_service = Mock(spec=SettingsService)
     token_manager = TokenManager()
@@ -295,11 +252,6 @@ def mock_settings_for_tests(
     csrf_manager.set_settings_service(mock_settings_service)
     ws_token_service = WsTokenService()
     ws_token_service.set_settings_service(mock_settings_service)
-    for module_name in list(sys.modules.keys()):
-        if module_name.startswith("snapper."):
-            module = sys.modules[module_name]
-            if hasattr(module, "get_settings"):
-                monkeypatch.setattr(f"{module_name}.get_settings", mock_get_settings)
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -348,11 +300,12 @@ def pytest_configure(config: pytest.Config) -> None:
     try:
 
         def safe_del(self: zmq.Context) -> None:
+            """Intentionally empty to suppress ZMQ context cleanup errors."""
             pass
 
         zmq.Context.__del__ = safe_del
     except (ImportError, AttributeError):
-        pass
+        """Intentionally suppressed: zmq may not be installed."""
 
 
 @pytest.fixture(autouse=True)
@@ -376,7 +329,9 @@ def cleanup_all() -> Generator[None, None, None]:
         loop = None
         try:
             loop = asyncio.get_running_loop()
-            asyncio.create_task(dispose_repositories())
+            task = asyncio.create_task(dispose_repositories())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
         except RuntimeError:
             loop = asyncio.new_event_loop()
             try:

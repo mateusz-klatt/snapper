@@ -560,6 +560,7 @@ async def test_start_cleans_up_on_exception(
 
     class FailingClient:
         async def connect(self) -> None:
+            """Intentionally empty async stub for testing."""
             pass
 
         async def disconnect(self) -> None:

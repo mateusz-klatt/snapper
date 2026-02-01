@@ -396,15 +396,15 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     assert normalized_ts == base_ts
     assert result_snapshot["symbol"] == "BTC-USD"
     assert result_snapshot["exchange"] == "kraken"
-    assert result_snapshot["bid"] == 10.4
-    assert result_snapshot["bid_volume"] == 1.0
-    assert result_snapshot["ask"] == 10.6
-    assert result_snapshot["ask_volume"] == 1.5
-    assert result_snapshot["last"] == 10.5
-    assert result_snapshot["volume"] == 5000.0
-    assert result_snapshot["vwap"] == 10.3
-    assert result_snapshot["low"] == 9.0
-    assert result_snapshot["high"] == 11.5
+    assert result_snapshot["bid"] == pytest.approx(10.4)
+    assert result_snapshot["bid_volume"] == pytest.approx(1.0)
+    assert result_snapshot["ask"] == pytest.approx(10.6)
+    assert result_snapshot["ask_volume"] == pytest.approx(1.5)
+    assert result_snapshot["last"] == pytest.approx(10.5)
+    assert result_snapshot["volume"] == pytest.approx(5000.0)
+    assert result_snapshot["vwap"] == pytest.approx(10.3)
+    assert result_snapshot["low"] == pytest.approx(9.0)
+    assert result_snapshot["high"] == pytest.approx(11.5)
 
 
 class DummyEngine(SimpleNamespace):
@@ -1702,6 +1702,7 @@ class TestMSSQLRepository:
         repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
         with pytest.raises(NotImplementedError, match="MSSQLRepository session"):
             async with repo.session():
+                """Consumed by iteration to trigger exception."""
                 pass
 
     @pytest.mark.asyncio
@@ -1959,6 +1960,7 @@ class _MinimalRepository(Repository):
         raise NotImplementedError
 
     async def create_all(self) -> None:
+        """Intentionally empty async stub for testing."""
         pass
 
     @property
@@ -1997,6 +1999,7 @@ class _MinimalRepository(Repository):
         exchange_order_id: str | None = None,
         error: str | None = None,
     ) -> None:
+        """Intentionally empty async stub for testing."""
         pass
 
     async def insert_execution(

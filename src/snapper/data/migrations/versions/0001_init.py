@@ -14,6 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
 
+_INSTRUMENT_FK = "instruments.id"
+
 revision: str = "0001"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
@@ -106,7 +108,7 @@ def upgrade() -> None:
         sa.Column("volume", sa.Float(), nullable=False),
         sa.Column("vwap", sa.Float(), nullable=True),
         sa.Column("trades", sa.Integer(), nullable=True),
-        sa.ForeignKeyConstraint(["instrument_id"], ["instruments.id"]),
+        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("instrument_id", "timeframe", "timestamp", name="uq_candle_itf_ts"),
     )
@@ -121,7 +123,7 @@ def upgrade() -> None:
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
         sa.Column("trade_id", sa.String(64), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], ["instruments.id"]),
+        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("trade_id", name="uq_trade_trade_id"),
     )
@@ -144,7 +146,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("time_in_force", sa.String(16), nullable=True),
         sa.Column("error", sa.String(256), nullable=True),
-        sa.ForeignKeyConstraint(["instrument_id"], ["instruments.id"]),
+        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_orders_instrument_id", "orders", ["instrument_id"])
@@ -174,7 +176,7 @@ def upgrade() -> None:
         sa.Column("unrealized_pnl", sa.Float(), nullable=False),
         sa.Column("realized_pnl", sa.Float(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], ["instruments.id"]),
+        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_positions_instrument_id", "positions", ["instrument_id"])
@@ -200,7 +202,7 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(256), nullable=False),
         sa.Column("strategy_name", sa.String(64), nullable=True),
         sa.Column("price", sa.Float(), nullable=True),
-        sa.ForeignKeyConstraint(["instrument_id"], ["instruments.id"]),
+        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_signal_events_instrument_id", "signal_events", ["instrument_id"])

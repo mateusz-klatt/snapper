@@ -30,7 +30,7 @@ interface ProcessControlCardProps {
   heartbeatLabel?: string
 }
 
-export const ProcessControlCard: React.FC<ProcessControlCardProps> = ({
+export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = ({
   title,
   description,
   status,
@@ -81,7 +81,12 @@ export const ProcessControlCard: React.FC<ProcessControlCardProps> = ({
           {details &&
             Object.entries(details).map(([key, value]) => (
               <div key={key}>
-                {key}: {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                {key}:{' '}
+                {typeof value === 'string' ||
+                typeof value === 'number' ||
+                typeof value === 'boolean'
+                  ? String(value)
+                  : JSON.stringify(value)}
               </div>
             ))}
         </div>
@@ -119,27 +124,7 @@ export const ProcessControlCard: React.FC<ProcessControlCardProps> = ({
       <div className='flex items-start gap-3 pt-2 border-t border-dark-700'>
         {}
         <div className='flex space-x-2 flex-1'>
-          {!isRunning ? (
-            <button
-              onClick={onStart}
-              disabled={isStarting}
-              className={clsx(
-                'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                isStarting
-                  ? 'bg-green-400/20 text-green-300 cursor-not-allowed'
-                  : 'bg-green-600 text-white hover:bg-green-700'
-              )}
-            >
-              {isStarting ? (
-                <>
-                  <div className='w-4 h-4 border-2 border-green-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
-                  Starting...
-                </>
-              ) : (
-                'Start'
-              )}
-            </button>
-          ) : (
+          {isRunning ? (
             <button
               onClick={onStop}
               disabled={isStopping}
@@ -157,6 +142,26 @@ export const ProcessControlCard: React.FC<ProcessControlCardProps> = ({
                 </>
               ) : (
                 'Stop'
+              )}
+            </button>
+          ) : (
+            <button
+              onClick={onStart}
+              disabled={isStarting}
+              className={clsx(
+                'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
+                isStarting
+                  ? 'bg-green-400/20 text-green-300 cursor-not-allowed'
+                  : 'bg-green-600 text-white hover:bg-green-700'
+              )}
+            >
+              {isStarting ? (
+                <>
+                  <div className='w-4 h-4 border-2 border-green-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                  Starting...
+                </>
+              ) : (
+                'Start'
               )}
             </button>
           )}
@@ -187,11 +192,9 @@ export const ProcessControlCard: React.FC<ProcessControlCardProps> = ({
                     key={key}
                     className={clsx(
                       'px-2 py-1 rounded text-xs whitespace-nowrap',
-                      isUnknown
-                        ? 'bg-gray-500/10 text-gray-400'
-                        : isHealthy
-                          ? 'bg-green-400/10 text-green-400'
-                          : 'bg-red-400/10 text-red-400'
+                      isUnknown && 'bg-gray-500/10 text-gray-400',
+                      !isUnknown && isHealthy && 'bg-green-400/10 text-green-400',
+                      !isUnknown && !isHealthy && 'bg-red-400/10 text-red-400'
                     )}
                   >
                     <span className='font-medium capitalize'>{key}</span>

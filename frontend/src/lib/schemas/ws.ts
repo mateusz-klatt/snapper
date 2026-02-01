@@ -66,12 +66,10 @@ export const wsMessageUnionSchema = z.discriminatedUnion('type', [
   WSTopicSuggestionsResponseSchema,
   WSPongResponseSchema,
 ])
-export const wsMessageBaseSchema = z
-  .object({
-    type: z.string(),
-    timestamp: z.string().optional(),
-  })
-  .passthrough()
+export const wsMessageBaseSchema = z.looseObject({
+  type: z.string(),
+  timestamp: z.string().optional(),
+})
 export type WsMessageBase = z.infer<typeof wsMessageBaseSchema>
 export type WsMessageUnion = z.infer<typeof wsMessageUnionSchema>
 export type Tick = z.infer<typeof TickEnvelopeSchema>

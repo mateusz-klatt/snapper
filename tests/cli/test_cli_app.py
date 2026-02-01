@@ -182,6 +182,7 @@ def test_trade_zmq_invokes_async_runner(
             captured["trader_kwargs"] = {"signal_topics": signal_topics}
 
         async def start(self) -> None:
+            """No-op start for FakeTraderCoordinator test stub."""
             pass
 
     monkeypatch.setattr(app_module, "TraderCoordinator", FakeTraderCoordinator)
@@ -461,6 +462,7 @@ def test_zmq_logger_handles_keyboard_interrupt(
 
     class DummyLogger:
         def __init__(self, **_kwargs: Any) -> None:
+            """Intentionally empty stub for testing."""
             pass
 
         async def start(self) -> None:
@@ -838,6 +840,7 @@ def test_executor_runs_and_stops(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
 
     class DummyExecutor:
         def __init__(self) -> None:
+            """Intentionally empty stub for testing."""
             pass
 
         def get_status(self) -> dict[str, str]:
@@ -1270,6 +1273,7 @@ class TestTradeCommands:
                     self.signal_topics = signal_topics
 
                 async def start(self) -> None:
+                    """No-op start for MockTraderCoordinator test stub."""
                     pass
 
             with (
@@ -1295,6 +1299,7 @@ class TestTradeCommands:
                     self.signal_topics = signal_topics
 
                 async def start(self) -> None:
+                    """No-op start for MockTraderCoordinator test stub."""
                     pass
 
             with (
@@ -1611,9 +1616,11 @@ class TestFeedCommand:
             mock_publisher_class.return_value = mock_publisher
 
             async def mock_start() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             async def mock_stop() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_publisher.start = mock_start
@@ -1634,9 +1641,11 @@ class TestFeedCommand:
             mock_publisher = MagicMock()
 
             async def mock_start() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             async def mock_stop() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_publisher.start = mock_start
@@ -1664,9 +1673,11 @@ class TestExecutorCommand:
             }
 
             async def mock_start() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             async def mock_stop() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_service.start = mock_start
@@ -1690,9 +1701,11 @@ class TestExecutorCommand:
             }
 
             async def mock_start() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             async def mock_stop() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_service.start = mock_start
@@ -1719,6 +1732,7 @@ class TestAdminCommands:
                 return None
 
             async def mock_create_user(**kwargs: Any) -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_service.get_user_by_username = mock_get_user
@@ -1741,6 +1755,7 @@ class TestAdminCommands:
                 return None
 
             async def mock_create_user(**kwargs: Any) -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_service.get_user_by_username = mock_get_user
@@ -1791,6 +1806,7 @@ class TestAdminCommands:
                 return mock_result
 
             async def mock_commit() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_session.execute = mock_execute
@@ -1830,6 +1846,7 @@ class TestAdminCommands:
                 return mock_result
 
             async def mock_commit() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_session.execute = mock_execute
@@ -1948,6 +1965,7 @@ class TestFeedKeyboardInterrupt:
                 raise KeyboardInterrupt
 
             async def mock_stop() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_publisher.start = mock_start
@@ -1978,6 +1996,7 @@ class TestZmqLoggerKeyboardInterrupt:
                 raise KeyboardInterrupt
 
             async def mock_stop() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_logger.start = mock_start
@@ -2003,9 +2022,11 @@ class TestZmqLoggerKeyboardInterrupt:
             mock_logger.audit_path = "/tmp/audit.log"
 
             async def mock_start() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             async def mock_stop() -> None:
+                """Intentionally empty mock implementation."""
                 pass
 
             mock_logger.start = mock_start
@@ -2451,9 +2472,11 @@ def test_broker_command_starts_zmq_broker(
 
     class MockEvent:
         def wait(self) -> None:
+            """Intentionally empty stub for testing."""
             pass
 
         def set(self) -> None:
+            """Intentionally empty stub for testing."""
             pass
 
         def is_set(self) -> bool:
@@ -2491,18 +2514,22 @@ def test_broker_command_with_custom_endpoints(
             self.xpub_endpoint = xpub_endpoint or "tcp://*:5556"
 
         def start(self) -> None:
+            """No-op start for MockBroker test stub."""
             pass
 
         def stop(self) -> None:
+            """Intentionally empty stub for testing."""
             pass
 
     monkeypatch.setattr(app_module, "ZmqBrokerThread", MockBroker)
 
     class MockEvent:
         def wait(self) -> None:
+            """Intentionally empty stub for testing."""
             pass
 
         def set(self) -> None:
+            """Intentionally empty stub for testing."""
             pass
 
         def is_set(self) -> bool:
@@ -2665,6 +2692,7 @@ def test_update_kraken_symbols_handles_exception(
 
     class MockUpdater:
         def __init__(self, force: bool = False):
+            """Intentionally empty stub for testing."""
             pass
 
         async def start(self) -> None:

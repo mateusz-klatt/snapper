@@ -7,7 +7,7 @@ interface AuthenticatedAppProps {
   children: React.ReactNode
 }
 
-export const AuthenticatedApp: React.FC<AuthenticatedAppProps> = ({ children }) => {
+export const AuthenticatedApp: React.FC<Readonly<AuthenticatedAppProps>> = ({ children }) => {
   const { isAuthenticated, user, refreshToken } = useAuth()
 
   useEffect(() => {

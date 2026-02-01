@@ -49,6 +49,8 @@ from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.utils.logging import set_log_context
 
+_EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
+
 
 class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     """Base service for executing orders on exchanges via ZMQ messaging."""
@@ -80,6 +82,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
         self.orphan_ttl_seconds: float = 5.0
         self.orphan_drop_count: int = 0
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -99,15 +102,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         ...
 
-    async def start(self) -> None:
-        """Start the execution service and subscribe to order topics."""
-        exchange_name = self._get_exchange_name()
-        set_log_context(f"exec:{exchange_name}")
-        if self.running:
-            logger.warning(f"{exchange_name} execution service already running")
-            return
-        repository = get_repository(self.settings.db_url)
-        self.repository = repository
+    async def _initialize_settings(self) -> None:
+        """Initialize settings service with database access."""
+        self.repository = get_repository(self.settings.db_url)
         settings_service = await get_settings_service(
             self.settings.db_url,
             self.settings.zmq_broker_xpub,
@@ -116,7 +113,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         self.settings = get_settings_with_service(settings_service)
         logger.info("AppSettings service initialized with database access")
-        self.exchange_client = self._create_exchange_client()
+
+    def _setup_zmq_sockets(self, exchange_name: str) -> None:
+        """Create and connect ZMQ subscriber and publisher sockets.
+
+        Args:
+            exchange_name: Exchange name for topic prefix construction.
+        """
         self.context = zmq.asyncio.Context()
         raw_sub_socket = self.context.socket(zmq.SUB)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
@@ -136,6 +139,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"ExchangeExecutorService[{exchange_name}]: "
             f"Publishing to broker {self.settings.zmq_broker_xsub}"
         )
+
+    async def start(self) -> None:
+        """Start the execution service and subscribe to order topics."""
+        exchange_name = self._get_exchange_name()
+        set_log_context(f"exec:{exchange_name}")
+        if self.running:
+            logger.warning(f"{exchange_name} execution service already running")
+            return
+        await self._initialize_settings()
+        self.exchange_client = self._create_exchange_client()
+        self._setup_zmq_sockets(exchange_name)
         supports_ws = self.exchange_client.supports_websocket_executions
         async with self.exchange_client:
             logger.info(
@@ -153,6 +167,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 await asyncio.gather(*tasks)
             except asyncio.CancelledError:
                 logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
+                raise
 
     async def stop(self) -> None:
         """Stop the execution service and close ZMQ connections."""
@@ -170,6 +185,54 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         logger.info(f"ExchangeExecutorService[{exchange_name}] stopped")
 
+    async def _dispatch_command(
+        self, parsed_suffix: str, payload_str: str, exchange_name: str, instrument: str
+    ) -> None:
+        """Dispatch a parsed order command to its handler.
+
+        Args:
+            parsed_suffix: Command suffix (submit, cancel, replace).
+            payload_str: JSON payload string.
+            exchange_name: Exchange name from topic.
+            instrument: Instrument from topic.
+        """
+        handler_map = {
+            "submit": self._handle_submit_command,
+            "cancel": self._handle_cancel_command,
+            "replace": self._handle_replace_command,
+        }
+        handler = handler_map.get(parsed_suffix)
+        if handler:
+            await handler(payload_str, exchange_name, instrument)
+        else:
+            logger.debug(f"Ignoring unknown command suffix: {parsed_suffix}")
+
+    async def _route_message(
+        self, topic_str: str, payload_str: str, exchange_name: str, commands_prefix: str
+    ) -> None:
+        """Route a received ZMQ message to the appropriate handler.
+
+        Args:
+            topic_str: ZMQ topic string.
+            payload_str: Decoded payload string.
+            exchange_name: Exchange name for this executor.
+            commands_prefix: Expected command topic prefix.
+        """
+        if topic_str.startswith(commands_prefix):
+            parsed = parse_order_command_topic(topic_str)
+            if parsed is None:
+                logger.warning(f"Malformed command topic: {topic_str}")
+                return
+            await self._dispatch_command(
+                parsed.suffix, payload_str, exchange_name, parsed.instrument
+            )
+        elif topic_str == "system.symbol_mappings":
+            await self._handle_symbol_mapping_update(payload_str)
+        elif topic_str == "system.settings":
+            await self._handle_settings_update(payload_str)
+        else:
+            logger.warning(f"Received message on unexpected topic: {topic_str}")
+
     async def _order_handler(self) -> None:
         """Process incoming order commands from ZMQ subscription.
 
@@ -184,48 +247,46 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         commands_prefix = f"orders.commands.{exchange_name}."
         while self.running:
             try:
-                if self.subscriber:
-                    topic_str, payload_bytes = await self.subscriber.recv_multipart()
-                    payload_str = payload_bytes.decode("utf-8")
-                    if topic_str.startswith(commands_prefix):
-                        parsed = parse_order_command_topic(topic_str)
-                        if parsed is None:
-                            logger.warning(f"Malformed command topic: {topic_str}")
-                            continue
-                        if parsed.suffix == "submit":
-                            await self._handle_submit_command(
-                                payload_str, exchange_name, parsed.instrument
-                            )
-                        elif parsed.suffix == "cancel":
-                            await self._handle_cancel_command(
-                                payload_str, exchange_name, parsed.instrument
-                            )
-                        elif parsed.suffix == "replace":
-                            await self._handle_replace_command(
-                                payload_str, exchange_name, parsed.instrument
-                            )
-                        else:
-                            logger.debug(f"Ignoring unknown command: {topic_str}")
-                    elif topic_str == "system.symbol_mappings":
-                        await self._handle_symbol_mapping_update(payload_str)
-                    elif topic_str == "system.settings":
-                        await self._handle_settings_update(payload_str)
-                    else:
-                        logger.warning(f"Received message on unexpected topic: {topic_str}")
-                else:
+                if not self.subscriber:
                     await asyncio.sleep(0.1)
+                    continue
+                topic_str, payload_bytes = await self.subscriber.recv_multipart()
+                payload_str = payload_bytes.decode("utf-8")
+                await self._route_message(topic_str, payload_str, exchange_name, commands_prefix)
             except Exception as e:
                 if self.running:
                     logger.error(f"Error handling order: {e}")
+
+    @staticmethod
+    def _validate_command_invariants(msg: Any, exchange_name: str, topic_instrument: str) -> bool:
+        """Validate topic/payload invariants for a command message.
+
+        Args:
+            msg: Parsed command message with exchange and instrument fields.
+            exchange_name: Expected exchange from topic.
+            topic_instrument: Expected instrument from topic.
+
+        Returns:
+            True if invariants hold, False otherwise.
+        """
+        if msg.exchange != exchange_name:
+            logger.warning(
+                f"Invariant violation: payload exchange '{msg.exchange}' "
+                f"!= topic exchange '{exchange_name}'"
+            )
+            return False
+        if msg.instrument != topic_instrument:
+            logger.warning(
+                f"Invariant violation: payload instrument '{msg.instrument}' "
+                f"!= topic instrument '{topic_instrument}'"
+            )
+            return False
+        return True
 
     async def _handle_submit_command(
         self, payload_str: str, exchange_name: str, topic_instrument: str
     ) -> None:
         """Handle submit command from orders.commands.*.*.submit topic.
-
-        Validates topic/payload invariants:
-        - payload.exchange == topic exchange (via subscription prefix)
-        - payload.instrument == topic instrument
 
         Args:
             payload_str: JSON payload string.
@@ -237,31 +298,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except MessageParseError as e:
             logger.warning(f"[{exchange_name}] Invalid submit command payload: {e}")
             return
-        if isinstance(order_msg, OrderRequestEnvelope):
-            if order_msg.exchange != exchange_name:
-                logger.warning(
-                    f"Invariant violation: payload exchange '{order_msg.exchange}' "
-                    f"!= topic exchange '{exchange_name}'"
-                )
-                return
-            if order_msg.instrument != topic_instrument:
-                logger.warning(
-                    f"Invariant violation: payload instrument '{order_msg.instrument}' "
-                    f"!= topic instrument '{topic_instrument}'"
-                )
-                return
-            await self._process_order(order_msg)
-        else:
+        if not isinstance(order_msg, OrderRequestEnvelope):
             logger.warning(f"Received non-order message on submit topic: {order_msg.type}")
+            return
+        if self._validate_command_invariants(order_msg, exchange_name, topic_instrument):
+            await self._process_order(order_msg)
 
     async def _handle_cancel_command(
         self, payload_str: str, exchange_name: str, topic_instrument: str
     ) -> None:
         """Handle cancel command from orders.commands.*.*.cancel topic.
-
-        Validates topic/payload invariants:
-        - payload.exchange == topic exchange (via subscription prefix)
-        - payload.instrument == topic instrument
 
         Args:
             payload_str: JSON payload string.
@@ -273,31 +319,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except MessageParseError as e:
             logger.warning(f"[{exchange_name}] Invalid cancel command payload: {e}")
             return
-        if isinstance(cancel_msg, OrderCancelEnvelope):
-            if cancel_msg.exchange != exchange_name:
-                logger.warning(
-                    f"Invariant violation: payload exchange '{cancel_msg.exchange}' "
-                    f"!= topic exchange '{exchange_name}'"
-                )
-                return
-            if cancel_msg.instrument != topic_instrument:
-                logger.warning(
-                    f"Invariant violation: payload instrument '{cancel_msg.instrument}' "
-                    f"!= topic instrument '{topic_instrument}'"
-                )
-                return
-            await self._process_cancel(cancel_msg)
-        else:
+        if not isinstance(cancel_msg, OrderCancelEnvelope):
             logger.warning(f"Received non-cancel message on cancel topic: {cancel_msg.type}")
+            return
+        if self._validate_command_invariants(cancel_msg, exchange_name, topic_instrument):
+            await self._process_cancel(cancel_msg)
 
     async def _handle_replace_command(
         self, payload_str: str, exchange_name: str, topic_instrument: str
     ) -> None:
         """Handle replace command from orders.commands.*.*.replace topic.
-
-        Validates topic/payload invariants:
-        - payload.exchange == topic exchange (via subscription prefix)
-        - payload.instrument == topic instrument
 
         Args:
             payload_str: JSON payload string.
@@ -309,22 +340,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except MessageParseError as e:
             logger.warning(f"[{exchange_name}] Invalid replace command payload: {e}")
             return
-        if isinstance(replace_msg, OrderReplaceEnvelope):
-            if replace_msg.exchange != exchange_name:
-                logger.warning(
-                    f"Invariant violation: payload exchange '{replace_msg.exchange}' "
-                    f"!= topic exchange '{exchange_name}'"
-                )
-                return
-            if replace_msg.instrument != topic_instrument:
-                logger.warning(
-                    f"Invariant violation: payload instrument '{replace_msg.instrument}' "
-                    f"!= topic instrument '{topic_instrument}'"
-                )
-                return
-            await self._process_replace(replace_msg)
-        else:
+        if not isinstance(replace_msg, OrderReplaceEnvelope):
             logger.warning(f"Received non-replace message on replace topic: {replace_msg.type}")
+            return
+        if self._validate_command_invariants(replace_msg, exchange_name, topic_instrument):
+            await self._process_replace(replace_msg)
 
     async def _process_order(self, order: OrderRequestEnvelope) -> None:
         """Submit an order to the exchange and handle the response.
@@ -380,7 +400,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         try:
-            assert self.exchange_client is not None, "Exchange client not initialized"
+            assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
             result = await self.exchange_client.cancel_order(
                 cancel.exchange_order_id, cancel.instrument
             )
@@ -501,7 +521,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 client_order_id=order.client_order_id,
                 signaled_at=order.signaled_at,
             )
-            assert self.exchange_client is not None, "Exchange client not initialized"
+            assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
             result = await self.exchange_client.create_order(order_request)
             exchange_order_id = result.id if result else None
             if exchange_order_id:
@@ -538,7 +558,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Handle execution updates from the exchange WebSocket."""
         exchange_name = self._get_exchange_name()
         if self.exchange_client is None:
-            logger.warning("ExchangeExecutorService: Exchange client not initialized")
+            logger.warning(f"ExchangeExecutorService: {_EXCHANGE_NOT_INIT_MSG}")
             return
         if not self.exchange_client.supports_websocket_executions:
             logger.warning(
@@ -592,7 +612,125 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.info(
                 f"[{exchange_name}] Processing buffered orphan execution for {exchange_order_id}"
             )
-            asyncio.create_task(self._process_execution(execution))
+            task = asyncio.create_task(self._process_execution(execution))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+    @staticmethod
+    def _determine_fill_status(execution: ExecutionUpdate) -> FillStatus:
+        """Determine the fill status from an execution update.
+
+        Args:
+            execution: Execution update to evaluate.
+
+        Returns:
+            Fill status string.
+        """
+        if execution.exec_type == "filled" or execution.order_status == OrderStatusEnum.CLOSED:
+            return "filled"
+        if execution.order_status == OrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
+            return "partial"
+        return "filled"
+
+    def _resolve_execution_order(
+        self, execution: ExecutionUpdate, exchange_name: str
+    ) -> tuple[str, str, OrderRequestEnvelope] | None:
+        """Resolve execution to its order using two-level correlation.
+
+        Args:
+            execution: Execution update from exchange.
+            exchange_name: Exchange name for logging.
+
+        Returns:
+            Tuple of (exchange_order_id, client_order_id, original_order)
+            or None if correlation fails or execution should be skipped.
+        """
+        exchange_order_id = execution.order_id
+        if exchange_order_id is None:
+            logger.warning(
+                f"[{exchange_name}] Received execution with None order_id, cannot correlate"
+            )
+            return None
+        client_order_id = self.client_by_exchange.get(exchange_order_id)
+        if client_order_id is None:
+            already_buffered = exchange_order_id in self.orphaned_executions
+            self.orphaned_executions[exchange_order_id] = (execution, time.monotonic())
+            if not already_buffered:
+                logger.info(
+                    f"[{exchange_name}] Buffered orphan execution for {exchange_order_id} "
+                    f"(status={execution.exec_type}, awaiting ACK or TTL expiry)"
+                )
+            return None
+        original_order = self.pending_orders.get(client_order_id)
+        if original_order is None:
+            logger.warning(
+                f"[{exchange_name}] Received execution for unknown client order: "
+                f"{client_order_id} (exchange: {exchange_order_id})"
+            )
+            return None
+        return exchange_order_id, client_order_id, original_order
+
+    def _handle_cancellation(
+        self,
+        execution: ExecutionUpdate,
+        exchange_order_id: str,
+        client_order_id: str,
+        exchange_name: str,
+    ) -> bool:
+        """Handle cancelled or expired execution by cleaning up maps.
+
+        Args:
+            execution: Execution update.
+            exchange_order_id: Exchange-assigned order ID.
+            client_order_id: Client-assigned order ID.
+            exchange_name: Exchange name for logging.
+
+        Returns:
+            True if the execution was a cancellation and was handled.
+        """
+        if execution.exec_type not in ("canceled", "expired"):
+            return False
+        self.pending_orders.pop(client_order_id, None)
+        self.client_by_exchange.pop(exchange_order_id, None)
+        logger.info(
+            f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
+            f"cleaned up maps (no FillEnvelope)"
+        )
+        return True
+
+    def _build_fill_envelope(
+        self,
+        execution: ExecutionUpdate,
+        exchange_order_id: str,
+        original_order: OrderRequestEnvelope,
+        exchange_name: str,
+    ) -> FillEnvelope:
+        """Build a FillEnvelope from execution and order data.
+
+        Args:
+            execution: Execution update from exchange.
+            exchange_order_id: Exchange-assigned order ID.
+            original_order: Original order request.
+            exchange_name: Exchange name.
+
+        Returns:
+            FillEnvelope ready for publishing.
+        """
+        status = self._determine_fill_status(execution)
+        total_fee = execution.fee_usd_equiv or 0.0
+        return FillEnvelope(
+            trade_id=execution.exec_id,
+            exchange_order_id=exchange_order_id,
+            client_order_id=original_order.client_order_id,
+            instrument=original_order.instrument,
+            exchange=exchange_name,
+            side=original_order.side,
+            size=execution.cum_qty or 0.0,
+            price=execution.average_price or 0.0,
+            fee=total_fee,
+            fee_asset="USD" if total_fee > 0 else "",
+            status=status,
+        )
 
     async def _process_execution(self, execution: ExecutionUpdate) -> None:
         """Process an execution update and publish fill notification.
@@ -610,61 +748,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         try:
             self._cleanup_expired_orphans()
-            exchange_order_id = execution.order_id
-            if exchange_order_id is None:
-                logger.warning(
-                    f"[{exchange_name}] Received execution with None order_id, cannot correlate"
-                )
+            resolved = self._resolve_execution_order(execution, exchange_name)
+            if resolved is None:
                 return
-            client_order_id = self.client_by_exchange.get(exchange_order_id)
-            if client_order_id is None:
-                already_buffered = exchange_order_id in self.orphaned_executions
-                self.orphaned_executions[exchange_order_id] = (execution, time.monotonic())
-                if not already_buffered:
-                    logger.info(
-                        f"[{exchange_name}] Buffered orphan execution for {exchange_order_id} "
-                        f"(status={execution.exec_type}, awaiting ACK or TTL expiry)"
-                    )
+            exchange_order_id, client_order_id, original_order = resolved
+            if self._handle_cancellation(
+                execution, exchange_order_id, client_order_id, exchange_name
+            ):
                 return
-            original_order = self.pending_orders.get(client_order_id)
-            if original_order is None:
-                logger.warning(
-                    f"[{exchange_name}] Received execution for unknown client order: "
-                    f"{client_order_id} (exchange: {exchange_order_id})"
-                )
-                return
-            if execution.exec_type in ("canceled", "expired"):
-                self.pending_orders.pop(client_order_id, None)
-                self.client_by_exchange.pop(exchange_order_id, None)
-                logger.info(
-                    f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
-                    f"cleaned up maps (no FillEnvelope)"
-                )
-                return
-            status: FillStatus
-            if execution.exec_type == "filled" or execution.order_status == OrderStatusEnum.CLOSED:
-                status = "filled"
-            elif execution.order_status == OrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
-                status = "partial"
-            else:
-                status = "filled"
-            total_fee = execution.fee_usd_equiv or 0.0
-            fee_asset = "USD" if total_fee > 0 else ""
-            fill = FillEnvelope(
-                trade_id=execution.exec_id,
-                exchange_order_id=exchange_order_id,
-                client_order_id=original_order.client_order_id,
-                instrument=original_order.instrument,
-                exchange=exchange_name,
-                side=original_order.side,
-                size=execution.cum_qty or 0.0,
-                price=execution.average_price or 0.0,
-                fee=total_fee,
-                fee_asset=fee_asset,
-                status=status,
+            fill = self._build_fill_envelope(
+                execution, exchange_order_id, original_order, exchange_name
             )
             await self._publish_fill(fill)
-            if status == "filled":
+            if fill.status == "filled":
                 self.pending_orders.pop(client_order_id, None)
                 self.client_by_exchange.pop(exchange_order_id, None)
                 logger.info(

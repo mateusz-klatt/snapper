@@ -61,7 +61,7 @@ describe('Modal', () => {
         <div>Modal content</div>
       </Modal>
     )
-    const closeButton = screen.getByRole('button')
+    const closeButton = screen.getByRole('button', { name: 'Close' })
 
     fireEvent.click(closeButton)
     expect(onClose).toHaveBeenCalledOnce()

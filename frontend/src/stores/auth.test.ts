@@ -530,7 +530,7 @@ describe('auth store', () => {
       const callback = (window as Window & { authLogoutCallback?: () => void }).authLogoutCallback
 
       if (callback) {
-        await callback()
+        await Promise.resolve(callback())
       }
 
       const state = useAuthStore.getState()

@@ -71,10 +71,17 @@ def update_config(
     Args:
         expected_revs: Dictionary mapping tool names to expected revision strings.
         config_path: Path to the .pre-commit-config.yaml file.
+
+    Raises:
+        FileNotFoundError: If config file does not exist.
+        ValueError: If resolved path contains path traversal.
     """
-    if not config_path.exists():
+    resolved = config_path.resolve()
+    if ".." in config_path.parts:
+        raise ValueError(f"Config path must not contain '..' components: {config_path}")
+    if not resolved.exists():
         raise FileNotFoundError(".pre-commit-config.yaml not found")
-    lines = config_path.read_text(encoding="utf-8").splitlines()
+    lines = resolved.read_text(encoding="utf-8").splitlines()
     updated_lines: list[str] = []
     active_repo: str | None = None
     for line in lines:
@@ -96,7 +103,7 @@ def update_config(
             active_repo = None
         else:
             updated_lines.append(line)
-    config_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+    resolved.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:

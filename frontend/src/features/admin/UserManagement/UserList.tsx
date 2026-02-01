@@ -11,7 +11,7 @@ interface UserListProps {
   onEditUser: (user: UserProfile) => void
 }
 
-const UserList: React.FC<UserListProps> = ({ onCreateUser, onEditUser }) => {
+const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser }) => {
   const [includeInactive, setIncludeInactive] = useState(false)
   const queryClient = useQueryClient()
   const {
@@ -48,7 +48,7 @@ const UserList: React.FC<UserListProps> = ({ onCreateUser, onEditUser }) => {
   })
 
   const handleDeleteUser = (user: UserProfile) => {
-    if (window.confirm(`Are you sure you want to deactivate user "${user.username}"?`)) {
+    if (confirm(`Are you sure you want to deactivate user "${user.username}"?`)) {
       deleteUserMutation.mutate(user.id)
     }
   }

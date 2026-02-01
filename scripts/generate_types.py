@@ -16,6 +16,8 @@ Usage:
 import argparse
 import inspect
 import json
+import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,12 @@ from snapper.server.app import create_app
 
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 
+_DEFS_REF_PREFIX = "#/definitions/"
+_COMPONENTS_REF_PREFIX = "#/components/schemas/"
+_WS_SCHEMAS_FILE = "ws-schemas.json"
+_OPENAPI_FILE = "openapi.json"
+_DEFS_KEY = "$defs"
+
 ENTITY_RENAMES: dict[str, str] = {}
 ENVELOPE_SUFFIX = "Envelope"
 SNAPSHOT_SUFFIX = "Snapshot"
@@ -35,57 +43,57 @@ REQUEST_SUFFIX = "Request"
 ENTITY_EXCLUDE_FIELDS = {"type", "meta"}
 ENTITY_UNION_ID_FIELDS = {"id", "order_id"}
 
-SWIFT_KEYWORDS = {
-    "operator",
-    "class",
-    "struct",
-    "enum",
-    "protocol",
-    "extension",
-    "func",
-    "var",
-    "let",
-    "import",
-    "return",
-    "if",
-    "else",
-    "for",
-    "while",
-    "switch",
-    "case",
-    "default",
-    "break",
-    "continue",
-    "in",
-    "true",
-    "false",
-    "nil",
-    "self",
-    "Self",
-    "super",
-    "init",
-    "deinit",
-    "get",
-    "set",
-    "willSet",
-    "didSet",
-    "throws",
-    "throw",
-    "try",
-    "catch",
-    "as",
-    "is",
-    "Any",
-    "Type",
-    "static",
-    "private",
-    "public",
-    "internal",
-    "fileprivate",
-    "open",
-    "final",
-    "override",
-    "mutating",
+SWIFT_KEYWORD_RENAMES: dict[str, str] = {
+    "operator": "operatorRole",
+    "open": "openStatus",
+    "class": "classValue",
+    "struct": "structValue",
+    "enum": "enumValue",
+    "protocol": "protocolValue",
+    "extension": "extensionValue",
+    "func": "funcValue",
+    "var": "varValue",
+    "let": "letValue",
+    "import": "importValue",
+    "return": "returnValue",
+    "if": "ifValue",
+    "else": "elseValue",
+    "for": "forValue",
+    "while": "whileValue",
+    "switch": "switchValue",
+    "case": "caseValue",
+    "default": "defaultValue",
+    "break": "breakValue",
+    "continue": "continueValue",
+    "in": "inValue",
+    "true": "trueValue",
+    "false": "falseValue",
+    "nil": "nilValue",
+    "self": "selfValue",
+    "Self": "selfType",
+    "super": "superValue",
+    "init": "initValue",
+    "deinit": "deinitValue",
+    "get": "getValue",
+    "set": "setValue",
+    "willSet": "willSetValue",
+    "didSet": "didSetValue",
+    "throws": "throwsValue",
+    "throw": "throwValue",
+    "try": "tryValue",
+    "catch": "catchValue",
+    "as": "asValue",
+    "is": "isValue",
+    "Any": "anyValue",
+    "Type": "typeValue",
+    "static": "staticValue",
+    "private": "privateValue",
+    "public": "publicValue",
+    "internal": "internalValue",
+    "fileprivate": "fileprivateValue",
+    "final": "finalValue",
+    "override": "overrideValue",
+    "mutating": "mutatingValue",
 }
 
 
@@ -102,7 +110,7 @@ def fix_refs_pydantic(obj: JsonValue) -> JsonValue:
         result: dict[str, JsonValue] = {}
         for key, value in obj.items():
             if key == "$ref" and isinstance(value, str) and value.startswith("#/$defs/"):
-                result[key] = value.replace("#/$defs/", "#/definitions/")
+                result[key] = value.replace("#/$defs/", _DEFS_REF_PREFIX)
             else:
                 result[key] = fix_refs_pydantic(value)
         return result
@@ -124,8 +132,8 @@ def fix_refs_openapi(obj: JsonValue) -> JsonValue:
         result: dict[str, JsonValue] = {}
         for key, value in obj.items():
             if key == "$ref" and isinstance(value, str):
-                if value.startswith("#/components/schemas/"):
-                    result[key] = value.replace("#/components/schemas/", "#/definitions/")
+                if value.startswith(_COMPONENTS_REF_PREFIX):
+                    result[key] = value.replace(_COMPONENTS_REF_PREFIX, _DEFS_REF_PREFIX)
                 else:
                     result[key] = value
             else:
@@ -134,6 +142,80 @@ def fix_refs_openapi(obj: JsonValue) -> JsonValue:
     if isinstance(obj, list):
         return [fix_refs_openapi(item) for item in obj]
     return obj
+
+
+def _process_property(
+    prop_schema: JsonValue,
+    const_fields: list[str],
+    prop_name: str,
+) -> JsonValue:
+    """Process a single property schema, tracking const fields.
+
+    Args:
+        prop_schema: The property schema to process.
+        const_fields: Accumulator for const field names (mutated in place).
+        prop_name: Name of the property.
+
+    Returns:
+        Processed property schema.
+    """
+    if not isinstance(prop_schema, dict):
+        return prop_schema
+    processed_schema = prop_schema
+    if "const" in prop_schema:
+        const_fields.append(prop_name)
+        if "default" in prop_schema:
+            processed_schema = dict(prop_schema)
+            del processed_schema["default"]
+    return make_const_fields_required(processed_schema)
+
+
+def _process_schema_value(
+    key: str,
+    value: JsonValue,
+    const_fields: list[str],
+) -> JsonValue:
+    """Process a single key-value pair from a schema dict.
+
+    Args:
+        key: Schema key.
+        value: Schema value.
+        const_fields: Accumulator for const field names (mutated in place).
+
+    Returns:
+        Processed value.
+    """
+    if key == "properties" and isinstance(value, dict):
+        return {
+            prop_name: _process_property(prop_schema, const_fields, prop_name)
+            for prop_name, prop_schema in value.items()
+        }
+    if isinstance(value, dict):
+        return make_const_fields_required(value)
+    if isinstance(value, list):
+        return [
+            make_const_fields_required(item) if isinstance(item, dict) else item for item in value
+        ]
+    return value
+
+
+def _add_const_to_required(
+    result: dict[str, JsonValue],
+    const_fields: list[str],
+) -> None:
+    """Add const fields to the required list in place.
+
+    Args:
+        result: Schema result dict (mutated in place).
+        const_fields: List of const field names to add.
+    """
+    required = result.get("required", [])
+    if not isinstance(required, list):
+        return
+    for field in const_fields:
+        if field not in required:
+            required.append(field)
+    result["required"] = required
 
 
 def make_const_fields_required(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
@@ -147,39 +229,12 @@ def make_const_fields_required(schema: dict[str, JsonValue]) -> dict[str, JsonVa
     """
     if not isinstance(schema, dict):
         return schema
-    result: dict[str, JsonValue] = {}
     const_fields: list[str] = []
-    for key, value in schema.items():
-        if key == "properties" and isinstance(value, dict):
-            fixed_props: dict[str, JsonValue] = {}
-            for prop_name, prop_schema in value.items():
-                if isinstance(prop_schema, dict):
-                    processed_schema = prop_schema
-                    if "const" in prop_schema:
-                        const_fields.append(prop_name)
-                        if "default" in prop_schema:
-                            processed_schema = dict(prop_schema)
-                            del processed_schema["default"]
-                    fixed_props[prop_name] = make_const_fields_required(processed_schema)
-                else:
-                    fixed_props[prop_name] = prop_schema
-            result[key] = fixed_props
-        elif isinstance(value, dict):
-            result[key] = make_const_fields_required(value)
-        elif isinstance(value, list):
-            result[key] = [
-                make_const_fields_required(item) if isinstance(item, dict) else item
-                for item in value
-            ]
-        else:
-            result[key] = value
+    result: dict[str, JsonValue] = {
+        key: _process_schema_value(key, value, const_fields) for key, value in schema.items()
+    }
     if const_fields:
-        required = result.get("required", [])
-        if isinstance(required, list):
-            for field in const_fields:
-                if field not in required:
-                    required.append(field)
-            result["required"] = required
+        _add_const_to_required(result, const_fields)
     return result
 
 
@@ -213,6 +268,51 @@ def discover_ws_schemas() -> list[tuple[str, type[BaseModel]]]:
     return discovered
 
 
+_PRIMITIVE_JSON_TYPES = frozenset({"string", "number", "integer", "boolean"})
+_TS_AFFECTING_SCHEMA_KEYS = frozenset(
+    {
+        "const",
+        "enum",
+        "anyOf",
+        "oneOf",
+        "allOf",
+        "$ref",
+        "items",
+        "properties",
+    }
+)
+
+
+def strip_primitive_titles(schema: JsonValue) -> JsonValue:
+    """Remove title from properties that are bare primitive types.
+
+    When json-schema-to-typescript encounters ``{"title": "Open", "type": "number"}``,
+    it emits ``export type Open = number`` which SonarCloud flags as a redundant
+    type alias (S6564).  Stripping the title forces the tool to inline the primitive.
+
+    Only strips title when the property has no TypeScript-affecting constraints
+    (const, enum, anyOf, etc.) that would make a named alias meaningful.
+
+    Args:
+        schema: JSON Schema value to process (mutates nothing, returns a new tree).
+
+    Returns:
+        A copy of the schema with redundant titles removed.
+    """
+    if isinstance(schema, dict):
+        result: dict[str, JsonValue] = {k: strip_primitive_titles(v) for k, v in schema.items()}
+        type_value = result.get("type")
+        has_primitive_type = isinstance(type_value, str) and type_value in _PRIMITIVE_JSON_TYPES
+        has_title = "title" in result
+        has_semantic_key = any(k in result for k in _TS_AFFECTING_SCHEMA_KEYS)
+        if has_primitive_type and has_title and not has_semantic_key:
+            del result["title"]
+        return result
+    if isinstance(schema, list):
+        return [strip_primitive_titles(item) for item in schema]
+    return schema
+
+
 def export_ws_schemas(project_root: Path) -> Path:
     """Export WebSocket Pydantic schemas to JSON Schema.
 
@@ -222,7 +322,7 @@ def export_ws_schemas(project_root: Path) -> Path:
     Returns:
         Path to the generated JSON schema file.
     """
-    output_path = project_root / "build" / "ws-schemas.json"
+    output_path = project_root / "build" / _WS_SCHEMAS_FILE
     output_path.parent.mkdir(parents=True, exist_ok=True)
     schemas = discover_ws_schemas()
 
@@ -230,12 +330,12 @@ def export_ws_schemas(project_root: Path) -> Path:
 
     for name, model in schemas:
         schema: dict[str, JsonValue] = model.model_json_schema(mode="serialization")
-        if "$defs" in schema:
-            defs_value = schema["$defs"]
+        if _DEFS_KEY in schema:
+            defs_value = schema[_DEFS_KEY]
             if isinstance(defs_value, dict):
                 for def_name, def_schema in defs_value.items():
                     all_definitions[def_name] = fix_refs_pydantic(def_schema)
-            del schema["$defs"]
+            del schema[_DEFS_KEY]
         schema_fixed = fix_refs_pydantic(schema)
         if isinstance(schema_fixed, dict):
             all_definitions[name] = schema_fixed
@@ -245,9 +345,12 @@ def export_ws_schemas(project_root: Path) -> Path:
         "title": "WebSocket Messages",
         "description": "WebSocket message schemas for Snapper trading platform",
         "definitions": all_definitions,
-        "oneOf": [{"$ref": f"#/definitions/{name}"} for name, _ in schemas],
+        "oneOf": [{"$ref": f"{_DEFS_REF_PREFIX}{name}"} for name, _ in schemas],
     }
     combined_schema = make_const_fields_required(combined_schema)
+    stripped = strip_primitive_titles(combined_schema)
+    assert isinstance(stripped, dict)
+    combined_schema = stripped
 
     with output_path.open("w") as f:
         json.dump(combined_schema, f, indent=2)
@@ -265,7 +368,7 @@ def export_openapi_spec(project_root: Path) -> Path:
     Returns:
         Path to the generated OpenAPI spec file.
     """
-    output_path = project_root / "build" / "openapi.json"
+    output_path = project_root / "build" / _OPENAPI_FILE
     output_path.parent.mkdir(parents=True, exist_ok=True)
     app = create_app()
     spec = app.openapi()
@@ -286,7 +389,7 @@ def export_openapi_schemas(project_root: Path) -> Path:
     Returns:
         Path to the generated JSON schema file.
     """
-    openapi_path = project_root / "build" / "openapi.json"
+    openapi_path = project_root / "build" / _OPENAPI_FILE
     output_path = project_root / "build" / "openapi-schemas.json"
 
     with openapi_path.open() as f:
@@ -309,7 +412,7 @@ def export_openapi_schemas(project_root: Path) -> Path:
         if isinstance(definitions, dict):
             definitions[name] = fixed_schema
         if isinstance(one_of, list):
-            one_of.append({"$ref": f"#/definitions/{name}"})
+            one_of.append({"$ref": f"{_DEFS_REF_PREFIX}{name}"})
 
     with output_path.open("w") as f:
         json.dump(json_schema, f, indent=2)
@@ -331,6 +434,96 @@ def to_camel_case(snake_str: str) -> str:
     return components[0] + "".join(x.title() for x in components[1:])
 
 
+_SWIFT_SIMPLE_TYPE_MAP: dict[str, str] = {
+    "integer": "Int",
+    "number": "Double",
+    "boolean": "Bool",
+}
+
+
+def _swift_string_type(prop: dict[str, Any], suffix: str) -> str:
+    """Resolve Swift type for a JSON Schema string property.
+
+    Args:
+        prop: Property schema.
+        suffix: Optional suffix (e.g., '?').
+
+    Returns:
+        Swift type string.
+    """
+    if prop.get("format") == "date-time":
+        return f"Date{suffix}"
+    return f"String{suffix}"
+
+
+def _swift_object_type(prop: dict[str, Any], definitions: dict[str, Any], suffix: str) -> str:
+    """Resolve Swift type for a JSON Schema object property.
+
+    Args:
+        prop: Property schema.
+        definitions: Schema definitions for reference resolution.
+        suffix: Optional suffix.
+
+    Returns:
+        Swift type string.
+    """
+    additional = prop.get("additionalProperties")
+    if additional:
+        if additional is True:
+            return f"[String: AnyCodable]{suffix}"
+        value_type = json_type_to_swift(additional, definitions, optional=False)
+        return f"[String: {value_type}]{suffix}"
+    return f"[String: AnyCodable]{suffix}"
+
+
+def _swift_ref_type(prop: dict[str, Any], suffix: str) -> str:
+    """Resolve Swift type for a JSON Schema $ref property.
+
+    Args:
+        prop: Property schema with $ref.
+        suffix: Optional suffix (e.g., '?').
+
+    Returns:
+        Swift type string.
+    """
+    ref_name = prop["$ref"].split("/")[-1]
+    return f"{ref_name}{suffix}"
+
+
+def _swift_anyof_type(prop: dict[str, Any], definitions: dict[str, Any], _suffix: str) -> str:
+    """Resolve Swift type for a JSON Schema anyOf property.
+
+    Args:
+        prop: Property schema with anyOf.
+        definitions: Schema definitions for reference resolution.
+        _suffix: Optional suffix (unused; kept for call-site symmetry).
+
+    Returns:
+        Swift type string.
+    """
+    types = prop["anyOf"]
+    non_null = [t for t in types if t.get("type") != "null"]
+    if len(non_null) == 1:
+        return json_type_to_swift(non_null[0], definitions, optional=True)
+    return "AnyCodable?"
+
+
+def _swift_array_type(prop: dict[str, Any], definitions: dict[str, Any], suffix: str) -> str:
+    """Resolve Swift type for a JSON Schema array property.
+
+    Args:
+        prop: Property schema with array type.
+        definitions: Schema definitions for reference resolution.
+        suffix: Optional suffix.
+
+    Returns:
+        Swift type string.
+    """
+    items = prop.get("items", {})
+    item_type = json_type_to_swift(items, definitions, optional=False)
+    return f"[{item_type}]{suffix}"
+
+
 def json_type_to_swift(
     prop: dict[str, Any], definitions: dict[str, Any], optional: bool = True
 ) -> str:
@@ -347,49 +540,28 @@ def json_type_to_swift(
     suffix = "?" if optional else ""
 
     if "$ref" in prop:
-        ref_name = prop["$ref"].split("/")[-1]
-        return f"{ref_name}{suffix}"
+        return _swift_ref_type(prop, suffix)
 
     if "anyOf" in prop:
-        types = prop["anyOf"]
-        non_null = [t for t in types if t.get("type") != "null"]
-        if len(non_null) == 1:
-            return json_type_to_swift(non_null[0], definitions, optional=True)
-        return "AnyCodable?"
+        return _swift_anyof_type(prop, definitions, suffix)
 
     if "allOf" in prop:
         return json_type_to_swift(prop["allOf"][0], definitions, optional)
 
     prop_type = prop.get("type")
-    prop_format = prop.get("format")
 
-    if prop_type == "string":
-        if prop_format == "date-time":
-            return f"Date{suffix}"
-        return f"String{suffix}"
+    simple_type = _SWIFT_SIMPLE_TYPE_MAP.get(prop_type or "")
+    if simple_type:
+        return f"{simple_type}{suffix}"
 
-    if prop_type == "integer":
-        return f"Int{suffix}"
-
-    if prop_type == "number":
-        return f"Double{suffix}"
-
-    if prop_type == "boolean":
-        return f"Bool{suffix}"
-
-    if prop_type == "array":
-        items = prop.get("items", {})
-        item_type = json_type_to_swift(items, definitions, optional=False)
-        return f"[{item_type}]{suffix}"
-
-    if prop_type == "object":
-        additional = prop.get("additionalProperties")
-        if additional:
-            if additional is True:
-                return f"[String: AnyCodable]{suffix}"
-            value_type = json_type_to_swift(additional, definitions, optional=False)
-            return f"[String: {value_type}]{suffix}"
-        return f"[String: AnyCodable]{suffix}"
+    type_handlers: dict[str, Callable[..., str]] = {
+        "string": lambda: _swift_string_type(prop, suffix),
+        "array": lambda: _swift_array_type(prop, definitions, suffix),
+        "object": lambda: _swift_object_type(prop, definitions, suffix),
+    }
+    handler = type_handlers.get(prop_type or "")
+    if handler:
+        return handler()
 
     return f"AnyCodable{suffix}"
 
@@ -456,12 +628,13 @@ def generate_swift_enum(name: str, values: list[str]) -> list[str]:
     lines.append(f"enum {name}: String, Codable, Sendable {{")
     for value in values:
         swift_case = to_camel_case(value) if "_" in value else value
-        escaped_case = f"`{swift_case}`" if swift_case in SWIFT_KEYWORDS else swift_case
-
-        if swift_case != value:
-            lines.append(f'    case {escaped_case} = "{value}"')
+        renamed = SWIFT_KEYWORD_RENAMES.get(swift_case)
+        if renamed:
+            lines.append(f'    case {renamed} = "{value}"')
+        elif swift_case != value:
+            lines.append(f'    case {swift_case} = "{value}"')
         else:
-            lines.append(f"    case {escaped_case}")
+            lines.append(f"    case {swift_case}")
     lines.append("}")
     return lines
 
@@ -529,13 +702,73 @@ def get_any_codable_helper() -> list[str]:
     ]
 
 
+def _collect_top_level_enums(
+    definitions: dict[str, Any],
+    lines: list[str],
+    generated_enums: set[str],
+) -> None:
+    """Emit Swift enums for top-level string enum definitions.
+
+    Args:
+        definitions: JSON Schema definitions dict.
+        lines: Mutable output lines list.
+        generated_enums: Mutable set of already-generated enum names.
+    """
+    for name, type_schema in definitions.items():
+        if type_schema.get("type") == "string" and "enum" in type_schema:
+            lines.extend(generate_swift_enum(name, type_schema["enum"]))
+            lines.append("")
+            generated_enums.add(name)
+
+
+def _collect_inline_enums(
+    definitions: dict[str, Any],
+    lines: list[str],
+    generated_enums: set[str],
+) -> None:
+    """Emit Swift enums for inline string enum properties on object definitions.
+
+    Args:
+        definitions: JSON Schema definitions dict.
+        lines: Mutable output lines list.
+        generated_enums: Mutable set of already-generated enum names.
+    """
+    for name, type_schema in definitions.items():
+        if type_schema.get("type") != "object":
+            continue
+        for prop_name, prop_schema in type_schema.get("properties", {}).items():
+            if "enum" not in prop_schema or prop_schema.get("type") != "string":
+                continue
+            enum_name = f"{name}{prop_name.title().replace('_', '')}"
+            if enum_name not in generated_enums:
+                lines.extend(generate_swift_enum(enum_name, prop_schema["enum"]))
+                lines.append("")
+                generated_enums.add(enum_name)
+
+
+def _collect_structs(
+    definitions: dict[str, Any],
+    lines: list[str],
+) -> None:
+    """Emit Swift structs for object definitions.
+
+    Args:
+        definitions: JSON Schema definitions dict.
+        lines: Mutable output lines list.
+    """
+    for name, type_schema in definitions.items():
+        if type_schema.get("type") == "object":
+            lines.extend(generate_swift_struct(name, type_schema, definitions))
+            lines.append("")
+
+
 def generate_swift_types(
-    project_root: Path, schema_path: Path, output_path: Path, include_any_codable: bool = True
+    _project_root: Path, schema_path: Path, output_path: Path, include_any_codable: bool = True
 ) -> None:
     """Generate Swift types from JSON Schema.
 
     Args:
-        project_root: Root directory of the project.
+        _project_root: Root directory of the project (reserved for future use).
         schema_path: Path to the JSON Schema file.
         output_path: Path for the generated Swift file.
         include_any_codable: Whether to include the AnyCodable helper.
@@ -556,27 +789,9 @@ def generate_swift_types(
         lines.extend(get_any_codable_helper())
 
     generated_enums: set[str] = set()
-
-    for name, type_schema in definitions.items():
-        if type_schema.get("type") == "string" and "enum" in type_schema:
-            lines.extend(generate_swift_enum(name, type_schema["enum"]))
-            lines.append("")
-            generated_enums.add(name)
-
-    for name, type_schema in definitions.items():
-        if type_schema.get("type") == "object":
-            for prop_name, prop_schema in type_schema.get("properties", {}).items():
-                if "enum" in prop_schema and prop_schema.get("type") == "string":
-                    enum_name = f"{name}{prop_name.title().replace('_', '')}"
-                    if enum_name not in generated_enums:
-                        lines.extend(generate_swift_enum(enum_name, prop_schema["enum"]))
-                        lines.append("")
-                        generated_enums.add(enum_name)
-
-    for name, type_schema in definitions.items():
-        if type_schema.get("type") == "object":
-            lines.extend(generate_swift_struct(name, type_schema, definitions))
-            lines.append("")
+    _collect_top_level_enums(definitions, lines, generated_enums)
+    _collect_inline_enums(definitions, lines, generated_enums)
+    _collect_structs(definitions, lines)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines))
@@ -604,7 +819,7 @@ def generate_ios_types(project_root: Path) -> None:
     any_codable_path.write_text("\n".join(any_codable_lines))
     print(f"Generated {any_codable_path}")
 
-    ws_schema_path = project_root / "build" / "ws-schemas.json"
+    ws_schema_path = project_root / "build" / _WS_SCHEMAS_FILE
     if ws_schema_path.exists():
         generate_swift_types(
             project_root,
@@ -623,6 +838,89 @@ def generate_ios_types(project_root: Path) -> None:
         )
 
 
+_ZOD_SIMPLE_TYPE_MAP: dict[str, str] = {
+    "integer": "z.number().int()",
+    "number": "z.number()",
+    "boolean": "z.boolean()",
+    "null": "z.null()",
+}
+
+_ZOD_STRING_FORMAT_MAP: dict[str, str] = {
+    "date-time": "z.iso.datetime()",
+    "uuid": "z.string().uuid()",
+    "email": "z.string().email()",
+}
+
+
+def _zod_anyof_type(prop: dict[str, Any], definitions: dict[str, Any]) -> str:
+    """Resolve Zod type for an anyOf JSON Schema property.
+
+    Args:
+        prop: Property schema containing 'anyOf'.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Zod type string.
+    """
+    types = prop["anyOf"]
+    non_null = [t for t in types if t.get("type") != "null"]
+    has_null = any(t.get("type") == "null" for t in types)
+    if len(non_null) == 1:
+        base = json_type_to_zod(non_null[0], True, definitions)
+        return f"{base}.nullable()" if has_null else base
+    zod_types = [json_type_to_zod(t, True, definitions) for t in non_null]
+    union = f"z.union([{', '.join(zod_types)}])"
+    return f"{union}.nullable()" if has_null else union
+
+
+def _zod_string_type(prop: dict[str, Any]) -> str:
+    """Resolve Zod type for a JSON Schema string property.
+
+    Args:
+        prop: Property schema with type 'string'.
+
+    Returns:
+        Zod type string.
+    """
+    if "const" in prop:
+        return f"z.literal('{prop['const']}')"
+    prop_format = prop.get("format")
+    if prop_format in _ZOD_STRING_FORMAT_MAP:
+        return _ZOD_STRING_FORMAT_MAP[prop_format]
+    if "enum" in prop:
+        enum_values = ", ".join(f"'{v}'" for v in prop["enum"])
+        return f"z.enum([{enum_values}])"
+    result = "z.string()"
+    min_length = prop.get("minLength")
+    max_length = prop.get("maxLength")
+    if min_length is not None:
+        result += f".min({min_length})"
+    if max_length is not None:
+        result += f".max({max_length})"
+    return result
+
+
+def _zod_object_type(prop: dict[str, Any], definitions: dict[str, Any]) -> str:
+    """Resolve Zod type for a JSON Schema object property.
+
+    Args:
+        prop: Property schema with type 'object'.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Zod type string.
+    """
+    if "properties" in prop:
+        return generate_zod_object_schema(prop, definitions)
+    additional = prop.get("additionalProperties")
+    if additional:
+        if additional is True:
+            return "z.record(z.string(), z.unknown())"
+        value_type = json_type_to_zod(additional, True, definitions)
+        return f"z.record(z.string(), {value_type})"
+    return "z.object({}).passthrough()"
+
+
 def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str, Any]) -> str:
     """Convert JSON Schema type to Zod type.
 
@@ -635,69 +933,23 @@ def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str
         Zod type string representation.
     """
     if "$ref" in prop:
-        ref_path = prop["$ref"]
-        ref_name = ref_path.split("/")[-1]
+        ref_name = prop["$ref"].split("/")[-1]
         return f"{ref_name}Schema"
     if "anyOf" in prop:
-        types = prop["anyOf"]
-        non_null = [t for t in types if t.get("type") != "null"]
-        has_null = any(t.get("type") == "null" for t in types)
-        if len(non_null) == 1:
-            base = json_type_to_zod(non_null[0], True, definitions)
-            if has_null:
-                return f"{base}.nullable()"
-            return base
-        zod_types = [json_type_to_zod(t, True, definitions) for t in non_null]
-        union = f"z.union([{', '.join(zod_types)}])"
-        if has_null:
-            return f"{union}.nullable()"
-        return union
+        return _zod_anyof_type(prop, definitions)
     if "allOf" in prop:
         return json_type_to_zod(prop["allOf"][0], required, definitions)
     prop_type = prop.get("type")
-    prop_format = prop.get("format")
-    min_length = prop.get("minLength")
-    max_length = prop.get("maxLength")
+    if prop_type in _ZOD_SIMPLE_TYPE_MAP:
+        return _ZOD_SIMPLE_TYPE_MAP[prop_type]
     if prop_type == "string":
-        if "const" in prop:
-            return f"z.literal('{prop['const']}')"
-        if prop_format == "date-time":
-            return "z.string().datetime()"
-        if prop_format == "uuid":
-            return "z.string().uuid()"
-        if prop_format == "email":
-            return "z.string().email()"
-        if "enum" in prop:
-            enum_values = ", ".join(f"'{v}'" for v in prop["enum"])
-            return f"z.enum([{enum_values}])"
-        result = "z.string()"
-        if min_length is not None:
-            result += f".min({min_length})"
-        if max_length is not None:
-            result += f".max({max_length})"
-        return result
-    if prop_type == "integer":
-        return "z.number().int()"
-    if prop_type == "number":
-        return "z.number()"
-    if prop_type == "boolean":
-        return "z.boolean()"
-    if prop_type == "null":
-        return "z.null()"
+        return _zod_string_type(prop)
     if prop_type == "array":
         items = prop.get("items", {})
         item_type = json_type_to_zod(items, True, definitions)
         return f"z.array({item_type})"
     if prop_type == "object":
-        if "properties" in prop:
-            return generate_zod_object_schema(prop, definitions)
-        additional = prop.get("additionalProperties")
-        if additional:
-            if additional is True:
-                return "z.record(z.string(), z.unknown())"
-            value_type = json_type_to_zod(additional, True, definitions)
-            return f"z.record(z.string(), {value_type})"
-        return "z.object({}).passthrough()"
+        return _zod_object_type(prop, definitions)
     return "z.unknown()"
 
 
@@ -752,6 +1004,30 @@ def generate_zod_schema_definition(
     return f"export const {name}Schema = {zod_type}"
 
 
+def _build_schema_deps(
+    schemas: dict[str, Any],
+    ref_prefix: str,
+) -> dict[str, set[str]]:
+    """Build a dependency graph from schema $ref references.
+
+    Args:
+        schemas: Dictionary of schema definitions.
+        ref_prefix: Reference prefix to match in schema references.
+
+    Returns:
+        Mapping from schema name to its set of dependencies.
+    """
+    deps: dict[str, set[str]] = {}
+    for name, schema in schemas.items():
+        schema_str = json.dumps(schema)
+        deps[name] = {
+            other
+            for other in schemas
+            if other != name and f'"$ref": "{ref_prefix}{other}"' in schema_str
+        }
+    return deps
+
+
 def topological_sort_schemas(schemas: dict[str, Any], ref_prefix: str) -> list[str]:
     """Topological sort for Zod schema generation order.
 
@@ -762,13 +1038,7 @@ def topological_sort_schemas(schemas: dict[str, Any], ref_prefix: str) -> list[s
     Returns:
         List of schema names in dependency order.
     """
-    deps: dict[str, set[str]] = {}
-    for name, schema in schemas.items():
-        deps[name] = set()
-        schema_str = json.dumps(schema)
-        for other_name in schemas:
-            if other_name != name and f'"$ref": "{ref_prefix}{other_name}"' in schema_str:
-                deps[name].add(other_name)
+    deps = _build_schema_deps(schemas, ref_prefix)
     result: list[str] = []
     no_deps = [n for n, d in deps.items() if not d]
     while no_deps:
@@ -779,9 +1049,8 @@ def topological_sort_schemas(schemas: dict[str, Any], ref_prefix: str) -> list[s
                 other_deps.remove(name)
                 if not other_deps and other not in result:
                     no_deps.append(other)
-    for name in schemas:
-        if name not in result:
-            result.append(name)
+    remaining = [n for n in schemas if n not in result]
+    result.extend(remaining)
     return result
 
 
@@ -791,7 +1060,7 @@ def generate_zod_ws(project_root: Path) -> None:
     Args:
         project_root: Root directory of the project.
     """
-    schema_file = project_root / "build" / "ws-schemas.json"
+    schema_file = project_root / "build" / _WS_SCHEMAS_FILE
     output_file = project_root / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts"
     if not schema_file.exists():
         print(f"Error: {schema_file} not found. Run --export first.")
@@ -802,7 +1071,7 @@ def generate_zod_ws(project_root: Path) -> None:
     if not definitions:
         print("Error: No definitions found in build/ws-schemas.json")
         return
-    sorted_names = topological_sort_schemas(definitions, "#/definitions/")
+    sorted_names = topological_sort_schemas(definitions, _DEFS_REF_PREFIX)
     lines = [
         "/**",
         " * Generated Zod schemas for WebSocket message validation.",
@@ -829,7 +1098,7 @@ def generate_zod_api(project_root: Path) -> None:
     Args:
         project_root: Root directory of the project.
     """
-    openapi_path = project_root / "build" / "openapi.json"
+    openapi_path = project_root / "build" / _OPENAPI_FILE
     output_path = project_root / "frontend" / "src" / "lib" / "schemas" / "api.generated.zod.ts"
     if not openapi_path.exists():
         print(f"Error: {openapi_path} not found. Run --export first.")
@@ -840,7 +1109,7 @@ def generate_zod_api(project_root: Path) -> None:
     if not schemas:
         print("Error: No schemas found in build/openapi.json")
         return
-    sorted_names = topological_sort_schemas(schemas, "#/components/schemas/")
+    sorted_names = topological_sort_schemas(schemas, _COMPONENTS_REF_PREFIX)
     lines = [
         "/**",
         " * Generated Zod schemas for REST API validation.",
@@ -892,6 +1161,75 @@ def camel_to_lower(name: str) -> str:
     return name[0].lower() + name[1:]
 
 
+def _resolve_anyof_entity(
+    types: list[dict[str, Any]],
+    field_name: str,
+    all_schemas: dict[str, Any] | None,
+) -> str:
+    """Resolve anyOf union to a TypeScript type string.
+
+    Args:
+        types: List of type schemas from anyOf.
+        field_name: Name of the field being converted.
+        all_schemas: All schema definitions for reference resolution.
+
+    Returns:
+        TypeScript union type string.
+    """
+    non_null = [t for t in types if t.get("type") != "null"]
+    has_null = any(t.get("type") == "null" for t in types)
+    if len(non_null) == 1:
+        base = json_type_to_ts_entity(non_null[0], field_name, True, all_schemas)
+    else:
+        parts = [json_type_to_ts_entity(t, field_name, True, all_schemas) for t in non_null]
+        base = " | ".join(parts)
+    return f"{base} | null" if has_null else base
+
+
+_SIMPLE_TYPE_MAP: dict[str, str] = {
+    "integer": "number",
+    "number": "number",
+    "boolean": "boolean",
+    "null": "null",
+}
+
+
+def _resolve_primitive_type(
+    prop: dict[str, Any],
+    prop_type: str,
+    field_name: str,
+    all_schemas: dict[str, Any] | None,
+) -> str:
+    """Resolve a primitive JSON Schema type to TypeScript.
+
+    Args:
+        prop: Property schema dict.
+        prop_type: The JSON Schema type string.
+        field_name: Name of the field.
+        all_schemas: All schema definitions for reference resolution.
+
+    Returns:
+        TypeScript type string.
+    """
+    if prop_type in _SIMPLE_TYPE_MAP:
+        return _SIMPLE_TYPE_MAP[prop_type]
+    if prop_type == "string":
+        if "enum" in prop:
+            return " | ".join(f"'{v}'" for v in prop["enum"])
+        return "string"
+    if prop_type == "array":
+        items = prop.get("items", {})
+        item_type = json_type_to_ts_entity(items, field_name, True, all_schemas)
+        return f"{item_type}[]"
+    if prop_type == "object":
+        additional = prop.get("additionalProperties")
+        if additional and isinstance(additional, dict):
+            val_type = json_type_to_ts_entity(additional, field_name, True, all_schemas)
+            return f"Record<string, {val_type}>"
+        return "Record<string, unknown>"
+    return "unknown"
+
+
 def json_type_to_ts_entity(
     prop: dict[str, Any],
     field_name: str,
@@ -910,60 +1248,89 @@ def json_type_to_ts_entity(
         TypeScript type string representation.
     """
     if "$ref" in prop and all_schemas:
-        ref_path = prop["$ref"]
-        ref_name = ref_path.split("/")[-1]
-        ref_schema = all_schemas.get(ref_name, {})
-        return json_type_to_ts_entity(ref_schema, field_name, required, all_schemas)
+        ref_name = prop["$ref"].split("/")[-1]
+        return json_type_to_ts_entity(
+            all_schemas.get(ref_name, {}), field_name, required, all_schemas
+        )
 
     if "anyOf" in prop:
-        types = prop["anyOf"]
-        non_null = [t for t in types if t.get("type") != "null"]
-        has_null = any(t.get("type") == "null" for t in types)
-        if len(non_null) == 1:
-            base = json_type_to_ts_entity(non_null[0], field_name, True, all_schemas)
-            if has_null:
-                return f"{base} | null"
-            return base
-        ts_types = [json_type_to_ts_entity(t, field_name, True, all_schemas) for t in non_null]
-        union = " | ".join(ts_types)
-        if has_null:
-            return f"{union} | null"
-        return union
+        return _resolve_anyof_entity(prop["anyOf"], field_name, all_schemas)
 
     if "allOf" in prop:
         return json_type_to_ts_entity(prop["allOf"][0], field_name, required, all_schemas)
 
-    prop_type = prop.get("type")
-    prop_format = prop.get("format")
-
-    if prop_type == "string" and prop_format == "date-time":
+    prop_type: str = prop.get("type", "")
+    if prop_type == "string" and prop.get("format") == "date-time":
         return "Date"
 
     if field_name in ENTITY_UNION_ID_FIELDS:
         return "string | number"
 
-    if prop_type == "string":
-        if "enum" in prop:
-            return " | ".join(f"'{v}'" for v in prop["enum"])
-        return "string"
-    if prop_type in ("integer", "number"):
-        return "number"
-    if prop_type == "boolean":
-        return "boolean"
-    if prop_type == "array":
-        items = prop.get("items", {})
-        item_type = json_type_to_ts_entity(items, field_name, True, all_schemas)
-        return f"{item_type}[]"
-    if prop_type == "object":
-        additional = prop.get("additionalProperties")
-        if additional and isinstance(additional, dict):
-            val_type = json_type_to_ts_entity(additional, field_name, True, all_schemas)
-            return f"Record<string, {val_type}>"
-        return "Record<string, unknown>"
-    if prop_type == "null":
-        return "null"
+    return _resolve_primitive_type(prop, prop_type, field_name, all_schemas)
 
-    return "unknown"
+
+_ENTITY_UNION_THRESHOLD = 3
+_UNION_LINE_RE = re.compile(r"^(\s+\w+\??:\s+)((?:'[\w]+' \| )*'[\w]+')\s*$")
+
+
+def extract_repeated_unions(lines: list[str]) -> list[str]:
+    """Extract repeated inline string-literal unions as type aliases.
+
+    Scans generated TypeScript interface lines for inline union types
+    that appear at least ``_ENTITY_UNION_THRESHOLD`` times and replaces
+    them with type alias references.
+
+    Args:
+        lines: Generated TypeScript code lines.
+
+    Returns:
+        Modified lines with type aliases extracted.
+    """
+    union_occurrences: dict[str, list[tuple[int, str]]] = {}
+    for idx, line in enumerate(lines):
+        match = _UNION_LINE_RE.match(line)
+        if match:
+            union_str = match.group(2)
+            prefix = match.group(1).strip()
+            field_name = prefix.split(":")[0].rstrip("?").strip()
+            if union_str not in union_occurrences:
+                union_occurrences[union_str] = []
+            union_occurrences[union_str].append((idx, field_name))
+
+    repeated = {
+        u: occ for u, occ in union_occurrences.items() if len(occ) >= _ENTITY_UNION_THRESHOLD
+    }
+    if not repeated:
+        return lines
+
+    alias_map: dict[str, str] = {}
+    for union_str, occurrences in repeated.items():
+        camel = snake_to_camel(occurrences[0][1])
+        alias_map[union_str] = camel[0].upper() + camel[1:]
+
+    result = list(lines)
+    for union_str, occurrences in repeated.items():
+        alias = alias_map[union_str]
+        for idx, _ in occurrences:
+            result[idx] = result[idx].replace(union_str, alias)
+
+    insert_idx = 0
+    for i, line in enumerate(result):
+        if line.startswith("export interface"):
+            insert_idx = i
+            while insert_idx > 0 and result[insert_idx - 1].startswith((" *", "/**")):
+                insert_idx -= 1
+            break
+
+    alias_lines: list[str] = []
+    for union_str, alias in alias_map.items():
+        alias_lines.append(f"type {alias} = {union_str}")
+    alias_lines.append("")
+
+    for j, decl_line in enumerate(alias_lines):
+        result.insert(insert_idx + j, decl_line)
+
+    return result
 
 
 def generate_entity_interface(
@@ -1031,8 +1398,8 @@ def generate_entities(project_root: Path) -> None:
     Args:
         project_root: Root directory of the project.
     """
-    ws_schema_path = project_root / "build" / "ws-schemas.json"
-    api_schema_path = project_root / "build" / "openapi.json"
+    ws_schema_path = project_root / "build" / _WS_SCHEMAS_FILE
+    api_schema_path = project_root / "build" / _OPENAPI_FILE
     output_path = project_root / "frontend" / "src" / "types" / "entities.generated.ts"
 
     if not ws_schema_path.exists():
@@ -1061,13 +1428,11 @@ def generate_entities(project_root: Path) -> None:
         " */",
         "",
         "// Re-export common types from generated schemas",
-        "import type {",
+        "export type {",
         "  Side1 as TradeSide,",
         "  OrderType,",
         "  Status2 as HeartbeatStatus,",
         "} from './ws.generated'",
-        "",
-        "export type { TradeSide, OrderType, HeartbeatStatus }",
         "",
     ]
 
@@ -1111,6 +1476,8 @@ def generate_entities(project_root: Path) -> None:
         lines.extend(interface_lines)
         lines.append("")
         request_count += 1
+
+    lines = extract_repeated_unions(lines)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines))

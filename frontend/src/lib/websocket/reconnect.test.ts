@@ -99,10 +99,10 @@ describe('reconnect utilities', () => {
     })
   })
   describe('buildWebSocketUrl', () => {
-    const originalLocation = window.location
+    const originalLocation = globalThis.location
 
     beforeEach(() => {
-      Object.defineProperty(window, 'location', {
+      Object.defineProperty(globalThis, 'location', {
         value: {
           protocol: 'https:',
           host: 'example.com',
@@ -111,27 +111,27 @@ describe('reconnect utilities', () => {
       })
     })
     afterEach(() => {
-      Object.defineProperty(window, 'location', {
+      Object.defineProperty(globalThis, 'location', {
         value: originalLocation,
         writable: true,
       })
     })
     it('builds wss URL for https', () => {
-      Object.defineProperty(window, 'location', {
+      Object.defineProperty(globalThis, 'location', {
         value: { protocol: 'https:', host: 'example.com' },
         writable: true,
       })
       expect(buildWebSocketUrl()).toBe('wss://example.com/snapper/api/ws')
     })
     it('builds ws URL for http', () => {
-      Object.defineProperty(window, 'location', {
+      Object.defineProperty(globalThis, 'location', {
         value: { protocol: 'http:', host: 'localhost:3000' },
         writable: true,
       })
       expect(buildWebSocketUrl()).toBe('ws://localhost:3000/snapper/api/ws')
     })
     it('uses custom endpoint', () => {
-      Object.defineProperty(window, 'location', {
+      Object.defineProperty(globalThis, 'location', {
         value: { protocol: 'https:', host: 'example.com' },
         writable: true,
       })

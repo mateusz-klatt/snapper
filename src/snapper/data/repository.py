@@ -71,6 +71,8 @@ from snapper.data.models import MarketSnapshot
 from snapper.data.models import OrderRecord
 from snapper.data.models import Trade
 
+_MSSQL_PREFIX = "mssql+pyodbc://"
+
 __all__ = [
     "Repository",
     "SQLAlchemyRepository",
@@ -583,7 +585,7 @@ def get_repository(db_url: str) -> "Repository":
         Cached or newly created Repository instance.
     """
     if db_url not in _repository_cache:
-        if db_url.startswith("mssql+pyodbc://"):
+        if db_url.startswith(_MSSQL_PREFIX):
             _repository_cache[db_url] = MSSQLRepository(db_url)
         else:
             _repository_cache[db_url] = SQLAlchemyRepository(db_url)
@@ -675,7 +677,7 @@ class MSSQLRepository(Repository):
 
     @staticmethod
     def _ensure_driver(db_url: str) -> str:
-        if not db_url.startswith("mssql+pyodbc://"):
+        if not db_url.startswith(_MSSQL_PREFIX):
             return db_url
         if "?" not in db_url:
             return (
@@ -1035,7 +1037,7 @@ class DatabaseRepository:
             return db_url.replace("sqlite+aiosqlite://", "sqlite://")
         if db_url.startswith("postgresql+asyncpg://"):
             return db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
-        if db_url.startswith("mssql+pyodbc://"):
+        if db_url.startswith(_MSSQL_PREFIX):
             return db_url
         return db_url
 

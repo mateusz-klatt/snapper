@@ -131,12 +131,17 @@ export function MarketData() {
       {}
       <div className='flex items-center space-x-4'>
         <div className='flex items-center space-x-2'>
-          <label className='text-sm font-medium text-dark-300'>Instrument:</label>
+          <label htmlFor='instrument-select' className='text-sm font-medium text-dark-300'>
+            Instrument:
+          </label>
           <Select.Root
             value={selectedInstrument || 'EUR-USD'}
             onValueChange={setSelectedInstrument}
           >
-            <Select.Trigger className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'>
+            <Select.Trigger
+              id='instrument-select'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
+            >
               <Select.Value />
               <Select.Icon className='ml-2'>
                 <ChevronDownIcon size={16} />
@@ -160,9 +165,14 @@ export function MarketData() {
           </Select.Root>
         </div>
         <div className='flex items-center space-x-2'>
-          <label className='text-sm font-medium text-dark-300'>Timeframe:</label>
+          <label htmlFor='timeframe-select' className='text-sm font-medium text-dark-300'>
+            Timeframe:
+          </label>
           <Select.Root value={selectedTimeframe} onValueChange={setSelectedTimeframe}>
-            <Select.Trigger className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'>
+            <Select.Trigger
+              id='timeframe-select'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
+            >
               <Select.Value />
               <Select.Icon className='ml-2'>
                 <ChevronDownIcon size={16} />
@@ -224,19 +234,22 @@ export function MarketData() {
       )}
       {}
       <Card title='Price Chart' className='flex-1 p-6'>
-        {isLoading ? (
+        {isLoading && (
           <div className='flex items-center justify-center h-full'>
             <LoadingSpinner />
           </div>
-        ) : error ? (
+        )}
+        {!isLoading && error && (
           <div className='flex items-center justify-center h-full'>
             <p className='text-red-600'>
               Error loading chart data: {error?.message || 'Unknown error'}
             </p>
           </div>
-        ) : chartData.length > 0 ? (
+        )}
+        {!isLoading && !error && chartData.length > 0 && (
           <LightweightChart data={chartData} height={400} />
-        ) : (
+        )}
+        {!isLoading && !error && chartData.length === 0 && (
           <div className='flex items-center justify-center h-full'>
             <div className='text-center'>
               <p className='text-gray-500 mb-2'>No data available for {selectedInstrument}</p>

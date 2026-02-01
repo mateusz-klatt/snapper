@@ -83,8 +83,10 @@ export function getMessageTopic(message: WebSocketMessages): string | null {
   }
 }
 
+const THROTTLED_MESSAGE_TYPES = new Set(['bar', 'order_status', 'fill', 'position'])
+
 export function shouldThrottle(messageType: string): boolean {
-  return ['bar', 'order_status', 'fill', 'position'].includes(messageType)
+  return THROTTLED_MESSAGE_TYPES.has(messageType)
 }
 
 export const MARKET_TOPIC_PREFIX = 'market.'

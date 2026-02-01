@@ -8,13 +8,14 @@
  */
 
 // Re-export common types from generated schemas
-import type {
+export type {
   Side1 as TradeSide,
   OrderType,
   Status2 as HeartbeatStatus,
 } from './ws.generated'
 
-export type { TradeSide, OrderType, HeartbeatStatus }
+type Side = 'buy' | 'sell'
+type Exchange = 'paper' | 'kraken' | 'zonda' | 'walutomat'
 
 /**
  * Canonical Bar entity.
@@ -45,7 +46,7 @@ export interface Fill {
   clientOrderId: string
   instrument: string
   exchange: string
-  side: 'buy' | 'sell'
+  side: Side
   size: number
   price: number
   fee: number
@@ -72,7 +73,7 @@ export interface Heartbeat {
  */
 export interface OrderCancel {
   timestamp?: Date
-  exchange: 'paper' | 'kraken' | 'zonda' | 'walutomat'
+  exchange: Exchange
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
@@ -86,7 +87,7 @@ export interface OrderEvent {
   timestamp?: Date
   exchangeOrderId: string
   clientOrderId: string
-  exchange: 'paper' | 'kraken' | 'zonda' | 'walutomat'
+  exchange: Exchange
   instrument: string
   event: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   reason?: string | null
@@ -98,7 +99,7 @@ export interface OrderEvent {
  */
 export interface OrderReplace {
   timestamp?: Date
-  exchange: 'paper' | 'kraken' | 'zonda' | 'walutomat'
+  exchange: Exchange
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
@@ -113,10 +114,10 @@ export interface OrderReplace {
 export interface OrderRequest {
   timestamp?: Date
   strategyId: string
-  exchange: 'paper' | 'kraken' | 'zonda' | 'walutomat'
+  exchange: Exchange
   instrument: string
   mode: 'live' | 'paper'
-  side: 'buy' | 'sell'
+  side: Side
   orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
   quantity: number
   price?: number | null
@@ -134,7 +135,7 @@ export interface OrderStatus {
   clientOrderId: string
   instrument: string
   exchange: string
-  side: 'buy' | 'sell'
+  side: Side
   status: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
   size: number
@@ -182,7 +183,7 @@ export interface SettingChanged {
 export interface Signal {
   timestamp?: Date
   instrument: string
-  side: 'buy' | 'sell'
+  side: Side
   strength: number
   reason: string
   price?: number | null

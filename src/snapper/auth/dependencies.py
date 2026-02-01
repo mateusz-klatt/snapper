@@ -27,7 +27,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 
 
-async def get_current_user(
+def get_current_user(
     request: Request,
 ) -> UserProfile | None:
     """Extract current user from access token cookie.
@@ -55,7 +55,7 @@ async def get_current_user(
     return user
 
 
-async def require_authentication(
+def require_authentication(
     current_user: Annotated[UserProfile | None, Depends(get_current_user)],
 ) -> UserProfile:
     """Require authenticated user dependency.
@@ -88,7 +88,7 @@ def require_permission(permission: Permission) -> Any:
         Dependency function that validates permission.
     """
 
-    async def permission_checker(
+    def permission_checker(
         current_user: Annotated[UserProfile, Depends(require_authentication)],
     ) -> UserProfile:
         user_permissions = ROLE_PERMISSIONS.get(current_user.role, set())
@@ -117,7 +117,7 @@ def require_role(role: UserRole) -> Any:
         UserRole.ADMIN: 2,
     }
 
-    async def role_checker(
+    def role_checker(
         current_user: Annotated[UserProfile, Depends(require_authentication)],
     ) -> UserProfile:
         if role_hierarchy[current_user.role] < role_hierarchy[role]:
@@ -302,7 +302,7 @@ def get_csrf_manager() -> CSRFManager:
     return CSRFManager.get_instance()
 
 
-async def get_csrf_token(request: Request) -> str | None:
+def get_csrf_token(request: Request) -> str | None:
     """Extract CSRF token from request.
 
     Checks header first, then cookie.
@@ -319,7 +319,7 @@ async def get_csrf_token(request: Request) -> str | None:
     return request.cookies.get("csrf_token")
 
 
-async def validate_csrf_token(
+def validate_csrf_token(
     request: Request,
     csrf_token: Annotated[str | None, Depends(get_csrf_token)] = None,
 ) -> None:

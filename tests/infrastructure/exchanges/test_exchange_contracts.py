@@ -1,5 +1,7 @@
 """Unit tests for Kraken exchange OHLC schemas."""
 
+import pytest
+
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenCandleSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcEventEnvelope
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcSubscribeParamsSchema
@@ -41,8 +43,8 @@ def test_ohlc_candle_as_dict_returns_floats() -> None:
         timestamp="1700000000",
     )
     payload = candle.as_dict()
-    assert payload["open"] == 50000.0
-    assert payload["volume"] == 12.5
+    assert payload["open"] == pytest.approx(50000.0)
+    assert payload["volume"] == pytest.approx(12.5)
     assert payload["trades"] == 42
     assert payload["symbol"] == "BTC-USD"
 
@@ -72,4 +74,4 @@ def test_ohlc_message_helpers_return_primary_symbol_and_dicts() -> None:
     normalized = message.as_dicts()
     assert message.primary_symbol() == "ETH-USD"
     assert len(normalized) == 2
-    assert normalized[0]["close"] == 3025.0
+    assert normalized[0]["close"] == pytest.approx(3025.0)

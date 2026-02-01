@@ -162,7 +162,8 @@ async def authenticate_websocket(
     auth_required = WSAuthRequiredResponse(timeout=AUTH_TIMEOUT_SECONDS)
     await websocket.send_text(auth_required.model_dump_json())
     try:
-        raw_message = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
+        async with asyncio.timeout(AUTH_TIMEOUT_SECONDS):
+            raw_message = await websocket.receive_text()
     except TimeoutError:
         auth_failed = WSAuthFailedResponse(reason="timeout")
         await websocket.send_text(auth_failed.model_dump_json())

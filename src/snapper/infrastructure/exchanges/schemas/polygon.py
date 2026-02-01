@@ -25,18 +25,26 @@ from pydantic import Field
 
 from snapper.infrastructure.exchanges.schemas.base import EXCHANGE_SCHEMA_CONFIG
 
+_OPEN_DESC = "Opening price"
+_HIGH_DESC = "High price"
+_LOW_DESC = "Low price"
+_CLOSE_DESC = "Closing price"
+_VOLUME_DESC = "Trading volume"
+_VWAP_DESC = "Volume weighted average price"
+_TIMESTAMP_DESC = "Unix timestamp in milliseconds"
+
 
 class PolygonAgg(BaseModel):
     """OHLCV aggregate bar from Polygon.io API."""
 
     model_config = EXCHANGE_SCHEMA_CONFIG
-    open: float | None = Field(default=None, description="Opening price")
-    high: float | None = Field(default=None, description="High price")
-    low: float | None = Field(default=None, description="Low price")
-    close: float | None = Field(default=None, description="Closing price")
-    volume: float | None = Field(default=None, description="Trading volume")
-    vwap: float | None = Field(default=None, description="Volume weighted average price")
-    timestamp: int | None = Field(default=None, description="Unix timestamp in milliseconds")
+    open: float | None = Field(default=None, description=_OPEN_DESC)
+    high: float | None = Field(default=None, description=_HIGH_DESC)
+    low: float | None = Field(default=None, description=_LOW_DESC)
+    close: float | None = Field(default=None, description=_CLOSE_DESC)
+    volume: float | None = Field(default=None, description=_VOLUME_DESC)
+    vwap: float | None = Field(default=None, description=_VWAP_DESC)
+    timestamp: int | None = Field(default=None, description=_TIMESTAMP_DESC)
     transactions: int | None = Field(default=None, description="Number of transactions")
     otc: bool | None = Field(default=None, description="Whether this is OTC data")
 
@@ -68,13 +76,13 @@ class PolygonGroupedAgg(BaseModel):
 
     model_config = EXCHANGE_SCHEMA_CONFIG
     ticker: str = Field(description="Ticker symbol (e.g., X:BTCUSD)")
-    open: float | None = Field(default=None, description="Opening price")
-    high: float | None = Field(default=None, description="High price")
-    low: float | None = Field(default=None, description="Low price")
-    close: float | None = Field(default=None, description="Closing price")
-    volume: float | None = Field(default=None, description="Trading volume")
-    vwap: float | None = Field(default=None, description="Volume weighted average price")
-    timestamp: int | None = Field(default=None, description="Unix timestamp in milliseconds")
+    open: float | None = Field(default=None, description=_OPEN_DESC)
+    high: float | None = Field(default=None, description=_HIGH_DESC)
+    low: float | None = Field(default=None, description=_LOW_DESC)
+    close: float | None = Field(default=None, description=_CLOSE_DESC)
+    volume: float | None = Field(default=None, description=_VOLUME_DESC)
+    vwap: float | None = Field(default=None, description=_VWAP_DESC)
+    timestamp: int | None = Field(default=None, description=_TIMESTAMP_DESC)
     transactions: int | None = Field(default=None, description="Number of transactions")
 
     @classmethod
@@ -105,13 +113,13 @@ class PolygonPreviousClose(BaseModel):
 
     model_config = EXCHANGE_SCHEMA_CONFIG
     ticker: str = Field(description="Ticker symbol")
-    open: float | None = Field(default=None, description="Opening price")
-    high: float | None = Field(default=None, description="High price")
-    low: float | None = Field(default=None, description="Low price")
-    close: float | None = Field(default=None, description="Closing price")
-    volume: float | None = Field(default=None, description="Trading volume")
-    vwap: float | None = Field(default=None, description="Volume weighted average price")
-    timestamp: int | None = Field(default=None, description="Unix timestamp in milliseconds")
+    open: float | None = Field(default=None, description=_OPEN_DESC)
+    high: float | None = Field(default=None, description=_HIGH_DESC)
+    low: float | None = Field(default=None, description=_LOW_DESC)
+    close: float | None = Field(default=None, description=_CLOSE_DESC)
+    volume: float | None = Field(default=None, description=_VOLUME_DESC)
+    vwap: float | None = Field(default=None, description=_VWAP_DESC)
+    timestamp: int | None = Field(default=None, description=_TIMESTAMP_DESC)
 
     @classmethod
     def from_sdk_agg(cls, ticker: str, agg: Any) -> "PolygonPreviousClose":

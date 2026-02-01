@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BaseURL</key>
+	<string>http://localhost:8000</string>
+	<key>APIPrefix</key>
+	<string>/snapper/api</string>
+	<key>Endpoints</key>
+	<dict>
+		<key>Login</key>
+		<string>/auth/login</string>
+		<key>Logout</key>
+		<string>/auth/logout</string>
+		<key>Refresh</key>
+		<string>/auth/refresh</string>
+		<key>Me</key>
+		<string>/auth/me</string>
+		<key>Orders</key>
+		<string>/orders</string>
+		<key>Portfolio</key>
+		<string>/portfolio</string>
+		<key>Positions</key>
+		<string>/portfolio/positions</string>
+		<key>MarketData</key>
+		<string>/market/data</string>
+		<key>Strategies</key>
+		<string>/strategies</string>
+	</dict>
+</dict>
+</plist>

@@ -223,7 +223,7 @@ export const useLatestSignals = (limit: number = 10) => {
     if (!signals) return []
 
     return signals
-      .sort((a, b) => (b.timestamp?.getTime() ?? 0) - (a.timestamp?.getTime() ?? 0))
+      .toSorted((a, b) => (b.timestamp?.getTime() ?? 0) - (a.timestamp?.getTime() ?? 0))
       .slice(0, limit)
   }, [signals, limit])
 

@@ -68,21 +68,19 @@ let mockClient: ReturnType<typeof createMockClient>
 let shouldThrowOnConnect = false
 
 vi.mock('../lib/websocket/client', () => {
-  return {
-    default: class MockWebSocketClient {
-      constructor() {
-        mockClient = createMockClient()
+  function MockWebSocketClient() {
+    mockClient = createMockClient()
 
-        if (shouldThrowOnConnect) {
-          mockClient.connect = vi.fn(() => {
-            throw new Error('Synchronous connect error')
-          })
-        }
+    if (shouldThrowOnConnect) {
+      mockClient.connect = vi.fn(() => {
+        throw new Error('Synchronous connect error')
+      })
+    }
 
-        return mockClient
-      }
-    },
+    return mockClient
   }
+
+  return { default: MockWebSocketClient }
 })
 describe('websocket store', () => {
   beforeEach(() => {
@@ -538,9 +536,10 @@ describe('websocket store', () => {
     shouldThrowOnConnect = false
   })
   it('uses fallback error message for non-Error connect failures', async () => {
+    const connectError = { code: 'CONNECT_FAIL' }
     const customClient = {
       connect: vi.fn(() => {
-        throw 'boom'
+        throw connectError
       }),
       disconnect: vi.fn(),
       subscribe: vi.fn(),
@@ -553,7 +552,7 @@ describe('websocket store', () => {
     useWebSocketStore.setState({
       wsClient: customClient as unknown as WebSocketClient,
     })
-    await expect(useWebSocketStore.getState().connect('ws://test')).rejects.toBe('boom')
+    await expect(useWebSocketStore.getState().connect('ws://test')).rejects.toBe(connectError)
     const state = useWebSocketStore.getState()
 
     expect(state.isConnecting).toBe(false)

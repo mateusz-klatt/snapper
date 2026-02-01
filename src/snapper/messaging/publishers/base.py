@@ -5,6 +5,7 @@ real-time market data from exchanges.
 """
 
 import asyncio
+import math
 from abc import ABC
 from abc import abstractmethod
 from datetime import UTC
@@ -32,6 +33,8 @@ from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
 from snapper.messaging.schemas.messages import TradeEnvelope
 from snapper.utils.logging import set_log_context
+
+_EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
 
 
 class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -155,6 +158,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info(f"{process_name}: Tasks cancelled")
+            raise
 
     async def stop(self) -> None:
         """Stop the publisher service and disconnect from exchange."""
@@ -191,7 +195,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             timeframe: Candle timeframe interval (e.g., '1m', '5m', '1h').
         """
         if not self._exchange_client:
-            logger.error("Exchange client not initialized")
+            logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_exchange_name()
         try:
@@ -225,7 +229,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             symbols: List of symbols to subscribe to for tick data.
         """
         if not self._exchange_client:
-            logger.error("Exchange client not initialized")
+            logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_exchange_name()
         try:
@@ -237,8 +241,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     exchange=exchange,
                     instrument=native_symbol,
                     volume=message.volume,
-                    bid=message.bid if message.bid != 0.0 else None,
-                    ask=message.ask if message.ask != 0.0 else None,
+                    bid=message.bid if not math.isclose(message.bid, 0.0) else None,
+                    ask=message.ask if not math.isclose(message.ask, 0.0) else None,
                     last=message.last,
                 )
                 topic = f"market.{exchange}.{native_symbol}.ticks"
@@ -254,7 +258,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             symbols: List of symbols to subscribe to for trade data.
         """
         if not self._exchange_client:
-            logger.error("Exchange client not initialized")
+            logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_exchange_name()
         try:
@@ -399,9 +403,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         try:
             while self.running:
                 try:
-                    topic, payload = await asyncio.wait_for(
-                        self.subscriber.recv_multipart(), timeout=1.0
-                    )
+                    async with asyncio.timeout(1.0):
+                        topic, payload = await self.subscriber.recv_multipart()
                     if topic == "system.symbol_mappings":
                         logger.info(
                             f"{exchange}_feed_publisher: Received symbol_mappings update, "

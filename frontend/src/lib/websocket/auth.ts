@@ -9,21 +9,19 @@ export function isAuthControlMessage(message: { type: string }): boolean {
 let wsTokenPromise: Promise<RefreshWsTokenResponse> | null = null
 
 async function fetchWsToken(): Promise<RefreshWsTokenResponse> {
-  if (!wsTokenPromise) {
-    wsTokenPromise = (async () => {
-      const data = await apiClient.postJSON<RefreshWsTokenResponse>(
-        '/snapper/api/auth/refresh',
-        undefined,
-        { skipRetry: true }
-      )
+  wsTokenPromise ??= (async () => {
+    const data = await apiClient.postJSON<RefreshWsTokenResponse>(
+      '/snapper/api/auth/refresh',
+      undefined,
+      { skipRetry: true }
+    )
 
-      if (!data || typeof data.ws_token !== 'string' || typeof data.ws_token_exp !== 'string') {
-        throw new Error('Invalid ws_token response from refresh endpoint')
-      }
+    if (!data || typeof data.ws_token !== 'string' || typeof data.ws_token_exp !== 'string') {
+      throw new Error('Invalid ws_token response from refresh endpoint')
+    }
 
-      return data
-    })()
-  }
+    return data
+  })()
 
   try {
     return await wsTokenPromise

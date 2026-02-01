@@ -14,6 +14,13 @@ from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessRoleType
 from snapper.core.types import ProcessRunStatusType
 
+_UNIQUE_PROCESS_NAME_DESC = "Unique process name"
+_CLASS_PATH_DESC = "Full Python class path"
+_METHOD_DESC = "Entry point method name"
+_LIFECYCLE_DESC = "Process lifecycle type"
+_ROLE_DESC = "Process role category"
+_PROCESS_NAME_DESC = "Process name"
+
 __all__ = [
     "ProcessStartRequest",
     "ProcessCreateRequest",
@@ -91,7 +98,7 @@ class ProcessCreateRequest(StrictApiSchema):
 
     name: str = Field(
         ...,
-        description="Unique process name",
+        description=_UNIQUE_PROCESS_NAME_DESC,
         pattern=r"^[a-z0-9_]+$",
         min_length=3,
         max_length=64,
@@ -252,11 +259,11 @@ class AvailableProcess(StrictApiSchema):
     """
 
     name: str = Field(description="Process identifier")
-    class_path: str = Field(description="Full Python class path")
-    method: str = Field(description="Entry point method name")
+    class_path: str = Field(description=_CLASS_PATH_DESC)
+    method: str = Field(description=_METHOD_DESC)
     description: str = Field(description="Human-readable description")
-    lifecycle: ProcessLifecycleType = Field(description="Process lifecycle type")
-    role: ProcessRoleType = Field(description="Process role category")
+    lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
+    role: ProcessRoleType = Field(description=_ROLE_DESC)
     tags: list[str] = Field(default_factory=list, description="Categorization tags")
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
 
@@ -296,17 +303,17 @@ class ConfiguredProcess(StrictApiSchema):
         active_run_id: Active run ID if running.
     """
 
-    name: str = Field(description="Unique process name")
+    name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
     enabled: bool = Field(description="Whether process autostarts on boot")
     running: bool = Field(description="Whether process is currently running")
     mode: str = Field(description="Execution mode (thread/process)")
-    class_path: str = Field(description="Full Python class path")
-    method: str = Field(description="Entry point method name")
+    class_path: str = Field(description=_CLASS_PATH_DESC)
+    method: str = Field(description=_METHOD_DESC)
     args: list[Any] = Field(default_factory=list, description="Constructor arguments")
     kwargs: dict[str, Any] = Field(default_factory=dict, description="Constructor kwargs")
     note: str | None = Field(None, description="Optional note")
-    lifecycle: ProcessLifecycleType = Field(description="Process lifecycle type")
-    role: ProcessRoleType = Field(description="Process role category")
+    lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
+    role: ProcessRoleType = Field(description=_ROLE_DESC)
     tags: list[str] = Field(default_factory=list, description="Categorization tags")
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
     is_one_shot: bool = Field(description="Whether process is one-shot task")
@@ -333,7 +340,7 @@ class ProcessCreatedInfo(StrictApiSchema):
         template: Template used for creation.
     """
 
-    name: str = Field(description="Unique process name")
+    name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
     template: str = Field(description="Template used for creation")
 
 
@@ -368,13 +375,13 @@ class ProcessSchemaResponse(StrictApiSchema):
 
     name: str = Field(description="Process identifier")
     description: str = Field(description="Human-readable description")
-    class_path: str = Field(description="Full Python class path")
-    method: str = Field(description="Entry point method name")
+    class_path: str = Field(description=_CLASS_PATH_DESC)
+    method: str = Field(description=_METHOD_DESC)
     default_enabled: bool = Field(description="Default autostart setting")
     default_mode: str = Field(description="Default execution mode")
     default_args: list[Any] = Field(default_factory=list, description="Default arguments")
     default_kwargs: dict[str, Any] = Field(default_factory=dict, description="Default kwargs")
-    lifecycle: ProcessLifecycleType = Field(description="Process lifecycle type")
+    lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 
 
 class ProcessRun(StrictApiSchema):
@@ -397,7 +404,7 @@ class ProcessRun(StrictApiSchema):
     """
 
     run_id: str = Field(description="Unique run identifier")
-    process_name: str = Field(description="Process name")
+    process_name: str = Field(description=_PROCESS_NAME_DESC)
     status: ProcessRunStatusType = Field(description="Run status")
     role: ProcessRoleType = Field(description="Process role")
     lifecycle: ProcessLifecycleType = Field(description="Process lifecycle")
@@ -435,10 +442,10 @@ class ProcessRuntimeStatus(StrictApiSchema):
         details: Additional process details.
     """
 
-    name: str = Field(description="Process name")
+    name: str = Field(description=_PROCESS_NAME_DESC)
     running: bool = Field(description="Whether process is currently running")
-    role: ProcessRoleType = Field(description="Process role category")
-    lifecycle: ProcessLifecycleType = Field(description="Process lifecycle type")
+    role: ProcessRoleType = Field(description=_ROLE_DESC)
+    lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
     active_run_id: str | None = Field(None, description="Active run ID if running")
     details: dict[str, Any] | None = Field(None, description="Additional process details")
 
@@ -454,7 +461,7 @@ class ProcessStartResponse(StrictApiSchema):
     """
 
     status: str = Field(description="Operation status (started, already_running, etc.)")
-    name: str = Field(description="Process name")
+    name: str = Field(description=_PROCESS_NAME_DESC)
     run_id: str | None = Field(None, description="Run ID if started")
     message: str | None = Field(None, description="Additional message")
 
@@ -469,5 +476,5 @@ class ProcessStopResponse(StrictApiSchema):
     """
 
     status: str = Field(description="Operation status (stopped, not_running, etc.)")
-    name: str = Field(description="Process name")
+    name: str = Field(description=_PROCESS_NAME_DESC)
     message: str | None = Field(None, description="Additional message")

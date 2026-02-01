@@ -18,8 +18,7 @@ class APIClient {
     private func request<T: Decodable>(
         endpoint: String,
         method: String = "GET",
-        body: Encodable? = nil,
-        requiresAuth: Bool = true
+        body: Encodable? = nil
     ) async throws -> T {
         guard let url = URL(string: "\(AppConfig.apiBaseURL)\(endpoint)") else {
             throw APIError.invalidURL
@@ -27,11 +26,7 @@ class APIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        if requiresAuth, let token = authService.getAccessToken() {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
+        request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
 
         if let body = body {
             let encoder = JSONEncoder()
@@ -58,53 +53,28 @@ class APIClient {
         return try decoder.decode(T.self, from: data)
     }
 
-    func fetchOrders() async throws -> [Order] {
+    func fetchOrders() async throws -> [OrderStatus] {
         return try await request(endpoint: AppConfig.Endpoints.orders)
     }
 
-    func createOrder(_ order: CreateOrderRequest) async throws -> Order {
-        return try await request(
-            endpoint: AppConfig.Endpoints.orders,
-            method: "POST",
-            body: order
-        )
-    }
-
-    func cancelOrder(orderId: String) async throws {
-        let _: EmptyResponse = try await request(
-            endpoint: "\(AppConfig.Endpoints.orders)/\(orderId)",
-            method: "DELETE"
-        )
-    }
-
-    func fetchPortfolio() async throws -> Portfolio {
-        return try await request(endpoint: AppConfig.Endpoints.portfolio)
-    }
-
-    func fetchPositions() async throws -> [Position] {
+    func fetchPositions() async throws -> [PositionSnapshot] {
         return try await request(endpoint: AppConfig.Endpoints.positions)
     }
 
-    func fetchMarketData(symbol: String) async throws -> MarketData {
-        return try await request(endpoint: "\(AppConfig.Endpoints.marketData)/\(symbol)")
+    func fetchSignals() async throws -> [TradingSignal] {
+        return try await request(endpoint: AppConfig.Endpoints.signals)
     }
 
-    func fetchStrategies() async throws -> [Strategy] {
-        return try await request(endpoint: AppConfig.Endpoints.strategies)
+    func fetchExecutions() async throws -> [ExecutionRecord] {
+        return try await request(endpoint: AppConfig.Endpoints.executions)
     }
 
-    func startStrategy(strategyId: String) async throws {
-        let _: EmptyResponse = try await request(
-            endpoint: "\(AppConfig.Endpoints.strategies)/\(strategyId)/start",
-            method: "POST"
-        )
+    func fetchSystemStatus() async throws -> SystemStatus {
+        return try await request(endpoint: AppConfig.Endpoints.status)
     }
 
-    func stopStrategy(strategyId: String) async throws {
-        let _: EmptyResponse = try await request(
-            endpoint: "\(AppConfig.Endpoints.strategies)/\(strategyId)/stop",
-            method: "POST"
-        )
+    func fetchHealth() async throws -> HealthCheckResponse {
+        return try await request(endpoint: AppConfig.Endpoints.health)
     }
 }
 
@@ -130,21 +100,3 @@ enum APIError: LocalizedError {
         }
     }
 }
-
-struct CreateOrderRequest: Codable {
-    let symbol: String
-    let side: String
-    let quantity: Double
-    let orderType: String
-    let price: Double?
-
-    enum CodingKeys: String, CodingKey {
-        case symbol
-        case side
-        case quantity
-        case orderType = "order_type"
-        case price
-    }
-}
-
-struct EmptyResponse: Codable {}

@@ -276,6 +276,18 @@ class TestUpdateConfig:
         with pytest.raises(FileNotFoundError, match=".pre-commit-config.yaml not found"):
             update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
 
+    def test_raises_for_path_traversal(self, tmp_path: Path) -> None:
+        """Verify raises for path with traversal components.
+
+        Given: A config path containing '..' components,
+        When: update_config is called with this path,
+        Then: Raises ValueError indicating path traversal.
+        """
+        config = tmp_path / ".." / ".pre-commit-config.yaml"
+
+        with pytest.raises(ValueError, match="must not contain"):
+            update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+
     def test_handles_repo_without_dash(self, tmp_path: Path) -> None:
         """Verify handles repo without dash.
 

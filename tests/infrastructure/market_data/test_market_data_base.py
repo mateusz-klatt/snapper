@@ -31,6 +31,7 @@ class TestMarketSnapshotServiceCoverage:
         mock_exchange.disconnect_websocket.__name__ = "disconnect_websocket"
 
         async def async_disconnect() -> None:
+            """Intentionally empty async stub for testing."""
             pass
 
         mock_exchange.disconnect_websocket.side_effect = async_disconnect
@@ -84,9 +85,9 @@ class TestMarketSnapshotServiceCoverage:
         snapshot = saved_snapshots[0]
         assert isinstance(snapshot, MarketSnapshot)
         assert snapshot.symbol == "BTC-USD"
-        assert snapshot.bid == 50000.0
-        assert snapshot.ask == 50100.0
-        assert snapshot.spread == 100.0
+        assert snapshot.bid == pytest.approx(50000.0)
+        assert snapshot.ask == pytest.approx(50100.0)
+        assert snapshot.spread == pytest.approx(100.0)
         assert snapshot.spread_pct is not None
         assert abs(snapshot.spread_pct - 0.1998) < 0.01
 
@@ -208,7 +209,7 @@ class TestMarketSnapshotServiceCoverage:
         assert count == 3
         saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
         assert len(saved_snapshots) == 1
-        assert saved_snapshots[0].bid == 50200.0
+        assert saved_snapshots[0].bid == pytest.approx(50200.0)
 
     async def test_update_market_snapshots_stops_at_2000_snapshots(
         self,
@@ -286,7 +287,7 @@ class TestMarketSnapshotServiceCoverage:
         await service.update_market_snapshots()
         saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
         snapshot = saved_snapshots[0]
-        assert snapshot.spread == 10.0
+        assert snapshot.spread == pytest.approx(10.0)
         mid = (3000.0 + 3010.0) / 2
         expected_spread_pct = (10.0 / mid) * 100
         assert abs(snapshot.spread_pct - expected_spread_pct) < 0.001
@@ -328,7 +329,7 @@ class TestMarketSnapshotServiceCoverage:
         await service.update_market_snapshots()
         saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
         snapshot = saved_snapshots[0]
-        assert snapshot.spread_pct == 0.0
+        assert snapshot.spread_pct == pytest.approx(0.0)
 
     async def test_update_market_snapshots_handles_exception(
         self,

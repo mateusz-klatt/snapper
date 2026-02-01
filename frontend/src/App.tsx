@@ -3,7 +3,7 @@ import { useTabRouting } from './hooks/useHashRouting'
 import { useAppShell } from './hooks/useAppShell'
 import { ConnectionBar } from './components/ui'
 import { AppRoutes } from './components/AppRoutes'
-import { ALL_TABS, TabType } from './components/tabs'
+import { ALL_TABS } from './components/tabs'
 
 function App() {
   const [activeTab, navigateToTab] = useTabRouting()
@@ -38,7 +38,7 @@ function App() {
           {tabs.map(tab => (
             <button
               key={tab.id}
-              onClick={() => navigateToTab(tab.id as TabType)}
+              onClick={() => navigateToTab(tab.id)}
               className={`
                 flex items-center gap-2 px-3 py-4 text-sm font-medium border-b-2 transition-colors
                 ${

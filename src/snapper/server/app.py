@@ -129,6 +129,58 @@ def get_repository_dependency() -> Repository:
     return get_repository(settings.db_url)
 
 
+async def _initialize_settings_service(settings: AppSettings) -> Any:
+    """Initialize and configure SettingsService with ZMQ synchronization.
+
+    Args:
+        settings: Bootstrap application settings.
+
+    Returns:
+        Initialized SettingsService instance.
+    """
+    settings_service = await get_settings_service(
+        settings.db_url,
+        settings.zmq_broker_xpub,
+        settings.master_password,
+        settings.encryption_salt,
+    )
+    logger.info("AppSettings initialized with database access (cached, ZMQ-synced)")
+    return settings_service
+
+
+def _configure_auth_services(settings_service: Any) -> None:
+    """Configure authentication services with SettingsService.
+
+    Args:
+        settings_service: Initialized SettingsService instance.
+    """
+    token_manager = get_token_manager()
+    token_manager.set_settings_service(settings_service)
+    logger.info("TokenManager initialized with database settings")
+    csrf_manager = get_csrf_manager()
+    csrf_manager.set_settings_service(settings_service)
+    logger.info("CSRFManager initialized with database settings")
+    ws_token_service = get_ws_token_service()
+    ws_token_service.set_settings_service(settings_service)
+    logger.info("WsTokenService initialized with database settings")
+
+
+async def _shutdown_zmq_bridge(app: FastAPI) -> None:
+    """Stop ZMQ bridge and await its task during shutdown.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    ws_manager: WebSocketConnectionManager = app.state.manager
+    if not (ws_manager.zmq_bridge and app.state.zmq_bridge_task):
+        return
+    await ws_manager.zmq_bridge.stop()
+    try:
+        await app.state.zmq_bridge_task
+    except (Exception, asyncio.CancelledError) as e:
+        logger.warning(f"ZMQ bridge task failed during shutdown: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager.
@@ -147,24 +199,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     set_log_context("api")
     settings = get_settings()
-    settings_service = await get_settings_service(
-        settings.db_url,
-        settings.zmq_broker_xpub,
-        settings.master_password,
-        settings.encryption_salt,
-    )
+    settings_service = await _initialize_settings_service(settings)
     settings = get_settings_with_service(settings_service)
-    logger.info("AppSettings initialized with database access (cached, ZMQ-synced)")
     app.state.settings = settings
-    token_manager = get_token_manager()
-    token_manager.set_settings_service(settings_service)
-    logger.info("TokenManager initialized with database settings")
-    csrf_manager = get_csrf_manager()
-    csrf_manager.set_settings_service(settings_service)
-    logger.info("CSRFManager initialized with database settings")
-    ws_token_service = get_ws_token_service()
-    ws_token_service.set_settings_service(settings_service)
-    logger.info("WsTokenService initialized with database settings")
+    _configure_auth_services(settings_service)
     discover_processes()
     process_factory = ProcessLauncherService(settings)
     app.state.process_factory = process_factory
@@ -179,18 +217,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         yield
     except asyncio.CancelledError:
         logger.info("Application lifespan cancelled by shutdown signal")
+        raise
     finally:
         logger.info("Starting application shutdown sequence")
-        ws_manager: WebSocketConnectionManager = app.state.manager
-        if ws_manager.zmq_bridge and app.state.zmq_bridge_task:
-            await ws_manager.zmq_bridge.stop()
-            try:
-                await app.state.zmq_bridge_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.warning(f"ZMQ bridge task failed during shutdown: {e}")
+        await _shutdown_zmq_bridge(app)
         await process_factory.stop_all_processes()
+        manager = app.state.manager
         await manager.cleanup()
         await settings_service.shutdown()
         await dispose_repositories()
@@ -251,42 +283,84 @@ def create_app() -> FastAPI:
     return app
 
 
-def create_api_router(
-    manager: WebSocketConnectionManager,
-) -> APIRouter:
-    """Create the main API router with all REST endpoints.
+_STRATEGY_STATUS_KEYS: tuple[str, ...] = (
+    "signals_generated",
+    "trades_executed",
+    "last_signal",
+    "last_signal_time",
+    "pnl",
+    "pid",
+    "uptime",
+)
+
+
+def _normalize_strategy_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Normalize strategy status dictionary keys to strings.
 
     Args:
-        manager: WebSocket connection manager for accessing ZMQ bridge.
+        status: Raw strategy status dict.
 
     Returns:
-        APIRouter with health, candles, orders, signals, executions,
-        positions, WebSocket stats, and ZMQ health endpoints.
+        New dict with all keys converted to strings.
+    """
+    return {str(key): value for key, value in status.items()}
+
+
+def _build_strategy_payload(raw_status: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a strategy payload dict from a raw process status.
+
+    Returns None if the raw status does not represent a strategy.
+
+    Args:
+        raw_status: Raw process status dictionary.
+
+    Returns:
+        Strategy payload dict or None if not a strategy status.
+    """
+    if not isinstance(raw_status, dict):
+        return None
+    if "strategy_name" not in raw_status:
+        return None
+    normalized = _normalize_strategy_status(raw_status)
+    payload: dict[str, Any] = {
+        "strategy_name": str(normalized.get("strategy_name", "unknown")),
+        "status": normalized.get("status", "unknown"),
+        "details": normalized,
+    }
+    for key in _STRATEGY_STATUS_KEYS:
+        if key in normalized:
+            payload[key] = normalized[key]
+    return payload
+
+
+def _collect_strategy_statuses(process_factory: ProcessLauncherService) -> list[dict[str, Any]]:
+    """Collect strategy statuses from all running processes.
+
+    Args:
+        process_factory: Process launcher service with started processes.
+
+    Returns:
+        List of strategy payload dicts.
+    """
+    strategies: list[dict[str, Any]] = []
+    for process_name, process_instance in process_factory.started_processes.items():
+        try:
+            raw = process_instance.get_status()
+            payload = _build_strategy_payload(raw)
+            if payload is not None:
+                strategies.append(payload)
+        except Exception as exc:
+            logger.warning(f"Failed to get status from process '{process_name}': {exc}")
+    return strategies
+
+
+def _create_candles_signals_router() -> APIRouter:
+    """Create router for candles and signals endpoints.
+
+    Returns:
+        APIRouter with candles and signals endpoints.
     """
     router = APIRouter()
-    zmq_bridge = manager.zmq_bridge
-
-    def normalize_strategy_status(status: dict[str, Any]) -> dict[str, Any]:
-        normalized: dict[str, Any] = {}
-        for key, value in status.items():
-            normalized[str(key)] = value
-        return normalized
-
-    @router.get("/health")
-    async def health_check() -> HealthCheckResponse:
-        stats = manager.get_stats()
-        return HealthCheckResponse(
-            status="healthy",
-            timestamp=dt.datetime.now(dt.UTC),
-            version="0.1.0",
-            connections=stats["connections"],
-            topics=HealthTopics(
-                available=len(get_all_topic_names()),
-                active=stats["connections"].get(
-                    "active_topics", len(zmq_bridge.topic_subscriptions)
-                ),
-            ),
-        )
 
     @router.get("/candles", response_model=list[CandleSnapshot])
     async def get_candles(
@@ -334,46 +408,6 @@ def create_api_router(
             logger.error(f"Failed to fetch candles for {instrument}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
 
-    @router.get("/orders", response_model=list[OrderStatus])
-    async def get_orders(
-        _auth: Annotated[UserProfile, Depends(require_authentication)],
-        _csrf: Annotated[None, Depends(validate_csrf_token)],
-        symbol: str | None = Query(default=None, description="Symbol to filter by"),
-        limit: int = Query(default=100, ge=1, le=1000, description="Number of orders to return"),
-        offset: int = Query(default=0, ge=0, description="Number of orders to skip"),
-        repo: Repository = Depends(get_repository_dependency),
-    ) -> list[OrderStatus]:
-        try:
-            async with repo.session() as session:
-                query = select(OrderRecord, Instrument).join(Instrument)
-                if symbol:
-                    query = query.where(Instrument.symbol == symbol)
-                query = query.order_by(desc(OrderRecord.created_at)).offset(offset).limit(limit)
-                result = await session.execute(query)
-                orders_with_instruments = result.all()
-                return [
-                    OrderStatus(
-                        id=order.id,
-                        instrument=inst.symbol,
-                        exchange=order.exchange,
-                        client_order_id=order.client_order_id,
-                        exchange_order_id=order.exchange_order_id,
-                        created_at=order.created_at,
-                        updated_at=order.updated_at,
-                        side=order.side,
-                        type=order.type,
-                        price=order.price,
-                        size=order.size,
-                        status=order.status,
-                        time_in_force=order.time_in_force,
-                        error=order.error,
-                    )
-                    for order, inst in orders_with_instruments
-                ]
-        except Exception as exc:
-            logger.error(f"Failed to fetch orders: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
-
     @router.get("/signals", response_model=list[TradingSignal])
     async def get_signals(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
@@ -413,6 +447,57 @@ def create_api_router(
         except Exception as exc:
             logger.error(f"Failed to fetch signals: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch signals") from exc
+
+    return router
+
+
+def _create_orders_executions_router() -> APIRouter:
+    """Create router for orders, executions, and positions endpoints.
+
+    Returns:
+        APIRouter with orders, executions, and positions endpoints.
+    """
+    router = APIRouter()
+
+    @router.get("/orders", response_model=list[OrderStatus])
+    async def get_orders(
+        _auth: Annotated[UserProfile, Depends(require_authentication)],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        symbol: str | None = Query(default=None, description="Symbol to filter by"),
+        limit: int = Query(default=100, ge=1, le=1000, description="Number of orders to return"),
+        offset: int = Query(default=0, ge=0, description="Number of orders to skip"),
+        repo: Repository = Depends(get_repository_dependency),
+    ) -> list[OrderStatus]:
+        try:
+            async with repo.session() as session:
+                query = select(OrderRecord, Instrument).join(Instrument)
+                if symbol:
+                    query = query.where(Instrument.symbol == symbol)
+                query = query.order_by(desc(OrderRecord.created_at)).offset(offset).limit(limit)
+                result = await session.execute(query)
+                orders_with_instruments = result.all()
+                return [
+                    OrderStatus(
+                        id=order.id,
+                        instrument=inst.symbol,
+                        exchange=order.exchange,
+                        client_order_id=order.client_order_id,
+                        exchange_order_id=order.exchange_order_id,
+                        created_at=order.created_at,
+                        updated_at=order.updated_at,
+                        side=order.side,
+                        type=order.type,
+                        price=order.price,
+                        size=order.size,
+                        status=order.status,
+                        time_in_force=order.time_in_force,
+                        error=order.error,
+                    )
+                    for order, inst in orders_with_instruments
+                ]
+        except Exception as exc:
+            logger.error(f"Failed to fetch orders: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
 
     @router.get("/executions", response_model=list[ExecutionRecord])
     async def get_executions(
@@ -479,6 +564,39 @@ def create_api_router(
             logger.error(f"Failed to fetch positions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch positions") from exc
 
+    return router
+
+
+def _create_monitoring_endpoints_router(
+    manager: WebSocketConnectionManager,
+) -> APIRouter:
+    """Create router for monitoring endpoints (health, ws/stats, zmq/health, status).
+
+    Args:
+        manager: WebSocket connection manager.
+
+    Returns:
+        APIRouter with monitoring endpoints.
+    """
+    router = APIRouter()
+    zmq_bridge = manager.zmq_bridge
+
+    @router.get("/health")
+    async def health_check() -> HealthCheckResponse:
+        stats = manager.get_stats()
+        return HealthCheckResponse(
+            status="healthy",
+            timestamp=dt.datetime.now(dt.UTC),
+            version="0.1.0",
+            connections=stats["connections"],
+            topics=HealthTopics(
+                available=len(get_all_topic_names()),
+                active=stats["connections"].get(
+                    "active_topics", len(zmq_bridge.topic_subscriptions)
+                ),
+            ),
+        )
+
     @router.get("/ws/stats")
     async def websocket_stats(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
@@ -495,7 +613,7 @@ def create_api_router(
         bridge_section = ZmqBridgeStats(
             active_topics=len(zmq_bridge.topic_subscriptions),
             subscriber_tasks=len(zmq_bridge.subscriber_tasks),
-            available_topics=list(zmq_bridge.available_topics.keys()),
+            available_topics=list(zmq_bridge.available_topics),
         )
         return WsStatsResponse(
             websocket=websocket_section,
@@ -551,38 +669,34 @@ def create_api_router(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> SystemStatus:
-        strategies: list[dict[str, Any]] = []
         process_factory: ProcessLauncherService = request.app.state.process_factory
-        for process_name, process_instance in process_factory.started_processes.items():
-            try:
-                process_status_raw = process_instance.get_status()
-                if isinstance(process_status_raw, dict) and "strategy_name" in process_status_raw:
-                    normalized_status = normalize_strategy_status(process_status_raw)
-                    strategy_payload: dict[str, Any] = {
-                        "strategy_name": str(normalized_status.get("strategy_name", "unknown")),
-                        "status": normalized_status.get("status", "unknown"),
-                        "details": normalized_status,
-                    }
-                    for key in (
-                        "signals_generated",
-                        "trades_executed",
-                        "last_signal",
-                        "last_signal_time",
-                        "pnl",
-                        "pid",
-                        "uptime",
-                    ):
-                        if key in normalized_status:
-                            strategy_payload[key] = normalized_status[key]
-                    strategies.append(strategy_payload)
-            except Exception as exc:
-                logger.warning(f"Failed to get status from process '{process_name}': {exc}")
         return SystemStatus(
             trader=ProcessStatus(status="not_running"),
             backtests={},
-            strategies=strategies,
+            strategies=_collect_strategy_statuses(process_factory),
         )
 
+    return router
+
+
+def create_api_router(
+    manager: WebSocketConnectionManager,
+) -> APIRouter:
+    """Create the main API router with all REST endpoints.
+
+    Composes data-query and monitoring sub-routers into a single router.
+
+    Args:
+        manager: WebSocket connection manager for accessing ZMQ bridge.
+
+    Returns:
+        APIRouter with health, candles, orders, signals, executions,
+        positions, WebSocket stats, and ZMQ health endpoints.
+    """
+    router = APIRouter()
+    router.include_router(_create_candles_signals_router())
+    router.include_router(_create_orders_executions_router())
+    router.include_router(_create_monitoring_endpoints_router(manager))
     return router
 
 

@@ -93,6 +93,71 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
         """
         return "polygon_symbol_mappings_last_update"
 
+    @staticmethod
+    def _split_native_symbol(
+        native_symbol: str, symbol_data: dict[str, Any]
+    ) -> tuple[str, str | None]:
+        """Split a native symbol into base and quote components.
+
+        For pair symbols (containing '-'), splits on the separator.
+        For single-ticker symbols, extracts quote from symbol metadata.
+
+        Args:
+            native_symbol: Native symbol string.
+            symbol_data: Symbol metadata from Polygon API.
+
+        Returns:
+            Tuple of (base currency, quote currency or None).
+        """
+        if "-" in native_symbol:
+            base, quote = native_symbol.split("-", 1)
+            return base, quote
+        currency: str = symbol_data.get("currency_symbol") or symbol_data.get("currency_name", "")
+        quote_value: str | None = currency.upper() if currency else None
+        return native_symbol, quote_value
+
+    def _upsert_polygon_mapping(
+        self,
+        session: Any,
+        native_symbol: str,
+        ticker: str,
+        base: str,
+        quote: str | None,
+        now: datetime,
+        stats: dict[str, int],
+    ) -> None:
+        """Insert or update a single Polygon symbol mapping.
+
+        Args:
+            session: SQLAlchemy session.
+            native_symbol: Native symbol string.
+            ticker: Polygon ticker string.
+            base: Base currency code.
+            quote: Quote currency code or None.
+            now: Current timestamp for created_at/updated_at.
+            stats: Mutable stats dict to increment counters.
+        """
+        stmt = select(SymbolMapping).where(SymbolMapping.native_symbol == native_symbol)
+        mapping = session.execute(stmt).scalar_one_or_none()
+        if mapping is None:
+            if not self.insert_new:
+                stats["skipped"] += 1
+                return
+            new_mapping = SymbolMapping(
+                native_symbol=native_symbol,
+                base_currency=base,
+                quote_currency=quote,
+                polygon_symbol=ticker,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(new_mapping)
+            stats["inserted"] += 1
+        else:
+            mapping.polygon_symbol = ticker
+            mapping.updated_at = now
+            stats["updated"] += 1
+
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Update database with fetched symbol data.
 
@@ -112,36 +177,10 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
                     if not native_symbol:
                         stats["skipped"] += 1
                         continue
-                    base: str
-                    quote: str | None
-                    if "-" in native_symbol:
-                        base, quote = native_symbol.split("-", 1)
-                    else:
-                        base = native_symbol
-                        currency = symbol_data.get("currency_symbol") or symbol_data.get(
-                            "currency_name", ""
-                        )
-                        quote = currency.upper() if currency else None
-                    stmt = select(SymbolMapping).where(SymbolMapping.native_symbol == native_symbol)
-                    mapping = session.execute(stmt).scalar_one_or_none()
-                    if mapping is None:
-                        if not self.insert_new:
-                            stats["skipped"] += 1
-                            continue
-                        mapping = SymbolMapping(
-                            native_symbol=native_symbol,
-                            base_currency=base,
-                            quote_currency=quote,
-                            polygon_symbol=ticker,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                        session.add(mapping)
-                        stats["inserted"] += 1
-                    else:
-                        mapping.polygon_symbol = ticker
-                        mapping.updated_at = now
-                        stats["updated"] += 1
+                    base, quote = self._split_native_symbol(native_symbol, symbol_data)
+                    self._upsert_polygon_mapping(
+                        session, native_symbol, ticker, base, quote, now, stats
+                    )
                     total_processed = stats["updated"] + stats["inserted"]
                     if total_processed % 1000 == 0 and total_processed > 0:
                         session.commit()
@@ -151,6 +190,51 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
         except Exception as e:
             logger.error(f"Error updating database: {e}")
             raise
+
+    @staticmethod
+    def _native_from_currencies(
+        base_currency: str | None, quote_currency: str | None
+    ) -> str | None:
+        """Build native symbol from base and quote currency if both present.
+
+        Args:
+            base_currency: Base currency symbol.
+            quote_currency: Quote currency symbol.
+
+        Returns:
+            Native symbol string or None if either currency is missing.
+        """
+        if base_currency and quote_currency:
+            return f"{base_currency.upper()}-{quote_currency.upper()}"
+        return None
+
+    @staticmethod
+    def _native_from_crypto_pair(pair: str) -> str | None:
+        """Parse crypto pair string (X: prefix removed) into native format.
+
+        Args:
+            pair: Ticker string after removing the X: prefix.
+
+        Returns:
+            Native symbol or None if pair is too short.
+        """
+        if len(pair) >= 6:
+            return f"{pair[:3].upper()}-{pair[3:6].upper()}"
+        return None
+
+    @staticmethod
+    def _native_from_forex_pair(pair: str) -> str | None:
+        """Parse forex pair string (C: prefix removed) into native format.
+
+        Args:
+            pair: Ticker string after removing the C: prefix.
+
+        Returns:
+            Native symbol or None if pair length is not exactly 6.
+        """
+        if len(pair) == 6:
+            return f"{pair[:3].upper()}-{pair[3:].upper()}"
+        return None
 
     def _match_polygon_to_native(self, ticker: str, symbol_data: dict[str, Any]) -> str | None:
         """Match Polygon ticker to native symbol format.
@@ -165,23 +249,13 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
         base_currency = symbol_data.get("base_currency_symbol")
         quote_currency = symbol_data.get("currency_symbol")
         if ticker.startswith("X:"):
-            if base_currency and quote_currency:
-                return f"{base_currency.upper()}-{quote_currency.upper()}"
-            pair = ticker[2:]
-            if len(pair) >= 6:
-                base = pair[:3]
-                quote = pair[3:6]
-                return f"{base.upper()}-{quote.upper()}"
-        elif ticker.startswith("C:"):
-            if base_currency and quote_currency:
-                return f"{base_currency.upper()}-{quote_currency.upper()}"
-            pair = ticker[2:]
-            if len(pair) == 6:
-                base = pair[:3]
-                quote = pair[3:]
-                return f"{base.upper()}-{quote.upper()}"
-        elif ticker.startswith("I:"):
+            return self._native_from_currencies(base_currency, quote_currency) or (
+                self._native_from_crypto_pair(ticker[2:])
+            )
+        if ticker.startswith("C:"):
+            return self._native_from_currencies(base_currency, quote_currency) or (
+                self._native_from_forex_pair(ticker[2:])
+            )
+        if ticker.startswith("I:"):
             return ticker[2:]
-        else:
-            return ticker
-        return None
+        return ticker

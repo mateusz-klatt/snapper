@@ -333,7 +333,9 @@ async def test_subscribe_instruments_downloads_and_caches(
         saved_symbols.append(list(symbols))
 
     monkeypatch.setattr(client, "_save_symbols_to_cache", fake_save)
-    results = [item async for item in client.subscribe_instruments()]
+    results: list[dict[str, Any]] = []
+    async for item in client.subscribe_instruments():
+        results.append(item)
     assert results
     assert results[0]["ticker"] == "X:BTCUSD"
     assert saved_symbols
@@ -370,11 +372,13 @@ async def test_subscribe_instruments_saves_cache_with_missing_fields(
         saved_symbols.append(list(symbols))
 
     monkeypatch.setattr(client, "_save_symbols_to_cache", fake_save)
-    results = [item async for item in client.subscribe_instruments()]
+    results: list[dict[str, Any]] = []
+    async for item in client.subscribe_instruments():
+        results.append(item)
     assert results
     assert "ticker" in results[0]
     assert saved_symbols
-    assert list(saved_symbols[0][0].keys()) == ["ticker"]
+    assert list(saved_symbols[0][0]) == ["ticker"]
 
 
 @pytest.mark.asyncio
@@ -408,7 +412,9 @@ async def test_subscribe_instruments_sleeps_each_page(monkeypatch: pytest.Monkey
     client = PolygonExchangeClient(api_key="key")
     monkeypatch.setattr(client, "_is_cache_valid", lambda: False)
     monkeypatch.setattr(client, "_save_symbols_to_cache", lambda symbols: None)
-    results = [item async for item in client.subscribe_instruments()]
+    results: list[dict[str, Any]] = []
+    async for item in client.subscribe_instruments():
+        results.append(item)
     assert len(results) == 1000
     assert sleeps == [12]
 
@@ -435,7 +441,9 @@ async def test_subscribe_instruments_empty_skips_cache_save(
     client = PolygonExchangeClient(api_key="key")
     monkeypatch.setattr(client, "_is_cache_valid", lambda: False)
     monkeypatch.setattr(client, "_save_symbols_to_cache", fake_save)
-    results = [item async for item in client.subscribe_instruments()]
+    results: list[dict[str, Any]] = []
+    async for item in client.subscribe_instruments():
+        results.append(item)
     assert results == []
     assert saved_symbols == []
 
@@ -462,7 +470,9 @@ async def test_subscribe_instruments_handles_missing_ticker_field(
     client = PolygonExchangeClient(api_key="key")
     monkeypatch.setattr(client, "_is_cache_valid", lambda: False)
     monkeypatch.setattr(client, "_save_symbols_to_cache", lambda symbols: None)
-    results = [item async for item in client.subscribe_instruments()]
+    results: list[dict[str, Any]] = []
+    async for item in client.subscribe_instruments():
+        results.append(item)
     assert results
     assert "ticker" not in results[0]
     assert results[0].get("name") == "Missing ticker"
@@ -918,7 +928,7 @@ async def test_update_database_handles_exception(
     When: Update database called,
     Then: AssertionError raised.
     """
-    updater, repository = polygon_updater
+    updater, _repository = polygon_updater
     updater.repository = None
     symbols: list[dict[str, Any]] = [
         {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}

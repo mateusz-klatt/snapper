@@ -284,7 +284,7 @@ export function createOrder(
     side: overrides.side ?? ('buy' as const),
     status: overrides.status ?? 'open',
     order_type: overrides.order_type ?? ('limit' as const),
-    size: overrides.size ?? 1.0,
+    size: overrides.size ?? 1,
     filled_size: overrides.filled_size ?? 0,
     price: overrides.price ?? 50000,
     average_price: overrides.average_price ?? null,

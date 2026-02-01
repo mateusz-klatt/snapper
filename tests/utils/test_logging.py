@@ -499,7 +499,7 @@ def test_setup_logging_json_logs_executes_serializer(monkeypatch: pytest.MonkeyP
 
     def _fake_add(sink: object, **_: object) -> None:
         if callable(sink):
-            sink("{}")
+            cast(Callable[[str], object], sink)("{}")
 
     logger_obj = log_utils.logger
     monkeypatch.setattr(logger_obj, "add", _fake_add)

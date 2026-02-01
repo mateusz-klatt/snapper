@@ -31,6 +31,8 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -62,6 +64,8 @@ from snapper.infrastructure.exchanges.schemas.zonda import ZondaTransactionsMess
 from snapper.infrastructure.exchanges.schemas.zonda import create_ticker_update_from_caches
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import native_to_ccxt
+
+_CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 
 
 class ZondaExchangeClient(ExchangeClientBase):
@@ -174,42 +178,71 @@ class ZondaExchangeClient(ExchangeClientBase):
             self._ws = None
             logger.info("Disconnected from Zonda WebSocket")
 
+    async def _send_subscribe_pair(self, ticker_path: str, stats_path: str) -> None:
+        """Send a matched pair of public subscribe messages (ticker + stats).
+
+        Args:
+            ticker_path: Path for the ticker subscription.
+            stats_path: Path for the stats subscription.
+        """
+        assert self._ws is not None
+        for path in (ticker_path, stats_path):
+            msg = {
+                "action": "subscribe-public",
+                "module": "trading",
+                "path": path,
+            }
+            await self._ws.send(json.dumps(msg))
+
     async def _resubscribe(self) -> None:
         """Resubscribe to all channels after reconnection."""
         assert self._ws is not None
         if self._subscribed_symbols == ["*"]:
             logger.info("Resubscribing to ALL symbols (wildcard)...")
-            ticker_msg = {
-                "action": "subscribe-public",
-                "module": "trading",
-                "path": "ticker",
-            }
-            await self._ws.send(json.dumps(ticker_msg))
-            stats_msg = {
-                "action": "subscribe-public",
-                "module": "trading",
-                "path": "stats",
-            }
-            await self._ws.send(json.dumps(stats_msg))
+            await self._send_subscribe_pair("ticker", "stats")
             logger.info("Resubscribed to ALL Zonda symbols (ticker + stats)")
-        else:
-            logger.info(f"Resubscribing to {len(self._subscribed_symbols)} symbols...")
-            for symbol in self._subscribed_symbols:
-                symbol_lower = symbol.lower()
-                ticker_msg = {
-                    "action": "subscribe-public",
-                    "module": "trading",
-                    "path": f"ticker/{symbol_lower}",
-                }
-                await self._ws.send(json.dumps(ticker_msg))
-                stats_msg = {
-                    "action": "subscribe-public",
-                    "module": "trading",
-                    "path": f"stats/{symbol_lower}",
-                }
-                await self._ws.send(json.dumps(stats_msg))
-                logger.debug(f"Resubscribed to Zonda: {symbol} (ticker + stats)")
-            logger.info(f"Resubscribed to {len(self._subscribed_symbols)} Zonda symbols")
+            return
+        logger.info(f"Resubscribing to {len(self._subscribed_symbols)} symbols...")
+        for symbol in self._subscribed_symbols:
+            symbol_lower = symbol.lower()
+            await self._send_subscribe_pair(f"ticker/{symbol_lower}", f"stats/{symbol_lower}")
+            logger.debug(f"Resubscribed to Zonda: {symbol} (ticker + stats)")
+        logger.info(f"Resubscribed to {len(self._subscribed_symbols)} Zonda symbols")
+
+    async def _handle_connection_closed(self, context: str) -> None:
+        """Clean up after WebSocket connection closed and prepare for reconnect.
+
+        Args:
+            context: Description of which subscription lost the connection.
+        """
+        if self._message_handler_task and not self._message_handler_task.done():
+            self._message_handler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._message_handler_task
+        self._ws = None
+        self._seq_no.clear()
+        await asyncio.sleep(self._reconnect_delay)
+
+    def _ensure_message_handler_running(self) -> None:
+        """Start the message handler task if not already running."""
+        if not self._message_handler_task or self._message_handler_task.done():
+            self._message_handler_task = asyncio.create_task(self._message_handler())
+
+    async def _drain_queue(self, queue: asyncio.Queue[Any]) -> AsyncIterator[Any]:
+        """Yield items from an async queue with timeout polling.
+
+        Args:
+            queue: Async queue to read from.
+
+        Yields:
+            Items from the queue while running.
+        """
+        while self._running:
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=1.0)
+                yield data
+            except TimeoutError:
+                await asyncio.sleep(0.01)
 
     async def subscribe_ticks(
         self, symbols: list[str], snapshot: bool = False
@@ -241,23 +274,12 @@ class ZondaExchangeClient(ExchangeClientBase):
                 await self._resubscribe()
                 if snapshot:
                     await self._request_snapshots(symbols)
-                if not self._message_handler_task or self._message_handler_task.done():
-                    self._message_handler_task = asyncio.create_task(self._message_handler())
-                while self._running:
-                    try:
-                        ticker_data = await asyncio.wait_for(self._tick_queue.get(), timeout=1.0)
-                        yield ticker_data
-                    except TimeoutError:
-                        await asyncio.sleep(0.01)
+                self._ensure_message_handler_running()
+                async for ticker_data in self._drain_queue(self._tick_queue):
+                    yield ticker_data
             except ConnectionClosed as e:
                 logger.warning(f"Connection closed by CloudFlare proxy: {e}. Reconnecting...")
-                if self._message_handler_task and not self._message_handler_task.done():
-                    self._message_handler_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._message_handler_task
-                self._ws = None
-                self._seq_no.clear()
-                await asyncio.sleep(self._reconnect_delay)
+                await self._handle_connection_closed("ticks")
             except Exception as e:
                 logger.error(f"Zonda WebSocket subscription error: {e}")
                 if self._running:
@@ -267,50 +289,13 @@ class ZondaExchangeClient(ExchangeClientBase):
                     raise
 
     async def _message_handler(self) -> None:
+        """Read WebSocket messages and dispatch to action-specific handlers."""
         assert self._ws is not None
         try:
             async for message in self._ws:
                 try:
                     data = json.loads(message)
-                    action = data.get("action", "")
-                    if action == "push":
-                        topic = data.get("topic", "")
-                        seq_no = data.get("seqNo")
-                        if seq_no is not None and topic:
-                            last_seq = self._seq_no.get(topic, 0)
-                            if seq_no <= last_seq:
-                                logger.warning(
-                                    f"Out-of-order seqNo for {topic}: "
-                                    f"received {seq_no}, expected > {last_seq}"
-                                )
-                                continue
-                            self._seq_no[topic] = seq_no
-                        if topic.startswith("trading/ticker"):
-                            await self._parse_ticker_message(data)
-                        elif topic.startswith("trading/stats"):
-                            await self._parse_stats_message(data)
-                        elif topic.startswith("trading/transactions/"):
-                            await self._parse_transactions_message(data)
-                        elif topic.startswith("trading/history/transactions"):
-                            await self._parse_executions_message(data)
-                    elif action == "subscribe-public-confirm":
-                        module = data.get("module", "unknown")
-                        path = data.get("path", "unknown")
-                        logger.debug(f"Subscription confirmed: {module}/{path}")
-                    elif action == "subscribe-private-confirm":
-                        module = data.get("module", "unknown")
-                        path = data.get("path", "unknown")
-                        logger.debug(f"Private subscription confirmed: {module}/{path}")
-                    elif action == "subscribe-public-error":
-                        logger.error(f"Subscription error: {data}")
-                    elif action == "subscribe-private-error":
-                        logger.error(f"Private subscription error: {data}")
-                    elif action == "proxy-response":
-                        await self._parse_proxy_response(data)
-                    elif action == "pong":
-                        logger.debug("Pong received from server")
-                    elif action == "json-error":
-                        logger.error(f"JSON error from server: {data}")
+                    await self._dispatch_ws_action(data)
                 except json.JSONDecodeError as e:
                     logger.warning(f"Failed to parse Zonda message: {e}")
                 except Exception as e:
@@ -321,6 +306,87 @@ class ZondaExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"Zonda message handler error: {e}")
             return
+
+    @staticmethod
+    def _log_subscription_confirm(data: dict[str, Any]) -> None:
+        """Log a subscription confirmation message.
+
+        Args:
+            data: WebSocket message with action, module, and path fields.
+        """
+        action = data.get("action", "")
+        module = data.get("module", "unknown")
+        path = data.get("path", "unknown")
+        prefix = "Private s" if "private" in action else "S"
+        logger.debug(f"{prefix}ubscription confirmed: {module}/{path}")
+
+    async def _dispatch_ws_action(self, data: dict[str, Any]) -> None:
+        """Dispatch a parsed WebSocket message based on its action field.
+
+        Args:
+            data: Parsed JSON message from WebSocket.
+        """
+        action = data.get("action", "")
+        async_handlers: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {
+            "push": self._handle_push_message,
+            "proxy-response": self._parse_proxy_response,
+        }
+        async_handler = async_handlers.get(action)
+        if async_handler:
+            await async_handler(data)
+            return
+        sync_actions: dict[str, Callable[[dict[str, Any]], None]] = {
+            "subscribe-public-confirm": self._log_subscription_confirm,
+            "subscribe-private-confirm": self._log_subscription_confirm,
+            "subscribe-public-error": lambda d: logger.error(f"Subscription error: {d}"),
+            "subscribe-private-error": lambda d: logger.error(f"Private subscription error: {d}"),
+            "pong": lambda d: logger.debug("Pong received from server"),
+            "json-error": lambda d: logger.error(f"JSON error from server: {d}"),
+        }
+        sync_handler = sync_actions.get(action)
+        if sync_handler:
+            sync_handler(data)
+
+    def _validate_sequence_number(self, topic: str, seq_no: int | None) -> bool:
+        """Validate and update sequence number for a topic.
+
+        Args:
+            topic: The topic to validate against.
+            seq_no: Sequence number from the message, or None.
+
+        Returns:
+            True if the message should be processed, False if out-of-order.
+        """
+        if seq_no is None or not topic:
+            return True
+        last_seq = self._seq_no.get(topic, 0)
+        if seq_no <= last_seq:
+            logger.warning(
+                f"Out-of-order seqNo for {topic}: received {seq_no}, expected > {last_seq}"
+            )
+            return False
+        self._seq_no[topic] = seq_no
+        return True
+
+    async def _handle_push_message(self, data: dict[str, Any]) -> None:
+        """Handle a push-type WebSocket message with sequence number validation.
+
+        Args:
+            data: Push message with topic, seqNo, and message payload.
+        """
+        topic = data.get("topic", "")
+        if not self._validate_sequence_number(topic, data.get("seqNo")):
+            return
+        topic_routes: list[tuple[str, Callable[[dict[str, Any]], Awaitable[None]]]] = [
+            ("trading/ticker", self._parse_ticker_message),
+            ("trading/stats", self._parse_stats_message),
+            ("trading/transactions/", self._parse_transactions_message),
+            ("trading/history/transactions", self._parse_executions_message),
+        ]
+        for prefix, handler in topic_routes:
+            if topic.startswith(prefix):
+                await handler(data)
+                return
 
     async def _parse_ticker_message(self, data: dict[str, Any]) -> None:
         try:
@@ -365,54 +431,85 @@ class ZondaExchangeClient(ExchangeClientBase):
         except (ValueError, KeyError) as e:
             logger.warning(f"Failed to parse Zonda stats data: {e}, data={data}")
 
+    async def _send_proxy_pair(self, ticker_path: str, stats_path: str) -> None:
+        """Send a matched pair of proxy requests (ticker + stats) over WebSocket.
+
+        Args:
+            ticker_path: REST path for the ticker proxy request.
+            stats_path: REST path for the stats proxy request.
+        """
+        assert self._ws is not None
+        for snapshot_type, path in (("ticker", ticker_path), ("stats", stats_path)):
+            request_id = str(uuid.uuid4())
+            self._pending_snapshots[request_id] = snapshot_type
+            msg = {
+                "requestId": request_id,
+                "action": "proxy",
+                "module": "trading",
+                "path": path,
+            }
+            await self._ws.send(json.dumps(msg))
+
     async def _request_snapshots(self, symbols: list[str]) -> None:
+        """Request ticker and stats snapshots via proxy API.
+
+        Args:
+            symbols: List of symbols or ``['*']`` for wildcard.
+        """
         assert self._ws is not None
         if symbols == ["*"]:
-            request_id_ticker = str(uuid.uuid4())
-            request_id_stats = str(uuid.uuid4())
-            self._pending_snapshots[request_id_ticker] = "ticker"
-            self._pending_snapshots[request_id_stats] = "stats"
-            ticker_msg = {
-                "requestId": request_id_ticker,
-                "action": "proxy",
-                "module": "trading",
-                "path": "ticker",
-            }
-            await self._ws.send(json.dumps(ticker_msg))
-            stats_msg = {
-                "requestId": request_id_stats,
-                "action": "proxy",
-                "module": "trading",
-                "path": "stats",
-            }
-            await self._ws.send(json.dumps(stats_msg))
+            await self._send_proxy_pair("ticker", "stats")
             logger.info("Requested snapshots for ALL markets (wildcard)")
-        else:
-            logger.info(f"Requesting snapshots for {len(symbols)} symbols...")
-            for symbol in symbols:
-                symbol_lower = symbol.lower()
-                request_id_ticker = str(uuid.uuid4())
-                request_id_stats = str(uuid.uuid4())
-                self._pending_snapshots[request_id_ticker] = "ticker"
-                self._pending_snapshots[request_id_stats] = "stats"
-                ticker_msg = {
-                    "requestId": request_id_ticker,
-                    "action": "proxy",
-                    "module": "trading",
-                    "path": f"ticker/{symbol_lower}",
-                }
-                await self._ws.send(json.dumps(ticker_msg))
-                stats_msg = {
-                    "requestId": request_id_stats,
-                    "action": "proxy",
-                    "module": "trading",
-                    "path": f"stats/{symbol_lower}",
-                }
-                await self._ws.send(json.dumps(stats_msg))
-                await asyncio.sleep(0.01)
-                logger.debug(f"Requested snapshots for {symbol}")
+            return
+        logger.info(f"Requesting snapshots for {len(symbols)} symbols...")
+        for symbol in symbols:
+            symbol_lower = symbol.lower()
+            await self._send_proxy_pair(f"ticker/{symbol_lower}", f"stats/{symbol_lower}")
+            await asyncio.sleep(0.01)
+            logger.debug(f"Requested snapshots for {symbol}")
+
+    async def _handle_ticker_snapshot(self, body: dict[str, Any]) -> None:
+        """Process a ticker snapshot from a proxy response body.
+
+        Args:
+            body: Proxy response body dict.
+        """
+        ticker_data = body.get("ticker")
+        if not ticker_data:
+            return
+        market_code = ticker_data.get("market", {}).get("code", "")
+        push_data = {
+            "action": "push",
+            "topic": (f"trading/ticker/{market_code.lower()}" if market_code else "trading/ticker"),
+            "message": ticker_data,
+        }
+        await self._parse_ticker_message(push_data)
+        logger.debug(f"Parsed ticker snapshot: {market_code}")
+
+    async def _handle_stats_snapshot(self, body: dict[str, Any]) -> None:
+        """Process a stats snapshot from a proxy response body.
+
+        Args:
+            body: Proxy response body dict.
+        """
+        stats_data = body.get("stats")
+        if not stats_data:
+            return
+        stats_array = [stats_data] if isinstance(stats_data, dict) else stats_data
+        push_data = {
+            "action": "push",
+            "topic": "trading/stats",
+            "message": stats_array,
+        }
+        await self._parse_stats_message(push_data)
+        logger.debug(f"Parsed stats snapshot: {len(stats_array)} markets")
 
     async def _parse_proxy_response(self, data: dict[str, Any]) -> None:
+        """Parse and dispatch a proxy API response.
+
+        Args:
+            data: Raw proxy response dict from WebSocket.
+        """
         request_id = data.get("requestId")
         status_code = data.get("statusCode")
         body = data.get("body", {})
@@ -426,30 +523,13 @@ class ZondaExchangeClient(ExchangeClientBase):
         if body.get("status") != "Ok":
             logger.warning(f"Proxy response not OK: {body}")
             return
-        if snapshot_type == "ticker":
-            ticker_data = body.get("ticker")
-            if ticker_data:
-                market_code = ticker_data.get("market", {}).get("code", "")
-                push_data = {
-                    "action": "push",
-                    "topic": (
-                        f"trading/ticker/{market_code.lower()}" if market_code else "trading/ticker"
-                    ),
-                    "message": ticker_data,
-                }
-                await self._parse_ticker_message(push_data)
-                logger.debug(f"Parsed ticker snapshot: {market_code}")
-        elif snapshot_type == "stats":
-            stats_data = body.get("stats")
-            if stats_data:
-                stats_array = [stats_data] if isinstance(stats_data, dict) else stats_data
-                push_data = {
-                    "action": "push",
-                    "topic": "trading/stats",
-                    "message": stats_array,
-                }
-                await self._parse_stats_message(push_data)
-                logger.debug(f"Parsed stats snapshot: {len(stats_array)} markets")
+        snapshot_handlers = {
+            "ticker": self._handle_ticker_snapshot,
+            "stats": self._handle_stats_snapshot,
+        }
+        handler = snapshot_handlers.get(snapshot_type)
+        if handler:
+            await handler(body)
 
     async def _try_merge_and_emit(self, symbol: str) -> None:
         """Merge ticker and stats caches and emit combined update."""
@@ -602,7 +682,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             Exception: If order creation fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(request.symbol)
             order_params: dict[str, Any] = {}
@@ -652,7 +732,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             Exception: If cancellation fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
             ccxt_order = await asyncio.to_thread(
@@ -691,7 +771,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             Exception: If order fetch fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
             ccxt_order = await asyncio.to_thread(
@@ -736,7 +816,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             Exception: If orders fetch fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
             if status == OrderStatusEnum.OPEN:
@@ -786,7 +866,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             Exception: If balance fetch fails.
         """
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("API credentials required for trading")
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_balance = await asyncio.to_thread(self._ccxt_client.fetch_balance)
             balances: dict[str, AccountBalance] = {}
@@ -805,6 +885,23 @@ class ZondaExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")
             raise
+
+    async def _subscribe_to_transactions(self, symbols: list[str]) -> None:
+        """Send subscription messages for trade transactions.
+
+        Args:
+            symbols: List of symbols to subscribe to.
+        """
+        assert self._ws is not None
+        for symbol in symbols:
+            symbol_lower = symbol.lower()
+            msg = {
+                "action": "subscribe-public",
+                "module": "trading",
+                "path": f"transactions/{symbol_lower}",
+            }
+            await self._ws.send(json.dumps(msg))
+            logger.debug(f"Subscribed to Zonda transactions: {symbol}")
 
     async def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Subscribe to real-time trade updates.
@@ -829,33 +926,13 @@ class ZondaExchangeClient(ExchangeClientBase):
         while self._running:
             try:
                 await self.connect()
-                assert self._ws is not None
-                for symbol in symbols:
-                    symbol_lower = symbol.lower()
-                    msg = {
-                        "action": "subscribe-public",
-                        "module": "trading",
-                        "path": f"transactions/{symbol_lower}",
-                    }
-                    await self._ws.send(json.dumps(msg))
-                    logger.debug(f"Subscribed to Zonda transactions: {symbol}")
-                if not self._message_handler_task or self._message_handler_task.done():
-                    self._message_handler_task = asyncio.create_task(self._message_handler())
-                while self._running:
-                    try:
-                        trade_data = await asyncio.wait_for(self._trade_queue.get(), timeout=1.0)
-                        yield trade_data
-                    except TimeoutError:
-                        await asyncio.sleep(0.01)
+                await self._subscribe_to_transactions(symbols)
+                self._ensure_message_handler_running()
+                async for trade_data in self._drain_queue(self._trade_queue):
+                    yield trade_data
             except ConnectionClosed as e:
                 logger.warning(f"Trades connection closed: {e}. Reconnecting...")
-                if self._message_handler_task and not self._message_handler_task.done():
-                    self._message_handler_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._message_handler_task
-                self._ws = None
-                self._seq_no.clear()
-                await asyncio.sleep(self._reconnect_delay)
+                await self._handle_connection_closed("trades")
             except Exception as e:
                 logger.error(f"Zonda trades subscription error: {e}")
                 if self._running:
@@ -907,52 +984,80 @@ class ZondaExchangeClient(ExchangeClientBase):
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._candle_aggregator_task
 
+    def _update_candle_builder(self, trade: TradeUpdate) -> None:
+        """Update or create candle builder entry for a trade.
+
+        Args:
+            trade: Trade update to incorporate into candle data.
+        """
+        minute_ts = int(trade.timestamp.replace(second=0, microsecond=0).timestamp())
+        candle_key = f"{trade.symbol}_{minute_ts}"
+        if candle_key not in self._candle_builder:
+            self._candle_builder[candle_key] = {
+                "symbol": trade.symbol,
+                "open": trade.price,
+                "high": trade.price,
+                "low": trade.price,
+                "close": trade.price,
+                "volume": trade.quantity,
+                "trades": 1,
+                "vwap_sum": trade.price * trade.quantity,
+                "interval_begin": trade.timestamp.replace(second=0, microsecond=0),
+            }
+            return
+        candle = self._candle_builder[candle_key]
+        candle["high"] = max(candle["high"], trade.price)
+        candle["low"] = min(candle["low"], trade.price)
+        candle["close"] = trade.price
+        candle["volume"] += trade.quantity
+        candle["trades"] += 1
+        candle["vwap_sum"] += trade.price * trade.quantity
+
+    async def _emit_completed_candles(self) -> None:
+        """Emit completed candles from the builder and remove them."""
+        current_minute = int(datetime.now(tz=UTC).replace(second=0, microsecond=0).timestamp())
+        for key, candle in self._candle_builder.copy().items():
+            candle_minute = int(candle["interval_begin"].timestamp())
+            if candle_minute >= current_minute:
+                continue
+            vwap = candle["vwap_sum"] / candle["volume"] if candle["volume"] > 0 else 0.0
+            candle_data = CandleUpdate(
+                symbol=candle["symbol"],
+                open=candle["open"],
+                high=candle["high"],
+                low=candle["low"],
+                close=candle["close"],
+                vwap=vwap,
+                trades=candle["trades"],
+                volume=candle["volume"],
+                interval_begin=candle["interval_begin"],
+                interval=1,
+            )
+            await self._candle_queue.put(candle_data)
+            del self._candle_builder[key]
+            logger.debug(f"Emitted 1m candle for {candle['symbol']} at {candle['interval_begin']}")
+
     async def _candle_aggregator(self, symbols: list[str]) -> None:
+        """Aggregate trades into 1-minute candles.
+
+        Args:
+            symbols: List of symbols to aggregate candles for.
+        """
         async for trade in self.subscribe_trades(symbols):
-            minute_ts = int(trade.timestamp.replace(second=0, microsecond=0).timestamp())
-            candle_key = f"{trade.symbol}_{minute_ts}"
-            if candle_key not in self._candle_builder:
-                self._candle_builder[candle_key] = {
-                    "symbol": trade.symbol,
-                    "open": trade.price,
-                    "high": trade.price,
-                    "low": trade.price,
-                    "close": trade.price,
-                    "volume": trade.quantity,
-                    "trades": 1,
-                    "vwap_sum": trade.price * trade.quantity,
-                    "interval_begin": trade.timestamp.replace(second=0, microsecond=0),
-                }
-            else:
-                candle = self._candle_builder[candle_key]
-                candle["high"] = max(candle["high"], trade.price)
-                candle["low"] = min(candle["low"], trade.price)
-                candle["close"] = trade.price
-                candle["volume"] += trade.quantity
-                candle["trades"] += 1
-                candle["vwap_sum"] += trade.price * trade.quantity
-            current_minute = int(datetime.now(tz=UTC).replace(second=0, microsecond=0).timestamp())
-            for key, candle in list(self._candle_builder.items()):
-                candle_minute = int(candle["interval_begin"].timestamp())
-                if candle_minute < current_minute:
-                    vwap = candle["vwap_sum"] / candle["volume"] if candle["volume"] > 0 else 0.0
-                    candle_data = CandleUpdate(
-                        symbol=candle["symbol"],
-                        open=candle["open"],
-                        high=candle["high"],
-                        low=candle["low"],
-                        close=candle["close"],
-                        vwap=vwap,
-                        trades=candle["trades"],
-                        volume=candle["volume"],
-                        interval_begin=candle["interval_begin"],
-                        interval=1,
-                    )
-                    await self._candle_queue.put(candle_data)
-                    del self._candle_builder[key]
-                    logger.debug(
-                        f"Emitted 1m candle for {candle['symbol']} at {candle['interval_begin']}"
-                    )
+            self._update_candle_builder(trade)
+            await self._emit_completed_candles()
+
+    async def _subscribe_to_private_executions(self) -> None:
+        """Send private subscription message for execution reports."""
+        assert self._ws is not None
+        payload = {
+            "action": "subscribe-private",
+            "module": "trading",
+            "path": "history/transactions",
+        }
+        signed_msg = self._sign_private_message(payload)
+        await self._ws.send(json.dumps(signed_msg))
+        logger.debug("Subscribed to Zonda private executions (trading/history/transactions)")
 
     async def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
         """Subscribe to user execution reports (private channel).
@@ -972,36 +1077,13 @@ class ZondaExchangeClient(ExchangeClientBase):
         while self._running:
             try:
                 await self.connect()
-                assert self._ws is not None
-                payload = {
-                    "action": "subscribe-private",
-                    "module": "trading",
-                    "path": "history/transactions",
-                }
-                signed_msg = self._sign_private_message(payload)
-                await self._ws.send(json.dumps(signed_msg))
-                logger.debug(
-                    "Subscribed to Zonda private executions (trading/history/transactions)"
-                )
-                if not self._message_handler_task or self._message_handler_task.done():
-                    self._message_handler_task = asyncio.create_task(self._message_handler())
-                while self._running:
-                    try:
-                        execution_data = await asyncio.wait_for(
-                            self._execution_queue.get(), timeout=1.0
-                        )
-                        yield execution_data
-                    except TimeoutError:
-                        await asyncio.sleep(0.01)
+                await self._subscribe_to_private_executions()
+                self._ensure_message_handler_running()
+                async for execution_data in self._drain_queue(self._execution_queue):
+                    yield execution_data
             except ConnectionClosed as e:
                 logger.warning(f"Executions connection closed: {e}. Reconnecting...")
-                if self._message_handler_task and not self._message_handler_task.done():
-                    self._message_handler_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._message_handler_task
-                self._ws = None
-                self._seq_no.clear()
-                await asyncio.sleep(self._reconnect_delay)
+                await self._handle_connection_closed("executions")
             except Exception as e:
                 logger.error(f"Zonda executions subscription error: {e}")
                 if self._running:

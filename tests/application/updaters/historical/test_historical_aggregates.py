@@ -330,7 +330,7 @@ def test_build_candle_rows() -> None:
     )
     rows = build_rows(candles, 7, "1m")
     assert rows[0]["instrument_id"] == 7
-    assert rows[0]["vwap"] == 101.5
+    assert rows[0]["vwap"] == pytest.approx(101.5)
     assert rows[1]["vwap"] is None
     assert rows[1]["trades"] is None
 
@@ -2337,3 +2337,20 @@ async def test_process_symbol_persists_fetched_rows(
     assert repo.instrument_calls[0]["symbol"] == "BTC-USD"
     assert repo.candle_batches and repo.candle_batches[0][0]["timeframe"] == "1m"
     assert loader_stub.fetch_calls, "fetch_aggregates should have been invoked"
+
+
+def test_mapping_to_context_returns_none_for_empty_polygon_symbol() -> None:
+    """Return None when polygon_symbol is empty.
+
+    Given a SymbolMapping with an empty polygon_symbol,
+    When _mapping_to_context is called,
+    Then None is returned.
+    """
+    service = PolygonAggregatesBackfillService()
+    mapping = SimpleNamespace(
+        native_symbol="BTC-USD",
+        polygon_symbol="",
+        base_currency="BTC",
+        quote_currency="USD",
+    )
+    assert service._mapping_to_context(mapping) is None

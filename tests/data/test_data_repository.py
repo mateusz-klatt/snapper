@@ -96,7 +96,7 @@ class TestPolygonSmallBranches:
         client._resolve_timeframe = lambda timeframe: (1, "minute", timedelta(minutes=1))
         snapshots = await client.get_ohlcv(symbol="X:BTCUSD", timeframe="1m", since=None, limit=1)
         assert len(snapshots) == 1
-        assert snapshots[0].close == 1.5
+        assert snapshots[0].close == pytest.approx(1.5)
 
     @pytest.mark.asyncio
     async def test_poll_tickers_handles_keyboard_interrupt(self) -> None:
@@ -314,7 +314,7 @@ class TestPolygonSmallBranches:
         monkeypatch.setattr(polygon_module, "logger", logger_mock)
         monkeypatch.setattr(retry_module.time, "sleep", lambda _: None)
         backoff = policy.get_backoff_time()
-        assert backoff == 24.0
+        assert backoff == pytest.approx(24.0)
         policy.sleep(response=None)
         logger_mock.warning.assert_called_once()
 
@@ -410,9 +410,11 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
                 self._last_added.id = 1
 
         def rollback(self) -> None:
+            """No-op for test stub."""
             pass
 
         def refresh(self, _obj: Any) -> None:
+            """No-op for test stub."""
             pass
 
     def fake_sync_sessionmaker(
@@ -535,6 +537,7 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
                 execution_id_counter["value"] += 1
 
         def refresh(self, _obj: Any) -> None:
+            """No-op for test stub."""
             pass
 
     def fake_sync_sessionmaker(
@@ -548,6 +551,7 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
     monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", fake_sync_sessionmaker)
 
     def fake_create_all(engine: Any) -> None:
+        """Intentionally empty mock implementation."""
         pass
 
     monkeypatch.setattr(Base.metadata, "create_all", fake_create_all)
@@ -578,8 +582,8 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
     )
     assert len(candles) == 1
     assert candles[0]["timeframe"] == "1m"
-    assert candles[0]["open"] == 1.0
-    assert candles[0]["close"] == 1.5
+    assert candles[0]["open"] == pytest.approx(1.0)
+    assert candles[0]["close"] == pytest.approx(1.5)
 
 
 @pytest.mark.asyncio
@@ -622,6 +626,7 @@ async def test_mssql_get_candles_returns_empty_when_no_instrument(monkeypatch: A
     monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", fake_sync_sessionmaker)
 
     def fake_create_all(engine: Any) -> None:
+        """Intentionally empty mock implementation."""
         pass
 
     monkeypatch.setattr(Base.metadata, "create_all", fake_create_all)
@@ -735,7 +740,7 @@ async def test_mssql_get_market_snapshots_returns_results(
     assert len(snapshots) == 1
     assert snapshots[0]["exchange"] == "kraken"
     assert snapshots[0]["symbol"] == "BTC/USD"
-    assert snapshots[0]["bid"] == 42000.0
+    assert snapshots[0]["bid"] == pytest.approx(42000.0)
 
 
 @pytest.mark.asyncio
@@ -801,7 +806,7 @@ async def test_mssql_get_trades_returns_results(
         end=datetime(2024, 1, 2, tzinfo=UTC),
     )
     assert len(trades) == 1
-    assert trades[0]["price"] == 42000.0
+    assert trades[0]["price"] == pytest.approx(42000.0)
     assert trades[0]["side"] == "buy"
 
 

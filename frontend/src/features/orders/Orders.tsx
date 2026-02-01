@@ -185,8 +185,11 @@ export const Orders: React.FC = () => {
       {}
       {activeTab === 'orders' && (
         <div className='flex items-center space-x-4'>
-          <label className='text-sm text-dark-400'>Filter by status:</label>
+          <label htmlFor='status-filter' className='text-sm text-dark-400'>
+            Filter by status:
+          </label>
           <select
+            id='status-filter'
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value)}
             className='px-3 py-1 bg-dark-800 border border-dark-600 rounded-sm text-white text-sm focus:outline-hidden focus:ring-2 focus:ring-blue-500'
@@ -203,14 +206,15 @@ export const Orders: React.FC = () => {
       <div className='space-y-4'>
         {activeTab === 'orders' && (
           <>
-            {ordersLoading ? (
+            {ordersLoading && (
               <div className='space-y-3'>
                 <OrderCardSkeleton />
                 <OrderCardSkeleton />
                 <OrderCardSkeleton />
                 <OrderCardSkeleton />
               </div>
-            ) : filteredOrders.length === 0 ? (
+            )}
+            {!ordersLoading && filteredOrders.length === 0 && (
               <div className='text-center py-8 text-dark-400'>
                 <div className='w-12 h-12 bg-dark-700 rounded-full flex items-center justify-center mx-auto mb-3'>
                   <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
@@ -229,7 +233,8 @@ export const Orders: React.FC = () => {
                     : `No ${statusFilter} orders`}
                 </p>
               </div>
-            ) : (
+            )}
+            {!ordersLoading && filteredOrders.length > 0 && (
               <div className='grid gap-4'>
                 {filteredOrders.map((order: OrderStatus) => (
                   <OrderCard key={order.id} order={order} />
@@ -240,14 +245,15 @@ export const Orders: React.FC = () => {
         )}
         {activeTab === 'executions' && (
           <>
-            {executionsLoading ? (
+            {executionsLoading && (
               <div className='space-y-3'>
                 <OrderCardSkeleton />
                 <OrderCardSkeleton />
                 <OrderCardSkeleton />
                 <OrderCardSkeleton />
               </div>
-            ) : executions.length === 0 ? (
+            )}
+            {!executionsLoading && executions.length === 0 && (
               <div className='text-center py-8 text-dark-400'>
                 <div className='w-12 h-12 bg-dark-700 rounded-full flex items-center justify-center mx-auto mb-3'>
                   <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
@@ -262,7 +268,8 @@ export const Orders: React.FC = () => {
                 <p>No executions found</p>
                 <p className='text-sm mt-1'>Trade executions will appear here</p>
               </div>
-            ) : (
+            )}
+            {!executionsLoading && executions.length > 0 && (
               <div className='grid gap-4'>
                 {executions.map((execution: Fill) => (
                   <ExecutionCard key={execution.id} execution={execution} />

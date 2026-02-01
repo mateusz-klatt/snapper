@@ -123,7 +123,7 @@ describe('Overview', () => {
       data: {
         totalValue: 10000,
         totalPnL: 500,
-        pnlPercent: 5.0,
+        pnlPercent: 5,
         count: 3,
       },
     } as never)
@@ -341,7 +341,7 @@ describe('Overview', () => {
       data: {
         totalValue: 10000,
         totalPnL: -500,
-        pnlPercent: -5.0,
+        pnlPercent: -5,
         count: 2,
       },
     } as never)

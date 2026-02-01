@@ -35,8 +35,8 @@ class TestInstrumentModel:
         assert instrument.symbol == "BTCUSD"
         assert instrument.base == "BTC"
         assert instrument.quote == "USD"
-        assert instrument.tick_size == 0.01
-        assert instrument.lot_size == 0.001
+        assert instrument.tick_size == pytest.approx(0.01)
+        assert instrument.lot_size == pytest.approx(0.001)
 
     def test_instrument_string_representation(self) -> None:
         """Test Instrument has string representation.
@@ -76,11 +76,11 @@ class TestCandleModel:
         assert candle.instrument_id == 1
         assert candle.timestamp == now
         assert candle.timeframe == "1h"
-        assert candle.open == 49000.0
-        assert candle.high == 51000.0
-        assert candle.low == 48500.0
-        assert candle.close == 50500.0
-        assert candle.volume == 150.5
+        assert candle.open == pytest.approx(49000.0)
+        assert candle.high == pytest.approx(51000.0)
+        assert candle.low == pytest.approx(48500.0)
+        assert candle.close == pytest.approx(50500.0)
+        assert candle.volume == pytest.approx(150.5)
 
     def test_candle_ohlc_validation(self) -> None:
         """Test Candle OHLC relationship constraints.
@@ -126,8 +126,8 @@ class TestTradeModel:
             trade_id="trade-123",
         )
         assert trade.instrument_id == 1
-        assert trade.price == 50000.0
-        assert trade.size == 1.5
+        assert trade.price == pytest.approx(50000.0)
+        assert trade.size == pytest.approx(1.5)
         assert trade.side == "buy"
         assert trade.trade_id == "trade-123"
         assert isinstance(trade.timestamp, datetime)
@@ -204,8 +204,8 @@ class TestOrderModel:
         assert order.exchange_order_id == "exchange-456"
         assert order.side == "buy"
         assert order.type == "limit"
-        assert order.price == 50000.0
-        assert order.size == 1.0
+        assert order.price == pytest.approx(50000.0)
+        assert order.size == pytest.approx(1.0)
         assert order.status == "pending"
 
     def test_market_order(self) -> None:
@@ -267,9 +267,9 @@ class TestExecutionModel:
             fee_asset="USD",
         )
         assert execution.order_id == 1
-        assert execution.price == 50000.0
-        assert execution.size == 1.0
-        assert execution.fee == 5.0
+        assert execution.price == pytest.approx(50000.0)
+        assert execution.size == pytest.approx(1.0)
+        assert execution.fee == pytest.approx(5.0)
         assert execution.fee_asset == "USD"
 
     def test_execution_fee_calculation(self) -> None:
@@ -312,10 +312,10 @@ class TestPositionModel:
             updated_at=datetime.now(UTC),
         )
         assert position.instrument_id == 1
-        assert position.quantity == 2.5
-        assert position.average_price == 48000.0
-        assert position.unrealized_pnl == 5000.0
-        assert position.realized_pnl == 1000.0
+        assert position.quantity == pytest.approx(2.5)
+        assert position.average_price == pytest.approx(48000.0)
+        assert position.unrealized_pnl == pytest.approx(5000.0)
+        assert position.realized_pnl == pytest.approx(1000.0)
 
     def test_position_calculations(self) -> None:
         """Test Position market value calculation.
@@ -333,7 +333,7 @@ class TestPositionModel:
             updated_at=datetime.now(UTC),
         )
         market_value = position.quantity * position.average_price
-        assert market_value == 45000.0
+        assert market_value == pytest.approx(45000.0)
 
     def test_position_pnl(self) -> None:
         """Test Position total PnL calculation.
@@ -351,7 +351,7 @@ class TestPositionModel:
             updated_at=datetime.now(UTC),
         )
         total_pnl = position.unrealized_pnl + position.realized_pnl
-        assert total_pnl == 2500.0
+        assert total_pnl == pytest.approx(2500.0)
 
 
 class TestStrategyRunModel:
@@ -414,10 +414,10 @@ class TestSignalEventModel:
         )
         assert event.instrument_id == 1
         assert event.side == "buy"
-        assert event.strength == 0.8
+        assert event.strength == pytest.approx(0.8)
         assert event.reason == "RSI oversold"
         assert event.strategy_name == "RSIReversion"
-        assert event.price == 49000.0
+        assert event.price == pytest.approx(49000.0)
 
     def test_signal_event_strength_validation(self) -> None:
         """Test SignalEvent strength is normalized 0-1.

@@ -94,12 +94,12 @@ export const Processes: React.FC = () => {
   )
   const longRunningProcesses = React.useMemo<ConfiguredProcess[]>(() => {
     if (!configuredProcesses) return []
-    const featured = ['zmq_broker', 'executor', 'feed_publisher']
+    const featured = new Set(['zmq_broker', 'executor', 'feed_publisher'])
 
     return configuredProcesses.processes.filter(
       process =>
         process.lifecycle === 'long_running' &&
-        !featured.includes(process.name) &&
+        !featured.has(process.name) &&
         process.role !== 'strategy' &&
         process.role !== 'backtest'
     )
@@ -156,51 +156,52 @@ export const Processes: React.FC = () => {
       wsClient.unsubscribe(topics)
     }
   }, [wsClient])
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now()
-      const staleThreshold = 10000
+  const pruneStaleHeartbeats = React.useCallback(() => {
+    const now = Date.now()
+    const staleThreshold = 10000
 
-      setAllHeartbeats(prev => {
-        const updated = { ...prev }
+    setAllHeartbeats(prev => {
+      const updated = { ...prev }
 
-        Object.keys(updated).forEach(key => {
-          if (now - updated[key].timestamp > staleThreshold) {
-            delete updated[key]
-          }
-        })
-
-        return updated
+      Object.keys(updated).forEach(key => {
+        if (now - updated[key].timestamp > staleThreshold) {
+          delete updated[key]
+        }
       })
-    }, 5000)
+
+      return updated
+    })
+  }, [])
+
+  useEffect(() => {
+    const interval = setInterval(pruneStaleHeartbeats, 5000)
 
     return () => clearInterval(interval)
-  }, [])
+  }, [pruneStaleHeartbeats])
   const startProcess = useStartProcessByName()
   const stopProcess = useStopProcessByName()
 
-  const handleConfirm = (title: string, message: string, onConfirm: () => void) => {
-    setConfirmDialog({ open: true, title, message, onConfirm })
-  }
+  const executeAction = React.useCallback((action: () => void, title: string, message: string) => {
+    setConfirmDialog({ open: true, title, message, onConfirm: action })
+  }, [])
 
-  const executeAction = (action: () => void, title: string, message: string) => {
-    handleConfirm(title, message, action)
-  }
-
-  const showExecutionModeModal = (
-    componentName: string,
-    description: string,
-    defaultAutostart: boolean,
-    onStart: (options: { executionMode: 'thread' | 'process'; autostart: boolean }) => void
-  ) => {
-    setExecutionModeModal({
-      open: true,
-      componentName,
-      description,
-      defaultAutostart,
-      onStart,
-    })
-  }
+  const showExecutionModeModal = React.useCallback(
+    (
+      componentName: string,
+      description: string,
+      defaultAutostart: boolean,
+      onStart: (options: { executionMode: 'thread' | 'process'; autostart: boolean }) => void
+    ) => {
+      setExecutionModeModal({
+        open: true,
+        componentName,
+        description,
+        defaultAutostart,
+        onStart,
+      })
+    },
+    []
+  )
 
   const closeExecutionModeModal = () => {
     setExecutionModeModal({
@@ -212,6 +213,27 @@ export const Processes: React.FC = () => {
     })
   }
 
+  const handleTaskProcessStart = React.useCallback(
+    (processName: string) => {
+      showExecutionModeModal(
+        processName,
+        `Start ${processName.replaceAll('_', ' ')} process`,
+        !!getProcess(processName)?.enabled,
+        ({ executionMode, autostart }) =>
+          executeAction(
+            () =>
+              startProcess.mutate({
+                name: processName,
+                mode: executionMode,
+                autostart,
+              }),
+            `Start ${processName}`,
+            `This will start the ${processName} process.`
+          )
+      )
+    },
+    [startProcess, executeAction, showExecutionModeModal, getProcess]
+  )
   const getProcessAutostartDefault = React.useCallback(
     (name: string): boolean => {
       const process = configuredProcesses?.processes.find(item => item.name === name)
@@ -349,11 +371,15 @@ export const Processes: React.FC = () => {
               const status: 'running' | 'stopped' | 'error' = process.running
                 ? 'running'
                 : 'stopped'
-              const statusBadge = process.is_one_shot
-                ? 'one-shot'
-                : process.enabled
-                  ? 'auto-start'
-                  : 'manual'
+
+              const resolveStatusBadge = (): string => {
+                if (process.is_one_shot) return 'one-shot'
+                if (process.enabled) return 'auto-start'
+
+                return 'manual'
+              }
+
+              const statusBadge = resolveStatusBadge()
               const registryDetails = registryByName[process.name]
               const latestRun = latestRunByProcess[process.name]
               const tags = registryDetails?.tags?.length ? registryDetails.tags : process.tags
@@ -387,32 +413,15 @@ export const Processes: React.FC = () => {
                 <ProcessControlCard
                   key={process.name}
                   title={process.name
-                    .replace(/_/g, ' ')
-                    .replace(/\b\w/g, (letter: string) => letter.toUpperCase())}
+                    .replaceAll('_', ' ')
+                    .replaceAll(/\b\w/g, (letter: string) => letter.toUpperCase())}
                   description={
                     registryDetails?.description || `Configured process (${process.mode} mode)`
                   }
                   status={status}
                   statusBadge={statusBadge}
                   details={details}
-                  onStart={() =>
-                    showExecutionModeModal(
-                      process.name,
-                      `Start ${process.name.replace(/_/g, ' ')} process`,
-                      getProcessAutostartDefault(process.name),
-                      ({ executionMode, autostart }) =>
-                        executeAction(
-                          () =>
-                            startProcess.mutate({
-                              name: process.name,
-                              mode: executionMode,
-                              autostart,
-                            }),
-                          `Start ${process.name}`,
-                          `This will start the ${process.name} process.`
-                        )
-                    )
-                  }
+                  onStart={() => handleTaskProcessStart(process.name)}
                   onStop={() =>
                     executeAction(
                       () => stopProcess.mutate({ name: process.name }),

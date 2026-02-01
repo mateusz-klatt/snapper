@@ -4,9 +4,12 @@ This module handles incoming WebSocket messages, routing them to
 appropriate handlers based on message type.
 """
 
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
+from typing import Any
 
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
@@ -54,7 +57,7 @@ __all__ = [
 
 async def send_auth_complete(
     websocket: WebSocket,
-    manager: WebSocketConnectionManager,
+    _manager: WebSocketConnectionManager,
     user: UserProfile,
     ws_payload: "WsTokenPayload",
     ws_auth_manager: WebSocketAuthManager,
@@ -66,7 +69,7 @@ async def send_auth_complete(
 
     Args:
         websocket: The authenticated WebSocket connection.
-        manager: WebSocket connection manager.
+        _manager: WebSocket connection manager (reserved for interface compatibility).
         user: Authenticated user profile.
         ws_payload: WebSocket token payload with expiration.
         ws_auth_manager: Manager for WebSocket authentication state.
@@ -82,6 +85,53 @@ async def send_auth_complete(
         ws_token_exp=datetime.fromtimestamp(ws_payload.exp, UTC),
     )
     await websocket.send_text(auth_complete.model_dump_json())
+
+
+def _try_parse_message(raw_message: str) -> WSClientMessage | WSErrorResponse:
+    """Attempt to parse a raw WebSocket message into a typed client message.
+
+    Args:
+        raw_message: Raw JSON string from WebSocket.
+
+    Returns:
+        Parsed client message on success, or WSErrorResponse on validation failure.
+    """
+    try:
+        return _client_message_adapter.validate_json(raw_message)
+    except ValidationError as e:
+        return WSErrorResponse(message=f"Invalid message format: {e.error_count()} errors")
+
+
+async def _handle_one_message(
+    websocket: WebSocket,
+    manager: WebSocketConnectionManager,
+    user: UserProfile,
+    ws_auth_manager: WebSocketAuthManager,
+    ws_token_service: "WsTokenService",
+    raw_message: str,
+) -> bool:
+    """Process a single incoming WebSocket message.
+
+    Args:
+        websocket: The authenticated WebSocket connection.
+        manager: WebSocket connection manager.
+        user: Authenticated user profile.
+        ws_auth_manager: Manager for WebSocket authentication state.
+        ws_token_service: Service for verifying ws_tokens.
+        raw_message: Raw JSON string received from the client.
+
+    Returns:
+        True to continue the dispatch loop, False to break.
+    """
+    parsed = _try_parse_message(raw_message)
+    if isinstance(parsed, WSErrorResponse):
+        await websocket.send_text(parsed.model_dump_json())
+        return True
+    if isinstance(parsed, WSReauthRequest):
+        success = await handle_reauth(websocket, parsed, user, ws_auth_manager, ws_token_service)
+        return success
+    await _dispatch_single_message(websocket, parsed, manager, user)
+    return True
 
 
 async def dispatch_messages(
@@ -106,35 +156,62 @@ async def dispatch_messages(
     try:
         while True:
             raw_message = await websocket.receive_text()
-            try:
-                message = _client_message_adapter.validate_json(raw_message)
-            except ValidationError as e:
-                error_msg = WSErrorResponse(
-                    message=f"Invalid message format: {e.error_count()} errors"
-                )
-                await websocket.send_text(error_msg.model_dump_json())
-                continue
-            if isinstance(message, WSReauthRequest):
-                success = await handle_reauth(
-                    websocket, message, user, ws_auth_manager, ws_token_service
-                )
-                if not success:
-                    break
-                continue
-            if isinstance(message, WSSubscribeRequest):
-                await handle_subscribe(websocket, message, manager, user.role)
-            elif isinstance(message, WSUnsubscribeRequest):
-                await handle_unsubscribe(websocket, message, manager)
-            elif isinstance(message, WSGetSubscriptionsRequest):
-                await handle_get_subscriptions(websocket, manager, user.role)
-            elif isinstance(message, WSGetTopicSuggestionsRequest):
-                await handle_get_topic_suggestions(websocket, manager, message, user.role)
-            else:
-                assert isinstance(message, WSPingRequest)
-                await handle_ping(websocket, manager)
+            should_continue = await _handle_one_message(
+                websocket, manager, user, ws_auth_manager, ws_token_service, raw_message
+            )
+            if not should_continue:
+                break
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for user {user.username}")
     except Exception as exc:
         logger.exception("WebSocket error: {}", exc)
         error_msg = WSErrorResponse(message="Internal server error")
         await websocket.send_text(error_msg.model_dump_json())
+
+
+def _build_dispatch_table(
+    websocket: WebSocket,
+    manager: WebSocketConnectionManager,
+    user: UserProfile,
+) -> dict[type, Callable[[Any], Awaitable[None]]]:
+    """Build a message-type-to-handler dispatch table.
+
+    Args:
+        websocket: The authenticated WebSocket connection.
+        manager: WebSocket connection manager.
+        user: Authenticated user profile.
+
+    Returns:
+        Dictionary mapping message types to async handler callables.
+    """
+    return {
+        WSSubscribeRequest: lambda msg: handle_subscribe(websocket, msg, manager, user.role),
+        WSUnsubscribeRequest: lambda msg: handle_unsubscribe(websocket, msg, manager),
+        WSGetSubscriptionsRequest: lambda msg: handle_get_subscriptions(
+            websocket, manager, user.role
+        ),
+        WSGetTopicSuggestionsRequest: lambda msg: handle_get_topic_suggestions(
+            websocket, manager, msg, user.role
+        ),
+        WSPingRequest: lambda msg: handle_ping(websocket, manager),
+    }
+
+
+async def _dispatch_single_message(
+    websocket: WebSocket,
+    message: WSClientMessage,
+    manager: WebSocketConnectionManager,
+    user: UserProfile,
+) -> None:
+    """Route a validated message to its handler.
+
+    Args:
+        websocket: The authenticated WebSocket connection.
+        message: Validated client message.
+        manager: WebSocket connection manager.
+        user: Authenticated user profile.
+    """
+    dispatch_table = _build_dispatch_table(websocket, manager, user)
+    handler = dispatch_table.get(type(message))
+    assert handler is not None, f"Unhandled message type: {type(message).__name__}"
+    await handler(message)

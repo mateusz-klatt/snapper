@@ -25,47 +25,29 @@ final class AuthServiceNetworkTests: XCTestCase {
 
     func testLoginSuccess() async throws {
 
-        var requestCount = 0
         MockURLProtocol.requestHandler = { request in
-            requestCount += 1
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
+            )!
 
-            if requestCount == 1 {
-                let response = HTTPURLResponse(
-                    url: request.url!,
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )!
-
-                let json: [String: Any] = [
-                    "access_token": "test_access_token_123",
-                    "refresh_token": "test_refresh_token_456",
-                    "token_type": "bearer"
-                ]
-                let data = try! JSONSerialization.data(withJSONObject: json)
-
-                return (response, data)
-            }
-
-            else {
-                let response = HTTPURLResponse(
-                    url: request.url!,
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )!
-
-                let json: [String: Any] = [
-                    "id": 1,
+            let json: [String: Any] = [
+                "message": "Login successful",
+                "expires_in": 900,
+                "user": [
+                    "id": "1",
                     "username": "testuser",
                     "email": "test@example.com",
+                    "role": "viewer",
                     "is_active": true,
-                    "is_admin": false
+                    "created_at": "2025-01-01T00:00:00Z"
                 ]
-                let data = try! JSONSerialization.data(withJSONObject: json)
+            ]
+            let data = try JSONSerialization.data(withJSONObject: json)
 
-                return (response, data)
-            }
+            return (response, data)
         }
 
         await authService.login(username: "testuser", password: "testpass")
@@ -73,7 +55,7 @@ final class AuthServiceNetworkTests: XCTestCase {
         await MainActor.run {
             XCTAssertTrue(authService.isAuthenticated)
             XCTAssertNil(authService.errorMessage)
-            XCTAssertEqual(authService.getAccessToken(), "test_access_token_123")
+            XCTAssertEqual(authService.currentUser?.username, "testuser")
         }
     }
 
@@ -84,11 +66,11 @@ final class AuthServiceNetworkTests: XCTestCase {
                 url: request.url!,
                 statusCode: 401,
                 httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
             )!
 
             let json = ["detail": "Invalid credentials"]
-            let data = try! JSONSerialization.data(withJSONObject: json)
+            let data = try JSONSerialization.data(withJSONObject: json)
 
             return (response, data)
         }
@@ -98,7 +80,7 @@ final class AuthServiceNetworkTests: XCTestCase {
         await MainActor.run {
             XCTAssertFalse(authService.isAuthenticated)
             XCTAssertEqual(authService.errorMessage, "Invalid credentials")
-            XCTAssertNil(authService.getAccessToken())
+            XCTAssertNil(authService.currentUser)
         }
     }
 
@@ -124,11 +106,11 @@ final class AuthServiceNetworkTests: XCTestCase {
                 url: request.url!,
                 statusCode: 500,
                 httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
             )!
 
             let json = ["detail": "Internal server error"]
-            let data = try! JSONSerialization.data(withJSONObject: json)
+            let data = try JSONSerialization.data(withJSONObject: json)
 
             return (response, data)
         }

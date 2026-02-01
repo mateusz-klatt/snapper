@@ -7,7 +7,11 @@ interface StatusBadgeProps {
   className?: string
 }
 
-export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, children, className }) => {
+export const StatusBadge: React.FC<Readonly<StatusBadgeProps>> = ({
+  status,
+  children,
+  className,
+}) => {
   const baseClasses = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium'
   const statusClasses = {
     connected: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300',
@@ -28,7 +32,7 @@ interface CardProps {
   actions?: React.ReactNode
 }
 
-export const Card: React.FC<CardProps> = ({ title, children, className, actions }) => {
+export const Card: React.FC<Readonly<CardProps>> = ({ title, children, className, actions }) => {
   return (
     <div className={clsx('panel', className)}>
       <div className='flex items-center justify-between mb-4'>
@@ -47,7 +51,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   children: React.ReactNode
 }
 
-export const Button: React.FC<ButtonProps> = ({
+export const Button: React.FC<Readonly<ButtonProps>> = ({
   variant = 'primary',
   size = 'md',
   loading = false,
@@ -99,7 +103,11 @@ interface BadgeProps {
   children: React.ReactNode
 }
 
-export const Badge: React.FC<BadgeProps> = ({ variant = 'default', className, children }) => {
+export const Badge: React.FC<Readonly<BadgeProps>> = ({
+  variant = 'default',
+  className,
+  children,
+}) => {
   const baseClasses = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium'
   const variantClasses = {
     default: 'bg-primary-100 text-primary-800 dark:bg-primary-900 dark:text-primary-300',
@@ -116,7 +124,10 @@ interface LoadingSpinnerProps {
   className?: string
 }
 
-export const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({ size = 'md', className }) => {
+export const LoadingSpinner: React.FC<Readonly<LoadingSpinnerProps>> = ({
+  size = 'md',
+  className,
+}) => {
   const sizeClasses = {
     sm: 'w-4 h-4',
     md: 'w-6 h-6',
@@ -140,7 +151,7 @@ interface ConnectionBarProps {
   subscribedTopicsCount: number
 }
 
-export const ConnectionBar: React.FC<ConnectionBarProps> = ({
+export const ConnectionBar: React.FC<Readonly<ConnectionBarProps>> = ({
   isConnected,
   lag,
   subscribedTopicsCount,
@@ -181,7 +192,7 @@ interface MetricCardProps {
   suffix?: string
 }
 
-export const MetricCard: React.FC<MetricCardProps> = ({
+export const MetricCard: React.FC<Readonly<MetricCardProps>> = ({
   label,
   value,
   change,

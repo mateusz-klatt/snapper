@@ -85,8 +85,14 @@ export const Strategies: React.FC = () => {
         const strategy = strategies.find(s => s.name === strategyName)
 
         if (strategy) {
-          const status =
-            message.status === 'healthy' ? 'ok' : message.status === 'warning' ? 'warn' : 'error'
+          const resolveHeartbeatStatus = (heartbeatStatus: string): 'ok' | 'warn' | 'error' => {
+            if (heartbeatStatus === 'healthy') return 'ok'
+            if (heartbeatStatus === 'warning') return 'warn'
+
+            return 'error'
+          }
+
+          const status = resolveHeartbeatStatus(message.status)
 
           setHealthStatuses(prev => ({
             ...prev,

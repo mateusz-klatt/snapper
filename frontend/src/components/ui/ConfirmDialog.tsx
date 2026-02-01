@@ -12,7 +12,7 @@ interface ConfirmDialogProps {
   variant?: 'default' | 'danger'
 }
 
-export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
+export const ConfirmDialog: React.FC<Readonly<ConfirmDialogProps>> = ({
   open,
   title,
   message,

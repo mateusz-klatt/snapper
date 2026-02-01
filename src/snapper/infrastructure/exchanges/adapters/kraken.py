@@ -37,6 +37,8 @@ from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSchema
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 
+_UTC_SUFFIX = "+00:00"
+
 
 def parse_kraken_ticker(data: dict[str, Any]) -> TickerUpdate:
     """Parse a Kraken ticker WebSocket message into TickerUpdate.
@@ -91,7 +93,7 @@ def parse_kraken_candle(data: dict[str, Any]) -> CandleUpdate:
     schema = KrakenCandleSchema.model_validate(data)
     if not schema.interval_begin:
         raise ValueError("Candle data missing required 'interval_begin' timestamp")
-    interval_begin = datetime.fromisoformat(schema.interval_begin.replace("Z", "+00:00"))
+    interval_begin = datetime.fromisoformat(schema.interval_begin.replace("Z", _UTC_SUFFIX))
     return CandleUpdate(
         symbol=kraken_websocket_to_native(schema.symbol) if schema.symbol else "",
         open=float(schema.open),
@@ -128,7 +130,7 @@ def parse_kraken_trade(data: dict[str, Any]) -> TradeUpdate:
         TradeUpdate with trade execution details.
     """
     schema = KrakenTradeSchema.model_validate(data)
-    timestamp = datetime.fromisoformat(schema.timestamp.replace("Z", "+00:00"))
+    timestamp = datetime.fromisoformat(schema.timestamp.replace("Z", _UTC_SUFFIX))
     return TradeUpdate(
         symbol=kraken_websocket_to_native(schema.symbol),
         side=schema.side,
@@ -247,6 +249,38 @@ def _parse_time_in_force(tif: str | None) -> TimeInForceEnum | None:
     return mapping.get(tif)
 
 
+def _optional_float(value: Any) -> float | None:
+    """Convert a value to float if truthy, otherwise return None.
+
+    Args:
+        value: Numeric value or None.
+
+    Returns:
+        Float conversion of the value, or None if falsy.
+    """
+    return float(value) if value else None
+
+
+def _parse_execution_fees(schema: KrakenExecutionSchema) -> list[ExecutionFeeBreakdown] | None:
+    """Parse fee breakdown from Kraken execution schema.
+
+    Args:
+        schema: Validated Kraken execution schema.
+
+    Returns:
+        List of fee breakdowns, or None if no fees present.
+    """
+    if not schema.fees:
+        return None
+    return [
+        ExecutionFeeBreakdown(
+            asset=fee.asset or "",
+            quantity=float(fee.qty) if fee.qty else 0.0,
+        )
+        for fee in schema.fees
+    ]
+
+
 def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
     """Parse a Kraken execution WebSocket message into ExecutionUpdate.
 
@@ -265,16 +299,7 @@ def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
     schema = KrakenExecutionSchema.model_validate(data)
     if not schema.timestamp:
         raise ValueError("Execution data missing required 'timestamp' field")
-    timestamp = datetime.fromisoformat(schema.timestamp.replace("Z", "+00:00"))
-    fees: list[ExecutionFeeBreakdown] | None = None
-    if schema.fees:
-        fees = [
-            ExecutionFeeBreakdown(
-                asset=fee.asset or "",
-                quantity=float(fee.qty) if fee.qty else 0.0,
-            )
-            for fee in schema.fees
-        ]
+    timestamp = datetime.fromisoformat(schema.timestamp.replace("Z", _UTC_SUFFIX))
     return ExecutionUpdate(
         order_id=schema.order_id or "",
         exec_type=cast(ExecType, schema.exec_type) if schema.exec_type else None,
@@ -283,23 +308,23 @@ def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
         order_type=_parse_order_type(schema.order_type),
         order_status=_parse_order_status(schema.order_status),
         timestamp=timestamp,
-        cum_qty=float(schema.cum_qty) if schema.cum_qty else None,
-        cum_cost=float(schema.cum_cost) if schema.cum_cost else None,
+        cum_qty=_optional_float(schema.cum_qty),
+        cum_cost=_optional_float(schema.cum_cost),
         order_userref=schema.order_userref,
         exec_id=schema.exec_id,
         trade_id=schema.trade_id,
-        last_qty=float(schema.last_qty) if schema.last_qty else None,
-        last_price=float(schema.last_price) if schema.last_price else None,
+        last_qty=_optional_float(schema.last_qty),
+        last_price=_optional_float(schema.last_price),
         liquidity_ind=(
             cast(LiquidityIndicator, schema.liquidity_ind) if schema.liquidity_ind else None
         ),
-        cost=float(schema.cost) if schema.cost else None,
-        average_price=float(schema.avg_price) if schema.avg_price else None,
-        fee_usd_equiv=float(schema.fee_usd_equiv) if schema.fee_usd_equiv else None,
-        fees=fees,
-        order_qty=float(schema.order_qty) if schema.order_qty else None,
-        limit_price=float(schema.limit_price) if schema.limit_price else None,
-        cash_order_qty=float(schema.cash_order_qty) if schema.cash_order_qty else None,
+        cost=_optional_float(schema.cost),
+        average_price=_optional_float(schema.avg_price),
+        fee_usd_equiv=_optional_float(schema.fee_usd_equiv),
+        fees=_parse_execution_fees(schema),
+        order_qty=_optional_float(schema.order_qty),
+        limit_price=_optional_float(schema.limit_price),
+        cash_order_qty=_optional_float(schema.cash_order_qty),
         margin=schema.margin,
         margin_borrow=schema.margin_borrow,
         post_only=schema.post_only,
