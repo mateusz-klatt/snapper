@@ -1,7 +1,10 @@
-"""Refresh frontend dependencies with a clean install.
+"""Refresh frontend dependencies.
 
-Removes node_modules and lock files, then reinstalls all dependencies
-using pnpm for a fresh, reproducible frontend environment.
+Upgrades direct dependencies to their latest versions (updating package.json),
+then removes node_modules and lock file and performs a clean install.
+
+This keeps the UI refresh behavior consistent with the backend refresh target
+which upgrades dependencies to the latest available versions.
 """
 
 import shutil
@@ -77,6 +80,21 @@ def ensure_pnpm_installed() -> None:
         run_cmd(["corepack", "prepare", "pnpm@latest", "--activate"], check=True)
 
 
+def upgrade_dependencies(ui_dir: Path) -> None:
+    """Upgrade direct UI dependencies to latest versions.
+
+    Args:
+        ui_dir: Path to the UI directory containing package.json.
+    """
+    package_json = ui_dir / "package.json"
+    if not package_json.exists():
+        print(f"Skipping dependency upgrade (missing {package_json})")
+        return
+
+    print("Upgrading UI direct dependencies to latest...")
+    run_cmd(["pnpm", "up", "--latest"], cwd=ui_dir, check=True)
+
+
 def install_dependencies(ui_dir: Path) -> None:
     """Run pnpm install in the UI directory.
 
@@ -98,9 +116,10 @@ def refresh_ui(root: Path | None = None) -> None:
         root = Path(__file__).parent.parent
     ui_dir = root / "frontend"
 
+    ensure_pnpm_installed()
+    upgrade_dependencies(ui_dir)
     remove_lock_file(ui_dir)
     remove_node_modules(ui_dir)
-    ensure_pnpm_installed()
     install_dependencies(ui_dir)
 
 
