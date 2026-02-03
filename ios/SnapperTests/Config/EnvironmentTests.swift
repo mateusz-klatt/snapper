@@ -13,8 +13,13 @@ final class EnvironmentTests: XCTestCase {
     func testWebSocketBaseURL() {
 
         let wsURL = AppConfig.wsBaseURL
-        XCTAssertTrue(wsURL.starts(with: AppConfig.URIScheme.ws))
-        XCTAssertTrue(wsURL.contains("localhost:8000"))
+        let expectedProtocol = AppConfig.baseURL.hasPrefix(AppConfig.URIScheme.httpsPrefix)
+            ? AppConfig.URIScheme.wss : AppConfig.URIScheme.ws
+        XCTAssertTrue(wsURL.starts(with: expectedProtocol))
+        let urlWithoutProtocol = AppConfig.baseURL
+            .replacingOccurrences(of: AppConfig.URIScheme.http, with: "")
+            .replacingOccurrences(of: AppConfig.URIScheme.https, with: "")
+        XCTAssertTrue(wsURL.contains(urlWithoutProtocol))
         let expectedWsPath = AppConfig.apiPrefix + AppConfig.wsPath
         XCTAssertTrue(wsURL.contains(expectedWsPath))
     }

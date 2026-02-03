@@ -16,13 +16,13 @@
 		60AFA2E0E27171B26CEA49C7 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4EDEB8970703709AC631633 /* DashboardView.swift */; };
 		7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C33334091D91D43D43B1C3 /* Environment.swift */; };
 		7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3AFFCD485E4541E995FC91CB /* Configuration.plist */; };
+		81189414878D69E0A0DC0601 /* TradingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 569FFBB46A52B74686A202D0 /* TradingView.swift */; };
 		8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C866C094E8868C0EF03F6809 /* AuthService.swift */; };
 		B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */; };
 		D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6605FA90A650CA70270A857 /* SettingsView.swift */; };
 		D4D538F756906829CC4ECC61 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9948BCE1220922C26E1E5D5 /* LoginView.swift */; };
 		D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6798D055E36E2A96D2575882 /* LoginViewModel.swift */; };
 		E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC42AFF6C9070E52403CC6A /* WSMessages.swift */; };
-		F1234567890ABCDEF1234567 /* TradingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1234567890ABCDEF1234568 /* TradingView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,6 +43,7 @@
 		3AFFCD485E4541E995FC91CB /* Configuration.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Configuration.plist; sourceTree = "<group>"; };
 		40BE9EE10BEF49D1DCA0F3C5 /* Snapper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Snapper.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		442D4323A9B7C8B7A02A5B08 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		569FFBB46A52B74686A202D0 /* TradingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradingView.swift; sourceTree = "<group>"; };
 		578078843FA532A83EBA1C53 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5A50EF856475775A1EEA07E0 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		6798D055E36E2A96D2575882 /* LoginViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewModel.swift; sourceTree = "<group>"; };
@@ -51,7 +52,6 @@
 		C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		CB3EEEA02ED3924700201EC3 /* SnapperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SnapperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		F1234567890ABCDEF1234568 /* TradingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradingView.swift; sourceTree = "<group>"; };
 		F4EDEB8970703709AC631633 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		F7849605786039354D6A6590 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapperApp.swift; sourceTree = "<group>"; };
@@ -117,7 +117,7 @@
 				A9948BCE1220922C26E1E5D5 /* LoginView.swift */,
 				5A50EF856475775A1EEA07E0 /* MainTabView.swift */,
 				E6605FA90A650CA70270A857 /* SettingsView.swift */,
-				F1234567890ABCDEF1234568 /* TradingView.swift */,
+				569FFBB46A52B74686A202D0 /* TradingView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -279,7 +279,7 @@
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
 				D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */,
 				3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */,
-				F1234567890ABCDEF1234567 /* TradingView.swift in Sources */,
+				81189414878D69E0A0DC0601 /* TradingView.swift in Sources */,
 				E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */,
 				4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */,
 			);
