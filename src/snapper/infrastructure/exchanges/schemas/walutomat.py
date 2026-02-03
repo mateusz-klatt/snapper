@@ -30,8 +30,8 @@ class WalutomatBestOffer(BaseModel):
     """Current best bid/ask prices from Walutomat."""
 
     model_config = EXCHANGE_SCHEMA_CONFIG
-    bid_now: float = Field(description="Current best bid price")
-    ask_now: float = Field(description="Current best ask price")
+    bid_now: float | None = Field(default=None, description="Current best bid price")
+    ask_now: float | None = Field(default=None, description="Current best ask price")
     forex_now: float = Field(description="Mid-market forex rate")
     bid_old: float | None = Field(default=None, description="Previous best bid price")
     ask_old: float | None = Field(default=None, description="Previous best ask price")
@@ -126,7 +126,12 @@ class WalutomatMarketResponse(BaseModel):
         Returns:
             Validated WalutomatMarketResponse instance.
         """
-        pairs = [WalutomatMarketPair.model_validate(item) for item in data]
+        all_pairs = [WalutomatMarketPair.model_validate(item) for item in data]
+        pairs = [
+            p
+            for p in all_pairs
+            if p.best_offers.bid_now is not None and p.best_offers.ask_now is not None
+        ]
         return cls(pairs=pairs)
 
     def to_dict(self) -> dict[str, WalutomatMarketPair]:

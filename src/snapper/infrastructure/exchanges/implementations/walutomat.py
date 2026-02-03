@@ -284,11 +284,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
             TickerUpdate with current market data.
         """
         offer = pair_data.best_offers
+        bid = offer.bid_now if offer.bid_now is not None else 0.0
+        ask = offer.ask_now if offer.ask_now is not None else 0.0
         return TickerUpdate(
             symbol=native_symbol,
-            bid=offer.bid_now,
+            bid=bid,
             bid_qty=0.0,
-            ask=offer.ask_now,
+            ask=ask,
             ask_qty=0.0,
             last=offer.forex_now,
             volume=0.0,
@@ -445,10 +447,12 @@ class WalutomatExchangeClient(ExchangeClientBase):
             raise ValueError(f"Symbol {symbol} not found. Available: {available}")
         pair_data = data[wal_symbol]
         offer = pair_data.best_offers
+        bid = offer.bid_now if offer.bid_now is not None else 0.0
+        ask = offer.ask_now if offer.ask_now is not None else 0.0
         return TickerSnapshot(
             symbol=symbol,
-            bid=offer.bid_now,
-            ask=offer.ask_now,
+            bid=bid,
+            ask=ask,
             last=offer.forex_now,
             timestamp=time.time(),
         )

@@ -129,3 +129,32 @@ class TestWalutomatMarketResponse:
         assert "EUR_PLN" in pairs_dict
         assert "USD_PLN" in pairs_dict
         assert pairs_dict["EUR_PLN"].best_offers.bid_now == pytest.approx(4.2161)
+
+    def test_from_api_response_filters_null_bid_ask(self) -> None:
+        """Verify pairs with null bid_now or ask_now are excluded.
+
+        Given API data containing a pair with null bid/ask (no active orders),
+        When from_api_response is called,
+        Then the inactive pair is filtered out from the result.
+        """
+        api_data = [
+            {
+                "pair": "EUR_PLN",
+                "bestOffers": {
+                    "bid_now": 4.2161,
+                    "ask_now": 4.2199,
+                    "forex_now": 4.219,
+                },
+            },
+            {
+                "pair": "EUR_BGN",
+                "bestOffers": {
+                    "bid_now": None,
+                    "ask_now": None,
+                    "forex_now": 1.9515,
+                },
+            },
+        ]
+        response = WalutomatMarketResponse.from_api_response(api_data)
+        assert len(response.pairs) == 1
+        assert response.pairs[0].pair == "EUR_PLN"
