@@ -6,6 +6,8 @@
 	<string>https://snapper.ch</string>
 	<key>APIPrefix</key>
 	<string>/api</string>
+	<key>WSPath</key>
+	<string>/ws</string>
 	<key>Endpoints</key>
 	<dict>
 		<key>Login</key>
@@ -21,7 +23,15 @@
 		<key>Portfolio</key>
 		<string>/portfolio</string>
 		<key>Positions</key>
-		<string>/portfolio/positions</string>
+		<string>/positions</string>
+		<key>Signals</key>
+		<string>/signals</string>
+		<key>Executions</key>
+		<string>/executions</string>
+		<key>Status</key>
+		<string>/status</string>
+		<key>Health</key>
+		<string>/health</string>
 		<key>MarketData</key>
 		<string>/market/data</string>
 		<key>Strategies</key>

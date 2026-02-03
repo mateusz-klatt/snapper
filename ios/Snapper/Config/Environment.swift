@@ -2,9 +2,19 @@ import Foundation
 
 enum AppConfig {
 
-    static let baseURL = "https://snapper.ch"
-    static let apiPrefix = "/api"
-    static let wsPath = "/ws"
+    private static let configuration = AppConfiguration.load()
+
+    static var baseURL: String {
+        return configuration.baseURL
+    }
+
+    static var apiPrefix: String {
+        return configuration.apiPrefix
+    }
+
+    static var wsPath: String {
+        return configuration.wsPath
+    }
 
     enum URIScheme {
         static let http = "http://"
@@ -37,15 +47,115 @@ enum AppConfig {
     }
 
     enum Endpoints {
-        static let login = "/auth/login"
-        static let logout = "/auth/logout"
-        static let refresh = "/auth/refresh"
-        static let me = "/auth/me"
-        static let orders = "/orders"
-        static let positions = "/positions"
-        static let signals = "/signals"
-        static let executions = "/executions"
-        static let status = "/status"
-        static let health = "/health"
+        static var login: String {
+            return configuration.endpoints.login
+        }
+
+        static var logout: String {
+            return configuration.endpoints.logout
+        }
+
+        static var refresh: String {
+            return configuration.endpoints.refresh
+        }
+
+        static var me: String {
+            return configuration.endpoints.me
+        }
+
+        static var orders: String {
+            return configuration.endpoints.orders
+        }
+
+        static var positions: String {
+            return configuration.endpoints.positions
+        }
+
+        static var signals: String {
+            return configuration.endpoints.signals
+        }
+
+        static var executions: String {
+            return configuration.endpoints.executions
+        }
+
+        static var status: String {
+            return configuration.endpoints.status
+        }
+
+        static var health: String {
+            return configuration.endpoints.health
+        }
+    }
+
+    private struct AppConfiguration {
+        let baseURL: String
+        let apiPrefix: String
+        let wsPath: String
+        let endpoints: EndpointConfiguration
+
+        struct EndpointConfiguration {
+            let login: String
+            let logout: String
+            let refresh: String
+            let me: String
+            let orders: String
+            let positions: String
+            let signals: String
+            let executions: String
+            let status: String
+            let health: String
+        }
+
+        static func load() -> AppConfiguration {
+            guard
+                let url = Bundle.main.url(forResource: "Configuration", withExtension: "plist"),
+                let data = try? Data(contentsOf: url),
+                let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+                let dict = plist as? [String: Any]
+            else {
+                return empty
+            }
+
+            let endpoints = dict["Endpoints"] as? [String: Any] ?? [:]
+
+            return AppConfiguration(
+                baseURL: dict["BaseURL"] as? String ?? "",
+                apiPrefix: dict["APIPrefix"] as? String ?? "",
+                wsPath: dict["WSPath"] as? String ?? "",
+                endpoints: EndpointConfiguration(
+                    login: endpoints["Login"] as? String ?? "",
+                    logout: endpoints["Logout"] as? String ?? "",
+                    refresh: endpoints["Refresh"] as? String ?? "",
+                    me: endpoints["Me"] as? String ?? "",
+                    orders: endpoints["Orders"] as? String ?? "",
+                    positions: endpoints["Positions"] as? String ?? "",
+                    signals: endpoints["Signals"] as? String ?? "",
+                    executions: endpoints["Executions"] as? String ?? "",
+                    status: endpoints["Status"] as? String ?? "",
+                    health: endpoints["Health"] as? String ?? ""
+                )
+            )
+        }
+
+        static var empty: AppConfiguration {
+            return AppConfiguration(
+                baseURL: "",
+                apiPrefix: "",
+                wsPath: "",
+                endpoints: EndpointConfiguration(
+                    login: "",
+                    logout: "",
+                    refresh: "",
+                    me: "",
+                    orders: "",
+                    positions: "",
+                    signals: "",
+                    executions: "",
+                    status: "",
+                    health: ""
+                )
+            )
+        }
     }
 }
