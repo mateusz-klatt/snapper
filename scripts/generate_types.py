@@ -1286,50 +1286,135 @@ def extract_repeated_unions(lines: list[str]) -> list[str]:
     Returns:
         Modified lines with type aliases extracted.
     """
-    union_occurrences: dict[str, list[tuple[int, str]]] = {}
-    for idx, line in enumerate(lines):
-        match = _UNION_LINE_RE.match(line)
-        if match:
-            union_str = match.group(2)
-            prefix = match.group(1).strip()
-            field_name = prefix.split(":")[0].rstrip("?").strip()
-            if union_str not in union_occurrences:
-                union_occurrences[union_str] = []
-            union_occurrences[union_str].append((idx, field_name))
-
-    repeated = {
-        u: occ for u, occ in union_occurrences.items() if len(occ) >= _ENTITY_UNION_THRESHOLD
-    }
+    repeated = _find_repeated_entity_unions(lines)
     if not repeated:
         return lines
 
+    alias_map = _build_entity_union_alias_map(repeated)
+    result = _replace_entity_union_occurrences(lines, repeated, alias_map)
+    insert_idx = _find_entity_union_alias_insert_index(result)
+    alias_lines = _build_entity_union_alias_lines(alias_map)
+    return _insert_entity_union_alias_lines(result, insert_idx, alias_lines)
+
+
+def _find_repeated_entity_unions(lines: list[str]) -> dict[str, list[tuple[int, str]]]:
+    """Return union occurrences that meet the extraction threshold.
+
+    Args:
+        lines: Generated TypeScript code lines.
+
+    Returns:
+        Mapping of union-string to list of (line_index, field_name) occurrences.
+    """
+    union_occurrences: dict[str, list[tuple[int, str]]] = {}
+    for idx, line in enumerate(lines):
+        match = _UNION_LINE_RE.match(line)
+        if not match:
+            continue
+        union_str = match.group(2)
+        prefix = match.group(1).strip()
+        field_name = prefix.split(":")[0].rstrip("?").strip()
+        union_occurrences.setdefault(union_str, []).append((idx, field_name))
+
+    return {
+        union_str: occurrences
+        for union_str, occurrences in union_occurrences.items()
+        if len(occurrences) >= _ENTITY_UNION_THRESHOLD
+    }
+
+
+def _build_entity_union_alias_map(
+    repeated: dict[str, list[tuple[int, str]]],
+) -> dict[str, str]:
+    """Build union-string to alias name mapping.
+
+    Args:
+        repeated: Mapping of repeated union-string occurrences.
+
+    Returns:
+        Mapping from union string to alias name.
+    """
     alias_map: dict[str, str] = {}
     for union_str, occurrences in repeated.items():
         camel = snake_to_camel(occurrences[0][1])
         alias_map[union_str] = camel[0].upper() + camel[1:]
+    return alias_map
 
+
+def _replace_entity_union_occurrences(
+    lines: list[str],
+    repeated: dict[str, list[tuple[int, str]]],
+    alias_map: dict[str, str],
+) -> list[str]:
+    """Replace inline unions with alias names.
+
+    Args:
+        lines: Original TypeScript lines.
+        repeated: Repeated union occurrences.
+        alias_map: Union-string to alias mapping.
+
+    Returns:
+        New list of lines with replacements applied.
+    """
     result = list(lines)
     for union_str, occurrences in repeated.items():
         alias = alias_map[union_str]
         for idx, _ in occurrences:
             result[idx] = result[idx].replace(union_str, alias)
+    return result
 
-    insert_idx = 0
-    for i, line in enumerate(result):
-        if line.startswith("export interface"):
-            insert_idx = i
-            while insert_idx > 0 and result[insert_idx - 1].startswith((" *", "/**")):
-                insert_idx -= 1
-            break
 
-    alias_lines: list[str] = []
-    for union_str, alias in alias_map.items():
-        alias_lines.append(f"type {alias} = {union_str}")
+def _find_entity_union_alias_insert_index(lines: list[str]) -> int:
+    """Find insertion index for alias declarations.
+
+    Args:
+        lines: TypeScript code lines.
+
+    Returns:
+        Index where type aliases should be inserted.
+    """
+    for i, line in enumerate(lines):
+        if not line.startswith("export interface"):
+            continue
+        insert_idx = i
+        while insert_idx > 0 and lines[insert_idx - 1].startswith((" *", "/**")):
+            insert_idx -= 1
+        return insert_idx
+    return 0
+
+
+def _build_entity_union_alias_lines(alias_map: dict[str, str]) -> list[str]:
+    """Build TypeScript alias declaration lines.
+
+    Args:
+        alias_map: Union-string to alias mapping.
+
+    Returns:
+        TypeScript lines for alias declarations.
+    """
+    alias_lines = [f"type {alias} = {union_str}" for union_str, alias in alias_map.items()]
     alias_lines.append("")
+    return alias_lines
 
-    for j, decl_line in enumerate(alias_lines):
-        result.insert(insert_idx + j, decl_line)
 
+def _insert_entity_union_alias_lines(
+    lines: list[str],
+    insert_idx: int,
+    alias_lines: list[str],
+) -> list[str]:
+    """Insert alias lines into the TypeScript output.
+
+    Args:
+        lines: TypeScript code lines.
+        insert_idx: Index to insert at.
+        alias_lines: Alias declaration lines.
+
+    Returns:
+        New list of lines with alias declarations inserted.
+    """
+    result = list(lines)
+    for offset, decl_line in enumerate(alias_lines):
+        result.insert(insert_idx + offset, decl_line)
     return result
 
 
@@ -1514,6 +1599,20 @@ def _resolve_project_relative_file_path(project_root: Path, raw_path: str) -> Pa
     return resolved_file
 
 
+class GenerateTypesArgs(argparse.Namespace):
+    """Typed CLI arguments for the type generator."""
+
+    openapi: bool
+    export: bool
+    frontend: bool
+    frontend_ws: bool
+    frontend_api: bool
+    entities: bool
+    ios: bool
+    strip_eslint_disable: str | None
+    all: bool
+
+
 def main() -> int:
     """Main entry point.
 
@@ -1549,11 +1648,33 @@ Examples:
         help="Strip eslint-disable comment from file",
     )
     parser.add_argument("--all", action="store_true", help="All of the above (default)")
-    args = parser.parse_args()
+    args: GenerateTypesArgs = parser.parse_args(namespace=GenerateTypesArgs())
 
     project_root = Path(__file__).parent.parent
 
-    has_specific = any(
+    if not _args_has_specific_targets(args):
+        args.all = True
+
+    _run_openapi_export(args, project_root)
+    _run_schema_exports(args, project_root)
+    _run_frontend_generators(args, project_root)
+    _run_entity_generator(args, project_root)
+    _run_ios_generator(args, project_root)
+    _run_strip_eslint_disable(args, project_root)
+
+    return 0
+
+
+def _args_has_specific_targets(args: GenerateTypesArgs) -> bool:
+    """Return True when at least one explicit generator target is requested.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        True when any target flag is set, False otherwise.
+    """
+    return any(
         [
             args.openapi,
             args.export,
@@ -1562,49 +1683,70 @@ Examples:
             args.frontend_api,
             args.entities,
             args.ios,
-            args.strip_eslint_disable,
+            bool(args.strip_eslint_disable),
         ]
     )
-    if not has_specific:
-        args.all = True
 
+
+def _run_openapi_export(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Run OpenAPI export when requested."""
     if args.openapi or args.all:
         print("=== Exporting OpenAPI Spec ===")
         export_openapi_spec(project_root)
 
+
+def _run_schema_exports(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Run schema exports when requested."""
     if args.export or args.all:
         print("=== Exporting JSON Schemas ===")
         export_ws_schemas(project_root)
         export_openapi_schemas(project_root)
 
+
+def _run_frontend_generators(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Run frontend type generation depending on flags."""
     if args.frontend or args.all:
         print("\n=== Generating Frontend Types (Zod) ===")
         generate_zod_ws(project_root)
         generate_zod_api(project_root)
-    elif args.frontend_ws:
+        return
+
+    if args.frontend_ws:
         generate_zod_ws(project_root)
-    elif args.frontend_api:
+        return
+
+    if args.frontend_api:
         generate_zod_api(project_root)
 
+
+def _run_entity_generator(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Run entity interface generation when requested."""
     if args.entities or args.all:
         print("\n=== Generating Entity Interfaces ===")
         generate_entities(project_root)
 
+
+def _run_ios_generator(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Run iOS type generation when requested."""
     if args.ios or args.all:
         print("\n=== Generating iOS Types (Swift) ===")
         generate_ios_types(project_root)
 
-    if args.strip_eslint_disable:
-        try:
-            file_path = _resolve_project_relative_file_path(project_root, args.strip_eslint_disable)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from None
 
-        if file_path.is_file():
-            content = file_path.read_text(encoding="utf-8")
-            file_path.write_text(content.replace("/* eslint-disable */\n", ""), encoding="utf-8")
+def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Strip eslint-disable header from a file when requested."""
+    raw_path = args.strip_eslint_disable
+    if not raw_path:
+        return
 
-    return 0
+    try:
+        file_path = _resolve_project_relative_file_path(project_root, str(raw_path))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
+    if file_path.is_file():
+        content = file_path.read_text(encoding="utf-8")
+        file_path.write_text(content.replace("/* eslint-disable */\n", ""), encoding="utf-8")
 
 
 if __name__ == "__main__":
