@@ -250,6 +250,7 @@ class BaseStrategy(ABC):
         Returns:
             Optional signal if strategy logic triggers.
         """
+        await asyncio.sleep(0)
         return None
 
     async def on_tick(self, instrument: str, tick: TickEnvelope) -> Signal | None:
@@ -262,6 +263,7 @@ class BaseStrategy(ABC):
         Returns:
             Optional signal if strategy logic triggers.
         """
+        await asyncio.sleep(0)
         return None
 
     async def on_trade(self, instrument: str, trade: TradeEnvelope) -> Signal | None:
@@ -274,6 +276,7 @@ class BaseStrategy(ABC):
         Returns:
             Optional signal if strategy logic triggers.
         """
+        await asyncio.sleep(0)
         return None
 
     @abstractmethod
@@ -291,6 +294,7 @@ class BaseStrategy(ABC):
             raw_pub_socket.connect(broker_addr)
             self.publisher = ValidatedPublisher(raw_pub_socket)
             logger.info(f"Strategy {self.name}: Publisher initialized successfully")
+        await asyncio.sleep(0)
 
     async def start(self) -> None:
         """Start the strategy and begin processing market data."""
@@ -376,6 +380,7 @@ class BaseStrategy(ABC):
     async def _subscribe_inputs(self) -> None:
         """Subscribe to input topics via ZMQ."""
         if self.subscriber:
+            await asyncio.sleep(0)
             return
         assert self.zmq_context is not None, "ZMQ context must be initialized in start()"
         raw_sub_socket = self.zmq_context.socket(zmq.SUB)
@@ -395,12 +400,14 @@ class BaseStrategy(ABC):
             )
             self.subscriber.subscribe("system.replay.")
         self._listen_task = asyncio.create_task(self._listen_loop())
+        await asyncio.sleep(0)
 
     async def _unsubscribe_inputs(self) -> None:
         """Unsubscribe from all input topics."""
         if self.subscriber:
             self.subscriber.close()
             self.subscriber = None
+        await asyncio.sleep(0)
 
     def _handle_system_heartbeat(self, topic_str: str, payload_str: str) -> None:
         """Handle feed heartbeat system message.
@@ -700,6 +707,7 @@ class CompositeStrategy(BaseStrategy):
                 f"None of sub-strategy output topics {strategy.output_topics} found in composite inputs {self.inputs}"
             )
         self.sub_strategies.append(strategy)
+        await asyncio.sleep(0)
 
     async def reset(self) -> None:
         """Reset composite and all sub-strategies for replay."""

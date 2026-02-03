@@ -1147,6 +1147,7 @@ class ProcessLauncherService:
                 status["details"] = instance.get_status()
             except Exception as e:
                 logger.warning(f"Failed to get status from process '{name}': {e}")
+        await asyncio.sleep(0)
         return status
 
     async def get_recent_runs(

@@ -6,6 +6,7 @@ This module defines the core data structures for process management:
 - ProcessConfigModel: Configuration model for process definitions
 """
 
+import asyncio
 import subprocess
 from abc import ABC
 from abc import abstractmethod
@@ -69,6 +70,7 @@ class RegisterableProcess(ABC):
         Override in subclasses that need cleanup on shutdown.
         Default implementation does nothing.
         """
+        await asyncio.sleep(0)
         return None
 
 

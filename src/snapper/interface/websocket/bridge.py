@@ -217,6 +217,7 @@ class ZmqWebSocketBridgeService:
             logger.info(f"ZMQ subscription started for {topic} on {topic_config.endpoint}")
         except Exception as e:
             logger.error(f"Failed to start ZMQ subscription for {topic}: {e}")
+        await asyncio.sleep(0)
 
     async def _stop_zmq_subscription(self, topic: str) -> None:
         """Stop ZMQ subscription for a topic.
@@ -472,6 +473,7 @@ class ZmqWebSocketBridgeService:
             logger.info(f"Started ZMQ subscriber for topic: {topic}")
         except Exception as e:
             logger.error(f"Failed to start ZMQ subscriber for {topic}: {e}")
+        await asyncio.sleep(0)
 
     async def stop_zmq_subscriber(self, topic: str) -> None:
         """Stop a ZMQ subscriber for a specific topic.
@@ -487,6 +489,7 @@ class ZmqWebSocketBridgeService:
             self.zmq_subscribers[topic].close()
             del self.zmq_subscribers[topic]
         logger.info(f"Stopped ZMQ subscriber for topic: {topic}")
+        await asyncio.sleep(0)
 
     async def _handle_zmq_messages(
         self, topic: str, socket: zmq.asyncio.Socket, _config: TopicConfigurationModel
@@ -749,6 +752,7 @@ class ZmqWebSocketBridgeService:
             self.context.term()
             self.context = None
         logger.info("ZMQ WebSocket bridge cleaned up")
+        await asyncio.sleep(0)
 
     async def start(self) -> None:
         """Start the ZMQ-WebSocket bridge service.

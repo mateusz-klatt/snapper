@@ -66,6 +66,7 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
         """
         symbols = self.exchange_client.get_supported_pairs()
         logger.info(f"Loaded {len(symbols)} Walutomat symbols from API (sorted alphabetically)")
+        await asyncio.sleep(0)
         return sorted(symbols)
 
     async def update_market_snapshots(self, **kwargs: object) -> int:

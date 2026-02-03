@@ -8,6 +8,7 @@ It handles:
 - Settings retrieval by category
 """
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC
@@ -143,6 +144,7 @@ class SettingsService:
         if self._zmq_context:
             self._zmq_context.term()
         logger.info("SettingsService shutdown complete")
+        await asyncio.sleep(0)
 
     async def _load_all_settings(self) -> None:
         """Load all settings from database into cache.
@@ -212,6 +214,7 @@ class SettingsService:
         raw_pub_socket.connect(self.zmq_broker_xpub)
         self._publisher = ValidatedPublisher(raw_pub_socket)
         logger.info(f"Settings service connected to ZMQ broker: {self.zmq_broker_xpub}")
+        await asyncio.sleep(0)
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         """Get a setting value from cache.
@@ -322,6 +325,7 @@ class SettingsService:
         Returns:
             Copy of settings cache dict.
         """
+        await asyncio.sleep(0)
         return self._cache.copy()
 
     async def get_settings_by_category(self, category: str) -> dict[str, Any]:

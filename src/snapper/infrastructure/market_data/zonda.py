@@ -72,6 +72,7 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
         logger.info(
             f"Loaded {len(symbols)} Zonda symbols from mapper cache (sorted alphabetically)"
         )
+        await asyncio.sleep(0)
         return symbols
 
     async def update_market_snapshots(self, **kwargs: object) -> int:
