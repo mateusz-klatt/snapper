@@ -62,5 +62,8 @@
   "sonarlint.connectedMode.project": {
     "connectionId": "mateusz-klatt",
     "projectKey": "mateusz-klatt_snapper"
-  }
+  },
+  "swift.autoGenerateLaunchConfigurations": false,
+  "swift.backgroundCompilation": false,
+  "swift.disableAutoResolve": true
 }
