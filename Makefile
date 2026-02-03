@@ -393,7 +393,7 @@ ios-setup:
 
 ios-gen-types:
 	$(info Generating Swift types from backend schemas...)
-	@$(VENV_PY) scripts/generate_types.py --export --ios
+	@$(VENV_PY) scripts/generate_types.py --openapi --export --ios
 	$(info Generated iOS types in ios/Snapper/Models/Generated/)
 
 ios-build:
