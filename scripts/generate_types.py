@@ -1622,6 +1622,35 @@ def postprocess_openapi_typescript_file(file_path: Path) -> None:
         file_path.write_text(updated, encoding="utf-8")
 
 
+def resolve_project_relative_file(project_root: Path, relative_path: Path) -> Path:
+    """Resolve a project-root-relative file path safely.
+
+    The caller must provide a relative path which, once resolved, stays within
+    the given project root. This is used to avoid writing to arbitrary paths.
+
+    Args:
+        project_root: Project root directory.
+        relative_path: Relative path under the project root.
+
+    Returns:
+        Resolved absolute path to the target file.
+
+    Raises:
+        ValueError: When the provided path is absolute or escapes the project root.
+    """
+    if relative_path.is_absolute():
+        raise ValueError("Expected a project-relative path")
+
+    if ".." in relative_path.parts:
+        raise ValueError("Path traversal is not allowed")
+
+    root = project_root.resolve()
+    target = (root / relative_path).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("Resolved path escapes the project root")
+    return target
+
+
 def main() -> int:
     """Main entry point.
 
@@ -1753,10 +1782,12 @@ def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> No
     if not args.strip_eslint_disable:
         return
 
-    file_path = project_root / _STRIP_ESLINT_DISABLE_TARGET
+    file_path = resolve_project_relative_file(project_root, _STRIP_ESLINT_DISABLE_TARGET)
     if file_path.is_file():
         content = file_path.read_text(encoding="utf-8")
-        file_path.write_text(content.replace("/* eslint-disable */\n", ""), encoding="utf-8")
+        header = "/* eslint-disable */\n"
+        if content.startswith(header):
+            file_path.write_text(content[len(header) :], encoding="utf-8")
 
 
 def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: Path) -> None:
@@ -1764,7 +1795,7 @@ def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: P
     if not args.postprocess_openapi_types:
         return
 
-    file_path = project_root / _OPENAPI_TYPESCRIPT_TARGET
+    file_path = resolve_project_relative_file(project_root, _OPENAPI_TYPESCRIPT_TARGET)
     postprocess_openapi_typescript_file(file_path)
 
 

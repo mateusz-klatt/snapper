@@ -1,6 +1,7 @@
 """Tests for scripts/generate_types.py."""
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ from scripts.generate_types import json_type_to_zod
 from scripts.generate_types import main
 from scripts.generate_types import make_const_fields_required
 from scripts.generate_types import postprocess_openapi_typescript_file
+from scripts.generate_types import resolve_project_relative_file
 from scripts.generate_types import snake_to_camel
 from scripts.generate_types import strip_primitive_titles
 from scripts.generate_types import to_camel_case
@@ -344,6 +346,40 @@ class TestRunOpenapiTypescriptPostprocess:
         updated = target.read_text(encoding="utf-8")
         assert "export type Paths" in updated
         assert "Operations['op']" in updated
+
+
+class TestResolveProjectRelativeFile:
+    """Tests for resolve_project_relative_file function."""
+
+    def test_resolves_valid_relative_path(self, tmp_path: Path) -> None:
+        """Resolves a normal project-relative file path."""
+        rel = Path("frontend") / "src" / "types" / "api.generated.ts"
+        resolved = resolve_project_relative_file(tmp_path, rel)
+        assert resolved == (tmp_path / rel).resolve()
+
+    def test_rejects_absolute_path(self, tmp_path: Path) -> None:
+        """Rejects absolute paths."""
+        with pytest.raises(ValueError):
+            resolve_project_relative_file(tmp_path, Path("/etc/passwd"))
+
+    def test_rejects_traversal_path(self, tmp_path: Path) -> None:
+        """Rejects paths that contain traversal segments."""
+        with pytest.raises(ValueError):
+            resolve_project_relative_file(tmp_path, Path("frontend") / ".." / "evil")
+
+    def test_rejects_symlink_escape_when_supported(self, tmp_path: Path) -> None:
+        """Rejects paths that escape the root via symlinks."""
+        outside_dir = tmp_path.parent / f"outside_{tmp_path.name}"
+        outside_dir.mkdir(parents=True, exist_ok=True)
+
+        link = tmp_path / "link"
+        try:
+            os.symlink(outside_dir, link)
+        except OSError:
+            pytest.skip("Symlinks not supported in this environment")
+
+        with pytest.raises(ValueError):
+            resolve_project_relative_file(tmp_path, Path("link") / "evil.txt")
 
     def test_strips_title_from_bare_string(self) -> None:
         """Strips title from a property that is just a string."""
