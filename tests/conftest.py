@@ -211,7 +211,7 @@ def _patch_settings_functions(
     monkeypatch.setattr("snapper.config.settings.get_settings", mock_get_settings)
     for path in _SETTINGS_WITH_SERVICE_PATHS:
         monkeypatch.setattr(path, mock_get_settings_with_service)
-    for module_name in list(sys.modules):
+    for module_name in tuple(sys.modules):
         if not module_name.startswith("snapper."):
             continue
         module = sys.modules[module_name]
@@ -352,7 +352,7 @@ def cleanup_zmq_sockets() -> Generator[None, None, None]:
         for ctx_module in [zmq, zmq.asyncio]:
             try:
                 ctx = ctx_module.Context.instance()
-                for socket in list(ctx.sockets):
+                for socket in tuple(ctx.sockets):
                     try:
                         socket.setsockopt(zmq.LINGER, 0)
                         socket.close()

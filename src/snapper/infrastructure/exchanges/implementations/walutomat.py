@@ -431,7 +431,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 break
             current_minute = int(time.time() // 60) * 60
             prev_minute_start = current_minute - 60
-            for symbol in list(self._tick_buffers):
+            for symbol in tuple(self._tick_buffers):
                 ticks = self._tick_buffers.get(symbol, [])
                 if not ticks:
                     continue
