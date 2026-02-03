@@ -35,6 +35,7 @@ _COMPONENTS_REF_PREFIX = "#/components/schemas/"
 _WS_SCHEMAS_FILE = "ws-schemas.json"
 _OPENAPI_FILE = "openapi.json"
 _DEFS_KEY = "$defs"
+_STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
 
 ENTITY_RENAMES: dict[str, str] = {}
 ENVELOPE_SUFFIX = "Envelope"
@@ -1572,33 +1573,6 @@ def generate_entities(project_root: Path) -> None:
     print(f"  - {request_count} request entities")
 
 
-def _resolve_project_relative_file_path(project_root: Path, raw_path: str) -> Path:
-    """Resolve a user-provided file path under the project root.
-
-    The input must be a project-relative path. Absolute paths and paths that
-    resolve outside the repository root are rejected.
-
-    Args:
-        project_root: Repository root directory.
-        raw_path: Raw user-provided path string.
-
-    Returns:
-        Resolved file path under project_root.
-
-    Raises:
-        ValueError: When the input is absolute or escapes the project root.
-    """
-    user_path = Path(raw_path)
-    if user_path.is_absolute():
-        raise ValueError("Expected a project-relative path")
-
-    resolved_root = project_root.resolve()
-    resolved_file = (resolved_root / user_path).resolve()
-    if not resolved_file.is_relative_to(resolved_root):
-        raise ValueError("Path must be under the project root")
-    return resolved_file
-
-
 class GenerateTypesArgs(argparse.Namespace):
     """Typed CLI arguments for the type generator."""
 
@@ -1609,7 +1583,7 @@ class GenerateTypesArgs(argparse.Namespace):
     frontend_api: bool
     entities: bool
     ios: bool
-    strip_eslint_disable: str | None
+    strip_eslint_disable: bool
     all: bool
 
 
@@ -1643,9 +1617,8 @@ Examples:
     parser.add_argument("--ios", action="store_true", help="Generate iOS Swift types")
     parser.add_argument(
         "--strip-eslint-disable",
-        type=str,
-        metavar="FILE",
-        help="Strip eslint-disable comment from file",
+        action="store_true",
+        help="Strip eslint-disable comment from frontend ws.generated.ts",
     )
     parser.add_argument("--all", action="store_true", help="All of the above (default)")
     args: GenerateTypesArgs = parser.parse_args(namespace=GenerateTypesArgs())
@@ -1734,16 +1707,11 @@ def _run_ios_generator(args: GenerateTypesArgs, project_root: Path) -> None:
 
 
 def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> None:
-    """Strip eslint-disable header from a file when requested."""
-    raw_path = args.strip_eslint_disable
-    if not raw_path:
+    """Strip eslint-disable header from the generated frontend file when requested."""
+    if not args.strip_eslint_disable:
         return
 
-    try:
-        file_path = _resolve_project_relative_file_path(project_root, str(raw_path))
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from None
-
+    file_path = project_root / _STRIP_ESLINT_DISABLE_TARGET
     if file_path.is_file():
         content = file_path.read_text(encoding="utf-8")
         file_path.write_text(content.replace("/* eslint-disable */\n", ""), encoding="utf-8")

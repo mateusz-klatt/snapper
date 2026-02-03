@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+import scripts.generate_types as generate_types
 from scripts.generate_types import ENTITY_EXCLUDE_FIELDS
 from scripts.generate_types import ENTITY_UNION_ID_FIELDS
 from scripts.generate_types import SWIFT_KEYWORD_RENAMES
@@ -1548,16 +1549,17 @@ class TestMain:
         """Strips eslint-disable comment from file when --strip-eslint-disable is used.
 
         Given: File containing eslint-disable comment,
-        When: main() is called with --strip-eslint-disable FILE,
+        When: main() is called with --strip-eslint-disable,
         Then: Comment is removed from file.
         """
         project_root = Path(__file__).resolve().parents[2]
         work_dir = project_root / "build" / "pytest" / "strip-eslint-disable" / tmp_path.name
         work_dir.mkdir(parents=True, exist_ok=True)
-        test_file = work_dir / "test.ts"
+        test_file = work_dir / "ws.generated.ts"
         test_file.write_text("/* eslint-disable */\nexport const foo = 1;\n", encoding="utf-8")
         rel_path = test_file.relative_to(project_root)
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(rel_path)])
+        monkeypatch.setattr(generate_types, "_STRIP_ESLINT_DISABLE_TARGET", rel_path)
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable"])
 
         result = main()
 
@@ -1569,7 +1571,7 @@ class TestMain:
     ) -> None:
         """Handles nonexistent file gracefully.
 
-        Given: Path to nonexistent file,
+        Given: Target file does not exist,
         When: main() is called with --strip-eslint-disable,
         Then: Returns success without error.
         """
@@ -1578,7 +1580,8 @@ class TestMain:
         work_dir.mkdir(parents=True, exist_ok=True)
         nonexistent = work_dir / "does_not_exist.ts"
         rel_path = nonexistent.relative_to(project_root)
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(rel_path)])
+        monkeypatch.setattr(generate_types, "_STRIP_ESLINT_DISABLE_TARGET", rel_path)
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable"])
 
         result = main()
 
@@ -1600,42 +1603,13 @@ class TestMain:
         original_content = "export const bar = 2;\n"
         test_file.write_text(original_content, encoding="utf-8")
         rel_path = test_file.relative_to(project_root)
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(rel_path)])
+        monkeypatch.setattr(generate_types, "_STRIP_ESLINT_DISABLE_TARGET", rel_path)
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable"])
 
         result = main()
 
         assert result == 0
         assert test_file.read_text(encoding="utf-8") == original_content
-
-    def test_strip_eslint_disable_rejects_absolute_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Rejects absolute paths for --strip-eslint-disable.
-
-        Given: Absolute path is provided,
-        When: main() is called,
-        Then: Exits with a clear message.
-        """
-        test_file = tmp_path / "abs.ts"
-        test_file.write_text("/* eslint-disable */\nexport const foo = 1;\n", encoding="utf-8")
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(test_file)])
-
-        with pytest.raises(SystemExit, match="Expected a project-relative path"):
-            main()
-
-    def test_strip_eslint_disable_rejects_escape_project_root(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Rejects paths that escape the project root.
-
-        Given: A path containing parent traversal,
-        When: main() is called,
-        Then: Exits with a clear message.
-        """
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", "../pyproject.toml"])
-
-        with pytest.raises(SystemExit, match="Path must be under the project root"):
-            main()
 
 
 class TestConstants:

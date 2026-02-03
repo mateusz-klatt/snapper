@@ -344,7 +344,7 @@ ui-gen-ws-types:
 	$(info Generating TypeScript types from WebSocket schemas...)
 	@$(VENV_PY) scripts/generate_types.py --export
 	@cd $(UI_DIR) && pnpm gen:ws-types
-	@$(VENV_PY) scripts/generate_types.py --strip-eslint-disable $(UI_DIR)/src/types/ws.generated.ts
+	@$(VENV_PY) scripts/generate_types.py --strip-eslint-disable
 	@cd $(UI_DIR) && pnpm exec prettier --write src/types/ws.generated.ts
 	$(info Generated frontend/src/types/ws.generated.ts)
 
