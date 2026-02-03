@@ -685,10 +685,27 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"Failed to get balance: {e}")
             raise
 
-    async def subscribe_ticks(
+    def subscribe_ticks(
         self, symbols: list[str], *, req_id: int | None = None
     ) -> AsyncIterator[TickerUpdate]:
         """Subscribe to real-time ticker updates via WebSocket.
+
+        Args:
+            symbols: List of symbols or ['*'] for all.
+            req_id: Optional request ID for tracking.
+
+        Returns:
+            AsyncIterator yielding TickerUpdate for each price change.
+
+        Raises:
+            Exception: If subscription fails.
+        """
+        return self._subscribe_ticks_impl(symbols, req_id=req_id)
+
+    async def _subscribe_ticks_impl(
+        self, symbols: list[str], *, req_id: int | None
+    ) -> AsyncIterator[TickerUpdate]:
+        """Implement WebSocket ticker subscription.
 
         Args:
             symbols: List of symbols or ['*'] for all.
@@ -724,7 +741,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"WebSocket tick subscription error: {e}")
             raise
 
-    async def subscribe_candles(
+    def subscribe_candles(
         self,
         symbols: list[str],
         timeframe: str = "1m",
@@ -732,6 +749,28 @@ class KrakenExchangeClient(ExchangeClientBase):
         req_id: int | None = None,
     ) -> AsyncIterator[CandleUpdate]:
         """Subscribe to real-time OHLC candle updates.
+
+        Args:
+            symbols: List of symbols or ['*'] for all.
+            timeframe: Candle interval (e.g., '1m', '1h').
+            req_id: Optional request ID.
+
+        Returns:
+            AsyncIterator yielding CandleUpdate for each candle change.
+
+        Raises:
+            Exception: If subscription fails.
+        """
+        return self._subscribe_candles_impl(symbols, timeframe=timeframe, req_id=req_id)
+
+    async def _subscribe_candles_impl(
+        self,
+        symbols: list[str],
+        *,
+        timeframe: str,
+        req_id: int | None,
+    ) -> AsyncIterator[CandleUpdate]:
+        """Implement WebSocket candle subscription.
 
         Args:
             symbols: List of symbols or ['*'] for all.
@@ -784,10 +823,27 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"WebSocket candle subscription error: {e}")
             raise
 
-    async def subscribe_trades(
+    def subscribe_trades(
         self, symbols: list[str], *, req_id: int | None = None
     ) -> AsyncIterator[TradeUpdate]:
         """Subscribe to real-time trade updates.
+
+        Args:
+            symbols: List of symbols or ['*'] for all.
+            req_id: Optional request ID.
+
+        Returns:
+            AsyncIterator yielding TradeUpdate for each trade execution.
+
+        Raises:
+            Exception: If subscription fails.
+        """
+        return self._subscribe_trades_impl(symbols, req_id=req_id)
+
+    async def _subscribe_trades_impl(
+        self, symbols: list[str], *, req_id: int | None
+    ) -> AsyncIterator[TradeUpdate]:
+        """Implement WebSocket trades subscription.
 
         Args:
             symbols: List of symbols or ['*'] for all.
@@ -823,7 +879,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"WebSocket trade subscription error: {e}")
             raise
 
-    async def subscribe_executions(
+    def subscribe_executions(
         self,
         *,
         snap_orders: bool | None = True,
@@ -834,6 +890,42 @@ class KrakenExchangeClient(ExchangeClientBase):
         req_id: int | None = None,
     ) -> AsyncIterator[ExecutionUpdate]:
         """Subscribe to user execution reports (private channel).
+
+        Args:
+            snap_orders: Include order snapshot on subscribe.
+            snap_trades: Include trade snapshot on subscribe.
+            order_status: Include order status updates.
+            ratecounter: Enable rate counter.
+            users: Subscribe to all users (for sub-accounts).
+            req_id: Optional request ID.
+
+        Returns:
+            AsyncIterator yielding ExecutionUpdate for each order fill or status change.
+
+        Raises:
+            RuntimeError: If API credentials are missing.
+            Exception: If subscription fails.
+        """
+        return self._subscribe_executions_impl(
+            snap_orders=snap_orders,
+            snap_trades=snap_trades,
+            order_status=order_status,
+            ratecounter=ratecounter,
+            users=users,
+            req_id=req_id,
+        )
+
+    async def _subscribe_executions_impl(
+        self,
+        *,
+        snap_orders: bool | None,
+        snap_trades: bool | None,
+        order_status: bool | None,
+        ratecounter: bool | None,
+        users: Literal["all"] | None,
+        req_id: int | None,
+    ) -> AsyncIterator[ExecutionUpdate]:
+        """Implement private execution reports subscription.
 
         Args:
             snap_orders: Include order snapshot on subscribe.

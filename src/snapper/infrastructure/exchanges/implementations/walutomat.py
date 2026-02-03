@@ -492,8 +492,22 @@ class WalutomatExchangeClient(ExchangeClientBase):
         logger.warning("Walutomat does not provide OhlcvSnapshot data - returning empty list")
         return []
 
-    async def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+    def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Subscribe to ticker updates via HTTP polling.
+
+        Args:
+            symbols: List of symbols or ['*'] for all.
+
+        Returns:
+            AsyncIterator yielding TickerUpdate for each price change.
+
+        Raises:
+            RuntimeError: If not connected.
+        """
+        return self._subscribe_ticks_impl(symbols)
+
+    async def _subscribe_ticks_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+        """Implement ticker polling subscription.
 
         Args:
             symbols: List of symbols or ['*'] for all.
@@ -518,7 +532,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             except TimeoutError:
                 continue
 
-    async def subscribe_candles(
+    def subscribe_candles(
         self,
         symbols: list[str],
         timeframe: str = "1m",
@@ -528,6 +542,27 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Args:
             symbols: List of symbols or ['*'] for all.
             timeframe: Must be '1m' (only supported interval).
+
+        Returns:
+            AsyncIterator yielding CandleUpdate for each completed candle.
+
+        Raises:
+            RuntimeError: If not connected.
+            NotImplementedError: If timeframe is not '1m'.
+        """
+        return self._subscribe_candles_impl(symbols, timeframe=timeframe)
+
+    async def _subscribe_candles_impl(
+        self,
+        symbols: list[str],
+        *,
+        timeframe: str,
+    ) -> AsyncIterator[CandleUpdate]:
+        """Implement candle subscription based on tick polling.
+
+        Args:
+            symbols: List of symbols or ['*'] for all.
+            timeframe: Candle interval (only '1m' supported).
 
         Yields:
             CandleUpdate for each completed candle.

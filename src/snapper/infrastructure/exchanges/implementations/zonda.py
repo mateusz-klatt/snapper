@@ -244,10 +244,27 @@ class ZondaExchangeClient(ExchangeClientBase):
             except TimeoutError:
                 await asyncio.sleep(0.01)
 
-    async def subscribe_ticks(
+    def subscribe_ticks(
         self, symbols: list[str], snapshot: bool = False
     ) -> AsyncIterator[TickerUpdate]:
         """Subscribe to real-time ticker updates.
+
+        Args:
+            symbols: List of symbols or ['*'] for all.
+            snapshot: Request initial snapshot before streaming.
+
+        Returns:
+            AsyncIterator yielding TickerUpdate for each price change.
+
+        Raises:
+            ValueError: If wildcard used with snapshot=True.
+        """
+        return self._subscribe_ticks_impl(symbols, snapshot=snapshot)
+
+    async def _subscribe_ticks_impl(
+        self, symbols: list[str], *, snapshot: bool
+    ) -> AsyncIterator[TickerUpdate]:
+        """Implement WebSocket ticker subscription.
 
         Args:
             symbols: List of symbols or ['*'] for all.
@@ -903,8 +920,22 @@ class ZondaExchangeClient(ExchangeClientBase):
             await self._ws.send(json.dumps(msg))
             logger.debug(f"Subscribed to Zonda transactions: {symbol}")
 
-    async def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+    def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Subscribe to real-time trade updates.
+
+        Args:
+            symbols: List of specific symbols (wildcard not supported).
+
+        Returns:
+            AsyncIterator yielding TradeUpdate for each trade.
+
+        Raises:
+            ValueError: If wildcard subscription attempted.
+        """
+        return self._subscribe_trades_impl(symbols)
+
+    async def _subscribe_trades_impl(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+        """Implement WebSocket trades subscription.
 
         Args:
             symbols: List of specific symbols (wildcard not supported).
@@ -940,12 +971,32 @@ class ZondaExchangeClient(ExchangeClientBase):
                 else:
                     raise
 
-    async def subscribe_candles(
+    def subscribe_candles(
         self,
         symbols: list[str],
         timeframe: str = "1m",
     ) -> AsyncIterator[CandleUpdate]:
         """Subscribe to 1-minute candles built from trades.
+
+        Args:
+            symbols: List of symbols (wildcard not supported).
+            timeframe: Must be '1m' (only supported interval).
+
+        Returns:
+            AsyncIterator yielding CandleUpdate for each completed candle.
+
+        Raises:
+            ValueError: If timeframe is not '1m' or wildcard used.
+        """
+        return self._subscribe_candles_impl(symbols, timeframe=timeframe)
+
+    async def _subscribe_candles_impl(
+        self,
+        symbols: list[str],
+        *,
+        timeframe: str,
+    ) -> AsyncIterator[CandleUpdate]:
+        """Implement candle streaming built from trades.
 
         Args:
             symbols: List of symbols (wildcard not supported).
@@ -1059,8 +1110,19 @@ class ZondaExchangeClient(ExchangeClientBase):
         await self._ws.send(json.dumps(signed_msg))
         logger.debug("Subscribed to Zonda private executions (trading/history/transactions)")
 
-    async def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
+    def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
         """Subscribe to user execution reports (private channel).
+
+        Returns:
+            AsyncIterator yielding ExecutionUpdate for each order fill.
+
+        Raises:
+            RuntimeError: If API credentials are missing.
+        """
+        return self._subscribe_executions_impl()
+
+    async def _subscribe_executions_impl(self) -> AsyncIterator[ExecutionUpdate]:
+        """Implement private execution reports streaming.
 
         Yields:
             ExecutionUpdate for each order fill.
