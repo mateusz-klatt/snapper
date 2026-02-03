@@ -4,7 +4,7 @@ This module provides the WebSocket endpoint that requires authentication
 before allowing subscription to real-time market data topics.
 
 Authentication Flow:
-    1. Client connects to ``/snapper/api/ws``
+    1. Client connects to ``/api/ws``
     2. Server validates origin header against allowed origins
     3. Client sends auth message with WebSocket token
     4. Server validates token and extracts user profile
@@ -19,7 +19,7 @@ Topics are role-based:
 Example:
     Client-side WebSocket connection::
 
-        const ws = new WebSocket('wss://host/snapper/api/ws');
+        const ws = new WebSocket('wss://host/api/ws');
         ws.onopen = () => {
             ws.send(JSON.stringify({
                 type: 'auth',

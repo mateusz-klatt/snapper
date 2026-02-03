@@ -84,7 +84,7 @@ class APIClient {
   private async refreshAndRetry(url: string, options: RequestOptions): Promise<Response> {
     try {
       const csrfToken = this.getCSRFToken()
-      const refreshResponse = await fetch('/snapper/api/auth/refresh', {
+      const refreshResponse = await fetch('/api/auth/refresh', {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -271,12 +271,12 @@ class APIClient {
     return false
   }
   async getHealth(): Promise<{ status: string; timestamp: string }> {
-    const data = await this.getJSON('/snapper/api/health')
+    const data = await this.getJSON('/api/health')
 
     return validateResponse(data, HealthCheckResponseSchema, '/health')
   }
   async getSystemStatus(): Promise<SystemStatus> {
-    const data = await this.getJSON('/snapper/api/status')
+    const data = await this.getJSON('/api/status')
 
     return validateResponse(data, SystemStatusSchema, '/status')
   }
@@ -286,7 +286,7 @@ class APIClient {
     limit: number = 100
   ): Promise<CandleSnapshot[]> {
     const params = new URLSearchParams({ instrument, timeframe, limit: String(limit) })
-    const response = await this.get(`/snapper/api/candles?${params}`)
+    const response = await this.get(`/api/candles?${params}`)
 
     if (response.status === 204) {
       return []
@@ -311,18 +311,18 @@ class APIClient {
       params.set('symbol', symbol)
     }
 
-    const data = await this.getJSON(`/snapper/api/orders?${params}`)
+    const data = await this.getJSON(`/api/orders?${params}`)
 
     return validateResponse(data, z.array(OrderStatusSchema), '/orders')
   }
   async getExecutions(limit: number = 100): Promise<ExecutionRecord[]> {
     const params = new URLSearchParams({ limit: String(limit) })
-    const data = await this.getJSON(`/snapper/api/executions?${params}`)
+    const data = await this.getJSON(`/api/executions?${params}`)
 
     return validateResponse(data, z.array(ExecutionRecordSchema), '/executions')
   }
   async getPositions(): Promise<PositionSnapshot[]> {
-    const data = await this.getJSON('/snapper/api/positions')
+    const data = await this.getJSON('/api/positions')
 
     return validateResponse(data, z.array(PositionSnapshotSchema), '/positions')
   }
@@ -339,49 +339,49 @@ class APIClient {
 
     if (strategy) params.set('strategy', strategy)
     if (instrument) params.set('instrument', instrument)
-    const data = await this.getJSON(`/snapper/api/signals?${params}`)
+    const data = await this.getJSON(`/api/signals?${params}`)
 
     return validateResponse(data, z.array(TradingSignalSchema), '/signals')
   }
   async getSettings(category?: string): Promise<SettingRead[]> {
     const params = category ? new URLSearchParams({ category }) : ''
-    const data = await this.getJSON(`/snapper/api/settings${params ? '?' + params : ''}`)
+    const data = await this.getJSON(`/api/settings${params ? '?' + params : ''}`)
 
     return validateResponse(data, z.array(SettingReadSchema), '/settings')
   }
   async getSettingCategories(): Promise<string[]> {
-    const data = await this.getJSON('/snapper/api/settings/categories')
+    const data = await this.getJSON('/api/settings/categories')
     const response = validateResponse(data, SettingCategoriesResponseSchema, '/settings/categories')
 
     return response.categories
   }
   async updateSetting(key: string, data: SettingUpdate): Promise<SettingRead> {
-    const response = await this.putJSON(`/snapper/api/settings/${encodeURIComponent(key)}`, data)
+    const response = await this.putJSON(`/api/settings/${encodeURIComponent(key)}`, data)
 
     return validateResponse(response, SettingReadSchema, '/settings/:key')
   }
   async deleteSetting(key: string): Promise<{ message: string }> {
-    const data = await this.deleteJSON(`/snapper/api/settings/${encodeURIComponent(key)}`)
+    const data = await this.deleteJSON(`/api/settings/${encodeURIComponent(key)}`)
 
     return validateResponse(data, MessageResponseSchema, '/settings/:key DELETE')
   }
   async getProcessSchema(name: string): Promise<ProcessSchemaResponse> {
-    const data = await this.getJSON(`/snapper/api/processes/schema/${encodeURIComponent(name)}`)
+    const data = await this.getJSON(`/api/processes/schema/${encodeURIComponent(name)}`)
 
     return validateResponse(data, ProcessSchemaResponseSchema, '/processes/schema/:name')
   }
   async createProcessConfig(body: ProcessCreateRequest): Promise<ProcessCreateResponse> {
-    const data = await this.postJSON('/snapper/api/processes', body)
+    const data = await this.postJSON('/api/processes', body)
 
     return validateResponse(data, ProcessCreateResponseSchema, '/processes')
   }
   async getConfiguredProcesses(): Promise<ConfiguredProcessesResponse> {
-    const data = await this.getJSON('/snapper/api/processes/configured')
+    const data = await this.getJSON('/api/processes/configured')
 
     return validateResponse(data, ConfiguredProcessesResponseSchema, '/processes/configured')
   }
   async getAvailableProcesses(): Promise<AvailableProcessesResponse> {
-    const data = await this.getJSON('/snapper/api/processes/available')
+    const data = await this.getJSON('/api/processes/available')
 
     return validateResponse(data, AvailableProcessesResponseSchema, '/processes/available')
   }
@@ -391,7 +391,7 @@ class APIClient {
     if (options?.limit) params.set('limit', String(options.limit))
     if (options?.name) params.set('name', options.name)
     const query = params.toString()
-    const data = await this.getJSON(`/snapper/api/processes/runs${query ? '?' + query : ''}`)
+    const data = await this.getJSON(`/api/processes/runs${query ? '?' + query : ''}`)
 
     return validateResponse(data, ProcessRunsResponseSchema, '/processes/runs')
   }
@@ -400,14 +400,14 @@ class APIClient {
     options?: ProcessStartRequest
   ): Promise<ProcessStartResponse> {
     const data = await this.postJSON(
-      `/snapper/api/processes/${encodeURIComponent(name)}/start`,
+      `/api/processes/${encodeURIComponent(name)}/start`,
       options || {}
     )
 
     return validateResponse(data, ProcessStartResponseSchema, '/processes/:name/start')
   }
   async stopProcessByName(name: string): Promise<ProcessStopResponse> {
-    const data = await this.postJSON(`/snapper/api/processes/${encodeURIComponent(name)}/stop`)
+    const data = await this.postJSON(`/api/processes/${encodeURIComponent(name)}/stop`)
 
     return validateResponse(data, ProcessStopResponseSchema, '/processes/:name/stop')
   }
@@ -421,7 +421,7 @@ class APIClient {
       new_password: newPassword,
     }
     const data = await this.postJSON(
-      `/snapper/api/auth/users/${encodeURIComponent(userId)}/change-password`,
+      `/api/auth/users/${encodeURIComponent(userId)}/change-password`,
       body
     )
 
@@ -445,7 +445,7 @@ export async function api(path: string, init: RequestInit = {}): Promise<Respons
     headers.set('Content-Type', 'application/json')
   }
 
-  const res = await fetch(`/snapper/api${path}`, {
+  const res = await fetch(`/api${path}`, {
     credentials: 'include',
     ...init,
     headers,
@@ -453,7 +453,7 @@ export async function api(path: string, init: RequestInit = {}): Promise<Respons
 
   if (res.status === 401) {
     try {
-      const refreshResponse = await fetch('/snapper/api/auth/refresh', {
+      const refreshResponse = await fetch('/api/auth/refresh', {
         method: 'POST',
         credentials: 'include',
         headers: { 'X-CSRF-Token': csrf },

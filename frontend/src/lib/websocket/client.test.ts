@@ -1044,7 +1044,7 @@ describe('WebSocketClient', () => {
       const stats = await client.getSubscriptionStats()
 
       expect(stats).toEqual({ subscribers: 10 })
-      expect(mockFetch).toHaveBeenCalledWith('/snapper/api/ws/stats')
+      expect(mockFetch).toHaveBeenCalledWith('/api/ws/stats')
     })
     it('returns null on error', async () => {
       globalThis.fetch = vi.fn().mockRejectedValueOnce(new Error('Network error'))
@@ -1063,7 +1063,7 @@ describe('WebSocketClient', () => {
       const health = await client.checkHealth()
 
       expect(health).toEqual({ status: 'ok' })
-      expect(mockFetch).toHaveBeenCalledWith('/snapper/api/zmq/health')
+      expect(mockFetch).toHaveBeenCalledWith('/api/zmq/health')
     })
     it('returns error status on failure', async () => {
       globalThis.fetch = vi.fn().mockRejectedValueOnce(new Error('Network error'))

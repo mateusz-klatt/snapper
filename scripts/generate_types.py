@@ -1515,6 +1515,12 @@ Examples:
     parser.add_argument("--frontend-api", action="store_true", help="Generate API Zod schemas only")
     parser.add_argument("--entities", action="store_true", help="Generate entity interfaces")
     parser.add_argument("--ios", action="store_true", help="Generate iOS Swift types")
+    parser.add_argument(
+        "--strip-eslint-disable",
+        type=str,
+        metavar="FILE",
+        help="Strip eslint-disable comment from file",
+    )
     parser.add_argument("--all", action="store_true", help="All of the above (default)")
     args = parser.parse_args()
 
@@ -1529,6 +1535,7 @@ Examples:
             args.frontend_api,
             args.entities,
             args.ios,
+            args.strip_eslint_disable,
         ]
     )
     if not has_specific:
@@ -1559,6 +1566,12 @@ Examples:
     if args.ios or args.all:
         print("\n=== Generating iOS Types (Swift) ===")
         generate_ios_types(project_root)
+
+    if args.strip_eslint_disable:
+        file_path = Path(args.strip_eslint_disable)
+        if file_path.exists():
+            content = file_path.read_text()
+            file_path.write_text(content.replace("/* eslint-disable */\n", ""))
 
     return 0
 

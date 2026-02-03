@@ -4,10 +4,10 @@ This module defines the user role enumeration for the authentication
 and authorization system.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class UserRole(str, Enum):
+class UserRole(StrEnum):
     """User role enumeration.
 
     Defines the available roles in the system with hierarchical

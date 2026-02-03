@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>BaseURL</key>
-	<string>http://localhost:8000</string>
+	<string>https://snapper.ch</string>
 	<key>APIPrefix</key>
-	<string>/snapper/api</string>
+	<string>/api</string>
 	<key>Endpoints</key>
 	<dict>
 		<key>Login</key>

@@ -38,10 +38,10 @@ class TestDatabaseEndpoints:
         """Verify GET /orders endpoint returns 200 with list.
 
         Given: An authenticated client with CSRF bypassed,
-        When: GET /snapper/api/orders is called,
+        When: GET /api/orders is called,
         Then: Response is 200 OK with a list body.
         """
-        response = self.client.get("/snapper/api/orders")
+        response = self.client.get("/api/orders")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -53,7 +53,7 @@ class TestDatabaseEndpoints:
         When: GET /orders is called with symbol, limit, and offset,
         Then: Response is 200 OK with filtered results.
         """
-        response = self.client.get("/snapper/api/orders?symbol=BTCUSD&limit=50&offset=10")
+        response = self.client.get("/api/orders?symbol=BTCUSD&limit=50&offset=10")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -62,10 +62,10 @@ class TestDatabaseEndpoints:
         """Verify GET /signals endpoint returns 200 with list.
 
         Given: An authenticated client,
-        When: GET /snapper/api/signals is called,
+        When: GET /api/signals is called,
         Then: Response is 200 OK with a list body.
         """
-        response = self.client.get("/snapper/api/signals")
+        response = self.client.get("/api/signals")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -78,7 +78,7 @@ class TestDatabaseEndpoints:
         Then: Response is 200 OK with filtered results.
         """
         response = self.client.get(
-            "/snapper/api/signals?instrument=BTCUSD&strategy=test_strat&hours=48&limit=50"
+            "/api/signals?instrument=BTCUSD&strategy=test_strat&hours=48&limit=50"
         )
         assert response.status_code == 200
         data = response.json()
@@ -88,10 +88,10 @@ class TestDatabaseEndpoints:
         """Verify GET /executions endpoint returns 200 with list.
 
         Given: An authenticated client,
-        When: GET /snapper/api/executions is called,
+        When: GET /api/executions is called,
         Then: Response is 200 OK with a list body.
         """
-        response = self.client.get("/snapper/api/executions")
+        response = self.client.get("/api/executions")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -103,7 +103,7 @@ class TestDatabaseEndpoints:
         When: GET /executions is called with limit parameter,
         Then: Response is 200 OK with limited results.
         """
-        response = self.client.get("/snapper/api/executions?limit=25")
+        response = self.client.get("/api/executions?limit=25")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -112,10 +112,10 @@ class TestDatabaseEndpoints:
         """Verify GET /positions endpoint returns 200 with list.
 
         Given: An authenticated client,
-        When: GET /snapper/api/positions is called,
+        When: GET /api/positions is called,
         Then: Response is 200 OK with a list body.
         """
-        response = self.client.get("/snapper/api/positions")
+        response = self.client.get("/api/positions")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -133,10 +133,10 @@ class TestDatabaseEndpoints:
         )
         self.app.dependency_overrides[get_repository_dependency] = lambda: mock_repository
         endpoints = [
-            "/snapper/api/orders",
-            "/snapper/api/signals",
-            "/snapper/api/executions",
-            "/snapper/api/positions",
+            "/api/orders",
+            "/api/signals",
+            "/api/executions",
+            "/api/positions",
         ]
         for endpoint in endpoints:
             response = self.client.get(endpoint)
@@ -157,10 +157,10 @@ class TestDatabaseEndpoints:
         mock_session.execute.side_effect = Exception("Database connection failed")
         self.app.dependency_overrides[get_repository_dependency] = lambda: mock_repository
         endpoint_messages = {
-            "/snapper/api/orders": "Failed to fetch orders",
-            "/snapper/api/signals": "Failed to fetch signals",
-            "/snapper/api/executions": "Failed to fetch executions",
-            "/snapper/api/positions": "Failed to fetch positions",
+            "/api/orders": "Failed to fetch orders",
+            "/api/signals": "Failed to fetch signals",
+            "/api/executions": "Failed to fetch executions",
+            "/api/positions": "Failed to fetch positions",
         }
         for endpoint, expected_message in endpoint_messages.items():
             response = self.client.get(endpoint)
@@ -174,9 +174,9 @@ class TestDatabaseEndpoints:
         When: Invalid parameters are provided to endpoints,
         Then: Response is 422 Unprocessable Entity.
         """
-        response = self.client.get("/snapper/api/orders?limit=0")
+        response = self.client.get("/api/orders?limit=0")
         assert response.status_code == 422
-        response = self.client.get("/snapper/api/orders?limit=2000")
+        response = self.client.get("/api/orders?limit=2000")
         assert response.status_code == 422
-        response = self.client.get("/snapper/api/orders?offset=-1")
+        response = self.client.get("/api/orders?offset=-1")
         assert response.status_code == 422

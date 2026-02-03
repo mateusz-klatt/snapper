@@ -22,7 +22,7 @@ All endpoints require MANAGE_PROCESSES permission (operator/admin role).
 Example:
     Start a process::
 
-        POST /snapper/api/processes/my-strategy/start
+        POST /api/processes/my-strategy/start
         {"mode": "subprocess", "autostart": true}
 """
 

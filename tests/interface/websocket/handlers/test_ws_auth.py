@@ -108,7 +108,7 @@ def test_client(mock_settings_for_tests: Any) -> Any:
     return client
 
 
-WS_PATH = "/snapper/api/ws"
+WS_PATH = "/api/ws"
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "AdminSnapper2026!"
 OPERATOR_USERNAME = "operator"
@@ -129,11 +129,11 @@ def _connect_with_cookie(test_client: Any, token: str) -> Any:
 def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
     test_client.cookies.clear()
     login_response = test_client.post(
-        "/snapper/api/auth/login",
+        "/api/auth/login",
         json={"username": username, "password": password},
     )
     assert login_response.status_code == 200
-    response = test_client.post("/snapper/api/auth/refresh")
+    response = test_client.post("/api/auth/refresh")
     assert response.status_code == 200
     data = cast(dict[str, Any], response.json())
     return cast(str, data["ws_token"])
@@ -386,7 +386,7 @@ def test_websocket_stats_endpoint(test_client: Any) -> None:
     When: Requesting stats endpoint,
     Then: Returns 200 with dictionary data.
     """
-    response = test_client.get("/snapper/api/ws/stats")
+    response = test_client.get("/api/ws/stats")
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, dict)
@@ -394,11 +394,11 @@ def test_websocket_stats_endpoint(test_client: Any) -> None:
 
 def _prepare_ws_token_v2(test_client: Any, *, username: str, password: str) -> tuple[str, str]:
     login_response = test_client.post(
-        "/snapper/api/auth/login",
+        "/api/auth/login",
         json={"username": username, "password": password},
     )
     assert login_response.status_code == 200
-    response = test_client.post("/snapper/api/auth/refresh")
+    response = test_client.post("/api/auth/refresh")
     assert response.status_code == 200
     data = cast(dict[str, Any], response.json())
     access_token = cast(str, test_client.cookies.get("access_token"))
@@ -3665,7 +3665,7 @@ class TestAuthRoutesCoverage:
         Then: Returns admin profile and sets cookies.
         """
         response = client.post(
-            "/snapper/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
         )
         assert response.status_code == 200
         data = response.json()
@@ -3684,7 +3684,7 @@ class TestAuthRoutesCoverage:
         Then: Returns operator role in response.
         """
         response = client.post(
-            "/snapper/api/auth/login", json={"username": "operator", "password": "OpSnapper2026!"}
+            "/api/auth/login", json={"username": "operator", "password": "OpSnapper2026!"}
         )
         assert response.status_code == 200
         data = response.json()
@@ -3699,7 +3699,7 @@ class TestAuthRoutesCoverage:
         Then: Returns viewer role in response.
         """
         response = client.post(
-            "/snapper/api/auth/login", json={"username": "viewer", "password": "ViewSnapper2026!"}
+            "/api/auth/login", json={"username": "viewer", "password": "ViewSnapper2026!"}
         )
         assert response.status_code == 200
         data = response.json()
@@ -3714,7 +3714,7 @@ class TestAuthRoutesCoverage:
         Then: Returns 401 error.
         """
         response = client.post(
-            "/snapper/api/auth/login",
+            "/api/auth/login",
             json={"username": "nonexistent", "password": "AdminSnapper2026!"},
         )
         assert response.status_code == 401
@@ -3728,7 +3728,7 @@ class TestAuthRoutesCoverage:
         Then: Returns 401 error.
         """
         response = client.post(
-            "/snapper/api/auth/login", json={"username": "admin", "password": "wrongpassword"}
+            "/api/auth/login", json={"username": "admin", "password": "wrongpassword"}
         )
         assert response.status_code == 401
         assert "Invalid username or password" in response.json()["detail"]
@@ -3740,7 +3740,7 @@ class TestAuthRoutesCoverage:
         When: Attempting login,
         Then: Returns 422 validation error.
         """
-        response = client.post("/snapper/api/auth/login", json={"username": "admin"})
+        response = client.post("/api/auth/login", json={"username": "admin"})
         assert response.status_code == 422
 
     def test_refresh_token_missing(self, client: TestClient) -> None:
@@ -3750,7 +3750,7 @@ class TestAuthRoutesCoverage:
         When: Calling refresh,
         Then: Returns 401 error.
         """
-        response = client.post("/snapper/api/auth/refresh")
+        response = client.post("/api/auth/refresh")
         assert response.status_code == 401
         assert "Refresh token not found" in response.json()["detail"]
 
@@ -3763,7 +3763,7 @@ class TestAuthRoutesCoverage:
         """
         client.cookies = {"refresh_token": "invalid_refresh_token"}
         try:
-            response = client.post("/snapper/api/auth/refresh")
+            response = client.post("/api/auth/refresh")
             assert response.status_code == 401
             assert "Invalid refresh token" in response.json()["detail"]
         finally:
@@ -3777,7 +3777,7 @@ class TestAuthRoutesCoverage:
         Then: Returns rotated tokens and ws_token.
         """
         login_response = client.post(
-            "/snapper/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
         )
         assert login_response.status_code == 200
         refresh_token = login_response.cookies.get("refresh_token")
@@ -3788,7 +3788,7 @@ class TestAuthRoutesCoverage:
         expected_sid_hash = compute_sid_hash(original_refresh_data.sid)
         client.cookies = {"refresh_token": refresh_token}
         try:
-            response = client.post("/snapper/api/auth/refresh")
+            response = client.post("/api/auth/refresh")
             assert response.status_code == 200
             data = response.json()
             assert data["message"] == "session refreshed"
@@ -3820,7 +3820,7 @@ class TestAuthRoutesCoverage:
         Then: Raises WsTokenAlreadyUsedError.
         """
         login_response = client.post(
-            "/snapper/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
         )
         assert login_response.status_code == 200
         refresh_token = login_response.cookies.get("refresh_token")
@@ -3831,7 +3831,7 @@ class TestAuthRoutesCoverage:
         expected_sid_hash = compute_sid_hash(original_refresh_data.sid)
         client.cookies = {"refresh_token": refresh_token}
         try:
-            response = client.post("/snapper/api/auth/refresh")
+            response = client.post("/api/auth/refresh")
             assert response.status_code == 200
             ws_token_value = response.json()["ws_token"]
             ws_token_service = get_ws_token_service()
@@ -3858,13 +3858,13 @@ class TestAuthRoutesCoverage:
         Then: Returns success message.
         """
         login_response = client.post(
-            "/snapper/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
         )
         csrf_token = login_response.cookies.get("csrf_token")
         assert csrf_token is not None
         client.cookies.update(login_response.cookies)
         try:
-            response = client.post("/snapper/api/auth/logout", headers={"X-CSRF-Token": csrf_token})
+            response = client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf_token})
             assert response.status_code == 200
             assert "Logged out successfully" in response.json()["message"]
         finally:
@@ -3877,7 +3877,7 @@ class TestAuthRoutesCoverage:
         When: Calling logout,
         Then: Returns success message.
         """
-        response = client.post("/snapper/api/auth/logout")
+        response = client.post("/api/auth/logout")
         assert response.status_code == 200
         assert "Logged out successfully" in response.json()["message"]
 
@@ -3889,7 +3889,7 @@ class TestAuthRoutesCoverage:
         Then: Returns success message.
         """
         response = client.post(
-            "/snapper/api/auth/logout", headers={"Authorization": "Bearer invalid_token"}
+            "/api/auth/logout", headers={"Authorization": "Bearer invalid_token"}
         )
         assert response.status_code == 200
         assert "Logged out successfully" in response.json()["message"]
@@ -3902,11 +3902,11 @@ class TestAuthRoutesCoverage:
         Then: Returns current user profile.
         """
         login_response = client.post(
-            "/snapper/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
         )
         assert login_response.status_code == 200
         client.cookies.update(login_response.cookies)
-        response = client.get("/snapper/api/auth/me")
+        response = client.get("/api/auth/me")
         assert response.status_code == 200
         data = response.json()
         assert data["username"] == "admin"
@@ -3920,7 +3920,7 @@ class TestAuthRoutesCoverage:
         Then: Returns 401 error.
         """
         with TestClient(app) as fresh_client:
-            response = fresh_client.get("/snapper/api/auth/me")
+            response = fresh_client.get("/api/auth/me")
             assert response.status_code == 401
 
     def test_me_endpoint_invalid_token(self) -> None:
@@ -3932,7 +3932,7 @@ class TestAuthRoutesCoverage:
         """
         with TestClient(app) as fresh_client:
             fresh_client.cookies.set("access_token", "invalid_token")
-            response = fresh_client.get("/snapper/api/auth/me")
+            response = fresh_client.get("/api/auth/me")
             assert response.status_code == 401
 
 
@@ -4250,11 +4250,11 @@ class TestUserManagementCoverage:
 
         Given: UserRole enum values,
         When: Converting to string,
-        Then: Returns 'UserRole.NAME' format.
+        Then: Returns lowercase value (StrEnum behavior).
         """
-        assert str(UserRole.ADMIN) == "UserRole.ADMIN"
-        assert str(UserRole.OPERATOR) == "UserRole.OPERATOR"
-        assert str(UserRole.VIEWER) == "UserRole.VIEWER"
+        assert str(UserRole.ADMIN) == "admin"
+        assert str(UserRole.OPERATOR) == "operator"
+        assert str(UserRole.VIEWER) == "viewer"
 
     def test_permission_inheritance(self) -> None:
         """Permissions are inherited hierarchically.

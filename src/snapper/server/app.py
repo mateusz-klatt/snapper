@@ -54,7 +54,6 @@ from fastapi import Query
 from fastapi import Request
 from fastapi import Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from sqlalchemy import desc
@@ -107,7 +106,7 @@ from snapper.server.authenticated_websocket import create_authenticated_websocke
 from snapper.server.process_routes import router as process_router
 from snapper.utils.logging import set_log_context
 
-API_PREFIX = "/snapper/api"
+API_PREFIX = "/api"
 
 
 def get_settings_dependency() -> AppSettings:
@@ -273,13 +272,9 @@ def create_app() -> FastAPI:
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 
-    @app.get("/")
-    async def dashboard() -> RedirectResponse:
-        return RedirectResponse(url="/snapper/", status_code=307)
-
     app.state.manager = manager
     if os.path.exists("frontend/dist"):
-        app.mount("/snapper", StaticFiles(directory="frontend/dist", html=True), name="snapper")
+        app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
     return app
 
 

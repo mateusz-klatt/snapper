@@ -35,7 +35,7 @@ from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import User
 
-_AUTH_API_PATH = "/snapper/api/auth"
+_AUTH_API_PATH = "/api/auth"
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 

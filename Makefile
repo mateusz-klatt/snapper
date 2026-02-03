@@ -243,14 +243,14 @@ run-server:
 
 dev-backend:
 	$(info Starting backend with hot reload...)
-	$(info Backend API: http://localhost:8000/snapper/api)
-	$(info WebSocket: ws://localhost:8000/snapper/api/ws)
+	$(info Backend API: http://localhost:8000/api)
+	$(info WebSocket: ws://localhost:8000/api/ws)
 	@bash -c 'script -q -e -c "$(PYRUN) snapper server --reload" /dev/null 2>&1 | tee >(sed "s/\x1b\[[0-9;]*m//g" > data/snapper.log)'
 
 dev-frontend:
 	$(info Starting frontend dev server...)
-	$(info Frontend URL: http://localhost:3000/snapper/)
-	$(info API proxy: http://localhost:3000/snapper/api -> http://localhost:8000/snapper/api)
+	$(info Frontend URL: http://localhost:3000/)
+	$(info API proxy: http://localhost:3000/api -> http://localhost:8000/api)
 	@cd $(UI_DIR) && pnpm dev
 
 run-static:
@@ -344,7 +344,7 @@ ui-gen-ws-types:
 	$(info Generating TypeScript types from WebSocket schemas...)
 	@$(VENV_PY) scripts/generate_types.py --export
 	@cd $(UI_DIR) && pnpm gen:ws-types
-	@sed -i '1{/\/\* eslint-disable \*\//d}' $(UI_DIR)/src/types/ws.generated.ts
+	@$(VENV_PY) scripts/generate_types.py --strip-eslint-disable $(UI_DIR)/src/types/ws.generated.ts
 	@cd $(UI_DIR) && pnpm exec prettier --write src/types/ws.generated.ts
 	$(info Generated frontend/src/types/ws.generated.ts)
 

@@ -39,7 +39,7 @@ export function flushThrottledMessages<T>(
   }
 }
 
-export function buildWebSocketUrl(endpoint: string = '/snapper/api/ws'): string {
+export function buildWebSocketUrl(endpoint: string = '/api/ws'): string {
   const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = globalThis.location.host
 

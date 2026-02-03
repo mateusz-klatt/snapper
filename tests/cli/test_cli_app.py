@@ -2956,7 +2956,7 @@ def test_list_users_displays_all_users(
     assert result.exit_code == 0
     assert "System Users" in result.stdout
     assert "testuser" in result.stdout
-    assert "ADMIN" in result.stdout
+    assert "admin" in result.stdout
     mock_user_service.get_all_users.assert_called_once_with(include_inactive=True)
 
 

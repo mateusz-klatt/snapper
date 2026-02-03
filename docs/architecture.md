@@ -159,7 +159,7 @@ FastAPI application:
 - **WebSocket** — Real-time streaming via ZMQ bridge
 - **Static Files** — Frontend dashboard
 
-### API (`src/snapper/api/`)
+### API (`src/api/`)
 
 API schemas:
 

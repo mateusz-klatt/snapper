@@ -121,14 +121,14 @@ describe('reconnect utilities', () => {
         value: { protocol: 'https:', host: 'example.com' },
         writable: true,
       })
-      expect(buildWebSocketUrl()).toBe('wss://example.com/snapper/api/ws')
+      expect(buildWebSocketUrl()).toBe('wss://example.com/api/ws')
     })
     it('builds ws URL for http', () => {
       Object.defineProperty(globalThis, 'location', {
         value: { protocol: 'http:', host: 'localhost:3000' },
         writable: true,
       })
-      expect(buildWebSocketUrl()).toBe('ws://localhost:3000/snapper/api/ws')
+      expect(buildWebSocketUrl()).toBe('ws://localhost:3000/api/ws')
     })
     it('uses custom endpoint', () => {
       Object.defineProperty(globalThis, 'location', {

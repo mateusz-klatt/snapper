@@ -370,7 +370,7 @@ describe('auth store', () => {
       const state = useAuthStore.getState()
 
       await state.refreshToken()
-      expect(apiClient.get).toHaveBeenCalledWith('/snapper/api/auth/me')
+      expect(apiClient.get).toHaveBeenCalledWith('/api/auth/me')
     })
     it('handles refresh failure by logging out', async () => {
       vi.mocked(apiClient.postJSON).mockRejectedValueOnce(new Error('Refresh failed'))

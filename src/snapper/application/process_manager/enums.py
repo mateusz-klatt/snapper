@@ -4,10 +4,10 @@ This module defines enumerations for process lifecycle management,
 including process types, roles, and run statuses.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ProcessLifecycleEnum(str, Enum):
+class ProcessLifecycleEnum(StrEnum):
     """Process lifecycle type enumeration.
 
     Defines whether a process is designed to run continuously
@@ -24,7 +24,7 @@ class ProcessLifecycleEnum(str, Enum):
     ONE_SHOT = "one_shot"
 
 
-class ProcessRoleEnum(str, Enum):
+class ProcessRoleEnum(StrEnum):
     """Process role enumeration.
 
     Categorizes processes by their function in the system.
@@ -42,7 +42,7 @@ class ProcessRoleEnum(str, Enum):
     BACKTEST = "backtest"
 
 
-class ProcessRunStatusEnum(str, Enum):
+class ProcessRunStatusEnum(StrEnum):
     """Process run status enumeration.
 
     Tracks the current state of a process execution.

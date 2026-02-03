@@ -4,12 +4,12 @@ This module defines granular permissions and role-permission mappings
 for the authorization system.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 from snapper.auth.domain.roles import UserRole
 
 
-class Permission(str, Enum):
+class Permission(StrEnum):
     """Permission enumeration.
 
     Defines granular permissions following resource:action pattern.

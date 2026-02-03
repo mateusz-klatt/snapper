@@ -476,7 +476,7 @@ describe('api function', () => {
     })
     await api('/test', { method: 'POST' })
     expect(mockFetch).toHaveBeenCalledWith(
-      '/snapper/api/test',
+      '/api/test',
       expect.objectContaining({
         method: 'POST',
         credentials: 'include',
@@ -874,7 +874,7 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({ message: 'Setting deleted successfully' })
     expect(mockFetch).toHaveBeenCalledWith(
-      expect.stringContaining('/snapper/api/settings/setting1'),
+      expect.stringContaining('/api/settings/setting1'),
       expect.objectContaining({ method: 'DELETE' })
     )
   })
@@ -1002,7 +1002,7 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({ message: 'Password changed successfully' })
     expect(mockFetch).toHaveBeenCalledWith(
-      '/snapper/api/auth/users/user-123/change-password',
+      '/api/auth/users/user-123/change-password',
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({

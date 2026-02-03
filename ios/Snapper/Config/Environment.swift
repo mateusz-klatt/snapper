@@ -2,8 +2,8 @@ import Foundation
 
 enum AppConfig {
 
-    static let baseURL = "http://localhost:8000"
-    static let apiPrefix = "/snapper/api"
+    static let baseURL = "https://snapper.ch"
+    static let apiPrefix = "/api"
     static let wsPath = "/ws"
 
     enum URIScheme {

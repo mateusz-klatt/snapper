@@ -1542,6 +1542,59 @@ class TestMain:
 
             assert result == 0
 
+    def test_strip_eslint_disable_removes_comment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Strips eslint-disable comment from file when --strip-eslint-disable is used.
+
+        Given: File containing eslint-disable comment,
+        When: main() is called with --strip-eslint-disable FILE,
+        Then: Comment is removed from file.
+        """
+        test_file = tmp_path / "test.ts"
+        test_file.write_text("/* eslint-disable */\nexport const foo = 1;\n")
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(test_file)])
+
+        result = main()
+
+        assert result == 0
+        assert test_file.read_text() == "export const foo = 1;\n"
+
+    def test_strip_eslint_disable_nonexistent_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Handles nonexistent file gracefully.
+
+        Given: Path to nonexistent file,
+        When: main() is called with --strip-eslint-disable,
+        Then: Returns success without error.
+        """
+        nonexistent = tmp_path / "does_not_exist.ts"
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(nonexistent)])
+
+        result = main()
+
+        assert result == 0
+
+    def test_strip_eslint_disable_no_comment_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """File without comment is unchanged.
+
+        Given: File without eslint-disable comment,
+        When: main() is called with --strip-eslint-disable,
+        Then: File content unchanged.
+        """
+        test_file = tmp_path / "clean.ts"
+        original_content = "export const bar = 2;\n"
+        test_file.write_text(original_content)
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(test_file)])
+
+        result = main()
+
+        assert result == 0
+        assert test_file.read_text() == original_content
+
 
 class TestConstants:
     """Tests for module constants."""

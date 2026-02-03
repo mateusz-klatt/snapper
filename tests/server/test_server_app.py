@@ -9,6 +9,7 @@ import sys
 import tempfile
 from collections.abc import Generator
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
@@ -192,14 +193,14 @@ class TestCreateApiRouter:
         """Test health check endpoint returns healthy status.
 
         Given: Mocked settings and repository,
-        When: GET /snapper/api/health is called,
+        When: GET /api/health is called,
         Then: Response contains healthy status and timestamp.
         """
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
         mock_repo = MagicMock()
         mock_get_repo.return_value = mock_repo
-        response = self.client.get("/snapper/api/health")
+        response = self.client.get("/api/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
@@ -213,7 +214,7 @@ class TestCreateApiRouter:
         """Test candles endpoint returns OHLCV data.
 
         Given: A valid instrument with candle data in repository,
-        When: GET /snapper/api/candles is called with parameters,
+        When: GET /api/candles is called with parameters,
         Then: Response contains candle data array with OHLCV values.
         """
         mock_settings = MagicMock()
@@ -251,7 +252,7 @@ class TestCreateApiRouter:
                 return mock_candles_result
 
         mock_session.execute = mock_execute
-        response = self.client.get("/snapper/api/candles?instrument=BTC-USD&timeframe=1h&limit=10")
+        response = self.client.get("/api/candles?instrument=BTC-USD&timeframe=1h&limit=10")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -273,7 +274,7 @@ class TestCreateApiRouter:
         """Test candles endpoint returns empty array when no data.
 
         Given: A valid instrument with no candle data,
-        When: GET /snapper/api/candles is called,
+        When: GET /api/candles is called,
         Then: Response contains an empty array.
         """
         mock_settings = MagicMock()
@@ -301,7 +302,7 @@ class TestCreateApiRouter:
                 return mock_candles_result
 
         mock_session.execute = mock_execute
-        response = self.client.get("/snapper/api/candles?instrument=BTC-USD&timeframe=1h&limit=10")
+        response = self.client.get("/api/candles?instrument=BTC-USD&timeframe=1h&limit=10")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -315,7 +316,7 @@ class TestCreateApiRouter:
         """Test candles endpoint returns 204 for unknown instrument.
 
         Given: An instrument that does not exist in the database,
-        When: GET /snapper/api/candles is called,
+        When: GET /api/candles is called,
         Then: Response status is 204 No Content.
         """
         mock_settings = MagicMock()
@@ -335,7 +336,7 @@ class TestCreateApiRouter:
             return mock_inst_result
 
         mock_session.execute = mock_execute
-        response = self.client.get("/snapper/api/candles?instrument=INVALID&timeframe=1h")
+        response = self.client.get("/api/candles?instrument=INVALID&timeframe=1h")
         assert response.status_code == 204
         assert response.content == b""
 
@@ -343,7 +344,7 @@ class TestCreateApiRouter:
         """Test system status returns running processes info.
 
         Given: Process factory with running strategy processes,
-        When: GET /snapper/api/status is called,
+        When: GET /api/status is called,
         Then: Response contains trader status and strategies array.
         """
         mock_process_factory = MagicMock()
@@ -369,7 +370,7 @@ class TestCreateApiRouter:
             "executor": mock_no_status_process,
         }
         self.app.state.process_factory = mock_process_factory
-        response = self.client.get("/snapper/api/status")
+        response = self.client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
         assert "trader" in data
@@ -404,10 +405,10 @@ class TestWebSocketEndpoints:
         """Test ZMQ health check returns healthy status.
 
         Given: A configured WebSocket manager with ZMQ bridge,
-        When: GET /snapper/api/zmq/health is called,
+        When: GET /api/zmq/health is called,
         Then: Response indicates healthy status and ok components.
         """
-        response = self.client.get("/snapper/api/zmq/health")
+        response = self.client.get("/api/zmq/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
@@ -415,23 +416,27 @@ class TestWebSocketEndpoints:
         assert data["components"]["websocket_manager"] == "ok"
 
 
-class TestRootRedirect:
-    """Tests for root path redirect behavior."""
+class TestStaticFileServing:
+    """Tests for static file serving behavior."""
 
-    def test_root_redirects_to_snapper(self) -> None:
-        """Test root path redirects to /snapper/.
+    def test_root_serves_static_files_when_dist_exists(self, tmp_path: Path) -> None:
+        """Test root path serves static files when frontend/dist exists.
 
-        Given: The FastAPI application,
+        Given: The FastAPI application with frontend/dist directory,
         When: GET / is called,
-        Then: Response redirects to /snapper/ with 307 status.
+        Then: Response serves index.html from static files.
         """
-        app = create_app()
-        client = TestClient(app)
-        response = client.get("/")
-        assert response.history, "Redirect history should contain initial response"
-        first_redirect = response.history[0]
-        assert first_redirect.status_code == 307
-        assert first_redirect.headers["location"] == "/snapper/"
+        dist_dir = tmp_path / "frontend" / "dist"
+        dist_dir.mkdir(parents=True)
+        index_html = dist_dir / "index.html"
+        index_html.write_text("<html><body>Snapper UI</body></html>")
+
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("snapper.server.app.StaticFiles") as mock_static,
+        ):
+            create_app()
+            assert mock_static.called
 
 
 class TestMainAppIntegration:
@@ -450,20 +455,15 @@ class TestMainAppIntegration:
         """Test app creation and basic endpoint accessibility.
 
         Given: Mocked settings and repository,
-        When: Health and root endpoints are accessed,
-        Then: Health returns 200 and root redirects to /snapper/.
+        When: Health endpoint is accessed,
+        Then: Health returns 200.
         """
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
         mock_repo = MagicMock()
         mock_get_repo.return_value = mock_repo
-        response = self.client.get("/snapper/api/health")
+        response = self.client.get("/api/health")
         assert response.status_code == 200
-        response = self.client.get("/")
-        assert response.history
-        first_redirect = response.history[0]
-        assert first_redirect.status_code == 307
-        assert first_redirect.headers["location"] == "/snapper/"
 
 
 class TestDependencyFunctions:
@@ -518,7 +518,7 @@ class TestApiEndpointsEnhanced:
         When: A nonexistent endpoint is requested,
         Then: Response status is 404 Not Found.
         """
-        response = self.client.get("/snapper/api/nonexistent")
+        response = self.client.get("/api/nonexistent")
         assert response.status_code == 404
 
     def test_invalid_method_returns_405(self) -> None:
@@ -528,7 +528,7 @@ class TestApiEndpointsEnhanced:
         When: PATCH method is used,
         Then: Response status is 405 Method Not Allowed.
         """
-        response = self.client.patch("/snapper/api/health")
+        response = self.client.patch("/api/health")
         assert response.status_code == 405
 
 
@@ -760,7 +760,7 @@ class TestOrdersEndpointWithErrors:
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
         client = TestClient(app)
-        response = client.get("/snapper/api/orders")
+        response = client.get("/api/orders")
         assert response.status_code == 500
         assert "Failed to fetch orders" in response.json()["detail"]
 
@@ -790,7 +790,7 @@ class TestSignalsEndpointWithErrors:
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
         client = TestClient(app)
-        response = client.get("/snapper/api/signals")
+        response = client.get("/api/signals")
         assert response.status_code == 500
         assert "Failed to fetch signals" in response.json()["detail"]
 
@@ -820,7 +820,7 @@ class TestExecutionsEndpointWithErrors:
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
         client = TestClient(app)
-        response = client.get("/snapper/api/executions")
+        response = client.get("/api/executions")
         assert response.status_code == 500
         assert "Failed to fetch executions" in response.json()["detail"]
 
@@ -850,7 +850,7 @@ class TestPositionsEndpointWithErrors:
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
         client = TestClient(app)
-        response = client.get("/snapper/api/positions")
+        response = client.get("/api/positions")
         assert response.status_code == 500
         assert "Failed to fetch positions" in response.json()["detail"]
 
@@ -883,7 +883,7 @@ class TestCandlesEndpointWithErrors:
             mock_session.__aexit__ = AsyncMock()
             mock_repo.session.return_value = mock_session
             mock_get_repo.return_value = mock_repo
-            response = client.get("/snapper/api/candles?instrument=BTC-USD&timeframe=1h")
+            response = client.get("/api/candles?instrument=BTC-USD&timeframe=1h")
             assert response.status_code == 500
             assert "Failed to fetch candle data" in response.json()["detail"]
 
@@ -912,7 +912,7 @@ class TestZmqHealthCheckErrors:
         original_context = app.state.manager.zmq_bridge.context
         app.state.manager.zmq_bridge.context = None
         try:
-            response = client.get("/snapper/api/zmq/health")
+            response = client.get("/api/zmq/health")
             assert response.status_code == 200
             data = response.json()
             assert "status" in data
@@ -935,7 +935,7 @@ class TestZmqHealthCheckErrors:
         manager.zmq_bridge.context = context_mock
         manager.zmq_bridge.available_topics = {"t": "topic"}
         manager.get_stats = MagicMock(return_value={"connections": {}, "topics": {}})
-        response = client.get("/snapper/api/zmq/health")
+        response = client.get("/api/zmq/health")
         assert response.status_code == 200
         test_socket.close.assert_called_once()
 
@@ -964,7 +964,7 @@ class TestSystemStatusEdgeCases:
         mock_factory.running_processes = {}
         app.state.process_factory = mock_factory
         client = TestClient(app)
-        response = client.get("/snapper/api/status")
+        response = client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
         assert "trader" in data
@@ -994,7 +994,7 @@ class TestSystemStatusEdgeCases:
         mock_factory.running_processes = {"test_strategy": mock_process}
         app.state.process_factory = mock_factory
         client = TestClient(app)
-        response = client.get("/snapper/api/status")
+        response = client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
         assert "trader" in data
@@ -1030,7 +1030,7 @@ class TestAppCoverageImprovement:
         When: GET /ws/stats is called,
         Then: Response contains websocket and zmq_bridge keys.
         """
-        response = self.client.get("/snapper/api/ws/stats")
+        response = self.client.get("/api/ws/stats")
         assert response.status_code == 200
         data = response.json()
         assert "websocket" in data
@@ -1044,7 +1044,7 @@ class TestAppCoverageImprovement:
         When: GET /zmq/health is called,
         Then: Response indicates healthy with ok components.
         """
-        response = self.client.get("/snapper/api/zmq/health")
+        response = self.client.get("/api/zmq/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
@@ -1057,7 +1057,7 @@ class TestAppCoverageImprovement:
         When: GET /zmq/health is called,
         Then: Response contains components and errors keys.
         """
-        response = self.client.get("/snapper/api/zmq/health")
+        response = self.client.get("/api/zmq/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
@@ -1071,7 +1071,7 @@ class TestAppCoverageImprovement:
         When: GET /health is called,
         Then: Response is 200 with healthy status and timestamp.
         """
-        response = self.client.get("/snapper/api/health")
+        response = self.client.get("/api/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
@@ -1098,7 +1098,7 @@ class TestAppCoverageImprovement:
         app = create_app()
         assert app is not None
         test_client = TestClient(app)
-        response = test_client.get("/snapper/api/health")
+        response = test_client.get("/api/health")
         assert response.status_code == 200
         test_client.close()
 
@@ -1277,7 +1277,7 @@ class TestOrdersSuccessPath:
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(order, instrument)])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/orders")
+        response = client.get("/api/orders")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
@@ -1298,7 +1298,7 @@ class TestOrdersSuccessPath:
         instrument = MockInstrument(symbol="ETH-USD")
         repo = MockRepository(session_result=[(order, instrument)])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/orders?symbol=ETH-USD")
+        response = client.get("/api/orders?symbol=ETH-USD")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
@@ -1313,7 +1313,7 @@ class TestOrdersSuccessPath:
         """
         repo = MockRepository(session_result=[])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/orders")
+        response = client.get("/api/orders")
         assert response.status_code == 200
         data = response.json()
         assert data == []
@@ -1333,7 +1333,7 @@ class TestSignalsSuccessPath:
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(signal, instrument)])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/signals")
+        response = client.get("/api/signals")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
@@ -1355,7 +1355,7 @@ class TestSignalsSuccessPath:
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(signal, instrument)])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/signals?instrument=BTC-USD&strategy=rsi_strategy")
+        response = client.get("/api/signals?instrument=BTC-USD&strategy=rsi_strategy")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
@@ -1369,7 +1369,7 @@ class TestSignalsSuccessPath:
         """
         repo = MockRepository(session_result=[])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/signals")
+        response = client.get("/api/signals")
         assert response.status_code == 200
         data = response.json()
         assert data == []
@@ -1390,7 +1390,7 @@ class TestExecutionsSuccessPath:
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(execution, order, instrument)])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/executions")
+        response = client.get("/api/executions")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
@@ -1410,7 +1410,7 @@ class TestExecutionsSuccessPath:
         """
         repo = MockRepository(session_result=[])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/executions")
+        response = client.get("/api/executions")
         assert response.status_code == 200
         data = response.json()
         assert data == []
@@ -1430,7 +1430,7 @@ class TestPositionsSuccessPath:
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(position, instrument)])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/positions")
+        response = client.get("/api/positions")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
@@ -1450,7 +1450,7 @@ class TestPositionsSuccessPath:
         """
         repo = MockRepository(session_result=[])
         client = create_app_with_overrides(repo)
-        response = client.get("/snapper/api/positions")
+        response = client.get("/api/positions")
         assert response.status_code == 200
         data = response.json()
         assert data == []
@@ -1482,7 +1482,7 @@ class TestZmqHealthCheckContextError:
         app.state.manager.zmq_bridge.context = mock_context
         client = TestClient(app)
         try:
-            response = client.get("/snapper/api/zmq/health")
+            response = client.get("/api/zmq/health")
             assert response.status_code == 200
             data = response.json()
             assert data["status"] == "unhealthy"
@@ -1521,7 +1521,7 @@ class TestSystemStatusProcessError:
         app.state.process_factory = mock_factory
         client = TestClient(app)
         with patch("snapper.server.app.logger") as mock_logger:
-            response = client.get("/snapper/api/status")
+            response = client.get("/api/status")
             assert response.status_code == 200
             data = response.json()
             assert "strategies" in data
@@ -1560,7 +1560,7 @@ class TestSystemStatusProcessError:
         mock_factory.started_processes = {"test_strategy": mock_process}
         app.state.process_factory = mock_factory
         client = TestClient(app)
-        response = client.get("/snapper/api/status")
+        response = client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
         assert len(data["strategies"]) == 1
@@ -1598,7 +1598,7 @@ class TestCandlesHttpExceptionReraise:
             mock_session.__aexit__ = AsyncMock()
             mock_repo.session.return_value = mock_session
             mock_get_repo.return_value = mock_repo
-            response = client.get("/snapper/api/candles?instrument=BTC-USD&timeframe=1h")
+            response = client.get("/api/candles?instrument=BTC-USD&timeframe=1h")
             assert response.status_code == 403
             assert "Forbidden" in response.json()["detail"]
 

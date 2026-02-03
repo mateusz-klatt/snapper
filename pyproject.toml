@@ -53,7 +53,7 @@ pyodbc = "^5.3.0"
 asyncpg = "^0.31.0"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.14.14"
+ruff = "^0.15.0"
 black = {extras = ["jupyter"], version = "^26.1.0"}
 isort = "^7.0.0"
 mypy = "^1.19.1"
@@ -82,7 +82,7 @@ ipykernel = "^7.1.0"
 matplotlib = "^3.10.8"
 statsmodels = "^0.14.6"
 scikit-learn = "^1.8.0"
-tqdm = "^4.67.2"
+tqdm = "^4.67.3"
 types-markdown = "^3.10.0.20251106"
 
 [tool.poetry.scripts]

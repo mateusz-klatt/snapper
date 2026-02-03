@@ -68,7 +68,7 @@ describe('auth', () => {
       const result = await getWsToken()
 
       expect(result).toEqual({ token: 'fetched-token', exp: Math.floor(expDate.getTime() / 1000) })
-      expect(apiClient.postJSON).toHaveBeenCalledWith('/snapper/api/auth/refresh', undefined, {
+      expect(apiClient.postJSON).toHaveBeenCalledWith('/api/auth/refresh', undefined, {
         skipRetry: true,
       })
     })

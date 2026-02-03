@@ -16,12 +16,12 @@ for sensitive values (API keys, secrets).
 Example:
     List all settings::
 
-        GET /snapper/api/settings
+        GET /api/settings
         Authorization: Bearer <token>
 
     Update a setting::
 
-        PUT /snapper/api/settings/kraken_api_key
+        PUT /api/settings/kraken_api_key
         {"value": "new-api-key", "category": "exchanges"}
 """
 

@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/snapper/',
+  base: '/',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -13,11 +13,11 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/snapper/api': {
+      '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
-      '/snapper/api/ws': {
+      '/api/ws': {
         target: 'ws://localhost:8000',
         ws: true,
         changeOrigin: true,

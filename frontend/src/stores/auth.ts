@@ -86,7 +86,7 @@ export const useAuthStore = create<AuthState>()(
         login: async (credentials: LoginRequest) => {
           try {
             set({ isLoading: true, error: null })
-            const response = await apiClient.post('/snapper/api/auth/login', credentials, {
+            const response = await apiClient.post('/api/auth/login', credentials, {
               skipCSRF: true,
             })
 
@@ -130,7 +130,7 @@ export const useAuthStore = create<AuthState>()(
               win.wsDisconnectCallback()
             }
 
-            await apiClient.post('/snapper/api/auth/logout', undefined, {
+            await apiClient.post('/api/auth/logout', undefined, {
               skipRetry: true,
               skipCSRF: true,
             })
@@ -178,7 +178,7 @@ export const useAuthStore = create<AuthState>()(
               ws_token_exp?: string
               csrf_token?: string
               user?: User
-            } = await apiClient.postJSON('/snapper/api/auth/refresh')
+            } = await apiClient.postJSON('/api/auth/refresh')
 
             if (typeof data.ws_token === 'string' && typeof data.ws_token_exp === 'string') {
               const expSeconds = Math.floor(new Date(data.ws_token_exp).getTime() / 1000)
@@ -192,7 +192,7 @@ export const useAuthStore = create<AuthState>()(
             let userData = data.user ?? get().user
 
             if (!userData) {
-              const userResponse = await apiClient.get('/snapper/api/auth/me')
+              const userResponse = await apiClient.get('/api/auth/me')
 
               if (!userResponse.ok) {
                 throw new Error('Failed to get user info')

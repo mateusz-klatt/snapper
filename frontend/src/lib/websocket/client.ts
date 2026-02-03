@@ -610,7 +610,7 @@ class WebSocketClient {
   }
   async getSubscriptionStats(): Promise<unknown> {
     try {
-      const response = await fetch('/snapper/api/ws/stats')
+      const response = await fetch('/api/ws/stats')
 
       return await response.json()
     } catch (error) {
@@ -621,7 +621,7 @@ class WebSocketClient {
   }
   async checkHealth(): Promise<unknown> {
     try {
-      const response = await fetch('/snapper/api/zmq/health')
+      const response = await fetch('/api/zmq/health')
 
       return await response.json()
     } catch (error) {

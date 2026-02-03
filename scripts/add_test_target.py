@@ -292,7 +292,7 @@ def add_container_item_proxy(content: str, main_target_uuid: str) -> str:
     if "/* Begin PBXContainerItemProxy section */" in content:
         return content
     insert_point = content.find("/* Begin PBXFileReference section */")
-    project_uuid = content.split("/* Project object */")[0].strip().split()[-1]
+    project_uuid = content.split("/* Project object */", maxsplit=1)[0].strip().split()[-1]
     proxy_section = (
         f"/* Begin PBXContainerItemProxy section */\n"
         f"\t\t{PROXY_UUID} /* PBXContainerItemProxy */ = {{\n"

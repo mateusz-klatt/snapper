@@ -10,11 +10,9 @@ let wsTokenPromise: Promise<RefreshWsTokenResponse> | null = null
 
 async function fetchWsToken(): Promise<RefreshWsTokenResponse> {
   wsTokenPromise ??= (async () => {
-    const data = await apiClient.postJSON<RefreshWsTokenResponse>(
-      '/snapper/api/auth/refresh',
-      undefined,
-      { skipRetry: true }
-    )
+    const data = await apiClient.postJSON<RefreshWsTokenResponse>('/api/auth/refresh', undefined, {
+      skipRetry: true,
+    })
 
     if (!data || typeof data.ws_token !== 'string' || typeof data.ws_token_exp !== 'string') {
       throw new Error('Invalid ws_token response from refresh endpoint')

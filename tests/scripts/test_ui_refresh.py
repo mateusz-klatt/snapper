@@ -13,6 +13,7 @@ from scripts.ui_refresh import refresh_ui
 from scripts.ui_refresh import remove_lock_file
 from scripts.ui_refresh import remove_node_modules
 from scripts.ui_refresh import run_cmd
+from scripts.ui_refresh import upgrade_dependencies
 
 
 class TestRunCmd:
@@ -220,6 +221,47 @@ class TestEnsurePnpmInstalled:
         assert call_count == 3
 
 
+class TestUpgradeDependencies:
+    """Test suite for UpgradeDependencies functionality."""
+
+    def test_skips_upgrade_when_no_package_json(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify upgrade_dependencies skips when package.json is missing.
+
+        Given: A directory without package.json,
+        When: upgrade_dependencies is called with that directory,
+        Then: Prints skip message and returns without running pnpm.
+        """
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            upgrade_dependencies(tmp_path)
+
+            mock_run.assert_not_called()
+            captured = capsys.readouterr()
+            assert "Skipping dependency upgrade" in captured.out
+
+    def test_runs_pnpm_upgrade_when_package_json_exists(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify upgrade_dependencies runs pnpm up when package.json exists.
+
+        Given: A directory with package.json,
+        When: upgrade_dependencies is called,
+        Then: Runs 'pnpm up --latest' with cwd set to target directory.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text("{}")
+
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0)
+
+            upgrade_dependencies(tmp_path)
+
+            mock_run.assert_called_once_with(["pnpm", "up", "--latest"], cwd=tmp_path, check=True)
+            captured = capsys.readouterr()
+            assert "Upgrading UI direct dependencies" in captured.out
+
+
 class TestInstallDependencies:
     """Test suite for InstallDependencies functionality."""
 
@@ -274,9 +316,10 @@ class TestRefreshUi:
         Then: The function executes successfully using default project root.
         """
         with (
+            patch("scripts.ui_refresh.ensure_pnpm_installed"),
+            patch("scripts.ui_refresh.upgrade_dependencies"),
             patch("scripts.ui_refresh.remove_lock_file"),
             patch("scripts.ui_refresh.remove_node_modules"),
-            patch("scripts.ui_refresh.ensure_pnpm_installed"),
             patch("scripts.ui_refresh.install_dependencies"),
         ):
             refresh_ui()

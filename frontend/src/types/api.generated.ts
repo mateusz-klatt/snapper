@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/snapper/api/auth/login": {
+    "/api/auth/login": {
         parameters: {
             query?: never;
             header?: never;
@@ -30,14 +30,14 @@ export interface paths {
          *     Raises:
          *         HTTPException: 401 if credentials invalid.
          */
-        post: operations["login_snapper_api_auth_login_post"];
+        post: operations["login_api_auth_login_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/auth/refresh": {
+    "/api/auth/refresh": {
         parameters: {
             query?: never;
             header?: never;
@@ -62,14 +62,14 @@ export interface paths {
          *     Raises:
          *         HTTPException: 401 if refresh token invalid.
          */
-        post: operations["refresh_token_snapper_api_auth_refresh_post"];
+        post: operations["refresh_token_api_auth_refresh_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/auth/me": {
+    "/api/auth/me": {
         parameters: {
             query?: never;
             header?: never;
@@ -86,7 +86,7 @@ export interface paths {
          *     Returns:
          *         Current user's UserProfile.
          */
-        get: operations["get_current_user_info_snapper_api_auth_me_get"];
+        get: operations["get_current_user_info_api_auth_me_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -95,7 +95,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/auth/logout": {
+    "/api/auth/logout": {
         parameters: {
             query?: never;
             header?: never;
@@ -117,14 +117,14 @@ export interface paths {
          *     Returns:
          *         MessageResponse confirming logout.
          */
-        post: operations["logout_snapper_api_auth_logout_post"];
+        post: operations["logout_api_auth_logout_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/auth/users": {
+    "/api/auth/users": {
         parameters: {
             query?: never;
             header?: never;
@@ -142,7 +142,7 @@ export interface paths {
          *     Returns:
          *         List of user profiles with total count.
          */
-        get: operations["get_users_snapper_api_auth_users_get"];
+        get: operations["get_users_api_auth_users_get"];
         put?: never;
         /**
          * Create User
@@ -158,14 +158,14 @@ export interface paths {
          *     Raises:
          *         HTTPException: If user creation fails.
          */
-        post: operations["create_user_snapper_api_auth_users_post"];
+        post: operations["create_user_api_auth_users_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/auth/users/{user_id}": {
+    "/api/auth/users/{user_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -188,7 +188,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If user not found.
          */
-        put: operations["update_user_snapper_api_auth_users__user_id__put"];
+        put: operations["update_user_api_auth_users__user_id__put"];
         post?: never;
         /**
          * Delete User
@@ -204,13 +204,13 @@ export interface paths {
          *     Raises:
          *         HTTPException: If user not found or trying to delete self.
          */
-        delete: operations["delete_user_snapper_api_auth_users__user_id__delete"];
+        delete: operations["delete_user_api_auth_users__user_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/auth/users/{user_id}/change-password": {
+    "/api/auth/users/{user_id}/change-password": {
         parameters: {
             query?: never;
             header?: never;
@@ -236,14 +236,14 @@ export interface paths {
          *     Raises:
          *         HTTPException: If forbidden or invalid current password.
          */
-        post: operations["change_user_password_snapper_api_auth_users__user_id__change_password_post"];
+        post: operations["change_user_password_api_auth_users__user_id__change_password_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/auth/users/{user_id}/admin-reset-password": {
+    "/api/auth/users/{user_id}/admin-reset-password": {
         parameters: {
             query?: never;
             header?: never;
@@ -267,14 +267,14 @@ export interface paths {
          *     Raises:
          *         HTTPException: If forbidden or user not found.
          */
-        post: operations["admin_reset_user_password_snapper_api_auth_users__user_id__admin_reset_password_post"];
+        post: operations["admin_reset_user_password_api_auth_users__user_id__admin_reset_password_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/settings": {
+    "/api/settings": {
         parameters: {
             query?: never;
             header?: never;
@@ -292,7 +292,7 @@ export interface paths {
          *     Returns:
          *         List of all settings matching the filter criteria.
          */
-        get: operations["get_all_settings_snapper_api_settings_get"];
+        get: operations["get_all_settings_api_settings_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -301,7 +301,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/settings/categories": {
+    "/api/settings/categories": {
         parameters: {
             query?: never;
             header?: never;
@@ -318,7 +318,7 @@ export interface paths {
          *     Returns:
          *         Response containing sorted list of category names.
          */
-        get: operations["get_setting_categories_snapper_api_settings_categories_get"];
+        get: operations["get_setting_categories_api_settings_categories_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -327,7 +327,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/settings/{key}": {
+    "/api/settings/{key}": {
         parameters: {
             query?: never;
             header?: never;
@@ -350,7 +350,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If setting not found after update.
          */
-        put: operations["update_setting_snapper_api_settings__key__put"];
+        put: operations["update_setting_api_settings__key__put"];
         post?: never;
         /**
          * Delete Setting
@@ -366,13 +366,13 @@ export interface paths {
          *     Raises:
          *         HTTPException: If setting not found.
          */
-        delete: operations["delete_setting_snapper_api_settings__key__delete"];
+        delete: operations["delete_setting_api_settings__key__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/processes/available": {
+    "/api/processes/available": {
         parameters: {
             query?: never;
             header?: never;
@@ -380,7 +380,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Available Processes */
-        get: operations["list_available_processes_snapper_api_processes_available_get"];
+        get: operations["list_available_processes_api_processes_available_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -389,7 +389,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/processes/configured": {
+    "/api/processes/configured": {
         parameters: {
             query?: never;
             header?: never;
@@ -397,7 +397,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Configured Processes */
-        get: operations["list_configured_processes_snapper_api_processes_configured_get"];
+        get: operations["list_configured_processes_api_processes_configured_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -406,7 +406,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/processes": {
+    "/api/processes": {
         parameters: {
             query?: never;
             header?: never;
@@ -432,14 +432,14 @@ export interface paths {
          *     Raises:
          *         HTTPException: If template not found or name already exists.
          */
-        post: operations["create_process_configuration_snapper_api_processes_post"];
+        post: operations["create_process_configuration_api_processes_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/processes/schema/{name}": {
+    "/api/processes/schema/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -461,7 +461,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If process not found in registry.
          */
-        get: operations["get_process_schema_snapper_api_processes_schema__name__get"];
+        get: operations["get_process_schema_api_processes_schema__name__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -470,7 +470,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/processes/{name}/start": {
+    "/api/processes/{name}/start": {
         parameters: {
             query?: never;
             header?: never;
@@ -480,14 +480,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Start Process */
-        post: operations["start_process_snapper_api_processes__name__start_post"];
+        post: operations["start_process_api_processes__name__start_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/processes/{name}/stop": {
+    "/api/processes/{name}/stop": {
         parameters: {
             query?: never;
             header?: never;
@@ -497,14 +497,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Stop Process */
-        post: operations["stop_process_snapper_api_processes__name__stop_post"];
+        post: operations["stop_process_api_processes__name__stop_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/processes/runs": {
+    "/api/processes/runs": {
         parameters: {
             query?: never;
             header?: never;
@@ -512,7 +512,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Process Runs */
-        get: operations["list_process_runs_snapper_api_processes_runs_get"];
+        get: operations["list_process_runs_api_processes_runs_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -521,7 +521,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/candles": {
+    "/api/candles": {
         parameters: {
             query?: never;
             header?: never;
@@ -529,7 +529,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Candles */
-        get: operations["get_candles_snapper_api_candles_get"];
+        get: operations["get_candles_api_candles_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -538,7 +538,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/signals": {
+    "/api/signals": {
         parameters: {
             query?: never;
             header?: never;
@@ -546,7 +546,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Signals */
-        get: operations["get_signals_snapper_api_signals_get"];
+        get: operations["get_signals_api_signals_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -555,7 +555,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/orders": {
+    "/api/orders": {
         parameters: {
             query?: never;
             header?: never;
@@ -563,7 +563,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Orders */
-        get: operations["get_orders_snapper_api_orders_get"];
+        get: operations["get_orders_api_orders_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -572,7 +572,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/executions": {
+    "/api/executions": {
         parameters: {
             query?: never;
             header?: never;
@@ -580,7 +580,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Executions */
-        get: operations["get_executions_snapper_api_executions_get"];
+        get: operations["get_executions_api_executions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -589,7 +589,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/positions": {
+    "/api/positions": {
         parameters: {
             query?: never;
             header?: never;
@@ -597,7 +597,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Positions */
-        get: operations["get_positions_snapper_api_positions_get"];
+        get: operations["get_positions_api_positions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -606,7 +606,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/health": {
+    "/api/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -614,7 +614,7 @@ export interface paths {
             cookie?: never;
         };
         /** Health Check */
-        get: operations["health_check_snapper_api_health_get"];
+        get: operations["health_check_api_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -623,7 +623,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/ws/stats": {
+    "/api/ws/stats": {
         parameters: {
             query?: never;
             header?: never;
@@ -631,7 +631,7 @@ export interface paths {
             cookie?: never;
         };
         /** Websocket Stats */
-        get: operations["websocket_stats_snapper_api_ws_stats_get"];
+        get: operations["websocket_stats_api_ws_stats_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -640,7 +640,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/zmq/health": {
+    "/api/zmq/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -648,7 +648,7 @@ export interface paths {
             cookie?: never;
         };
         /** Zmq Health Check */
-        get: operations["zmq_health_check_snapper_api_zmq_health_get"];
+        get: operations["zmq_health_check_api_zmq_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -657,7 +657,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapper/api/status": {
+    "/api/status": {
         parameters: {
             query?: never;
             header?: never;
@@ -665,24 +665,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get System Status */
-        get: operations["get_system_status_snapper_api_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Dashboard */
-        get: operations["dashboard__get"];
+        get: operations["get_system_status_api_status_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2170,7 +2153,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    login_snapper_api_auth_login_post: {
+    login_api_auth_login_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2203,7 +2186,7 @@ export interface operations {
             };
         };
     };
-    refresh_token_snapper_api_auth_refresh_post: {
+    refresh_token_api_auth_refresh_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2223,7 +2206,7 @@ export interface operations {
             };
         };
     };
-    get_current_user_info_snapper_api_auth_me_get: {
+    get_current_user_info_api_auth_me_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2243,7 +2226,7 @@ export interface operations {
             };
         };
     };
-    logout_snapper_api_auth_logout_post: {
+    logout_api_auth_logout_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2263,7 +2246,7 @@ export interface operations {
             };
         };
     };
-    get_users_snapper_api_auth_users_get: {
+    get_users_api_auth_users_get: {
         parameters: {
             query?: {
                 include_inactive?: boolean;
@@ -2294,7 +2277,7 @@ export interface operations {
             };
         };
     };
-    create_user_snapper_api_auth_users_post: {
+    create_user_api_auth_users_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2327,7 +2310,7 @@ export interface operations {
             };
         };
     };
-    update_user_snapper_api_auth_users__user_id__put: {
+    update_user_api_auth_users__user_id__put: {
         parameters: {
             query?: never;
             header?: never;
@@ -2362,7 +2345,7 @@ export interface operations {
             };
         };
     };
-    delete_user_snapper_api_auth_users__user_id__delete: {
+    delete_user_api_auth_users__user_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2393,7 +2376,7 @@ export interface operations {
             };
         };
     };
-    change_user_password_snapper_api_auth_users__user_id__change_password_post: {
+    change_user_password_api_auth_users__user_id__change_password_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2428,7 +2411,7 @@ export interface operations {
             };
         };
     };
-    admin_reset_user_password_snapper_api_auth_users__user_id__admin_reset_password_post: {
+    admin_reset_user_password_api_auth_users__user_id__admin_reset_password_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2463,7 +2446,7 @@ export interface operations {
             };
         };
     };
-    get_all_settings_snapper_api_settings_get: {
+    get_all_settings_api_settings_get: {
         parameters: {
             query?: {
                 category?: string | null;
@@ -2494,7 +2477,7 @@ export interface operations {
             };
         };
     };
-    get_setting_categories_snapper_api_settings_categories_get: {
+    get_setting_categories_api_settings_categories_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2514,7 +2497,7 @@ export interface operations {
             };
         };
     };
-    update_setting_snapper_api_settings__key__put: {
+    update_setting_api_settings__key__put: {
         parameters: {
             query?: never;
             header?: never;
@@ -2549,7 +2532,7 @@ export interface operations {
             };
         };
     };
-    delete_setting_snapper_api_settings__key__delete: {
+    delete_setting_api_settings__key__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2580,7 +2563,7 @@ export interface operations {
             };
         };
     };
-    list_available_processes_snapper_api_processes_available_get: {
+    list_available_processes_api_processes_available_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2600,7 +2583,7 @@ export interface operations {
             };
         };
     };
-    list_configured_processes_snapper_api_processes_configured_get: {
+    list_configured_processes_api_processes_configured_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2620,7 +2603,7 @@ export interface operations {
             };
         };
     };
-    create_process_configuration_snapper_api_processes_post: {
+    create_process_configuration_api_processes_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2653,7 +2636,7 @@ export interface operations {
             };
         };
     };
-    get_process_schema_snapper_api_processes_schema__name__get: {
+    get_process_schema_api_processes_schema__name__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2684,7 +2667,7 @@ export interface operations {
             };
         };
     };
-    start_process_snapper_api_processes__name__start_post: {
+    start_process_api_processes__name__start_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2719,7 +2702,7 @@ export interface operations {
             };
         };
     };
-    stop_process_snapper_api_processes__name__stop_post: {
+    stop_process_api_processes__name__stop_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2750,7 +2733,7 @@ export interface operations {
             };
         };
     };
-    list_process_runs_snapper_api_processes_runs_get: {
+    list_process_runs_api_processes_runs_get: {
         parameters: {
             query?: {
                 limit?: number;
@@ -2782,7 +2765,7 @@ export interface operations {
             };
         };
     };
-    get_candles_snapper_api_candles_get: {
+    get_candles_api_candles_get: {
         parameters: {
             query: {
                 /** @description Instrument symbol */
@@ -2818,7 +2801,7 @@ export interface operations {
             };
         };
     };
-    get_signals_snapper_api_signals_get: {
+    get_signals_api_signals_get: {
         parameters: {
             query?: {
                 /** @description Filter by instrument */
@@ -2856,7 +2839,7 @@ export interface operations {
             };
         };
     };
-    get_orders_snapper_api_orders_get: {
+    get_orders_api_orders_get: {
         parameters: {
             query?: {
                 /** @description Symbol to filter by */
@@ -2892,7 +2875,7 @@ export interface operations {
             };
         };
     };
-    get_executions_snapper_api_executions_get: {
+    get_executions_api_executions_get: {
         parameters: {
             query?: {
                 /** @description Number of executions to return */
@@ -2924,7 +2907,7 @@ export interface operations {
             };
         };
     };
-    get_positions_snapper_api_positions_get: {
+    get_positions_api_positions_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2944,7 +2927,7 @@ export interface operations {
             };
         };
     };
-    health_check_snapper_api_health_get: {
+    health_check_api_health_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2964,7 +2947,7 @@ export interface operations {
             };
         };
     };
-    websocket_stats_snapper_api_ws_stats_get: {
+    websocket_stats_api_ws_stats_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2984,7 +2967,7 @@ export interface operations {
             };
         };
     };
-    zmq_health_check_snapper_api_zmq_health_get: {
+    zmq_health_check_api_zmq_health_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3004,7 +2987,7 @@ export interface operations {
             };
         };
     };
-    get_system_status_snapper_api_status_get: {
+    get_system_status_api_status_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3020,26 +3003,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SystemStatus"];
-                };
-            };
-        };
-    };
-    dashboard__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
         };

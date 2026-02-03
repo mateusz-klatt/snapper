@@ -344,7 +344,7 @@ def validate_csrf_token(
         f"http://localhost:{settings.server_port}",
         "http://localhost:8000",
         "http://localhost:3000",
-        "https://holzera.klatt.ie",
+        "https://snapper.ch",
     ]
     origin_valid = any(
         origin.startswith(allowed_origin) or referer.startswith(allowed_origin)

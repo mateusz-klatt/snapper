@@ -196,9 +196,9 @@ class TestConstants:
 
         Given: DEFAULT_URL constant is imported from server_check module,
         When: Value is checked,
-        Then: Equals 'http://localhost:8000/snapper/api/health'.
+        Then: Equals 'http://localhost:8000/api/health'.
         """
-        assert DEFAULT_URL == "http://localhost:8000/snapper/api/health"
+        assert DEFAULT_URL == "http://localhost:8000/api/health"
 
     def test_default_max_retries(self) -> None:
         """Verify DEFAULT_MAX_RETRIES constant has correct value.
