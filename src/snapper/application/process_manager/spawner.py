@@ -305,6 +305,8 @@ class ProcessSpawnerService:
         process: "subprocess.Popen[bytes]",
         sig: int,
         name: str,
+        *,
+        force: bool = False,
     ) -> None:
         """Send a signal to a process or its process group.
 
@@ -316,11 +318,11 @@ class ProcessSpawnerService:
             process: Subprocess handle.
             sig: Signal number to send.
             name: Process name for logging.
+            force: If True, use kill() instead of graceful termination.
         """
-        use_kill_fallback = sig == SIGKILL_SIGNAL
         try:
             if IS_WINDOWS:
-                if use_kill_fallback:
+                if force:
                     process.kill()
                 else:
                     process.send_signal(CTRL_BREAK_EVENT)
@@ -329,11 +331,11 @@ class ProcessSpawnerService:
                 assert _posix_getpgid is not None
                 _posix_killpg(_posix_getpgid(process.pid), sig)
         except OSError as e:
-            fallback_name = "kill" if use_kill_fallback else "terminate"
+            fallback_name = "kill" if force else "terminate"
             logger.debug(
                 f"Signal {sig} failed for '{name}': {e}, falling back to {fallback_name}()"
             )
-            if use_kill_fallback:
+            if force:
                 process.kill()
             else:
                 process.terminate()
@@ -400,7 +402,7 @@ class ProcessSpawnerService:
         logger.warning(
             f"Process '{name}' didn't stop within {effective_timeout}s, force killing (SIGKILL)"
         )
-        self._send_signal_to_process(process, SIGKILL_SIGNAL, name)
+        self._send_signal_to_process(process, SIGKILL_SIGNAL, name, force=True)
         try:
             process.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
