@@ -1551,14 +1551,18 @@ class TestMain:
         When: main() is called with --strip-eslint-disable FILE,
         Then: Comment is removed from file.
         """
-        test_file = tmp_path / "test.ts"
-        test_file.write_text("/* eslint-disable */\nexport const foo = 1;\n")
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(test_file)])
+        project_root = Path(__file__).resolve().parents[2]
+        work_dir = project_root / "build" / "pytest" / "strip-eslint-disable" / tmp_path.name
+        work_dir.mkdir(parents=True, exist_ok=True)
+        test_file = work_dir / "test.ts"
+        test_file.write_text("/* eslint-disable */\nexport const foo = 1;\n", encoding="utf-8")
+        rel_path = test_file.relative_to(project_root)
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(rel_path)])
 
         result = main()
 
         assert result == 0
-        assert test_file.read_text() == "export const foo = 1;\n"
+        assert test_file.read_text(encoding="utf-8") == "export const foo = 1;\n"
 
     def test_strip_eslint_disable_nonexistent_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1569,8 +1573,12 @@ class TestMain:
         When: main() is called with --strip-eslint-disable,
         Then: Returns success without error.
         """
-        nonexistent = tmp_path / "does_not_exist.ts"
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(nonexistent)])
+        project_root = Path(__file__).resolve().parents[2]
+        work_dir = project_root / "build" / "pytest" / "strip-eslint-disable" / tmp_path.name
+        work_dir.mkdir(parents=True, exist_ok=True)
+        nonexistent = work_dir / "does_not_exist.ts"
+        rel_path = nonexistent.relative_to(project_root)
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(rel_path)])
 
         result = main()
 
@@ -1585,15 +1593,49 @@ class TestMain:
         When: main() is called with --strip-eslint-disable,
         Then: File content unchanged.
         """
-        test_file = tmp_path / "clean.ts"
+        project_root = Path(__file__).resolve().parents[2]
+        work_dir = project_root / "build" / "pytest" / "strip-eslint-disable" / tmp_path.name
+        work_dir.mkdir(parents=True, exist_ok=True)
+        test_file = work_dir / "clean.ts"
         original_content = "export const bar = 2;\n"
-        test_file.write_text(original_content)
-        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(test_file)])
+        test_file.write_text(original_content, encoding="utf-8")
+        rel_path = test_file.relative_to(project_root)
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(rel_path)])
 
         result = main()
 
         assert result == 0
-        assert test_file.read_text() == original_content
+        assert test_file.read_text(encoding="utf-8") == original_content
+
+    def test_strip_eslint_disable_rejects_absolute_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rejects absolute paths for --strip-eslint-disable.
+
+        Given: Absolute path is provided,
+        When: main() is called,
+        Then: Exits with a clear message.
+        """
+        test_file = tmp_path / "abs.ts"
+        test_file.write_text("/* eslint-disable */\nexport const foo = 1;\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", str(test_file)])
+
+        with pytest.raises(SystemExit, match="Expected a project-relative path"):
+            main()
+
+    def test_strip_eslint_disable_rejects_escape_project_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rejects paths that escape the project root.
+
+        Given: A path containing parent traversal,
+        When: main() is called,
+        Then: Exits with a clear message.
+        """
+        monkeypatch.setattr(sys, "argv", ["prog", "--strip-eslint-disable", "../pyproject.toml"])
+
+        with pytest.raises(SystemExit, match="Path must be under the project root"):
+            main()
 
 
 class TestConstants:
