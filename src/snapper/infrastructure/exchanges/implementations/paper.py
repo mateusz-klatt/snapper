@@ -606,17 +606,16 @@ class PaperExchangeClient(ExchangeClientBase):
             "USD/PLN",
         ]
 
-    async def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+    def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Subscribe to ticker updates (alias for subscribe_ticker).
 
         Args:
             symbols: List of trading pairs.
 
-        Yields:
-            TickerUpdate from historical data.
+        Returns:
+            AsyncIterator yielding TickerUpdate from historical data.
         """
-        async for tick in self.subscribe_ticker(symbols):
-            yield tick
+        return self.subscribe_ticker(symbols)
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument updates (not implemented for paper).
