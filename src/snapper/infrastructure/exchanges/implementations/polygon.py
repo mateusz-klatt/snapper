@@ -800,7 +800,7 @@ class PolygonExchangeClient(ExchangeClientBase):
                 result[field] = value
         return result
 
-    async def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+    def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Stream instrument/ticker metadata from Polygon.io.
 
         Yields cached symbols if valid, otherwise fetches fresh data
@@ -812,6 +812,10 @@ class PolygonExchangeClient(ExchangeClientBase):
         Yields:
             dict: Symbol metadata dictionaries.
         """
+        _ = kwargs
+        return self._subscribe_instruments_impl()
+
+    async def _subscribe_instruments_impl(self) -> AsyncIterator[dict[str, Any]]:
         if self._is_cache_valid():
             logger.info("Using cached symbols (fresh)")
             symbols = self._load_symbols_from_cache()

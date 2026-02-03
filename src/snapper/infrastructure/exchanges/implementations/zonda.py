@@ -1091,7 +1091,7 @@ class ZondaExchangeClient(ExchangeClientBase):
                 else:
                     raise
 
-    async def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+    def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Fetch instrument information via CCXT.
 
         Args:
@@ -1103,6 +1103,10 @@ class ZondaExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If market loading fails.
         """
+        _ = kwargs
+        return self._subscribe_instruments_impl()
+
+    async def _subscribe_instruments_impl(self) -> AsyncIterator[dict[str, Any]]:
         try:
             markets = await asyncio.to_thread(self._ccxt_client.load_markets)
             if not isinstance(markets, dict):

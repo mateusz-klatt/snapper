@@ -59,6 +59,20 @@ from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
 from snapper.infrastructure.symbols.functions import walutomat_to_native
 
+
+class _RaisingAsyncIterator[T](AsyncIterator[T]):
+    """Async iterator that raises the provided exception on iteration."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def __aiter__(self) -> "_RaisingAsyncIterator[T]":
+        return self
+
+    async def __anext__(self) -> T:
+        raise self._exc
+
+
 _NOT_CONNECTED_MSG = "Not connected - call connect() first"
 _AUTH_REQUIRED_MSG = "Trading requires authentication - provide api_key and private_key"
 
@@ -541,7 +555,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             except TimeoutError:
                 continue
 
-    async def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+    def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Not implemented - Walutomat does not provide public trade feed.
 
         Args:
@@ -553,10 +567,12 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             NotImplementedError: Always raised.
         """
-        raise NotImplementedError("Walutomat does not provide public trade feed")
-        yield
+        _ = symbols
+        return _RaisingAsyncIterator[TradeUpdate](
+            NotImplementedError("Walutomat does not provide public trade feed")
+        )
 
-    async def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
+    def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
         """Not implemented - Walutomat is market data only.
 
         Yields:
@@ -565,10 +581,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             NotImplementedError: Always raised.
         """
-        raise NotImplementedError("Walutomat is market data only - no trading API")
-        yield
+        return _RaisingAsyncIterator[ExecutionUpdate](
+            NotImplementedError("Walutomat is market data only - no trading API")
+        )
 
-    async def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+    def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument/pair information.
 
         Args:
@@ -580,6 +597,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected.
         """
+        _ = kwargs
+        return self._subscribe_instruments_impl()
+
+    async def _subscribe_instruments_impl(self) -> AsyncIterator[dict[str, Any]]:
         if not self._running:
             raise RuntimeError(_NOT_CONNECTED_MSG)
         try:

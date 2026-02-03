@@ -59,6 +59,16 @@ _CALL_CONNECT_MSG = "Not connected - call connect() first"
 _TIME_RANGE_REQUIRED_MSG = "Time range (start_time, end_time) required for paper market data replay"
 
 
+class _EmptyInstrumentsAsyncIterator(AsyncIterator[dict[str, Any]]):
+    """Async iterator that yields nothing."""
+
+    def __aiter__(self) -> "_EmptyInstrumentsAsyncIterator":
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        raise StopAsyncIteration
+
+
 class PaperExchangeClient(ExchangeClientBase):
     """Simulated exchange client for paper trading and backtesting.
 
@@ -608,7 +618,7 @@ class PaperExchangeClient(ExchangeClientBase):
         async for tick in self.subscribe_ticker(symbols):
             yield tick
 
-    async def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+    def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument updates (not implemented for paper).
 
         Args:
@@ -617,5 +627,5 @@ class PaperExchangeClient(ExchangeClientBase):
         Yields:
             Nothing; the iterator is always empty.
         """
-        return
-        yield
+        _ = kwargs
+        return _EmptyInstrumentsAsyncIterator()

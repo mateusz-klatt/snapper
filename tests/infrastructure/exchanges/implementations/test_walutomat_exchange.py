@@ -856,8 +856,8 @@ async def test_subscribe_trades_not_supported() -> None:
     """
     client = WalutomatExchangeClient()
     with pytest.raises(NotImplementedError):
-        generator = client.subscribe_trades(["EUR-PLN"])
-        await generator.__anext__()
+        async for _item in client.subscribe_trades(["EUR-PLN"]):
+            """Consumed by iteration to trigger exception."""
 
 
 @pytest.mark.asyncio()
@@ -870,8 +870,8 @@ async def test_subscribe_executions_not_supported() -> None:
     """
     client = WalutomatExchangeClient()
     with pytest.raises(NotImplementedError):
-        generator = client.subscribe_executions()
-        await generator.__anext__()
+        async for _item in client.subscribe_executions():
+            """Consumed by iteration to trigger exception."""
 
 
 @pytest.mark.asyncio()
