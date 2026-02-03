@@ -1,12 +1,12 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { components } from '../types/api.generated'
+import type { Components } from '../types/api.generated'
 import type { LoginRequest } from '../types/api'
 import { apiClient } from '../lib/apiClient'
 import { storeWsTicket } from '../lib/wsTicketCache'
 
-type User = components['schemas']['UserProfile']
-type UserRole = components['schemas']['UserRole']
+type User = Components['schemas']['UserProfile']
+type UserRole = Components['schemas']['UserRole']
 type WindowWithCallbacks = typeof globalThis & {
   authLogoutCallback?: () => void
   wsDisconnectCallback?: () => void

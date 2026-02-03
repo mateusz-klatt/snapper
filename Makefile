@@ -337,6 +337,7 @@ ui-gen-api-types:
 	$(info Exporting OpenAPI schema from FastAPI...)
 	@$(VENV_PY) scripts/generate_types.py --openapi
 	@cd $(UI_DIR) && pnpm gen:api-types
+	@$(VENV_PY) scripts/generate_types.py --postprocess-openapi-types
 	@cd $(UI_DIR) && pnpm exec prettier --write src/types/api.generated.ts
 	$(info Generated frontend/src/types/api.generated.ts)
 

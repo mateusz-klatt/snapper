@@ -3,7 +3,7 @@
  * Do not make direct changes to the file.
  */
 
-export interface paths {
+export type Paths = {
     "/api/auth/login": {
         parameters: {
             query?: never;
@@ -30,7 +30,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: 401 if credentials invalid.
          */
-        post: operations["login_api_auth_login_post"];
+        post: Operations["login_api_auth_login_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -62,7 +62,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: 401 if refresh token invalid.
          */
-        post: operations["refresh_token_api_auth_refresh_post"];
+        post: Operations["refresh_token_api_auth_refresh_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -86,7 +86,7 @@ export interface paths {
          *     Returns:
          *         Current user's UserProfile.
          */
-        get: operations["get_current_user_info_api_auth_me_get"];
+        get: Operations["get_current_user_info_api_auth_me_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -117,7 +117,7 @@ export interface paths {
          *     Returns:
          *         MessageResponse confirming logout.
          */
-        post: operations["logout_api_auth_logout_post"];
+        post: Operations["logout_api_auth_logout_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -142,7 +142,7 @@ export interface paths {
          *     Returns:
          *         List of user profiles with total count.
          */
-        get: operations["get_users_api_auth_users_get"];
+        get: Operations["get_users_api_auth_users_get"];
         put?: never;
         /**
          * Create User
@@ -158,7 +158,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If user creation fails.
          */
-        post: operations["create_user_api_auth_users_post"];
+        post: Operations["create_user_api_auth_users_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -188,7 +188,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If user not found.
          */
-        put: operations["update_user_api_auth_users__user_id__put"];
+        put: Operations["update_user_api_auth_users__user_id__put"];
         post?: never;
         /**
          * Delete User
@@ -204,7 +204,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If user not found or trying to delete self.
          */
-        delete: operations["delete_user_api_auth_users__user_id__delete"];
+        delete: Operations["delete_user_api_auth_users__user_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -236,7 +236,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If forbidden or invalid current password.
          */
-        post: operations["change_user_password_api_auth_users__user_id__change_password_post"];
+        post: Operations["change_user_password_api_auth_users__user_id__change_password_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -267,7 +267,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If forbidden or user not found.
          */
-        post: operations["admin_reset_user_password_api_auth_users__user_id__admin_reset_password_post"];
+        post: Operations["admin_reset_user_password_api_auth_users__user_id__admin_reset_password_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -292,7 +292,7 @@ export interface paths {
          *     Returns:
          *         List of all settings matching the filter criteria.
          */
-        get: operations["get_all_settings_api_settings_get"];
+        get: Operations["get_all_settings_api_settings_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -318,7 +318,7 @@ export interface paths {
          *     Returns:
          *         Response containing sorted list of category names.
          */
-        get: operations["get_setting_categories_api_settings_categories_get"];
+        get: Operations["get_setting_categories_api_settings_categories_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -350,7 +350,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If setting not found after update.
          */
-        put: operations["update_setting_api_settings__key__put"];
+        put: Operations["update_setting_api_settings__key__put"];
         post?: never;
         /**
          * Delete Setting
@@ -366,7 +366,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If setting not found.
          */
-        delete: operations["delete_setting_api_settings__key__delete"];
+        delete: Operations["delete_setting_api_settings__key__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -380,7 +380,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Available Processes */
-        get: operations["list_available_processes_api_processes_available_get"];
+        get: Operations["list_available_processes_api_processes_available_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -397,7 +397,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Configured Processes */
-        get: operations["list_configured_processes_api_processes_configured_get"];
+        get: Operations["list_configured_processes_api_processes_configured_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -432,7 +432,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If template not found or name already exists.
          */
-        post: operations["create_process_configuration_api_processes_post"];
+        post: Operations["create_process_configuration_api_processes_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -461,7 +461,7 @@ export interface paths {
          *     Raises:
          *         HTTPException: If process not found in registry.
          */
-        get: operations["get_process_schema_api_processes_schema__name__get"];
+        get: Operations["get_process_schema_api_processes_schema__name__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -480,7 +480,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** Start Process */
-        post: operations["start_process_api_processes__name__start_post"];
+        post: Operations["start_process_api_processes__name__start_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -497,7 +497,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** Stop Process */
-        post: operations["stop_process_api_processes__name__stop_post"];
+        post: Operations["stop_process_api_processes__name__stop_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -512,7 +512,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Process Runs */
-        get: operations["list_process_runs_api_processes_runs_get"];
+        get: Operations["list_process_runs_api_processes_runs_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -529,7 +529,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Candles */
-        get: operations["get_candles_api_candles_get"];
+        get: Operations["get_candles_api_candles_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -546,7 +546,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Signals */
-        get: operations["get_signals_api_signals_get"];
+        get: Operations["get_signals_api_signals_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -563,7 +563,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Orders */
-        get: operations["get_orders_api_orders_get"];
+        get: Operations["get_orders_api_orders_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -580,7 +580,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Executions */
-        get: operations["get_executions_api_executions_get"];
+        get: Operations["get_executions_api_executions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -597,7 +597,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Positions */
-        get: operations["get_positions_api_positions_get"];
+        get: Operations["get_positions_api_positions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -614,7 +614,7 @@ export interface paths {
             cookie?: never;
         };
         /** Health Check */
-        get: operations["health_check_api_health_get"];
+        get: Operations["health_check_api_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -631,7 +631,7 @@ export interface paths {
             cookie?: never;
         };
         /** Websocket Stats */
-        get: operations["websocket_stats_api_ws_stats_get"];
+        get: Operations["websocket_stats_api_ws_stats_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -648,7 +648,7 @@ export interface paths {
             cookie?: never;
         };
         /** Zmq Health Check */
-        get: operations["zmq_health_check_api_zmq_health_get"];
+        get: Operations["zmq_health_check_api_zmq_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -665,7 +665,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get System Status */
-        get: operations["get_system_status_api_status_get"];
+        get: Operations["get_system_status_api_status_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -674,9 +674,9 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-}
+};
 export type webhooks = Record<string, never>;
-export interface components {
+export type Components = {
     schemas: {
         /**
          * AdminResetPasswordRequest
@@ -764,7 +764,7 @@ export interface components {
          */
         AvailableProcessesResponse: {
             /** Processes */
-            processes: components["schemas"]["AvailableProcess"][];
+            processes: Components["schemas"]["AvailableProcess"][];
             /** Count */
             count: number;
         };
@@ -943,7 +943,7 @@ export interface components {
          */
         ConfiguredProcessesResponse: {
             /** Processes */
-            processes: components["schemas"]["ConfiguredProcess"][];
+            processes: Components["schemas"]["ConfiguredProcess"][];
             /** Count */
             count: number;
         };
@@ -965,7 +965,7 @@ export interface components {
             email?: string | null;
             /** Password */
             password: string;
-            role: components["schemas"]["UserRole"];
+            role: Components["schemas"]["UserRole"];
             /**
              * Is Active
              * @default true
@@ -1024,7 +1024,7 @@ export interface components {
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
+            detail?: Components["schemas"]["ValidationError"][];
         };
         /**
          * HealthCheckResponse
@@ -1065,7 +1065,7 @@ export interface components {
                 [key: string]: unknown;
             };
             /** @description Topics availability */
-            topics: components["schemas"]["HealthTopics"];
+            topics: Components["schemas"]["HealthTopics"];
         };
         /**
          * HealthTopics
@@ -1123,7 +1123,7 @@ export interface components {
             message: string;
             /** Expires In */
             expires_in: number;
-            user: components["schemas"]["UserProfile"];
+            user: Components["schemas"]["UserProfile"];
         };
         /**
          * MessageResponse
@@ -1315,7 +1315,7 @@ export interface components {
              */
             status: "created";
             /** @description Created process info */
-            process: components["schemas"]["ProcessCreatedInfo"];
+            process: Components["schemas"]["ProcessCreatedInfo"];
         };
         /**
          * ProcessCreatedInfo
@@ -1430,7 +1430,7 @@ export interface components {
          */
         ProcessRunsResponse: {
             /** Runs */
-            runs: components["schemas"]["ProcessRun"][];
+            runs: Components["schemas"]["ProcessRun"][];
             /** Count */
             count: number;
         };
@@ -1676,7 +1676,7 @@ export interface components {
             ws_token_exp: string;
             /** Csrf Token */
             csrf_token: string;
-            user: components["schemas"]["UserProfile"];
+            user: Components["schemas"]["UserProfile"];
         };
         /**
          * SettingCategoriesResponse
@@ -1788,10 +1788,10 @@ export interface components {
          *         strategies: List of active strategies from strategy_runner.
          */
         SystemStatus: {
-            trader: components["schemas"]["ProcessStatus"];
+            trader: Components["schemas"]["ProcessStatus"];
             /** Backtests */
             backtests: {
-                [key: string]: components["schemas"]["ProcessStatus"];
+                [key: string]: Components["schemas"]["ProcessStatus"];
             };
             /**
              * Strategies
@@ -1861,7 +1861,7 @@ export interface components {
         UpdateUserRequest: {
             /** Email */
             email?: string | null;
-            role?: components["schemas"]["UserRole"] | null;
+            role?: Components["schemas"]["UserRole"] | null;
             /** Is Active */
             is_active?: boolean | null;
         };
@@ -1877,7 +1877,7 @@ export interface components {
          */
         UserListResponse: {
             /** Users */
-            users: components["schemas"]["UserProfile"][];
+            users: Components["schemas"]["UserProfile"][];
             /** Total Count */
             total_count: number;
         };
@@ -1904,7 +1904,7 @@ export interface components {
             username: string;
             /** Email */
             email?: string | null;
-            role: components["schemas"]["UserRole"];
+            role: Components["schemas"]["UserRole"];
             /**
              * Is Active
              * @default true
@@ -2004,9 +2004,9 @@ export interface components {
          */
         WsStatsResponse: {
             /** @description WebSocket statistics */
-            websocket: components["schemas"]["WebSocketStats"];
+            websocket: Components["schemas"]["WebSocketStats"];
             /** @description ZMQ bridge statistics */
-            zmq_bridge: components["schemas"]["ZmqBridgeStats"];
+            zmq_bridge: Components["schemas"]["ZmqBridgeStats"];
             /**
              * Connections
              * @description Connection statistics
@@ -2022,9 +2022,9 @@ export interface components {
                 [key: string]: unknown;
             };
             /** @description Subscription details */
-            subscriptions: components["schemas"]["SubscriptionsStats"];
+            subscriptions: Components["schemas"]["SubscriptionsStats"];
             /** @description Configuration details */
-            config: components["schemas"]["WsStatsConfig"];
+            config: Components["schemas"]["WsStatsConfig"];
         };
         /**
          * ZmqBridgeStats
@@ -2121,9 +2121,9 @@ export interface components {
              */
             timestamp: string;
             /** @description Component status details */
-            components: components["schemas"]["ZmqComponents"];
+            components: Components["schemas"]["ZmqComponents"];
             /** @description ZMQ configuration */
-            config: components["schemas"]["ZmqConfig"];
+            config: Components["schemas"]["ZmqConfig"];
             /**
              * Connections
              * @description Connection statistics
@@ -2150,9 +2150,9 @@ export interface components {
     requestBodies: never;
     headers: never;
     pathItems: never;
-}
+};
 export type $defs = Record<string, never>;
-export interface operations {
+export interface Operations {
     login_api_auth_login_post: {
         parameters: {
             query?: never;
@@ -2162,7 +2162,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["LoginRequest"];
+                "application/json": Components["schemas"]["LoginRequest"];
             };
         };
         responses: {
@@ -2172,7 +2172,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LoginResponse"];
+                    "application/json": Components["schemas"]["LoginResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2181,7 +2181,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2201,7 +2201,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RefreshResponse"];
+                    "application/json": Components["schemas"]["RefreshResponse"];
                 };
             };
         };
@@ -2221,7 +2221,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UserProfile"];
+                    "application/json": Components["schemas"]["UserProfile"];
                 };
             };
         };
@@ -2241,7 +2241,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
         };
@@ -2263,7 +2263,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UserListResponse"];
+                    "application/json": Components["schemas"]["UserListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2272,7 +2272,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2286,7 +2286,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateUserRequest"];
+                "application/json": Components["schemas"]["CreateUserRequest"];
             };
         };
         responses: {
@@ -2296,7 +2296,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UserProfile"];
+                    "application/json": Components["schemas"]["UserProfile"];
                 };
             };
             /** @description Validation Error */
@@ -2305,7 +2305,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2321,7 +2321,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["UpdateUserRequest"];
+                "application/json": Components["schemas"]["UpdateUserRequest"];
             };
         };
         responses: {
@@ -2331,7 +2331,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UserProfile"];
+                    "application/json": Components["schemas"]["UserProfile"];
                 };
             };
             /** @description Validation Error */
@@ -2340,7 +2340,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2362,7 +2362,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2371,7 +2371,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2387,7 +2387,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ChangePasswordRequest"];
+                "application/json": Components["schemas"]["ChangePasswordRequest"];
             };
         };
         responses: {
@@ -2397,7 +2397,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2406,7 +2406,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2422,7 +2422,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["AdminResetPasswordRequest"];
+                "application/json": Components["schemas"]["AdminResetPasswordRequest"];
             };
         };
         responses: {
@@ -2432,7 +2432,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2441,7 +2441,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2463,7 +2463,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SettingRead"][];
+                    "application/json": Components["schemas"]["SettingRead"][];
                 };
             };
             /** @description Validation Error */
@@ -2472,7 +2472,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2492,7 +2492,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SettingCategoriesResponse"];
+                    "application/json": Components["schemas"]["SettingCategoriesResponse"];
                 };
             };
         };
@@ -2508,7 +2508,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SettingUpdate"];
+                "application/json": Components["schemas"]["SettingUpdate"];
             };
         };
         responses: {
@@ -2518,7 +2518,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SettingRead"];
+                    "application/json": Components["schemas"]["SettingRead"];
                 };
             };
             /** @description Validation Error */
@@ -2527,7 +2527,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2549,7 +2549,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2558,7 +2558,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2578,7 +2578,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AvailableProcessesResponse"];
+                    "application/json": Components["schemas"]["AvailableProcessesResponse"];
                 };
             };
         };
@@ -2598,7 +2598,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConfiguredProcessesResponse"];
+                    "application/json": Components["schemas"]["ConfiguredProcessesResponse"];
                 };
             };
         };
@@ -2612,7 +2612,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProcessCreateRequest"];
+                "application/json": Components["schemas"]["ProcessCreateRequest"];
             };
         };
         responses: {
@@ -2622,7 +2622,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProcessCreateResponse"];
+                    "application/json": Components["schemas"]["ProcessCreateResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2631,7 +2631,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2653,7 +2653,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProcessSchemaResponse"];
+                    "application/json": Components["schemas"]["ProcessSchemaResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2662,7 +2662,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2678,7 +2678,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProcessStartRequest"];
+                "application/json": Components["schemas"]["ProcessStartRequest"];
             };
         };
         responses: {
@@ -2688,7 +2688,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProcessStartResponse"];
+                    "application/json": Components["schemas"]["ProcessStartResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2697,7 +2697,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2719,7 +2719,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProcessStopResponse"];
+                    "application/json": Components["schemas"]["ProcessStopResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2728,7 +2728,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2751,7 +2751,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProcessRunsResponse"];
+                    "application/json": Components["schemas"]["ProcessRunsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2760,7 +2760,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2787,7 +2787,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CandleSnapshot"][];
+                    "application/json": Components["schemas"]["CandleSnapshot"][];
                 };
             };
             /** @description Validation Error */
@@ -2796,7 +2796,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2825,7 +2825,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TradingSignal"][];
+                    "application/json": Components["schemas"]["TradingSignal"][];
                 };
             };
             /** @description Validation Error */
@@ -2834,7 +2834,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2861,7 +2861,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OrderStatus"][];
+                    "application/json": Components["schemas"]["OrderStatus"][];
                 };
             };
             /** @description Validation Error */
@@ -2870,7 +2870,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2893,7 +2893,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ExecutionRecord"][];
+                    "application/json": Components["schemas"]["ExecutionRecord"][];
                 };
             };
             /** @description Validation Error */
@@ -2902,7 +2902,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2922,7 +2922,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PositionSnapshot"][];
+                    "application/json": Components["schemas"]["PositionSnapshot"][];
                 };
             };
         };
@@ -2942,7 +2942,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HealthCheckResponse"];
+                    "application/json": Components["schemas"]["HealthCheckResponse"];
                 };
             };
         };
@@ -2962,7 +2962,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WsStatsResponse"];
+                    "application/json": Components["schemas"]["WsStatsResponse"];
                 };
             };
         };
@@ -2982,7 +2982,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ZmqHealthResponse"];
+                    "application/json": Components["schemas"]["ZmqHealthResponse"];
                 };
             };
         };
@@ -3002,7 +3002,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SystemStatus"];
+                    "application/json": Components["schemas"]["SystemStatus"];
                 };
             };
         };

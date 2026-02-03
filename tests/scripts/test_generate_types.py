@@ -38,6 +38,7 @@ from scripts.generate_types import json_type_to_ts_entity
 from scripts.generate_types import json_type_to_zod
 from scripts.generate_types import main
 from scripts.generate_types import make_const_fields_required
+from scripts.generate_types import postprocess_openapi_typescript_file
 from scripts.generate_types import snake_to_camel
 from scripts.generate_types import strip_primitive_titles
 from scripts.generate_types import to_camel_case
@@ -238,6 +239,111 @@ class TestMakeConstFieldsRequired:
 
 class TestStripPrimitiveTitles:
     """Tests for strip_primitive_titles function."""
+
+
+class TestPostprocessOpenapiTypescriptFile:
+    """Tests for postprocess_openapi_typescript_file function."""
+
+    def test_renames_root_exports_and_references(self, tmp_path: Path) -> None:
+        """Renames paths/components/operations to PascalCase exports."""
+        file_path = tmp_path / "api.generated.ts"
+        file_path.write_text(
+            "\n".join(
+                [
+                    "export interface paths {",
+                    "  '/api/test': { post: operations['op']; }",
+                    "}",
+                    "export interface components {",
+                    "  schemas: { X: string }",
+                    "}",
+                    "export interface operations {",
+                    "  op: { responses: { 200: components['schemas']['X'] } }",
+                    "}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        postprocess_openapi_typescript_file(file_path)
+        updated = file_path.read_text(encoding="utf-8")
+        assert "export interface Paths" in updated
+        assert "export interface Components" in updated
+        assert "export interface Operations" in updated
+        assert "post: Operations['op']" in updated
+        assert "components['schemas']" not in updated
+        assert "Components['schemas']" in updated
+
+    def test_noop_for_missing_file(self, tmp_path: Path) -> None:
+        """Returns without error when the target file does not exist."""
+        missing = tmp_path / "missing.ts"
+        postprocess_openapi_typescript_file(missing)
+
+    def test_idempotent_when_already_postprocessed(self, tmp_path: Path) -> None:
+        """Does not modify content that already uses PascalCase exports."""
+        file_path = tmp_path / "api.generated.ts"
+        content = "\n".join(
+            [
+                "export type Paths = { '/api/test': { post: Operations['op'] } }",
+                "export type Operations = { op: { responses: { 200: Components['schemas']['X'] } } }",
+                "export type Components = { schemas: { X: string } }",
+                "",
+            ]
+        )
+        file_path.write_text(content, encoding="utf-8")
+
+        postprocess_openapi_typescript_file(file_path)
+        updated = file_path.read_text(encoding="utf-8")
+        assert updated == content
+
+    def test_handles_type_alias_exports(self, tmp_path: Path) -> None:
+        """Supports openapi-typescript --export-type output."""
+        file_path = tmp_path / "api.generated.ts"
+        file_path.write_text(
+            "\n".join(
+                [
+                    "export type paths = { '/api/test': { post: operations['op'] } }",
+                    "export type operations = { op: { responses: { 200: components['schemas']['X'] } } }",
+                    "export type components = { schemas: { X: string } }",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        postprocess_openapi_typescript_file(file_path)
+        updated = file_path.read_text(encoding="utf-8")
+        assert "export type Paths" in updated
+        assert "export type Components" in updated
+        assert "export type Operations" in updated
+        assert "operations['op']" not in updated
+        assert "Operations['op']" in updated
+
+
+class TestRunOpenapiTypescriptPostprocess:
+    """Tests for internal runner that targets the default generated file path."""
+
+    def test_skips_when_flag_not_set(self, tmp_path: Path) -> None:
+        """Does nothing when the CLI flag is not enabled."""
+        args = generate_types.GenerateTypesArgs()
+        args.postprocess_openapi_types = False
+        generate_types._run_openapi_typescript_postprocess(args, tmp_path)
+
+    def test_processes_default_target_when_flag_set(self, tmp_path: Path) -> None:
+        """Processes the default api.generated.ts location under project root."""
+        args = generate_types.GenerateTypesArgs()
+        args.postprocess_openapi_types = True
+
+        target = tmp_path / "frontend" / "src" / "types" / "api.generated.ts"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "export type paths = { '/api/test': { post: operations['op'] } }\n",
+            encoding="utf-8",
+        )
+
+        generate_types._run_openapi_typescript_postprocess(args, tmp_path)
+        updated = target.read_text(encoding="utf-8")
+        assert "export type Paths" in updated
+        assert "Operations['op']" in updated
 
     def test_strips_title_from_bare_string(self) -> None:
         """Strips title from a property that is just a string."""

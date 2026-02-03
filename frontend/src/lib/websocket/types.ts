@@ -20,7 +20,7 @@ import type {
   WSTopicSuggestionsResponse,
   WSPongResponse,
 } from '../../types/ws'
-import type { components } from '../../types/api.generated'
+import type { Components } from '../../types/api.generated'
 
 export interface WebSocketMessageTypeMap {
   tick: TickEnvelope
@@ -61,7 +61,7 @@ export const AUTH_CONTROL_MESSAGES: ReadonlySet<AuthControlMessageType> = new Se
   'reauth_required',
   'reauth_ok',
 ])
-export type RefreshWsTokenResponse = components['schemas']['RefreshResponse']
+export type RefreshWsTokenResponse = Components['schemas']['RefreshResponse']
 export type MessageHandler = (message: WebSocketMessages) => void
 export type TypedMessageHandler<T extends WebSocketMessageType> = (
   message: WebSocketMessageTypeMap[T]

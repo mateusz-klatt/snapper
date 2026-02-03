@@ -36,6 +36,7 @@ _WS_SCHEMAS_FILE = "ws-schemas.json"
 _OPENAPI_FILE = "openapi.json"
 _DEFS_KEY = "$defs"
 _STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
+_OPENAPI_TYPESCRIPT_TARGET = Path("frontend") / "src" / "types" / "api.generated.ts"
 
 ENTITY_RENAMES: dict[str, str] = {}
 ENVELOPE_SUFFIX = "Envelope"
@@ -1584,7 +1585,41 @@ class GenerateTypesArgs(argparse.Namespace):
     entities: bool
     ios: bool
     strip_eslint_disable: bool
+    postprocess_openapi_types: bool
     all: bool
+
+
+def postprocess_openapi_typescript_file(file_path: Path) -> None:
+    """Normalize openapi-typescript root export naming.
+
+    This repository enforces naming conventions that prefer PascalCase for
+    exported types. The `openapi-typescript` generator emits root exports named
+    `paths`, `components`, and `operations`. This function renames those exports
+    to `Paths`, `Components`, and `Operations` and updates intra-file references.
+
+    Args:
+        file_path: Path to the generated `api.generated.ts` file.
+    """
+    if not file_path.is_file():
+        return
+
+    content = file_path.read_text(encoding="utf-8")
+    updated = content
+
+    updated = re.sub(r"\bexport\s+interface\s+paths\b", "export interface Paths", updated)
+    updated = re.sub(r"\bexport\s+interface\s+components\b", "export interface Components", updated)
+    updated = re.sub(r"\bexport\s+interface\s+operations\b", "export interface Operations", updated)
+
+    updated = re.sub(r"\bexport\s+type\s+paths\s*=", "export type Paths =", updated)
+    updated = re.sub(r"\bexport\s+type\s+components\s*=", "export type Components =", updated)
+    updated = re.sub(r"\bexport\s+type\s+operations\s*=", "export type Operations =", updated)
+
+    updated = updated.replace("paths[", "Paths[")
+    updated = updated.replace("components[", "Components[")
+    updated = updated.replace("operations[", "Operations[")
+
+    if updated != content:
+        file_path.write_text(updated, encoding="utf-8")
 
 
 def main() -> int:
@@ -1620,6 +1655,11 @@ Examples:
         action="store_true",
         help="Strip eslint-disable comment from frontend ws.generated.ts",
     )
+    parser.add_argument(
+        "--postprocess-openapi-types",
+        action="store_true",
+        help="Post-process frontend api.generated.ts to use PascalCase root exports",
+    )
     parser.add_argument("--all", action="store_true", help="All of the above (default)")
     args: GenerateTypesArgs = parser.parse_args(namespace=GenerateTypesArgs())
 
@@ -1634,6 +1674,7 @@ Examples:
     _run_entity_generator(args, project_root)
     _run_ios_generator(args, project_root)
     _run_strip_eslint_disable(args, project_root)
+    _run_openapi_typescript_postprocess(args, project_root)
 
     return 0
 
@@ -1657,6 +1698,7 @@ def _args_has_specific_targets(args: GenerateTypesArgs) -> bool:
             args.entities,
             args.ios,
             bool(args.strip_eslint_disable),
+            bool(args.postprocess_openapi_types),
         ]
     )
 
@@ -1715,6 +1757,15 @@ def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> No
     if file_path.is_file():
         content = file_path.read_text(encoding="utf-8")
         file_path.write_text(content.replace("/* eslint-disable */\n", ""), encoding="utf-8")
+
+
+def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Post-process openapi-typescript output when requested."""
+    if not args.postprocess_openapi_types:
+        return
+
+    file_path = project_root / _OPENAPI_TYPESCRIPT_TARGET
+    postprocess_openapi_typescript_file(file_path)
 
 
 if __name__ == "__main__":
