@@ -1782,7 +1782,10 @@ def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> No
     if not args.strip_eslint_disable:
         return
 
-    file_path = resolve_project_relative_file(project_root, _STRIP_ESLINT_DISABLE_TARGET)
+    root = project_root.resolve()
+    file_path = (root / _STRIP_ESLINT_DISABLE_TARGET).resolve()
+    if file_path != root and root not in file_path.parents:
+        raise ValueError("Resolved path escapes the project root")
     if file_path.is_file():
         content = file_path.read_text(encoding="utf-8")
         header = "/* eslint-disable */\n"
@@ -1795,7 +1798,10 @@ def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: P
     if not args.postprocess_openapi_types:
         return
 
-    file_path = resolve_project_relative_file(project_root, _OPENAPI_TYPESCRIPT_TARGET)
+    root = project_root.resolve()
+    file_path = (root / _OPENAPI_TYPESCRIPT_TARGET).resolve()
+    if file_path != root and root not in file_path.parents:
+        raise ValueError("Resolved path escapes the project root")
     postprocess_openapi_typescript_file(file_path)
 
 

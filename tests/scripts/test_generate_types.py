@@ -347,6 +347,48 @@ class TestRunOpenapiTypescriptPostprocess:
         assert "export type Paths" in updated
         assert "Operations['op']" in updated
 
+    def test_rejects_symlink_escape_when_supported(self, tmp_path: Path) -> None:
+        """Rejects default target resolution that escapes root via symlinks."""
+        args = generate_types.GenerateTypesArgs()
+        args.postprocess_openapi_types = True
+
+        outside_dir = tmp_path.parent / f"outside_{tmp_path.name}"
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        link = tmp_path / "frontend"
+        try:
+            os.symlink(outside_dir, link)
+        except OSError:
+            pytest.skip("Symlinks not supported in this environment")
+
+        with pytest.raises(ValueError):
+            generate_types._run_openapi_typescript_postprocess(args, tmp_path)
+
+
+class TestRunStripEslintDisable:
+    """Tests for internal runner that strips eslint-disable from the default generated file."""
+
+    def test_skips_when_flag_not_set(self, tmp_path: Path) -> None:
+        """Does nothing when the CLI flag is not enabled."""
+        args = generate_types.GenerateTypesArgs()
+        args.strip_eslint_disable = False
+        generate_types._run_strip_eslint_disable(args, tmp_path)
+
+    def test_rejects_symlink_escape_when_supported(self, tmp_path: Path) -> None:
+        """Rejects default target resolution that escapes root via symlinks."""
+        args = generate_types.GenerateTypesArgs()
+        args.strip_eslint_disable = True
+
+        outside_dir = tmp_path.parent / f"outside_{tmp_path.name}"
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        link = tmp_path / "frontend"
+        try:
+            os.symlink(outside_dir, link)
+        except OSError:
+            pytest.skip("Symlinks not supported in this environment")
+
+        with pytest.raises(ValueError):
+            generate_types._run_strip_eslint_disable(args, tmp_path)
+
 
 class TestResolveProjectRelativeFile:
     """Tests for resolve_project_relative_file function."""
