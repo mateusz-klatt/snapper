@@ -509,6 +509,67 @@ def test_windows_termination_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     importlib.reload(spawner_module)
 
 
+class DummyWinProcessWithOSError:
+    """Mock Windows process that raises OSError on send_signal."""
+
+    def __init__(self) -> None:
+        """Initialize the instance."""
+        self.pid = 124
+        self.returncode: int | None = None
+        self.terminate_called = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        """Return current returncode."""
+        return self.returncode
+
+    def send_signal(self, _sig: int) -> None:
+        """Raise OSError to test fallback."""
+        raise OSError("Signal not supported")
+
+    def terminate(self) -> None:
+        """Mark as terminated."""
+        self.terminate_called = True
+
+    def kill(self) -> None:
+        """Mark as killed and set returncode."""
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout: float = 0.0) -> None:
+        """Set returncode to -9."""
+        self.returncode = -9
+
+
+def test_windows_termination_oserror_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Windows termination falls back to terminate on OSError.
+
+    Given a process running on Windows platform,
+    When send_signal raises OSError,
+    Then fallback to terminate() method is used.
+    """
+    original_platform = sys.platform
+    monkeypatch.setattr(sys, "platform", "win32", raising=False)
+    mod = importlib.reload(spawner_module)
+    svc = mod.ProcessSpawnerService()
+    dummy_proc = DummyWinProcessWithOSError()
+    info = ProcessInstanceInfo(
+        name="p2",
+        pid=dummy_proc.pid,
+        started_at=datetime.now(UTC),
+        config={},
+        process=cast(subprocess.Popen[bytes], dummy_proc),
+        exit_code=None,
+        last_heartbeat=datetime.now(UTC),
+    )
+    svc.processes["p2"] = info
+    svc.terminate("p2", timeout=0)
+    assert dummy_proc.terminate_called
+    assert dummy_proc.killed
+    monkeypatch.setattr(sys, "platform", original_platform, raising=False)
+    importlib.reload(spawner_module)
+
+
 def test_posix_module_init_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify POSIX module initialization sets correct functions.
 

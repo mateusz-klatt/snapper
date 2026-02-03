@@ -392,7 +392,7 @@ class ProcessSpawnerService:
             logger.info(f"Process '{name}' already dead (exit code: {process.returncode})")
             info.exit_code = process.returncode
             return True
-        effective_timeout = timeout or self._shutdown_timeout
+        effective_timeout = self._shutdown_timeout if timeout is None else timeout
         logger.info(f"Terminating process '{name}' (PID: {info.pid})")
         self._send_signal_to_process(process, signal.SIGTERM, name)
         if self._wait_for_graceful_exit(name, info, effective_timeout):
