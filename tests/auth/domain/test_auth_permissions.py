@@ -30,6 +30,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
+from snapper.auth.tokens import BLACKLIST_GRACE_PERIOD_SECONDS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.auth.tokens import get_token_manager
@@ -596,7 +597,9 @@ class TestTokenManager:
         assert token_manager.settings is not None
         assert isinstance(token_manager._blacklisted_tokens, dict)
         assert len(token_manager._blacklisted_tokens) == 0
-        assert token_manager._blacklist_grace_period == pytest.approx(10.0)
+        assert token_manager._blacklist_grace_period == pytest.approx(
+            BLACKLIST_GRACE_PERIOD_SECONDS
+        )
 
     def test_create_tokens_basic(self) -> None:
         """Verify create_tokens generates valid access and refresh tokens.
@@ -1895,6 +1898,67 @@ class TestCSRFDependencies:
             validate_csrf_token(request, "test_token")
         assert exc_info.value.status_code == 403
         assert "Invalid origin" in exc_info.value.detail
+
+    async def test_validate_csrf_token_rejects_prefix_attack_origin(self) -> None:
+        """Verify validate_csrf_token rejects origin that is a prefix match.
+
+        Given: A POST request with origin that starts with an allowed origin
+            but belongs to a different domain (prefix attack),
+        When: validate_csrf_token is called,
+        Then: HTTPException with 403 and "Invalid origin" is raised.
+        """
+        request = Mock(spec=Request)
+        request.method = "POST"
+        request.headers = {
+            "origin": "https://snapper.ch.evil.com",
+            "referer": "https://snapper.ch.evil.com/page",
+            "X-CSRF-Token": "test_token",
+        }
+        request.cookies = {"csrf_token": "test_token"}
+        with pytest.raises(HTTPException) as exc_info:
+            validate_csrf_token(request, "test_token")
+        assert exc_info.value.status_code == 403
+        assert "Invalid origin" in exc_info.value.detail
+
+    async def test_validate_csrf_token_rejects_prefix_attack_referer(self) -> None:
+        """Verify validate_csrf_token rejects referer that is a prefix match.
+
+        Given: A POST request with empty origin and a referer that starts with
+            an allowed origin but belongs to a different domain,
+        When: validate_csrf_token is called with both origin and referer present,
+        Then: HTTPException with 403 and "Invalid origin" is raised.
+        """
+        request = Mock(spec=Request)
+        request.method = "POST"
+        request.headers = {
+            "origin": "https://snapper.ch.attacker.com",
+            "referer": "https://snapper.ch.attacker.com/steal",
+            "X-CSRF-Token": "test_token",
+        }
+        request.cookies = {"csrf_token": "test_token"}
+        with pytest.raises(HTTPException) as exc_info:
+            validate_csrf_token(request, "test_token")
+        assert exc_info.value.status_code == 403
+        assert "Invalid origin" in exc_info.value.detail
+
+    async def test_validate_csrf_token_accepts_valid_referer_with_path(self) -> None:
+        """Verify validate_csrf_token accepts valid referer that includes a path.
+
+        Given: A POST request with valid origin and referer containing a path,
+        When: validate_csrf_token is called with valid CSRF tokens,
+        Then: No error is raised.
+        """
+        csrf_manager = CSRFManager()
+        valid_token = csrf_manager.generate_token()
+        request = Mock(spec=Request)
+        request.method = "POST"
+        request.headers = {
+            "origin": "http://localhost:8000",
+            "referer": "http://localhost:8000/some/page",
+            "X-CSRF-Token": valid_token,
+        }
+        request.cookies = {"csrf_token": valid_token}
+        validate_csrf_token(request, valid_token)
 
     async def test_validate_csrf_token_requires_cookie_and_header(self) -> None:
         """Verify validate_csrf_token requires both cookie and header.

@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 
+from loguru import logger
 from sqlalchemy import desc
 from sqlalchemy import select
 
@@ -73,7 +74,7 @@ class SignalReadService:
                 await session.refresh(signal_event)
                 return signal_event.id
         except Exception as e:
-            print(f"Error storing signal: {e}")
+            logger.error(f"Error storing signal: {e}")
             return -1
 
     async def get_recent_signals(
@@ -120,7 +121,7 @@ class SignalReadService:
                     for signal, inst in signals_with_instruments
                 ]
         except Exception as e:
-            print(f"Error retrieving signals: {e}")
+            logger.error(f"Error retrieving signals: {e}")
             return []
 
 

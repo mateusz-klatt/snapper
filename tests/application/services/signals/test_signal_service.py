@@ -264,65 +264,85 @@ class TestSignalServiceCoverage:
     async def test_store_signal_error_handling(
         self, signal_service: SignalReadService, sample_signal: Signal
     ) -> None:
-        """Verify store_signal returns -1 on error.
+        """Verify store_signal returns -1 and logs error on exception.
 
         Given: Repository session that raises Exception,
         When: store_signal called,
-        Then: Returns -1.
+        Then: Returns -1 and logger.error called with message.
         """
-        with patch.object(signal_service.repo, "session", side_effect=Exception("Database error")):
-            signal_id = await signal_service.store_signal(
-                signal=sample_signal, strategy_name="test_strategy", price=50000.0
-            )
-            assert signal_id == -1
-
-    async def test_store_signal_upsert_instrument_error(
-        self, signal_service: SignalReadService, sample_signal: Signal
-    ) -> None:
-        """Verify store_signal returns -1 on upsert error.
-
-        Given: Repository upsert_instrument that raises Exception,
-        When: store_signal called,
-        Then: Returns -1.
-        """
-        with patch.object(
-            signal_service.repo, "upsert_instrument", side_effect=Exception("Upsert error")
+        with (
+            patch.object(signal_service.repo, "session", side_effect=Exception("Database error")),
+            patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
             signal_id = await signal_service.store_signal(
                 signal=sample_signal, strategy_name="test_strategy", price=50000.0
             )
             assert signal_id == -1
+            mock_logger.error.assert_called_once()
+            assert "Error storing signal" in str(mock_logger.error.call_args)
+
+    async def test_store_signal_upsert_instrument_error(
+        self, signal_service: SignalReadService, sample_signal: Signal
+    ) -> None:
+        """Verify store_signal returns -1 and logs error on upsert failure.
+
+        Given: Repository upsert_instrument that raises Exception,
+        When: store_signal called,
+        Then: Returns -1 and logger.error called with message.
+        """
+        with (
+            patch.object(
+                signal_service.repo, "upsert_instrument", side_effect=Exception("Upsert error")
+            ),
+            patch("snapper.application.services.signals.service.logger") as mock_logger,
+        ):
+            signal_id = await signal_service.store_signal(
+                signal=sample_signal, strategy_name="test_strategy", price=50000.0
+            )
+            assert signal_id == -1
+            mock_logger.error.assert_called_once()
+            assert "Error storing signal" in str(mock_logger.error.call_args)
 
     async def test_get_recent_signals_error_handling(
         self, signal_service: SignalReadService
     ) -> None:
-        """Verify get_recent_signals returns empty list on error.
+        """Verify get_recent_signals returns empty list and logs error on exception.
 
         Given: Repository session that raises Exception,
         When: get_recent_signals called,
-        Then: Empty list returned.
+        Then: Empty list returned and logger.error called with message.
         """
-        with patch.object(signal_service.repo, "session", side_effect=Exception("Database error")):
+        with (
+            patch.object(signal_service.repo, "session", side_effect=Exception("Database error")),
+            patch("snapper.application.services.signals.service.logger") as mock_logger,
+        ):
             signals = await signal_service.get_recent_signals(
                 instrument="BTC-USD", strategy="test_strategy", hours=24, limit=100
             )
             assert signals == []
+            mock_logger.error.assert_called_once()
+            assert "Error retrieving signals" in str(mock_logger.error.call_args)
 
     async def test_get_recent_signals_session_error(
         self, signal_service: SignalReadService
     ) -> None:
-        """Verify get_recent_signals handles session execution error.
+        """Verify get_recent_signals handles session execution error and logs it.
 
         Given: Session execute that raises Exception,
         When: get_recent_signals called,
-        Then: Empty list returned.
+        Then: Empty list returned and logger.error called with message.
         """
         mock_session = AsyncMock()
         mock_session.execute.side_effect = Exception("Session execution error")
-        with patch.object(signal_service.repo, "session") as mock_session_manager:
+        with (
+            patch.object(signal_service.repo, "session") as mock_session_manager,
+            patch("snapper.application.services.signals.service.logger") as mock_logger,
+        ):
             mock_session_manager.return_value.__aenter__.return_value = mock_session
             signals = await signal_service.get_recent_signals()
             assert signals == []
+            mock_logger.error.assert_called_once()
+            assert "Error retrieving signals" in str(mock_logger.error.call_args)
 
     async def test_store_signal_session_add_error(
         self,
@@ -330,11 +350,11 @@ class TestSignalServiceCoverage:
         sample_signal: Signal,
         test_repository: SQLAlchemyRepository,
     ) -> None:
-        """Verify store_signal returns -1 when session.add fails.
+        """Verify store_signal returns -1 and logs error when session.add fails.
 
         Given: Session with add that raises Exception,
         When: store_signal called,
-        Then: Returns -1.
+        Then: Returns -1 and logger.error called with message.
         """
         await test_repository.upsert_instrument(
             symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
@@ -346,21 +366,26 @@ class TestSignalServiceCoverage:
         mock_session.add.side_effect = Exception("Add error")
         mock_session.commit = AsyncMock()
         mock_session.refresh = AsyncMock()
-        with patch.object(signal_service.repo, "session") as mock_session_manager:
+        with (
+            patch.object(signal_service.repo, "session") as mock_session_manager,
+            patch("snapper.application.services.signals.service.logger") as mock_logger,
+        ):
             mock_session_manager.return_value.__aenter__.return_value = mock_session
             signal_id = await signal_service.store_signal(
                 signal=sample_signal, strategy_name="test_strategy", price=50000.0
             )
             assert signal_id == -1
+            mock_logger.error.assert_called_once()
+            assert "Error storing signal" in str(mock_logger.error.call_args)
 
     async def test_get_recent_signals_complex_query_error(
         self, signal_service: SignalReadService, test_repository: SQLAlchemyRepository
     ) -> None:
-        """Verify get_recent_signals handles result processing error.
+        """Verify get_recent_signals handles result processing error and logs it.
 
         Given: Result.all that raises Exception,
         When: get_recent_signals called with filters,
-        Then: Empty list returned.
+        Then: Empty list returned and logger.error called with message.
         """
         await test_repository.upsert_instrument(
             symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
@@ -369,9 +394,14 @@ class TestSignalServiceCoverage:
         mock_result = MagicMock()
         mock_result.all.side_effect = Exception("Result processing error")
         mock_session.execute.return_value = mock_result
-        with patch.object(signal_service.repo, "session") as mock_session_manager:
+        with (
+            patch.object(signal_service.repo, "session") as mock_session_manager,
+            patch("snapper.application.services.signals.service.logger") as mock_logger,
+        ):
             mock_session_manager.return_value.__aenter__.return_value = mock_session
             signals = await signal_service.get_recent_signals(
                 instrument="BTC-USD", strategy="test_strategy"
             )
             assert signals == []
+            mock_logger.error.assert_called_once()
+            assert "Error retrieving signals" in str(mock_logger.error.call_args)

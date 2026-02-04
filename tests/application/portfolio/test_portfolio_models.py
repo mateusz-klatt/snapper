@@ -5,6 +5,9 @@ from typing import cast
 
 import pytest
 
+from snapper.application.portfolio.models import EPSILON_MICRO
+from snapper.application.portfolio.models import EPSILON_NANO
+from snapper.application.portfolio.models import EPSILON_PICO
 from snapper.application.portfolio.models import PortfolioTracker
 
 
@@ -30,7 +33,7 @@ def test_update_fill_closes_position_resets_avg_price() -> None:
     portfolio.update_fill(instrument="BTC-USD", side="buy", size=1.0, price=10_000.0, fee=0.0)
     portfolio.update_fill(instrument="BTC-USD", side="sell", size=1.0, price=10_000.0, fee=0.0)
     position = portfolio.positions["BTC-USD"]
-    assert position.quantity <= 1e-12
+    assert position.quantity <= EPSILON_PICO
     assert position.average_price == pytest.approx(0.0)
 
 
@@ -65,7 +68,7 @@ def test_clamp_cash_handles_tiny_negatives() -> None:
             return other == 0
 
         def __gt__(self, other: object) -> bool:
-            if other == -1e-9:
+            if other == -EPSILON_NANO:
                 self.gt_calls += 1
                 return self.gt_calls > 1
             return False
@@ -81,11 +84,11 @@ def test_clamp_cash_adjusts_small_positive() -> None:
 
     Given: Portfolio with cash of 5e-10,
     When: _clamp_cash is called,
-    Then: Cash is adjusted to 1e-6 minimum.
+    Then: Cash is adjusted to EPSILON_MICRO minimum.
     """
     portfolio = PortfolioTracker(cash=5e-10)
     portfolio._clamp_cash()
-    assert portfolio.cash == pytest.approx(1e-6)
+    assert portfolio.cash == pytest.approx(EPSILON_MICRO)
 
 
 def test_portfolio_fill_buy_sell() -> None:
@@ -192,7 +195,7 @@ def test_clamp_cash_tiny_negative_to_zero() -> None:
     """
     p = PortfolioTracker(cash=-5e-10)
     p._clamp_cash()
-    assert p.cash == pytest.approx(0.0) or p.cash == pytest.approx(1e-6)
+    assert p.cash == pytest.approx(0.0) or p.cash == pytest.approx(EPSILON_MICRO)
 
 
 def test_equity_with_missing_price_for_some_positions() -> None:
@@ -222,7 +225,7 @@ def test_sell_clears_position_and_average_price() -> None:
     p.update_fill("BTC-USD", "buy", size=0.5, price=100.0, fee=0.0)
     assert p.positions["BTC-USD"].average_price == pytest.approx(100.0)
     p.update_fill("BTC-USD", "sell", size=0.5, price=110.0, fee=0.0)
-    assert p.positions["BTC-USD"].quantity <= 1e-12
+    assert p.positions["BTC-USD"].quantity <= EPSILON_PICO
     assert p.positions["BTC-USD"].average_price == pytest.approx(0.0)
 
 

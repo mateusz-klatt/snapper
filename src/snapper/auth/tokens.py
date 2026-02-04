@@ -10,6 +10,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from typing import Final
 
 import jwt
 from loguru import logger
@@ -21,6 +22,12 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+
+BLACKLIST_GRACE_PERIOD_SECONDS: Final[float] = 10.0
+"""Seconds a blacklisted token remains usable to handle concurrent requests."""
+
+BLACKLIST_CLEANUP_MULTIPLIER: Final[int] = 2
+"""Factor applied to grace period when deciding when to purge old entries."""
 
 
 class TokenManager:
@@ -57,7 +64,7 @@ class TokenManager:
         self._initialized = True
         self._settings: Any = None
         self._blacklisted_tokens: dict[str, float] = {}
-        self._blacklist_grace_period = 10.0
+        self._blacklist_grace_period = BLACKLIST_GRACE_PERIOD_SECONDS
 
     def set_settings_service(self, settings_service: Any) -> None:
         """Set settings service for configuration.
@@ -167,7 +174,10 @@ class TokenManager:
         current_time = datetime.now(UTC).timestamp()
         expired_tokens: list[str] = []
         for jti, blacklist_time in self._blacklisted_tokens.items():
-            if current_time - blacklist_time >= self._blacklist_grace_period * 2:
+            if (
+                current_time - blacklist_time
+                >= self._blacklist_grace_period * BLACKLIST_CLEANUP_MULTIPLIER
+            ):
                 expired_tokens.append(jti)
         for jti in expired_tokens:
             del self._blacklisted_tokens[jti]

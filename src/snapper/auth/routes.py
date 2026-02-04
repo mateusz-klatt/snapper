@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import Response
 from fastapi import status
+from loguru import logger
 from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
@@ -348,7 +349,10 @@ async def create_user(
         )
         return new_user
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+        logger.warning("User creation failed: {}", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="User creation failed"
+        ) from e
 
 
 @router.put("/users/{user_id}", response_model=UserProfile)
@@ -496,8 +500,11 @@ async def admin_reset_user_password(
             return MessageResponse(
                 message=f"Password reset successfully for user {db_user.username}"
             )
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error("Failed to reset password for user {}: {}", user_id, str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset password: {str(e)}",
+            detail="Failed to reset password",
         ) from e

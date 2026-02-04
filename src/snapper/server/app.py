@@ -263,7 +263,7 @@ def create_app() -> FastAPI:
         allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
+        allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
     )
     manager = WebSocketConnectionManager()
     app.include_router(auth_router, prefix=API_PREFIX)

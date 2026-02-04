@@ -340,14 +340,14 @@ def validate_csrf_token(
     origin = request.headers.get("origin") or ""
     referer = request.headers.get("referer") or ""
     settings = get_settings()
-    allowed_origins = [
+    allowed_origins = {
         f"http://localhost:{settings.server_port}",
         "http://localhost:8000",
         "http://localhost:3000",
         "https://snapper.ch",
-    ]
-    origin_valid = any(
-        origin.startswith(allowed_origin) or referer.startswith(allowed_origin)
+    }
+    origin_valid = origin in allowed_origins or any(
+        referer == allowed_origin or referer.startswith(allowed_origin + "/")
         for allowed_origin in allowed_origins
     )
     if not origin_valid and origin and referer:

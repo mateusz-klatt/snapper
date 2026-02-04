@@ -3616,7 +3616,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
 
     Given: Non-existent user_id,
     When: Resetting password,
-    Then: Raises HTTPException with 500 status.
+    Then: Raises HTTPException with 404 status.
     """
 
     class EmptyResult:
@@ -3661,8 +3661,8 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
         )
-    assert exc.value.status_code == 500
-    assert "User not found" in exc.value.detail
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "User not found"
 
 
 @pytest.fixture(name="client", scope="module")

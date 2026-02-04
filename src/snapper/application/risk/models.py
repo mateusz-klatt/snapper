@@ -6,6 +6,13 @@ and drawdown constraints.
 """
 
 from dataclasses import dataclass
+from typing import Final
+
+EPSILON_NANO: Final[float] = 1e-9
+"""Guard value to prevent division by zero in price/stop calculations."""
+
+EPSILON_PICO: Final[float] = 1e-12
+"""Tolerance for floating-point rounding in step-based rounding."""
 
 
 @dataclass
@@ -80,9 +87,9 @@ class RiskEvaluator:
             Maximum position size in units.
         """
         risk_amount = equity * self.cfg.r_per_trade
-        stop_distance = max(price * self.stop_pct(), 1e-9)
+        stop_distance = max(price * self.stop_pct(), EPSILON_NANO)
         size_by_risk = max(risk_amount / stop_distance, 0.0)
-        size_by_leverage = (equity * self.cfg.max_leverage) / max(price, 1e-9)
+        size_by_leverage = (equity * self.cfg.max_leverage) / max(price, EPSILON_NANO)
         return max(min(size_by_risk, size_by_leverage), 0.0)
 
     def can_open_new_trade(self, equity: float, peak_equity: float) -> bool:
@@ -121,7 +128,7 @@ class RiskEvaluator:
         """
         max_notional = equity * self.cfg.max_leverage
         allowed_notional = max(max_notional - current_notional, 0.0)
-        max_size = allowed_notional / max(price, 1e-9)
+        max_size = allowed_notional / max(price, EPSILON_NANO)
         return max(min(desired_size, max_size), 0.0)
 
     @staticmethod
@@ -137,7 +144,7 @@ class RiskEvaluator:
         """
         if step <= 0:
             return max(value, 0.0)
-        units = int((value + 1e-12) // step)
+        units = int((value + EPSILON_PICO) // step)
         return max(units * step, 0.0)
 
     def round_size(

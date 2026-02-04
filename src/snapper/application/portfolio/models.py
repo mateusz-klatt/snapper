@@ -5,6 +5,16 @@ It maintains cash balances, position states, and calculates realized PnL.
 """
 
 from dataclasses import dataclass
+from typing import Final
+
+EPSILON_MICRO: Final[float] = 1e-6
+"""Tolerance for clamping very small positive cash values."""
+
+EPSILON_NANO: Final[float] = 1e-9
+"""Tolerance for detecting near-zero negatives and division guards."""
+
+EPSILON_PICO: Final[float] = 1e-12
+"""Threshold below which a position is considered fully closed."""
 
 
 @dataclass
@@ -95,9 +105,9 @@ class PortfolioTracker:
 
         Prevents negative cash from rounding errors.
         """
-        if -1e-9 < self.cash < 1e-6:
-            self.cash = 1e-6
-        elif self.cash < 0 and self.cash > -1e-9:
+        if -EPSILON_NANO < self.cash < EPSILON_MICRO:
+            self.cash = EPSILON_MICRO
+        elif self.cash < 0 and self.cash > -EPSILON_NANO:
             self.cash = 0.0
 
     def update_fill(
@@ -129,7 +139,7 @@ class PortfolioTracker:
         if side == "buy":
             new_qty = pos.quantity + size
             pos.average_price = (pos.average_price * pos.quantity + size * price) / max(
-                new_qty, 1e-9
+                new_qty, EPSILON_NANO
             )
             pos.quantity = new_qty
             self.cash -= cost
@@ -138,6 +148,6 @@ class PortfolioTracker:
             pos.quantity -= size
             self.cash += size * price - fee
             pos.realized_pnl += (price - pos.average_price) * size
-            if pos.quantity <= 1e-12:
+            if pos.quantity <= EPSILON_PICO:
                 pos.average_price = 0.0
             self._clamp_cash()

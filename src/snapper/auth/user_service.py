@@ -9,6 +9,7 @@ import secrets
 from datetime import UTC
 from datetime import datetime
 
+import bcrypt
 from sqlalchemy import select
 
 from snapper.auth.domain.roles import UserRole
@@ -51,8 +52,23 @@ class UserService:
         """
         return secrets.token_hex(16)
 
-    def _hash_password(self, password: str, salt: str) -> str:
-        """Hash password with salt using SHA-256.
+    def _hash_password(self, password: str) -> str:
+        """Hash password using bcrypt.
+
+        Args:
+            password: Plain text password.
+
+        Returns:
+            Bcrypt-encoded password hash string.
+        """
+        hashed: bytes = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+        return hashed.decode()
+
+    def _hash_password_legacy(self, password: str, salt: str) -> str:
+        """Hash password with salt using legacy SHA-256 algorithm.
+
+        Retained for backward compatibility with existing SHA-256 hashes
+        stored in the database before the bcrypt migration.
 
         Args:
             password: Plain text password.
@@ -63,30 +79,53 @@ class UserService:
         """
         return hashlib.sha256((password + salt).encode()).hexdigest()
 
+    def _is_legacy_hash(self, password_hash: str) -> bool:
+        """Check whether a stored hash is a legacy SHA-256 hex digest.
+
+        SHA-256 hex digests are exactly 64 hexadecimal characters.
+        Bcrypt hashes start with ``$2b$`` and are 60 characters long.
+
+        Args:
+            password_hash: The stored password hash to inspect.
+
+        Returns:
+            True if the hash is a legacy SHA-256 hex digest.
+        """
+        return len(password_hash) == 64
+
     def _verify_password(self, password: str, password_hash: str, salt: str) -> bool:
         """Verify password against stored hash.
 
+        Supports both bcrypt and legacy SHA-256 hashes. Legacy hashes are
+        identified by their 64-character hex digest length.
+
         Args:
             password: Plain text password to verify.
-            password_hash: Stored password hash.
-            salt: Stored salt.
+            password_hash: Stored password hash (bcrypt or SHA-256).
+            salt: Stored salt (used only for legacy SHA-256 verification).
 
         Returns:
             True if password matches.
         """
-        return self._hash_password(password, salt) == password_hash
+        if self._is_legacy_hash(password_hash):
+            return self._hash_password_legacy(password, salt) == password_hash
+        matched: bool = bcrypt.checkpw(password.encode(), password_hash.encode())
+        return matched
 
     def hash_password_with_salt(self, password: str) -> tuple[str, str]:
-        """Hash password and generate salt.
+        """Hash password with bcrypt and generate a placeholder salt.
+
+        Bcrypt embeds its own salt in the hash output, so the returned
+        salt value is a placeholder kept for database schema compatibility.
 
         Args:
             password: Plain text password.
 
         Returns:
-            Tuple of (password_hash, salt).
+            Tuple of (bcrypt_hash, placeholder_salt).
         """
         salt = self._generate_salt()
-        password_hash = self._hash_password(password, salt)
+        password_hash = self._hash_password(password)
         return password_hash, salt
 
     def _db_user_to_auth_user(self, db_user: User) -> UserProfile:
@@ -111,7 +150,9 @@ class UserService:
     async def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         """Authenticate user by username and password.
 
-        Updates last_login timestamp on success.
+        Updates last_login timestamp on success. When a legacy SHA-256 hash
+        is detected and the password is correct, the hash is transparently
+        upgraded to bcrypt.
 
         Args:
             username: User's username.
@@ -128,6 +169,10 @@ class UserService:
                 return None
             if not self._verify_password(password, db_user.password_hash, db_user.salt):
                 return None
+            if self._is_legacy_hash(db_user.password_hash):
+                new_hash, new_salt = self.hash_password_with_salt(password)
+                db_user.password_hash = new_hash
+                db_user.salt = new_salt
             db_user.last_login = datetime.now(UTC)
             await session.commit()
             return self._db_user_to_auth_user(db_user)
