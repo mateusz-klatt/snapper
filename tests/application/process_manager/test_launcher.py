@@ -52,7 +52,7 @@ async def test_import_class_prefers_registry(monkeypatch: pytest.MonkeyPatch) ->
     """
     launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.config_resolver.get_registered_processes",
         lambda: {"foo": {"class_ref": DummyProcess}},
     )
     cls = launcher.import_class("ignored.path.DummyProcess", process_name="foo")
@@ -299,7 +299,7 @@ class TestSyncRegistryTagsNotIterable:
             }
         }
         monkeypatch.setattr(
-            "snapper.application.process_manager.launcher.get_registered_processes",
+            "snapper.application.process_manager.registry_syncer.get_registered_processes",
             lambda: registry,
         )
         mock_setting = MagicMock()
@@ -314,7 +314,7 @@ class TestSyncRegistryTagsNotIterable:
         mock_repo = MagicMock()
         mock_repo.session.return_value = mock_context
         with patch(
-            "snapper.application.process_manager.launcher.get_repository",
+            "snapper.application.process_manager.registry_syncer.get_repository",
             return_value=mock_repo,
         ):
             await launcher.sync_registry_to_database()
@@ -398,7 +398,7 @@ class TestImportClass:
             pass
 
         with patch(
-            "snapper.application.process_manager.launcher.get_registered_processes"
+            "snapper.application.process_manager.config_resolver.get_registered_processes"
         ) as mock_registry:
             mock_registry.return_value = {"test_process": {"class_ref": MockProcessClass}}
             result = launcher.import_class("some.module.MockProcessClass", "test_process")
@@ -414,7 +414,7 @@ class TestImportClass:
         Then: TypeError is raised.
         """
         with patch(
-            "snapper.application.process_manager.launcher.get_registered_processes"
+            "snapper.application.process_manager.config_resolver.get_registered_processes"
         ) as mock_registry:
             mock_registry.return_value = {"test_process": {"class_ref": "not_a_class"}}
             with pytest.raises(TypeError, match="is not a class"):
@@ -831,7 +831,9 @@ class TestGetProcessConfigs:
                 "role": "core",
             }
         )
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.config_resolver.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -841,7 +843,7 @@ class TestGetProcessConfigs:
             mock_repo.session.return_value.__aexit__ = AsyncMock()
             mock_get_repo.return_value = mock_repo
             with patch(
-                "snapper.application.process_manager.launcher.get_registered_processes"
+                "snapper.application.process_manager.config_resolver.get_registered_processes"
             ) as mock_registry:
                 mock_registry.return_value = {}
                 configs = await launcher.get_process_configs()
@@ -862,7 +864,9 @@ class TestGetProcessConfigs:
         mock_setting = MagicMock()
         mock_setting.key = "process_invalid"
         mock_setting.value = "not valid json {"
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.config_resolver.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -872,7 +876,7 @@ class TestGetProcessConfigs:
             mock_repo.session.return_value.__aexit__ = AsyncMock()
             mock_get_repo.return_value = mock_repo
             with patch(
-                "snapper.application.process_manager.launcher.get_registered_processes"
+                "snapper.application.process_manager.config_resolver.get_registered_processes"
             ) as mock_registry:
                 mock_registry.return_value = {}
                 configs = await launcher.get_process_configs()
@@ -900,7 +904,9 @@ class TestGetProcessConfigs:
                 "role": "core",
             }
         )
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.config_resolver.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -910,7 +916,7 @@ class TestGetProcessConfigs:
             mock_repo.session.return_value.__aexit__ = AsyncMock()
             mock_get_repo.return_value = mock_repo
             with patch(
-                "snapper.application.process_manager.launcher.get_registered_processes"
+                "snapper.application.process_manager.config_resolver.get_registered_processes"
             ) as mock_registry:
                 mock_registry.return_value = {}
                 configs = await launcher.get_process_configs()
@@ -939,7 +945,9 @@ class TestGetProcessConfigs:
                 "role": "unknown_role",
             }
         )
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.config_resolver.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -949,7 +957,7 @@ class TestGetProcessConfigs:
             mock_repo.session.return_value.__aexit__ = AsyncMock()
             mock_get_repo.return_value = mock_repo
             with patch(
-                "snapper.application.process_manager.launcher.get_registered_processes"
+                "snapper.application.process_manager.config_resolver.get_registered_processes"
             ) as mock_registry:
                 mock_registry.return_value = {}
                 configs = await launcher.get_process_configs()
@@ -987,7 +995,9 @@ class TestGetProcessConfigs:
                 "priority": 1,
             }
         }
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.config_resolver.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -997,7 +1007,7 @@ class TestGetProcessConfigs:
             mock_repo.session.return_value.__aexit__ = AsyncMock()
             mock_get_repo.return_value = mock_repo
             with patch(
-                "snapper.application.process_manager.launcher.get_registered_processes"
+                "snapper.application.process_manager.config_resolver.get_registered_processes"
             ) as mock_registry:
                 mock_registry.return_value = metadata
                 configs = await launcher.get_process_configs()
@@ -1029,7 +1039,9 @@ class TestProcessRunRecords:
             role=ProcessRoleEnum.CORE,
             tags=("tag1", "tag2"),
         )
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.run_recorder.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = MagicMock()
             mock_session.commit = AsyncMock()
@@ -1051,7 +1063,9 @@ class TestProcessRunRecords:
         When: _update_process_run_record is called.
         Then: No exception raised, operation completes.
         """
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.run_recorder.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -1078,7 +1092,9 @@ class TestProcessRunRecords:
         """
         mock_run = MagicMock()
         mock_run.run_id = "test-run-id"
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.run_recorder.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -1321,7 +1337,9 @@ class TestGetRecentRuns:
         mock_run.tags = ["tag1"]
         mock_run.started_at = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
         mock_run.completed_at = datetime(2024, 1, 1, 12, 5, 0, tzinfo=UTC)
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.run_recorder.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
             mock_result = MagicMock()
@@ -1512,11 +1530,13 @@ class TestSyncRegistryToDatabase:
 
         with (
             patch(
-                "snapper.application.process_manager.launcher.get_registered_processes"
+                "snapper.application.process_manager.registry_syncer.get_registered_processes"
             ) as mock_registry,
-            patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo,
+            patch(
+                "snapper.application.process_manager.registry_syncer.get_repository"
+            ) as mock_get_repo,
             patch.object(
-                launcher, "_create_process_config_in_db", new_callable=AsyncMock
+                launcher._registry_syncer, "_create_process_config_in_db", new_callable=AsyncMock
             ) as mock_create,
         ):
             mock_registry.return_value = {
@@ -1551,7 +1571,9 @@ class TestCreateProcessConfig:
         When: create_process_config is called.
         Then: Setting added to database and committed.
         """
-        with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
+        with patch(
+            "snapper.application.process_manager.registry_syncer.get_repository"
+        ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = MagicMock()
             mock_result = MagicMock()
@@ -1684,7 +1706,7 @@ class TestGetDefaultsFromMetadata:
             "tags": ("tag1", "tag2"),
             "parameters_schema": {"type": "object"},
         }
-        defaults = launcher._get_defaults_from_metadata(metadata)
+        defaults = launcher._registry_syncer._get_defaults_from_metadata(metadata)
         assert defaults["enabled"] is True
         assert defaults["mode"] == "process"
         assert defaults["args"] == [1, 2, 3]
@@ -1700,7 +1722,7 @@ class TestGetDefaultsFromMetadata:
         When: _get_defaults_from_metadata is called.
         Then: Default values returned for all fields.
         """
-        defaults = launcher._get_defaults_from_metadata({})
+        defaults = launcher._registry_syncer._get_defaults_from_metadata({})
         assert defaults["enabled"] is False
         assert defaults["mode"] == "thread"
         assert defaults["args"] == []

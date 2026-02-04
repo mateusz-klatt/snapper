@@ -1,7 +1,11 @@
 """Base strategy framework.
 
-This module provides the abstract base classes and data structures for
-implementing trading strategies with ZMQ-based messaging.
+This module provides the abstract base classes for implementing
+trading strategies with ZMQ-based messaging.
+
+Data models (Signal, StrategyConfig) are defined in
+snapper.strategies.models and re-exported here for backwards
+compatibility.
 """
 
 import asyncio
@@ -10,9 +14,6 @@ import logging
 import time
 from abc import ABC
 from abc import abstractmethod
-from collections.abc import Callable
-from dataclasses import dataclass
-from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -20,163 +21,24 @@ from typing import Any
 import zmq
 import zmq.asyncio
 
-from snapper.application.services.settings import SettingsService
 from snapper.config.settings import get_bootstrap_settings
-from snapper.core.types import TradeSide
-from snapper.infrastructure.symbols.functions import TradingExchange
-from snapper.infrastructure.symbols.functions import _get_db_mapper
-from snapper.infrastructure.symbols.functions import get_available_exchanges
-from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
-from snapper.infrastructure.symbols.functions import get_available_symbols
-from snapper.infrastructure.symbols.functions import get_available_walutomat_symbols
-from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
-from snapper.interface.websocket.schemas import HealthStatus
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.messages import BarEnvelope
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
-from snapper.messaging.schemas.messages import ReplayEndEnvelope
-from snapper.messaging.schemas.messages import ReplayStartEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import SignalEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
 from snapper.messaging.schemas.messages import TradeEnvelope
+from snapper.strategies.health import StrategyHealthMonitor
+from snapper.strategies.models import Signal
+from snapper.strategies.models import StrategyConfig
+from snapper.strategies.system_events import SystemMessageRouter
+
+__all__ = ["BaseStrategy", "CompositeStrategy", "Signal", "StrategyConfig"]
+
 
 logger = logging.getLogger(__name__)
 _bootstrap_settings = get_bootstrap_settings()
-_bootstrap_settings = get_bootstrap_settings()
-
-
-@dataclass
-class Signal:
-    """Trading signal emitted by a strategy.
-
-    Attributes:
-        instrument: The trading instrument symbol.
-        side: Trade direction ('buy' or 'sell').
-        strength: Signal strength from 0.0 to 1.0.
-        reason: Human-readable reason for the signal.
-        price: Price at which signal was generated.
-        timestamp: Signal generation timestamp (Unix epoch).
-        metadata: Additional signal metadata.
-    """
-
-    instrument: str
-    side: TradeSide
-    strength: float
-    reason: str
-    price: float
-    timestamp: float | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-def _get_exchange_instrument_resolver(
-    exchange: str,
-) -> tuple[Callable[[], list[str]], str] | None:
-    """Look up the instrument resolver and label for an exchange.
-
-    Args:
-        exchange: Exchange name to look up.
-
-    Returns:
-        Tuple of (resolver_callable, label) or None if exchange unknown.
-    """
-    resolvers: dict[str, tuple[Callable[[], list[str]], str]] = {
-        "paper": (get_available_symbols, "Paper (all exchanges)"),
-        "walutomat": (get_available_walutomat_symbols, "Walutomat (FX pairs only)"),
-        "zonda": (get_available_zonda_symbols, "Zonda"),
-        "kraken": (get_available_kraken_symbols, "Kraken"),
-    }
-    return resolvers.get(exchange)
-
-
-@dataclass
-class StrategyConfig:
-    """Configuration for a trading strategy.
-
-    Attributes:
-        name: Unique strategy instance name.
-        strategy_class: Name of the strategy class to instantiate.
-        inputs: List of ZMQ topics to subscribe to.
-        outputs: List of output instruments for signals.
-        exchange: Target exchange for order execution.
-        params: Strategy-specific parameters.
-    """
-
-    name: str
-    strategy_class: str
-    inputs: list[str]
-    outputs: list[str]
-    exchange: TradingExchange = "paper"
-    params: dict[str, Any] = field(default_factory=dict)
-
-    @staticmethod
-    def _is_paper_or_replay(topic: str) -> bool:
-        """Check if a topic string refers to paper or replay data.
-
-        Args:
-            topic: Input topic string.
-
-        Returns:
-            True if the topic contains 'paper' or 'replay'.
-        """
-        lowered = topic.lower()
-        return "paper" in lowered or "replay" in lowered
-
-    def _validate_paper_inputs(self) -> None:
-        """Validate paper/replay input consistency with exchange setting."""
-        has_paper_input = any(self._is_paper_or_replay(inp) for inp in self.inputs)
-        if not has_paper_input:
-            return
-        if self.exchange != "paper":
-            raise ValueError(
-                f"Strategy {self.name}: Paper/replay input data MUST use exchange='paper'. "
-                f"Found inputs: {self.inputs}, exchange: {self.exchange}"
-            )
-        all_paper = all(self._is_paper_or_replay(inp) for inp in self.inputs)
-        if not all_paper:
-            raise ValueError(
-                f"Strategy {self.name}: Cannot mix paper/replay and live inputs. "
-                f"All inputs must be paper/replay OR all must be live (no mixing). "
-                f"Found inputs: {self.inputs}"
-            )
-
-    def __post_init__(self) -> None:
-        """Validate configuration after initialization."""
-        if not self.name:
-            raise ValueError("Strategy name cannot be empty")
-        if not self.inputs:
-            raise ValueError(f"Strategy {self.name} must have at least one input")
-        if not self.outputs:
-            raise ValueError(f"Strategy {self.name} must define at least one output instrument")
-        valid_exchanges = get_available_exchanges()
-        if self.exchange not in valid_exchanges:
-            raise ValueError(
-                f"Strategy {self.name}: exchange must be one of {valid_exchanges}, "
-                f"got '{self.exchange}'"
-            )
-        self._validate_output_instruments()
-        self._validate_paper_inputs()
-
-    def _validate_output_instruments(self) -> None:
-        """Validate that output instruments are valid for the exchange."""
-        resolver = _get_exchange_instrument_resolver(self.exchange)
-        if resolver is None:
-            return
-        get_instruments, exchange_label = resolver
-        valid_instruments = get_instruments()
-        if not valid_instruments:
-            logger.warning(
-                f"Strategy {self.name}: No symbols loaded for {exchange_label}, "
-                "skipping output validation (DB may be empty)"
-            )
-            return
-        invalid_instruments = [inst for inst in self.outputs if inst not in valid_instruments]
-        if invalid_instruments:
-            raise ValueError(
-                f"Strategy {self.name}: Invalid output instruments for {exchange_label}: "
-                f"{invalid_instruments}. Valid instruments: {valid_instruments[:20]}..."
-            )
 
 
 class BaseStrategy(ABC):
@@ -230,6 +92,8 @@ class BaseStrategy(ABC):
         self._feed_heartbeats: dict[str, dict[str, Any]] = {}
         self._last_data_ts: float | None = None
         self._is_paper_input = any(StrategyConfig._is_paper_or_replay(inp) for inp in self.inputs)
+        self._health_monitor = StrategyHealthMonitor(self)
+        self._system_router = SystemMessageRouter(self)
 
     @property
     def is_running(self) -> bool:
@@ -312,14 +176,7 @@ class BaseStrategy(ABC):
         Args:
             envelope: Settings change envelope with key and value.
         """
-        try:
-            settings_service = SettingsService.get_instance()
-            if settings_service:
-                parsed_value = settings_service._parse_value(envelope.value)
-                settings_service._cache[envelope.key] = parsed_value
-                logger.info(f"Strategy {self.name}: Setting {envelope.key} updated via ZMQ event")
-        except (ValueError, TypeError, KeyError, RuntimeError) as e:
-            logger.error(f"Strategy {self.name}: Error handling settings update: {e}")
+        self._system_router.handle_settings_update(envelope)
 
     async def stop(self) -> None:
         """Stop the strategy and clean up resources."""
@@ -416,25 +273,11 @@ class BaseStrategy(ABC):
             topic_str: The ZMQ topic string.
             payload_str: The JSON payload string.
         """
-        exchange = topic_str.replace("system.heartbeats.feed.", "")
-        heartbeat = HeartbeatEnvelope.from_json(payload_str)
-        self._feed_heartbeats[exchange] = {
-            "timestamp": time.time(),
-            "status": heartbeat.status,
-            "lag_ms": heartbeat.lag_ms,
-            "component": heartbeat.component,
-            "symbol_count": heartbeat.meta.get("symbol_count", 0),
-        }
-        logger.debug(
-            f"Strategy {self.name}: Received heartbeat from feed.{exchange}, "
-            f"status={heartbeat.status}, lag={heartbeat.lag_ms}ms, "
-            f"symbols={heartbeat.meta.get('symbol_count', 0)}"
-        )
+        self._system_router.handle_system_heartbeat(topic_str, payload_str)
 
     def _handle_symbol_mappings_update(self) -> None:
         """Handle symbol_mappings system message by refreshing cache."""
-        logger.info(f"Strategy {self.name}: Received symbol_mappings update, refreshing cache")
-        _get_db_mapper().trigger_cache_invalidation(fail_fast=False)
+        self._system_router.handle_symbol_mappings_update()
 
     async def _handle_replay_start(self, payload_str: str) -> None:
         """Handle replay start system message.
@@ -442,12 +285,7 @@ class BaseStrategy(ABC):
         Args:
             payload_str: The JSON payload string.
         """
-        replay_envelope = ReplayStartEnvelope.from_json(payload_str)
-        logger.info(f"Strategy {self.name}: Replay started, resetting state")
-        await self.reset()
-        self._last_data_ts = (
-            replay_envelope.started_at.timestamp() if replay_envelope.started_at else None
-        )
+        await self._system_router.handle_replay_start(payload_str)
 
     def _handle_replay_end(self, payload_str: str) -> None:
         """Handle replay end system message.
@@ -455,12 +293,10 @@ class BaseStrategy(ABC):
         Args:
             payload_str: The JSON payload string.
         """
-        ReplayEndEnvelope.from_json(payload_str)
-        logger.info(f"Strategy {self.name}: Replay ended")
-        self._last_data_ts = None
+        self._system_router.handle_replay_end(payload_str)
 
     async def _handle_system_message(self, topic_str: str, payload_str: str) -> None:
-        """Handle a system-category message.
+        """Route a system message to the appropriate handler.
 
         Args:
             topic_str: The ZMQ topic string.
@@ -593,84 +429,9 @@ class BaseStrategy(ABC):
             f"(strength={signal.strength:.2f}, price={signal.price:.2f}) -> {topic}"
         )
 
-    @staticmethod
-    def _classify_health_status(lag_ms: int) -> HealthStatus:
-        """Classify health status based on data lag.
-
-        Args:
-            lag_ms: Milliseconds since last data received.
-
-        Returns:
-            Health status string.
-        """
-        if lag_ms < 2000:
-            return "healthy"
-        if lag_ms < 10000:
-            return "warning"
-        return "error"
-
-    def _build_feed_health(self) -> dict[str, dict[str, Any]] | None:
-        """Build feed health summary from cached heartbeats.
-
-        Returns:
-            Feed health dict or None if no heartbeats collected.
-        """
-        if not self._feed_heartbeats:
-            return None
-        current_time = time.time()
-        feed_health: dict[str, dict[str, Any]] = {}
-        for feed_key, heartbeat in self._feed_heartbeats.items():
-            age_ms = int((current_time - heartbeat["timestamp"]) * 1000)
-            feed_health[feed_key] = {
-                "status": heartbeat["status"],
-                "lag_ms": heartbeat["lag_ms"],
-                "heartbeat_age_ms": age_ms,
-                "healthy": age_ms < 5000,
-            }
-        return feed_health
-
-    def _build_heartbeat_envelope(self, lag_ms: int) -> HeartbeatEnvelope:
-        """Build a heartbeat envelope with current strategy state.
-
-        Args:
-            lag_ms: Milliseconds since last data received.
-
-        Returns:
-            HeartbeatEnvelope ready for publishing.
-        """
-        return HeartbeatEnvelope(
-            component=f"strategy_{self.name}",
-            sequence=self.heartbeat_seq,
-            status=self._classify_health_status(lag_ms),
-            lag_ms=lag_ms,
-            meta={
-                "inputs": self.inputs,
-                "outputs": self.outputs,
-                "output_topics": self.output_topics,
-                "running": self._running,
-                "feed_health": self._build_feed_health(),
-            },
-        )
-
     async def _heartbeat_loop(self) -> None:
         """Background loop for emitting strategy heartbeats."""
-        await asyncio.sleep(1.0)
-        try:
-            while self._running:
-                await asyncio.sleep(2.0)
-                try:
-                    self.heartbeat_seq += 1
-                    lag_ms = int((time.time() - self.last_data_timestamp) * 1000)
-                    hb_msg = self._build_heartbeat_envelope(lag_ms)
-                    if self.publisher:
-                        topic = f"system.heartbeats.strategy.{self.name}"
-                        payload = hb_msg.to_json().encode()
-                        await self.publisher.send_multipart(topic, payload)
-                except Exception as e:
-                    logger.error(f"Strategy {self.name}: Heartbeat error: {e}")
-        except asyncio.CancelledError:
-            logger.info(f"Strategy {self.name}: Heartbeat loop cancelled")
-            raise
+        await self._health_monitor.heartbeat_loop()
 
 
 class CompositeStrategy(BaseStrategy):

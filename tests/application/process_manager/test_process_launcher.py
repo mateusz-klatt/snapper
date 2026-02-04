@@ -103,7 +103,7 @@ class TestProcessFactoryInit:
 class TestImportClass:
     """Unit tests for ProcessLauncherService.import_class method."""
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
     def test_import_class_from_registry(self, mock_get_registry: MagicMock) -> None:
         """Verify import_class retrieves class from process registry.
 
@@ -126,7 +126,7 @@ class TestImportClass:
         assert result is mock_class
         mock_get_registry.assert_called_once()
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
     def test_import_class_registry_not_a_class(self, mock_get_registry: MagicMock) -> None:
         """Verify import_class raises TypeError for non-class registry entry.
 
@@ -145,7 +145,7 @@ class TestImportClass:
         with pytest.raises(TypeError, match="is not a class"):
             factory.import_class("test.BadClass", process_name="bad_entry")
 
-    @patch("snapper.application.process_manager.launcher.importlib.import_module")
+    @patch("snapper.application.process_manager.config_resolver.importlib.import_module")
     def test_import_class_via_importlib(self, mock_import: MagicMock) -> None:
         """Verify import_class falls back to importlib when not in registry.
 
@@ -163,7 +163,7 @@ class TestImportClass:
         assert result is mock_class
         mock_import.assert_called_once_with("snapper.ipc.zmq_broker")
 
-    @patch("snapper.application.process_manager.launcher.importlib.import_module")
+    @patch("snapper.application.process_manager.config_resolver.importlib.import_module")
     def test_import_class_module_not_found(self, mock_import: MagicMock) -> None:
         """Verify import_class raises ImportError for nonexistent module.
 
@@ -177,7 +177,7 @@ class TestImportClass:
         with pytest.raises(ImportError, match="Failed to import class"):
             factory.import_class("nonexistent.module.Class")
 
-    @patch("snapper.application.process_manager.launcher.importlib.import_module")
+    @patch("snapper.application.process_manager.config_resolver.importlib.import_module")
     def test_import_class_attribute_error(self, mock_import: MagicMock) -> None:
         """Verify import_class raises ImportError for missing class attribute.
 
@@ -193,7 +193,7 @@ class TestImportClass:
         with pytest.raises(ImportError, match="Failed to import class"):
             factory.import_class("snapper.ipc.zmq_broker.NonexistentClass")
 
-    @patch("snapper.application.process_manager.launcher.importlib.import_module")
+    @patch("snapper.application.process_manager.config_resolver.importlib.import_module")
     def test_import_class_not_a_type(self, mock_import: MagicMock) -> None:
         """Verify import_class raises TypeError when attribute is not a class.
 
@@ -1068,6 +1068,7 @@ def _create_settings() -> AppSettings:
 def _stub_run_tracking(factory: ProcessLauncherService) -> None:
     cast(Any, factory)._create_process_run_record = mock.AsyncMock(return_value="test-run-id")
     cast(Any, factory)._update_process_run_record = mock.AsyncMock(return_value=None)
+    cast(Any, factory)._run_recorder.update_run_record = mock.AsyncMock(return_value=None)
 
 
 class SyncProcess:
@@ -1887,7 +1888,7 @@ def test_import_class_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.config_resolver.get_registered_processes",
         lambda: {"bad": {"class_ref": object()}},
     )
     with pytest.raises(TypeError):
@@ -2210,10 +2211,10 @@ async def test_get_process_configs_uses_metadata_parameters_schema(
     setting = Setting(key="process_demo", value=json.dumps({"class": "module.Class"}))
     repo = _DummyRepository([setting])
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.config_resolver.get_repository", lambda _url: repo
     )
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.config_resolver.get_registered_processes",
         lambda: {"demo": {"parameters_schema": {"field": "value"}}},
     )
     configs = await factory.get_process_configs()
@@ -2238,10 +2239,10 @@ async def test_get_process_configs_preserves_existing_parameters_schema(
     )
     repo = _DummyRepository([setting])
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.config_resolver.get_repository", lambda _url: repo
     )
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.config_resolver.get_registered_processes",
         lambda: {"demo": {"parameters_schema": {"other": False}}},
     )
     configs = await factory.get_process_configs()
@@ -2753,7 +2754,7 @@ async def test_get_recent_runs_with_filter(monkeypatch: pytest.MonkeyPatch) -> N
     ]
     repo = _RunsRepository(runs)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.run_recorder.get_repository", lambda _url: repo
     )
     factory = ProcessLauncherService(_create_settings())
     result = await factory.get_recent_runs(name="demo")
@@ -2779,7 +2780,7 @@ async def test_sync_registry_creates_missing_configs(monkeypatch: pytest.MonkeyP
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
     create_mock = mock.AsyncMock()
-    monkeypatch.setattr(factory, "_create_process_config_in_db", create_mock)
+    monkeypatch.setattr(factory._registry_syncer, "_create_process_config_in_db", create_mock)
     metadata = {
         "class_ref": _RegistryClass,
         "class_path": "module.Class",
@@ -2788,11 +2789,11 @@ async def test_sync_registry_creates_missing_configs(monkeypatch: pytest.MonkeyP
         "tags": ("x",),
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"new_proc": metadata},
     )
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository",
+        "snapper.application.process_manager.registry_syncer.get_repository",
         lambda _url: _DummyRepository(None),
     )
     await factory.sync_registry_to_database()
@@ -2823,18 +2824,18 @@ async def test_sync_registry_creates_missing_configs_even_when_kwargs_fail(
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
     create_mock = mock.AsyncMock()
-    monkeypatch.setattr(factory, "_create_process_config_in_db", create_mock)
+    monkeypatch.setattr(factory._registry_syncer, "_create_process_config_in_db", create_mock)
     metadata = {
         "class_ref": _RegistryClassFailingKwargs,
         "class_path": "module.Class",
         "method": "start",
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"new_proc": metadata},
     )
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository",
+        "snapper.application.process_manager.registry_syncer.get_repository",
         lambda _url: _DummyRepository(None),
     )
     await factory.sync_registry_to_database()
@@ -2875,7 +2876,7 @@ async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.Mo
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryNoKwargs,
@@ -2885,7 +2886,7 @@ async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.Mo
         "role": ProcessRoleEnum.CORE,
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"existing": metadata},
     )
     await factory.sync_registry_to_database()
@@ -2928,7 +2929,7 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryClassNoKwargs,
@@ -2940,7 +2941,7 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
         "parameters_schema": {"shape": "x"},
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"existing": metadata},
     )
     await factory.sync_registry_to_database()
@@ -2981,7 +2982,7 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryClass,
@@ -2993,7 +2994,7 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
         "parameters_schema": {"p": 1},
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"existing": metadata},
     )
     await factory.sync_registry_to_database()
@@ -3057,7 +3058,7 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryClassKwargsFailingUpdate,
@@ -3067,7 +3068,7 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
         "role": ProcessRoleEnum.CORE,
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"existing": metadata},
     )
     await factory.sync_registry_to_database()
@@ -3106,7 +3107,7 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     )
     repo = _TwoPhaseRepository(existing_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryClassNoKwargs,
@@ -3117,7 +3118,7 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
         "tags": ("t",),
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"existing": metadata},
     )
     await factory.sync_registry_to_database()
@@ -3138,7 +3139,7 @@ async def test_sync_registry_handles_invalid_json(monkeypatch: pytest.MonkeyPatc
     bad_setting = Setting(key="process_bad", value="{")
     repo = _DummyRepository(bad_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryNoKwargs,
@@ -3146,7 +3147,7 @@ async def test_sync_registry_handles_invalid_json(monkeypatch: pytest.MonkeyPatc
         "method": "start",
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"bad": metadata},
     )
     await factory.sync_registry_to_database()
@@ -3189,7 +3190,7 @@ async def test_sync_registry_skips_tag_update_when_already_present(
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryWithTagsAlready,
@@ -3198,7 +3199,7 @@ async def test_sync_registry_skips_tag_update_when_already_present(
         "tags": ("keep",),
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"tagged": metadata},
     )
     await factory.sync_registry_to_database()
@@ -3237,7 +3238,7 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     metadata = {
         "class_ref": _RegistryNoKwargs,
@@ -3246,7 +3247,7 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
         "tags": ("new",),
     }
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_registered_processes",
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
         lambda: {"tagless": metadata},
     )
     await factory.sync_registry_to_database()
@@ -3288,9 +3289,9 @@ async def test_create_process_config_in_db_includes_tags_and_schema(
 
     repo = _CaptureRepo()
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    await factory._create_process_config_in_db(
+    await factory._registry_syncer._create_process_config_in_db(
         name="new",
         class_path="module.Class",
         method="start",
@@ -3345,9 +3346,9 @@ async def test_create_process_config_in_db_omits_absent_optional_fields(
 
     repo = _MinimalRepo()
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    await factory._create_process_config_in_db(
+    await factory._registry_syncer._create_process_config_in_db(
         name="minimal",
         class_path="module.Class",
         method="start",
@@ -3378,7 +3379,7 @@ async def test_create_process_config_raises_if_exists(monkeypatch: pytest.Monkey
     existing = Setting(key="process_dup", value="{}")
     repo = _DummyRepository(existing)
     monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
     with pytest.raises(ValueError):
         await factory.create_process_config(
@@ -3422,7 +3423,7 @@ class TestProcessFactoryDatabasePersistence:
             parameters_schema={"type": "object"},
         )
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_create_process_run_record_success(
         self,
         mock_get_repo: MagicMock,
@@ -3457,7 +3458,7 @@ class TestProcessFactoryDatabasePersistence:
         assert isinstance(added_run.started_at, datetime)
         mock_session.commit.assert_called_once()
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_create_process_run_record_with_none_parameters(
         self,
         mock_get_repo: MagicMock,
@@ -3481,7 +3482,7 @@ class TestProcessFactoryDatabasePersistence:
         added_run = mock_session.add.call_args[0][0]
         assert added_run.parameters is None
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_update_process_run_record_success(
         self,
         mock_get_repo: MagicMock,
@@ -3514,7 +3515,7 @@ class TestProcessFactoryDatabasePersistence:
         assert isinstance(mock_process_run.completed_at, datetime)
         mock_session.commit.assert_called_once()
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_update_process_run_record_with_error(
         self,
         mock_get_repo: MagicMock,
@@ -3545,7 +3546,7 @@ class TestProcessFactoryDatabasePersistence:
         assert mock_process_run.error == error_message[:1024]
         mock_session.commit.assert_called_once()
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_update_process_run_record_truncates_long_error(
         self,
         mock_get_repo: MagicMock,
@@ -3574,7 +3575,7 @@ class TestProcessFactoryDatabasePersistence:
         assert len(mock_process_run.error) == 1024
         assert mock_process_run.error == "X" * 1024
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_update_process_run_record_handles_missing_run(
         self,
         mock_get_repo: MagicMock,
@@ -3599,7 +3600,7 @@ class TestProcessFactoryDatabasePersistence:
         )
         mock_session.commit.assert_not_called()
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_finalize_process_run_success(
         self,
         mock_get_repo: MagicMock,
@@ -3629,7 +3630,7 @@ class TestProcessFactoryDatabasePersistence:
         assert mock_process_run.status == ProcessRunStatusEnum.SUCCEEDED.value
         assert mock_process_run.result == {"status": "done"}
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_finalize_process_run_no_active_run(
         self,
         mock_get_repo: MagicMock,
@@ -3709,8 +3710,8 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
 
 
 @pytest.mark.asyncio()
-@patch("snapper.application.process_manager.launcher.get_registered_processes")
-@patch("snapper.application.process_manager.launcher.get_repository")
+@patch("snapper.application.process_manager.registry_syncer.get_registered_processes")
+@patch("snapper.application.process_manager.registry_syncer.get_repository")
 async def test_sync_registry_to_database_adds_missing_tags(
     mock_get_repo: MagicMock,
     mock_get_registry: MagicMock,
@@ -3780,8 +3781,8 @@ class TestProcessFactoryConfigLoading:
         settings = get_settings()
         return ProcessLauncherService(settings)
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_repository")
     async def test_get_process_configs_success(
         self,
         mock_get_repo: MagicMock,
@@ -3837,8 +3838,8 @@ class TestProcessFactoryConfigLoading:
         assert config.tags == ("test", "coverage")
         assert config.parameters_schema == {"type": "object"}
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_repository")
     async def test_get_process_configs_unknown_lifecycle_defaults(
         self,
         mock_get_repo: MagicMock,
@@ -3871,8 +3872,8 @@ class TestProcessFactoryConfigLoading:
         assert len(configs) == 1
         assert configs[0].lifecycle == ProcessLifecycleEnum.LONG_RUNNING
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_repository")
     async def test_get_process_configs_unknown_role_defaults(
         self,
         mock_get_repo: MagicMock,
@@ -3905,8 +3906,8 @@ class TestProcessFactoryConfigLoading:
         assert len(configs) == 1
         assert configs[0].role == ProcessRoleEnum.CORE
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_repository")
     async def test_get_process_configs_handles_tags_conversion(
         self,
         mock_get_repo: MagicMock,
@@ -3940,8 +3941,8 @@ class TestProcessFactoryConfigLoading:
         assert configs[0].tags == ("tag1", "tag2", "tag3")
         assert isinstance(configs[0].tags, tuple)
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_repository")
     async def test_get_process_configs_skips_invalid_json(
         self,
         mock_get_repo: MagicMock,
@@ -3979,8 +3980,8 @@ class TestProcessFactoryConfigLoading:
         assert len(configs) == 1
         assert configs[0].name == "valid"
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.config_resolver.get_registered_processes")
+    @patch("snapper.application.process_manager.config_resolver.get_repository")
     async def test_get_process_configs_skips_missing_required_fields(
         self,
         mock_get_repo: MagicMock,
@@ -4028,7 +4029,7 @@ class TestProcessFactoryNativeProcessCompletion:
         mock_info.process.returncode = 0
         return mock_info
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_success_exit_code_zero(
         self,
         mock_get_repo: MagicMock,
@@ -4063,7 +4064,7 @@ class TestProcessFactoryNativeProcessCompletion:
         assert "test_process" not in factory.active_runs
         assert mock_process_run.status == ProcessRunStatusEnum.SUCCEEDED.value
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_failure_exit_code_nonzero(
         self,
         mock_get_repo: MagicMock,
@@ -4096,7 +4097,7 @@ class TestProcessFactoryNativeProcessCompletion:
         assert mock_process_run.status == ProcessRunStatusEnum.FAILED.value
         assert mock_process_run.error == "exit_code=1"
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_expected_termination(
         self,
         mock_get_repo: MagicMock,
@@ -4128,7 +4129,7 @@ class TestProcessFactoryNativeProcessCompletion:
         assert "test_process" not in factory.expected_terminations
         assert mock_process_run.status == ProcessRunStatusEnum.CANCELLED.value
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_long_running_unexpected_exit(
         self,
         mock_get_repo: MagicMock,
@@ -4158,7 +4159,7 @@ class TestProcessFactoryNativeProcessCompletion:
         await factory._handle_process_completion("test_process", mock_process_info)
         assert mock_process_run.status == ProcessRunStatusEnum.SUCCEEDED.value
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_non_processinfo_object(
         self,
         mock_get_repo: MagicMock,
@@ -4184,7 +4185,7 @@ class TestProcessFactoryNativeProcessCompletion:
         assert "test_process" not in factory.started_processes
         assert "test_process" not in factory.process_lifecycles
 
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_cleanup_exception_suppressed(
         self,
         mock_get_repo: MagicMock,
@@ -4237,8 +4238,8 @@ class TestProcessFactoryRegistrySync:
 
         return MockProcess
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.registry_syncer.get_registered_processes")
+    @patch("snapper.application.process_manager.registry_syncer.get_repository")
     async def test_sync_registry_creates_new_config(
         self,
         mock_get_repo: MagicMock,
@@ -4299,8 +4300,8 @@ class TestProcessFactoryRegistrySync:
         assert config_dict["tags"] == ["test", "new"]
         assert config_dict["parameters_schema"] == {"type": "object"}
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.registry_syncer.get_registered_processes")
+    @patch("snapper.application.process_manager.registry_syncer.get_repository")
     async def test_sync_registry_updates_empty_kwargs(
         self,
         mock_get_repo: MagicMock,
@@ -4362,8 +4363,8 @@ class TestProcessFactoryRegistrySync:
         assert updated_config["role"] == ProcessRoleEnum.BACKTEST.value
         mock_session.commit.assert_called()
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.registry_syncer.get_registered_processes")
+    @patch("snapper.application.process_manager.registry_syncer.get_repository")
     async def test_sync_registry_skips_config_with_existing_kwargs(
         self,
         mock_get_repo: MagicMock,
@@ -4407,8 +4408,8 @@ class TestProcessFactoryRegistrySync:
         original_config = json.loads(existing_setting.value)
         assert original_config["kwargs"] == {"existing": "value"}
 
-    @patch("snapper.application.process_manager.launcher.get_registered_processes")
-    @patch("snapper.application.process_manager.launcher.get_repository")
+    @patch("snapper.application.process_manager.registry_syncer.get_registered_processes")
+    @patch("snapper.application.process_manager.registry_syncer.get_repository")
     async def test_sync_registry_handles_json_decode_error(
         self,
         mock_get_repo: MagicMock,

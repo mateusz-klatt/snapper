@@ -2,29 +2,34 @@
 
 This module provides the main process lifecycle management service.
 It handles:
-- Loading process configurations from database
 - Starting processes as threads or subprocesses
 - Tracking process runs in database
 - Monitoring and cleanup of completed processes
 - Graceful shutdown of all processes
+
+Configuration resolution is delegated to config_resolver module.
+Registry synchronization is delegated to registry_syncer module.
+Run record persistence is delegated to run_recorder module.
 """
 
 import asyncio
 import contextlib
-import importlib
 import inspect
 import json
 from collections.abc import Iterable
 from datetime import UTC
 from datetime import datetime
 from typing import Any
-from typing import cast
-from uuid import uuid4
 
 from loguru import logger
-from sqlalchemy import desc
 from sqlalchemy import select
 
+from snapper.application.process_manager.config_resolver import get_process_configs
+from snapper.application.process_manager.config_resolver import import_process_class
+from snapper.application.process_manager.config_resolver import resolve_lifecycle
+from snapper.application.process_manager.config_resolver import resolve_parameters_schema
+from snapper.application.process_manager.config_resolver import resolve_role
+from snapper.application.process_manager.config_resolver import resolve_tags
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.enums import ProcessRunStatusEnum
@@ -32,9 +37,10 @@ from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
+from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
+from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.settings import AppSettings
-from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 
@@ -43,11 +49,14 @@ class ProcessLauncherService:
     """Service for launching and managing application processes.
 
     Provides comprehensive process lifecycle management:
-    - Loads configurations from database settings
     - Starts processes based on priority order
-    - Tracks run history in database
     - Monitors process completion and handles failures
     - Coordinates graceful shutdown
+
+    Delegates to specialized services:
+    - ProcessRunRecorder for run record persistence
+    - ProcessRegistrySyncer for registry-database synchronization
+    - config_resolver module for configuration parsing
 
     Attributes:
         settings: Application settings.
@@ -74,37 +83,16 @@ class ProcessLauncherService:
         self.active_runs: dict[str, str] = {}
         self.spawner = ProcessSpawnerService()
         self.expected_terminations: set[str] = set()
+        self._run_recorder = ProcessRunRecorder(settings)
+        self._registry_syncer = ProcessRegistrySyncer(settings)
 
     async def _create_process_run_record(
         self,
         config: ProcessConfigModel,
         parameters: dict[str, Any] | None,
     ) -> str:
-        """Create a new process run record in database.
-
-        Args:
-            config: Process configuration.
-            parameters: Runtime parameters for this run.
-
-        Returns:
-            Generated run_id (UUID string).
-        """
-        repository = get_repository(self.settings.db_url)
-        run_id = str(uuid4())
-        async with repository.session() as session:
-            run = ProcessRun(
-                run_id=run_id,
-                process_name=config.name,
-                role=config.role.value,
-                lifecycle=config.lifecycle.value,
-                status=ProcessRunStatusEnum.RUNNING.value,
-                parameters=parameters,
-                tags=list(config.tags),
-                started_at=datetime.now(UTC),
-            )
-            session.add(run)
-            await session.commit()
-        return run_id
+        """Delegate to run_recorder.create_run_record."""
+        return await self._run_recorder.create_run_record(config, parameters)
 
     async def _update_process_run_record(
         self,
@@ -114,30 +102,8 @@ class ProcessLauncherService:
         result: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
-        """Update an existing process run record.
-
-        Args:
-            run_id: Run ID to update.
-            status: New status to set.
-            result: Optional result data dict.
-            error: Optional error message (truncated to 1024 chars).
-        """
-        repository = get_repository(self.settings.db_url)
-        async with repository.session() as session:
-            result_row = await session.execute(
-                select(ProcessRun).where(ProcessRun.run_id == run_id)
-            )
-            process_run = result_row.scalar_one_or_none()
-            if process_run is None:
-                logger.warning("Process run '{}' not found for status update", run_id)
-                return
-            process_run.status = status.value
-            process_run.completed_at = datetime.now(UTC)
-            if result is not None:
-                process_run.result = result
-            if error is not None:
-                process_run.error = error[:1024]
-            await session.commit()
+        """Delegate to run_recorder.update_run_record."""
+        await self._run_recorder.update_run_record(run_id, status, result=result, error=error)
 
     async def _finalize_process_run(
         self,
@@ -149,7 +115,8 @@ class ProcessLauncherService:
     ) -> None:
         """Finalize a process run by updating its record.
 
-        Removes run from active_runs and updates database record.
+        Removes run from active_runs and delegates DB update
+        to run_recorder.
 
         Args:
             name: Process name.
@@ -160,200 +127,56 @@ class ProcessLauncherService:
         run_id = self.active_runs.pop(name, None)
         if run_id is None:
             return
-        await self._update_process_run_record(run_id, status, result=result, error=error)
+        await self._run_recorder.update_run_record(run_id, status, result=result, error=error)
 
     @staticmethod
     def _resolve_lifecycle(
         raw: Any,
         process_name: str,
     ) -> ProcessLifecycleEnum:
-        """Resolve lifecycle value from config or metadata.
-
-        Args:
-            raw: Raw lifecycle value (enum, string, or None).
-            process_name: Name used in warning messages.
-
-        Returns:
-            Resolved ProcessLifecycleEnum value.
-        """
-        if raw is None:
-            return ProcessLifecycleEnum.LONG_RUNNING
-        if isinstance(raw, ProcessLifecycleEnum):
-            return raw
-        try:
-            return ProcessLifecycleEnum(str(raw))
-        except ValueError:
-            logger.warning(
-                "Unknown lifecycle '{}' for process '{}', defaulting to long-running",
-                raw,
-                process_name,
-            )
-            return ProcessLifecycleEnum.LONG_RUNNING
+        """Delegate to config_resolver.resolve_lifecycle."""
+        return resolve_lifecycle(raw, process_name)
 
     @staticmethod
     def _resolve_role(
         raw: Any,
         process_name: str,
     ) -> ProcessRoleEnum:
-        """Resolve role value from config or metadata.
-
-        Args:
-            raw: Raw role value (enum, string, or None).
-            process_name: Name used in warning messages.
-
-        Returns:
-            Resolved ProcessRoleEnum value.
-        """
-        if raw is None:
-            return ProcessRoleEnum.CORE
-        if isinstance(raw, ProcessRoleEnum):
-            return raw
-        try:
-            return ProcessRoleEnum(str(raw))
-        except ValueError:
-            logger.warning(
-                "Unknown role '{}' for process '{}', defaulting to core",
-                raw,
-                process_name,
-            )
-            return ProcessRoleEnum.CORE
+        """Delegate to config_resolver.resolve_role."""
+        return resolve_role(raw, process_name)
 
     @staticmethod
     def _resolve_tags(raw: Any) -> tuple[str, ...]:
-        """Resolve tags from config or metadata.
-
-        Args:
-            raw: Raw tags value (list, tuple, set, or other).
-
-        Returns:
-            Tuple of tag strings, empty tuple if not iterable.
-        """
-        if isinstance(raw, (list, tuple, set)):
-            return tuple(str(tag) for tag in cast(Iterable[Any], raw))
-        return ()
+        """Delegate to config_resolver.resolve_tags."""
+        return resolve_tags(raw)
 
     @staticmethod
     def _resolve_parameters_schema(
         config_dict: dict[str, Any],
         metadata: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Resolve parameters_schema from config or metadata.
-
-        Args:
-            config_dict: Parsed config dictionary.
-            metadata: Registry metadata dictionary.
-
-        Returns:
-            Parameters schema dict or None.
-        """
-        schema = config_dict.get("parameters_schema")
-        if schema is None:
-            schema = metadata.get("parameters_schema")
-        return schema
-
-    def _build_process_config_from_dict(
-        self,
-        process_name: str,
-        config_dict: dict[str, Any],
-        metadata: dict[str, Any],
-    ) -> ProcessConfigModel:
-        """Build ProcessConfigModel from parsed config dict and metadata.
-
-        Args:
-            process_name: The process name.
-            config_dict: Parsed JSON config dictionary.
-            metadata: Registry metadata dictionary.
-
-        Returns:
-            Fully resolved ProcessConfigModel.
-        """
-        lifecycle_raw = config_dict.get("lifecycle")
-        if lifecycle_raw is None:
-            lifecycle_raw = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
-        role_raw = config_dict.get("role")
-        if role_raw is None:
-            role_raw = metadata.get("role", ProcessRoleEnum.CORE)
-        tags_raw = config_dict.get("tags")
-        if tags_raw is None:
-            tags_raw = metadata.get("tags", ())
-        return ProcessConfigModel(
-            name=process_name,
-            enabled=config_dict.get("enabled", False),
-            mode=config_dict.get("mode", "thread"),
-            class_path=config_dict["class"],
-            method=config_dict.get("method", "start"),
-            args=config_dict.get("args", []),
-            kwargs=config_dict.get("kwargs", {}),
-            note=config_dict.get("note"),
-            lifecycle=self._resolve_lifecycle(lifecycle_raw, process_name),
-            role=self._resolve_role(role_raw, process_name),
-            tags=self._resolve_tags(tags_raw),
-            parameters_schema=self._resolve_parameters_schema(config_dict, metadata),
-        )
+        """Delegate to config_resolver.resolve_parameters_schema."""
+        return resolve_parameters_schema(config_dict, metadata)
 
     async def get_process_configs(self) -> list[ProcessConfigModel]:
         """Load process configurations from database.
 
-        Reads settings with key prefix "process_" and merges with
-        registered process metadata.
-
         Returns:
             List of ProcessConfigModel instances.
         """
-        repository = get_repository(self.settings.db_url)
-        registry = get_registered_processes()
-        async with repository.session() as session:
-            result = await session.execute(select(Setting).where(Setting.key.like("process_%")))
-            settings_rows = result.scalars().all()
-            configs: list[ProcessConfigModel] = []
-            for setting in settings_rows:
-                try:
-                    config_dict = json.loads(setting.value)
-                    process_name = setting.key.replace("process_", "")
-                    metadata = registry.get(process_name, {})
-                    config = self._build_process_config_from_dict(
-                        process_name, config_dict, metadata
-                    )
-                    configs.append(config)
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.error(f"Failed to parse process config '{setting.key}': {e}")
-        return configs
+        return await get_process_configs(self.settings)
 
     def import_class(self, class_path: str, process_name: str | None = None) -> type:
         """Import a class by its fully qualified path.
 
-        First checks the process registry, then falls back to
-        dynamic import.
-
         Args:
-            class_path: Fully qualified class path (e.g., "snapper.app.MyClass").
+            class_path: Fully qualified class path.
             process_name: Optional process name to check registry first.
 
         Returns:
             The imported class type.
-
-        Raises:
-            TypeError: If the imported object is not a class.
-            ImportError: If the class cannot be imported.
         """
-        if process_name:
-            registry = get_registered_processes()
-            if process_name in registry:
-                cls = registry[process_name]["class_ref"]
-                if not isinstance(cls, type):
-                    raise TypeError(f"{class_path} is not a class")
-                return cls
-        try:
-            module_path, class_name = class_path.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            cls = getattr(module, class_name)
-            if not isinstance(cls, type):
-                raise TypeError(f"{class_path} is not a class")
-            return cls
-        except (ValueError, ModuleNotFoundError, AttributeError) as e:
-            raise ImportError(
-                f"Failed to import class '{class_path}' (process_name='{process_name}'): {e}"
-            ) from e
+        return import_process_class(class_path, process_name)
 
     async def _start_as_async_task(self, config: ProcessConfigModel, method: Any) -> None:
         """Start an async method as an asyncio task.
@@ -1156,268 +979,20 @@ class ProcessLauncherService:
         limit: int = 50,
         name: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve recent process run history.
+        """Retrieve recent process run records.
 
         Args:
-            limit: Maximum number of runs to return.
-            name: Filter by process name.
+            limit: Maximum number of records to return.
+            name: Optional process name filter.
 
         Returns:
-            List of run records with status, timestamps, and results.
+            List of run record dictionaries.
         """
-        repository = get_repository(self.settings.db_url)
-        async with repository.session() as session:
-            stmt = select(ProcessRun).order_by(desc(ProcessRun.started_at)).limit(limit)
-            if name:
-                stmt = stmt.where(ProcessRun.process_name == name)
-            result = await session.execute(stmt)
-            runs = result.scalars().all()
-        return [
-            {
-                "run_id": run.run_id,
-                "process_name": run.process_name,
-                "status": run.status,
-                "role": run.role,
-                "lifecycle": run.lifecycle,
-                "parameters": run.parameters,
-                "result": run.result,
-                "error": run.error,
-                "tags": run.tags or [],
-                "started_at": run.started_at.isoformat(),
-                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
-            }
-            for run in runs
-        ]
-
-    def _get_defaults_from_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "enabled": metadata.get("enabled", False),
-            "mode": metadata.get("mode", "thread"),
-            "args": metadata.get("args", []),
-            "kwargs": {},
-            "lifecycle": metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING),
-            "role": metadata.get("role", ProcessRoleEnum.CORE),
-            "tags": metadata.get("tags", ()),
-            "parameters_schema": metadata.get("parameters_schema"),
-        }
-
-    async def _create_process_config_in_db(
-        self, name: str, class_path: str, method: str, defaults: dict[str, Any]
-    ) -> None:
-        repository = get_repository(self.settings.db_url)
-        config_dict: dict[str, Any] = {
-            "enabled": defaults["enabled"],
-            "mode": defaults["mode"],
-            "class": class_path,
-            "method": method,
-            "args": defaults["args"],
-            "kwargs": defaults["kwargs"],
-            "lifecycle": (
-                defaults["lifecycle"].value
-                if isinstance(defaults["lifecycle"], ProcessLifecycleEnum)
-                else str(defaults["lifecycle"])
-            ),
-            "role": (
-                defaults["role"].value
-                if isinstance(defaults["role"], ProcessRoleEnum)
-                else str(defaults["role"])
-            ),
-        }
-        tags_default = defaults.get("tags")
-        if isinstance(tags_default, (list, tuple, set)):
-            config_dict["tags"] = [str(tag) for tag in cast(Iterable[Any], tags_default)]
-        parameters_schema_default = defaults.get("parameters_schema")
-        if parameters_schema_default is not None:
-            config_dict["parameters_schema"] = parameters_schema_default
-        async with repository.session() as session:
-            setting = Setting(
-                key=f"process_{name}",
-                value=json.dumps(config_dict),
-                category="process",
-                updated_at=datetime.now(UTC),
-            )
-            session.add(setting)
-            await session.commit()
-        logger.info(f"Created database config for process '{name}'")
-
-    def _sync_kwargs_from_metadata(
-        self,
-        name: str,
-        config_dict: dict[str, Any],
-        metadata: dict[str, Any],
-    ) -> bool:
-        """Sync kwargs from metadata into config_dict if missing.
-
-        Args:
-            name: Process name for logging.
-            config_dict: Mutable config dictionary.
-            metadata: Registry metadata dictionary.
-
-        Returns:
-            True if config_dict was updated.
-        """
-        kwargs = config_dict.get("kwargs", {})
-        if kwargs:
-            logger.debug(f"Process '{name}' already has database config with kwargs")
-            return False
-        cls = metadata["class_ref"]
-        try:
-            default_kwargs = cls.get_default_kwargs(self.settings)
-        except Exception as e:
-            logger.debug(f"Process '{name}' get_default_kwargs failed: {e}")
-            default_kwargs = {}
-        if not default_kwargs:
-            logger.debug(f"Process '{name}' has empty default kwargs")
-            return False
-        config_dict["kwargs"] = default_kwargs
-        return True
-
-    @staticmethod
-    def _sync_enum_field(
-        config_dict: dict[str, Any],
-        field_key: str,
-        meta_value: Any,
-    ) -> bool:
-        """Sync an enum field from metadata to config_dict.
-
-        Args:
-            config_dict: Mutable config dictionary.
-            field_key: Key in config_dict to check/update.
-            meta_value: Metadata value (enum or string).
-
-        Returns:
-            True if config_dict was updated.
-        """
-        new_value = meta_value.value if hasattr(meta_value, "value") else str(meta_value)
-        if config_dict.get(field_key) == new_value:
-            return False
-        config_dict[field_key] = new_value
-        return True
-
-    @staticmethod
-    def _sync_tags_from_metadata(
-        config_dict: dict[str, Any],
-        metadata: dict[str, Any],
-    ) -> bool:
-        """Sync tags from metadata to config_dict if not present.
-
-        Args:
-            config_dict: Mutable config dictionary.
-            metadata: Registry metadata dictionary.
-
-        Returns:
-            True if config_dict was updated.
-        """
-        if "tags" in config_dict or not metadata.get("tags"):
-            return False
-        tags_meta = metadata.get("tags", ())
-        if not isinstance(tags_meta, (list, tuple, set)):
-            return False
-        config_dict["tags"] = [str(tag) for tag in cast(Iterable[Any], tags_meta)]
-        return True
-
-    def _apply_metadata_updates(
-        self,
-        name: str,
-        config_dict: dict[str, Any],
-        metadata: dict[str, Any],
-    ) -> bool:
-        """Apply all metadata updates to an existing config_dict.
-
-        Args:
-            name: Process name for logging.
-            config_dict: Mutable config dictionary.
-            metadata: Registry metadata dictionary.
-
-        Returns:
-            True if any field was updated.
-        """
-        updated = self._sync_kwargs_from_metadata(name, config_dict, metadata)
-        lifecycle_meta = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
-        updated = self._sync_enum_field(config_dict, "lifecycle", lifecycle_meta) or updated
-        role_meta = metadata.get("role", ProcessRoleEnum.CORE)
-        updated = self._sync_enum_field(config_dict, "role", role_meta) or updated
-        updated = self._sync_tags_from_metadata(config_dict, metadata) or updated
-        if "parameters_schema" not in config_dict and metadata.get("parameters_schema") is not None:
-            config_dict["parameters_schema"] = metadata.get("parameters_schema")
-            updated = True
-        return updated
-
-    async def _sync_new_process(self, name: str, metadata: dict[str, Any]) -> None:
-        """Create database config for a newly registered process.
-
-        Args:
-            name: Process name.
-            metadata: Registry metadata for this process.
-        """
-        cls: type[RegisterableProcess] = metadata["class_ref"]
-        defaults = self._get_defaults_from_metadata(metadata)
-        try:
-            defaults["kwargs"] = cls.get_default_kwargs(self.settings)
-        except Exception as e:
-            logger.warning(f"Failed to get default kwargs for '{name}': {e}, using empty dict")
-            defaults["kwargs"] = {}
-        await self._create_process_config_in_db(
-            name=name,
-            class_path=metadata["class_path"],
-            method=metadata["method"],
-            defaults=defaults,
-        )
-
-    async def _sync_existing_process(
-        self,
-        name: str,
-        metadata: dict[str, Any],
-        existing: Any,
-        repository: Any,
-    ) -> None:
-        """Update database config for an existing registered process.
-
-        Args:
-            name: Process name.
-            metadata: Registry metadata for this process.
-            existing: Existing Setting row from database.
-            repository: Database repository for update operations.
-        """
-        try:
-            config_dict = json.loads(existing.value)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse config for '{name}': {e}")
-            return
-        if not self._apply_metadata_updates(name, config_dict, metadata):
-            return
-        config_key = f"process_{name}"
-        async with repository.session() as update_session:
-            result = await update_session.execute(select(Setting).where(Setting.key == config_key))
-            existing_record = result.scalar_one_or_none()
-            if existing_record:
-                existing_record.value = json.dumps(config_dict, indent=4)
-                existing_record.updated_at = datetime.now(UTC)
-                existing_record.updated_by = "sync_registry"
-                await update_session.commit()
-                logger.info(
-                    "Updated process '{}' metadata in database",
-                    name,
-                )
+        return await self._run_recorder.get_recent_runs(limit=limit, name=name)
 
     async def sync_registry_to_database(self) -> None:
-        """Synchronize process registry with database configurations.
-
-        Creates missing database entries and updates existing ones
-        with current metadata from the registry.
-        """
-        registry = get_registered_processes()
-        logger.info(f"Syncing {len(registry)} registered processes to database")
-        repository = get_repository(self.settings.db_url)
-        for name, metadata in registry.items():
-            config_key = f"process_{name}"
-            async with repository.session() as session:
-                result = await session.execute(select(Setting).where(Setting.key == config_key))
-                existing = result.scalar_one_or_none()
-            if existing is None:
-                await self._sync_new_process(name, metadata)
-            else:
-                await self._sync_existing_process(name, metadata, existing, repository)
+        """Delegate to registry_syncer.sync_registry_to_database."""
+        await self._registry_syncer.sync_registry_to_database()
 
     async def create_process_config(
         self,
@@ -1438,50 +1013,30 @@ class ProcessLauncherService:
         """Create a new process configuration in the database.
 
         Args:
-            name: Unique process name.
+            name: Process name.
             class_path: Fully qualified class path.
-            method: Entry method name.
-            enabled: Whether process is enabled for autostart.
-            mode: Execution mode (thread/process/async).
-            args: Positional arguments.
-            kwargs: Keyword arguments.
+            method: Method to invoke on the class.
+            enabled: Whether the process is enabled.
+            mode: Execution mode (thread/process).
+            args: Positional arguments for the method.
+            kwargs: Keyword arguments for the method.
             lifecycle: Process lifecycle type.
-            role: Process role category.
-            tags: Process tags for grouping.
+            role: Process role classification.
+            tags: Process tags for categorization.
             parameters_schema: Optional JSON schema for parameters.
-            note: Optional description note.
-
-        Raises:
-            ValueError: If process name already exists.
+            note: Optional descriptive note.
         """
-        repository = get_repository(self.settings.db_url)
-        config_key = f"process_{name}"
-        config_dict: dict[str, Any] = {
-            "enabled": enabled,
-            "mode": mode,
-            "class": class_path,
-            "method": method,
-            "args": args,
-            "kwargs": kwargs,
-            "lifecycle": lifecycle.value,
-            "role": role.value,
-        }
-        tags_list = [str(tag) for tag in tags]
-        if tags_list:
-            config_dict["tags"] = tags_list
-        if parameters_schema is not None:
-            config_dict["parameters_schema"] = parameters_schema
-        if note is not None:
-            config_dict["note"] = note
-        async with repository.session() as session:
-            existing = await session.execute(select(Setting).where(Setting.key == config_key))
-            if existing.scalar_one_or_none() is not None:
-                raise ValueError(f"Process '{name}' is already configured")
-            setting = Setting(
-                key=config_key,
-                value=json.dumps(config_dict, indent=4),
-                category="process",
-                updated_at=datetime.now(UTC),
-            )
-            session.add(setting)
-            await session.commit()
+        await self._registry_syncer.create_process_config(
+            name=name,
+            class_path=class_path,
+            method=method,
+            enabled=enabled,
+            mode=mode,
+            args=args,
+            kwargs=kwargs,
+            lifecycle=lifecycle,
+            role=role,
+            tags=tags,
+            parameters_schema=parameters_schema,
+            note=note,
+        )

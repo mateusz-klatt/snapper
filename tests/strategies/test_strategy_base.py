@@ -600,7 +600,7 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
         def trigger_cache_invalidation(self, *, fail_fast: bool) -> None:
             invalidate_calls.append(str(fail_fast))
 
-    monkeypatch.setattr("snapper.strategies.base._get_db_mapper", lambda: _Mapper())
+    monkeypatch.setattr("snapper.strategies.system_events._get_db_mapper", lambda: _Mapper())
     heartbeat = HeartbeatEnvelope(
         component="feed.kraken",
         sequence=1,
@@ -1709,7 +1709,7 @@ class TestListenLoop:
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
         mapper = MagicMock()
-        monkeypatch.setattr("snapper.strategies.base._get_db_mapper", lambda: mapper)
+        monkeypatch.setattr("snapper.strategies.system_events._get_db_mapper", lambda: mapper)
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[("system.symbol_mappings", b"{}"), asyncio.CancelledError()]
@@ -2875,7 +2875,7 @@ class TestListenLoopSystemMessages:
         )
         strategy.subscriber = mock_subscriber
         with (
-            patch("snapper.strategies.base._get_db_mapper") as mock_mapper,
+            patch("snapper.strategies.system_events._get_db_mapper") as mock_mapper,
             pytest.raises(asyncio.CancelledError),
         ):
             mock_mapper_instance = MagicMock()
@@ -2938,7 +2938,7 @@ class TestListenLoopSystemMessages:
         )
         strategy = SimpleTestStrategy(config)
         envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
-        with patch("snapper.strategies.base.SettingsService.get_instance") as mock_service:
+        with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
             mock_instance._parse_value.return_value = "test_value"
             mock_instance._cache = {}
@@ -2962,7 +2962,7 @@ class TestListenLoopSystemMessages:
         )
         strategy = SimpleTestStrategy(config)
         envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
-        with patch("snapper.strategies.base.SettingsService.get_instance") as mock_service:
+        with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_service.return_value = None
             strategy._handle_settings_update(envelope)
 
@@ -2981,7 +2981,7 @@ class TestListenLoopSystemMessages:
         )
         strategy = SimpleTestStrategy(config)
         envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
-        with patch("snapper.strategies.base.SettingsService.get_instance") as mock_service:
+        with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
             mock_instance._parse_value.side_effect = RuntimeError("parse failed")
             mock_service.return_value = mock_instance
@@ -3569,10 +3569,10 @@ class TestBaseStrategyValidation:
         """
         with (
             patch(
-                "snapper.strategies.base.get_available_zonda_symbols",
+                "snapper.strategies.models.get_available_zonda_symbols",
                 return_value=set(),
             ),
-            patch("snapper.strategies.base.logger") as mock_logger,
+            patch("snapper.strategies.models.logger") as mock_logger,
         ):
             config = object.__new__(StrategyConfig)
             config.name = "test"
