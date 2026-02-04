@@ -364,6 +364,21 @@ class TestRunOpenapiTypescriptPostprocess:
         with pytest.raises(ValueError):
             generate_types._run_openapi_typescript_postprocess(args, tmp_path)
 
+    def test_rejects_escape_via_mocked_resolve(self, tmp_path: Path) -> None:
+        """Rejects resolved path escaping root (platform-independent, no symlinks)."""
+        args = generate_types.GenerateTypesArgs()
+        args.postprocess_openapi_types = True
+        escape_target = tmp_path.parent / "outside" / "evil.txt"
+
+        def fake_resolve(path: Path, strict: bool = False) -> Path:
+            """Return escape path for any path other than the project root itself."""
+            if path == tmp_path:
+                return tmp_path
+            return escape_target
+
+        with patch.object(Path, "resolve", fake_resolve), pytest.raises(ValueError):
+            generate_types._run_openapi_typescript_postprocess(args, tmp_path)
+
 
 class TestRunStripEslintDisable:
     """Tests for internal runner that strips eslint-disable from the default generated file."""
@@ -388,6 +403,21 @@ class TestRunStripEslintDisable:
             pytest.skip("Symlinks not supported in this environment")
 
         with pytest.raises(ValueError):
+            generate_types._run_strip_eslint_disable(args, tmp_path)
+
+    def test_rejects_escape_via_mocked_resolve(self, tmp_path: Path) -> None:
+        """Rejects resolved path escaping root (platform-independent, no symlinks)."""
+        args = generate_types.GenerateTypesArgs()
+        args.strip_eslint_disable = True
+        escape_target = tmp_path.parent / "outside" / "evil.txt"
+
+        def fake_resolve(path: Path, strict: bool = False) -> Path:
+            """Return escape path for any path other than the project root itself."""
+            if path == tmp_path:
+                return tmp_path
+            return escape_target
+
+        with patch.object(Path, "resolve", fake_resolve), pytest.raises(ValueError):
             generate_types._run_strip_eslint_disable(args, tmp_path)
 
 
@@ -423,6 +453,19 @@ class TestResolveProjectRelativeFile:
 
         with pytest.raises(ValueError):
             resolve_project_relative_file(tmp_path, Path("link") / "evil.txt")
+
+    def test_rejects_escape_via_mocked_resolve(self, tmp_path: Path) -> None:
+        """Rejects resolved path escaping root (platform-independent, no symlinks)."""
+        escape_target = tmp_path.parent / "outside" / "evil.txt"
+
+        def fake_resolve(path: Path, strict: bool = False) -> Path:
+            """Return escape path for any path other than the project root itself."""
+            if path == tmp_path:
+                return tmp_path
+            return escape_target
+
+        with patch.object(Path, "resolve", fake_resolve), pytest.raises(ValueError):
+            resolve_project_relative_file(tmp_path, Path("safe") / "file.txt")
 
     def test_strips_title_from_bare_string(self) -> None:
         """Strips title from a property that is just a string."""
