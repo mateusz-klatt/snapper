@@ -20,7 +20,7 @@ from snapper.cli.app import app
 from snapper.utils.logging import setup_logging
 
 
-def main() -> None:
+def main() -> int:
     """Initialize logging and launch the Snapper CLI application.
 
     Sets up the logging subsystem with sensible defaults (INFO level,
@@ -31,10 +31,14 @@ def main() -> None:
         - Log level: INFO
         - JSON format: disabled (human-readable)
         - Log file: data/snapper.log
+
+    Returns:
+        Exit code (always 0 on success).
     """
     setup_logging(level="INFO", json_logs=False, logfile="data/snapper.log")
     app()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

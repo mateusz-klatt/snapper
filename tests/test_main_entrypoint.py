@@ -64,7 +64,9 @@ def test_run_module_executes_main(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("snapper.utils.logging.setup_logging", _fake_setup_logging)
     monkeypatch.setattr("snapper.cli.app.app", _fake_app)
     monkeypatch.delitem(sys.modules, "snapper.__main__", raising=False)
-    runpy.run_module("snapper.__main__", run_name="__main__", alter_sys=True)
+    with pytest.raises(SystemExit) as exc_info:
+        runpy.run_module("snapper.__main__", run_name="__main__", alter_sys=True)
+    assert exc_info.value.code == 0
     assert setup_calls
     assert app_calls == [((), {})]
 

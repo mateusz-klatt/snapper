@@ -225,8 +225,12 @@ def save_json(issues: list[dict[str, Any]], metrics: dict[str, str], output_dir:
     return path
 
 
-def main() -> None:
-    """Run the SonarCloud report workflow and write output JSON to reports/."""
+def main() -> int:
+    """Run the SonarCloud report workflow and write output JSON to reports/.
+
+    Returns:
+        Exit code (always 0 on success).
+    """
     token = get_token()
 
     print("Fetching project metrics...")
@@ -241,7 +245,8 @@ def main() -> None:
     json_path = save_json(issues, metrics, output_dir)
     print(f"\nRaw JSON saved to: {json_path}")
     print(f"({len(issues)} issues, {json_path.stat().st_size / 1024:.0f} KB)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
