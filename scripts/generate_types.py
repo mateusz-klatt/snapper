@@ -38,6 +38,8 @@ _DEFS_KEY = "$defs"
 _STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
 _OPENAPI_TYPESCRIPT_TARGET = Path("frontend") / "src" / "types" / "api.generated.ts"
 
+_PATH_ESCAPE_MSG = "Resolved path escapes the project root"
+
 ENTITY_RENAMES: dict[str, str] = {}
 ENVELOPE_SUFFIX = "Envelope"
 SNAPSHOT_SUFFIX = "Snapshot"
@@ -1647,7 +1649,7 @@ def resolve_project_relative_file(project_root: Path, relative_path: Path) -> Pa
     root = project_root.resolve()
     target = (root / relative_path).resolve()
     if target != root and root not in target.parents:
-        raise ValueError("Resolved path escapes the project root")
+        raise ValueError(_PATH_ESCAPE_MSG)
     return target
 
 
@@ -1785,7 +1787,7 @@ def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> No
     root = project_root.resolve()
     file_path = (root / _STRIP_ESLINT_DISABLE_TARGET).resolve()
     if file_path != root and root not in file_path.parents:
-        raise ValueError("Resolved path escapes the project root")
+        raise ValueError(_PATH_ESCAPE_MSG)
     if file_path.is_file():
         content = file_path.read_text(encoding="utf-8")
         header = "/* eslint-disable */\n"
@@ -1801,7 +1803,7 @@ def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: P
     root = project_root.resolve()
     file_path = (root / _OPENAPI_TYPESCRIPT_TARGET).resolve()
     if file_path != root and root not in file_path.parents:
-        raise ValueError("Resolved path escapes the project root")
+        raise ValueError(_PATH_ESCAPE_MSG)
     postprocess_openapi_typescript_file(file_path)
 
 
