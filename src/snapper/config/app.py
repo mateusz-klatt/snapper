@@ -31,12 +31,10 @@ Example:
 """
 
 from typing import Any
-from typing import TypeVar
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
 
 __all__ = ["AppSettings"]
-T = TypeVar("T")
 
 
 class AppSettings:
@@ -136,7 +134,7 @@ class AppSettings:
         """
         return self._bootstrap.zmq_broker_xpub
 
-    def _get_db_setting(self, key: str, default: T) -> T:
+    def _get_db_setting[T](self, key: str, default: T) -> T:
         """Retrieve a setting value from database with fallback to default.
 
         Args:

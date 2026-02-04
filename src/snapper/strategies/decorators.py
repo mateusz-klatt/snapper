@@ -6,16 +6,13 @@ and creating process wrappers for running strategies.
 
 from collections.abc import Callable
 from typing import Any
-from typing import TypeVar
 
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.process_wrapper import create_strategy_process as _create_strategy_process
 
-T = TypeVar("T", bound=type[BaseStrategy])
 
-
-def register_strategy(name: str | None = None) -> Callable[[T], T]:
+def register_strategy[T: type[BaseStrategy]](name: str | None = None) -> Callable[[T], T]:
     """Decorator to register a strategy class in the factory.
 
     Args:
@@ -38,7 +35,7 @@ def register_strategy(name: str | None = None) -> Callable[[T], T]:
     return decorator
 
 
-def create_strategy_process(
+def create_strategy_process[T: type[BaseStrategy]](
     process_name: str,
     default_config: dict[str, Any],
 ) -> Callable[[T], T]:

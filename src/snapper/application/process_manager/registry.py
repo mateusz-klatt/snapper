@@ -8,7 +8,6 @@ and can be discovered and launched by the ProcessLauncherService.
 from collections.abc import Callable
 from collections.abc import Iterable
 from typing import Any
-from typing import TypeVar
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
@@ -22,10 +21,9 @@ __all__ = [
     "discover_processes",
 ]
 _PROCESS_REGISTRY: dict[str, dict[str, Any]] = {}
-T = TypeVar("T", bound=type[RegisterableProcess])
 
 
-def register_process(
+def register_process[T: type[RegisterableProcess]](
     name: str,
     method: str = "start",
     description: str = "",
