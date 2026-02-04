@@ -318,7 +318,7 @@ class BaseStrategy(ABC):
                 parsed_value = settings_service._parse_value(envelope.value)
                 settings_service._cache[envelope.key] = parsed_value
                 logger.info(f"Strategy {self.name}: Setting {envelope.key} updated via ZMQ event")
-        except Exception as e:
+        except (ValueError, TypeError, KeyError, RuntimeError) as e:
             logger.error(f"Strategy {self.name}: Error handling settings update: {e}")
 
     async def stop(self) -> None:

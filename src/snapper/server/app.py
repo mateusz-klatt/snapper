@@ -56,6 +56,8 @@ from fastapi import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import desc
 from sqlalchemy import select
 
@@ -104,9 +106,28 @@ from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.topics.schemas import get_all_topic_names
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.process_routes import router as process_router
+from snapper.server.rate_limiting import limiter
 from snapper.utils.logging import set_log_context
 
 API_PREFIX = "/api"
+
+
+def handle_rate_limit_exceeded(request: Request, exc: Exception) -> Response:
+    """Return 429 response when rate limit is exceeded.
+
+    Args:
+        request: Incoming HTTP request.
+        exc: Rate limit exceeded exception.
+
+    Returns:
+        JSON response with 429 status code and retry-after header.
+    """
+    detail = getattr(exc, "detail", str(exc))
+    resp = Response(f"Rate limit exceeded: {detail}", status_code=429)
+    retry_after = getattr(request.state, "view_rate_limit", None)
+    if retry_after:
+        resp.headers["Retry-After"] = str(retry_after)
+    return resp
 
 
 def get_settings_dependency() -> AppSettings:
@@ -258,6 +279,9 @@ def create_app() -> FastAPI:
 
     settings = get_settings()
     allowed_origins = list(build_allowed_origins(settings))
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, handle_rate_limit_exceeded)
+    app.add_middleware(SlowAPIMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,

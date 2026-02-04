@@ -35,6 +35,10 @@ from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import User
+from snapper.server.rate_limiting import LOGIN_RATE_LIMIT
+from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
+from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
+from snapper.server.rate_limiting import limiter
 
 _AUTH_API_PATH = "/api/auth"
 
@@ -42,6 +46,7 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
 @router.post("/login")
+@limiter.limit(LOGIN_RATE_LIMIT)
 async def login(
     request: Request,
     response: Response,
@@ -416,7 +421,9 @@ async def delete_user(
 
 
 @router.post("/users/{user_id}/change-password")
+@limiter.limit(PASSWORD_CHANGE_RATE_LIMIT)
 async def change_user_password(
+    request: Request,
     user_id: str,
     password_data: ChangePasswordRequest,
     current_user: Annotated[UserProfile, Depends(require_authentication)],
@@ -426,6 +433,7 @@ async def change_user_password(
     Users can change their own password. Admins can change any password.
 
     Args:
+        request: FastAPI request (used by rate limiter).
         user_id: Target user ID.
         password_data: Current and new password.
         current_user: Authenticated user.
@@ -458,7 +466,9 @@ async def change_user_password(
 
 
 @router.post("/users/{user_id}/admin-reset-password")
+@limiter.limit(PASSWORD_RESET_RATE_LIMIT)
 async def admin_reset_user_password(
+    request: Request,
     user_id: str,
     password_data: AdminResetPasswordRequest,
     current_user: Annotated[UserProfile, Depends(require_authentication)],
@@ -466,6 +476,7 @@ async def admin_reset_user_password(
     """Admin endpoint to reset a user's password without current password.
 
     Args:
+        request: FastAPI request (used by rate limiter).
         user_id: Target user ID.
         password_data: New password.
         current_user: Admin user with MANAGE_USERS permission.

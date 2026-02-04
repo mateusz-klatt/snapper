@@ -1709,14 +1709,14 @@ def test_csrf_manager_settings_fallback_called_once(monkeypatch: pytest.MonkeyPa
 def test_validate_token_handles_internal_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify validate_token handles internal errors gracefully.
 
-    Given: _is_timestamp_valid raises RuntimeError,
+    Given: _is_timestamp_valid raises ValueError,
     When: validate_token is called,
     Then: False is returned without raising.
     """
     manager = CSRFManager()
 
     def _raise(*_: object, **__: object) -> bool:
-        raise RuntimeError("boom")
+        raise ValueError("boom")
 
     monkeypatch.setattr(manager, "_is_timestamp_valid", _raise)
     assert manager.validate_token("nonce.123.signature") is False
@@ -1725,14 +1725,14 @@ def test_validate_token_handles_internal_errors(monkeypatch: pytest.MonkeyPatch)
 def test_validate_token_handles_verification_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify validate_token handles verification errors gracefully.
 
-    Given: _verify_hmac_signature raises RuntimeError,
+    Given: _verify_hmac_signature raises TypeError,
     When: validate_token is called,
     Then: False is returned without raising.
     """
     manager = CSRFManager()
 
     def _verify(*_: object, **__: object) -> bool:
-        raise RuntimeError("verify boom")
+        raise TypeError("verify boom")
 
     monkeypatch.setattr(manager, "_is_timestamp_valid", lambda *_: True)
     monkeypatch.setattr(manager, "_verify_hmac_signature", _verify)

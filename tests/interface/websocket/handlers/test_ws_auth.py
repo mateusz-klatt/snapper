@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi import Request
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -3397,10 +3398,11 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
+    pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
     result = await routes.change_user_password(
+        request=MagicMock(spec=Request),
         user_id="self",
-        password_data=request,
+        password_data=pwd_request,
         current_user=UserProfile(id="self", username="self", role=UserRole.OPERATOR),
     )
     assert result.message == "Password changed successfully"
@@ -3417,11 +3419,12 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
+    pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
+            request=MagicMock(spec=Request),
             user_id="other",
-            password_data=request,
+            password_data=pwd_request,
             current_user=UserProfile(id="self", username="self", role=UserRole.VIEWER),
         )
     assert exc.value.status_code == 403
@@ -3438,11 +3441,12 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
     stub_service = StubUserService()
     stub_service.change_password_success = False
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
+    pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
+            request=MagicMock(spec=Request),
             user_id="self",
-            password_data=request,
+            password_data=pwd_request,
             current_user=UserProfile(id="self", username="self", role=UserRole.OPERATOR),
         )
     assert exc.value.status_code == 400
@@ -3458,10 +3462,11 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    request = ChangePasswordRequest(current_password="irrelevant", new_password="new-password")
+    pwd_request = ChangePasswordRequest(current_password="irrelevant", new_password="new-password")
     result = await routes.change_user_password(
+        request=MagicMock(spec=Request),
         user_id="target",
-        password_data=request,
+        password_data=pwd_request,
         current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
     )
     assert result.message == "Password changed successfully"
@@ -3478,6 +3483,7 @@ async def test_admin_reset_password_requires_admin() -> None:
     """
     with pytest.raises(HTTPException) as exc:
         await routes.admin_reset_user_password(
+            request=MagicMock(spec=Request),
             user_id="user-1",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(id="viewer", username="view", role=UserRole.VIEWER),
@@ -3524,6 +3530,7 @@ async def test_admin_reset_password_handles_repository_error(
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     with pytest.raises(HTTPException) as exc:
         await routes.admin_reset_user_password(
+            request=MagicMock(spec=Request),
             user_id="user-1",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
@@ -3599,6 +3606,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
     stub_service = ResetUserService(fake_db_user)
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.admin_reset_user_password(
+        request=MagicMock(spec=Request),
         user_id="user-1",
         password_data=AdminResetPasswordRequest(new_password="super-secret"),
         current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
@@ -3657,6 +3665,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     with pytest.raises(HTTPException) as exc:
         await routes.admin_reset_user_password(
+            request=MagicMock(spec=Request),
             user_id="missing",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),

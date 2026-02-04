@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.services.signals.service import SignalReadService
 from snapper.data.models import Instrument
@@ -271,7 +272,9 @@ class TestSignalServiceCoverage:
         Then: Returns -1 and logger.error called with message.
         """
         with (
-            patch.object(signal_service.repo, "session", side_effect=Exception("Database error")),
+            patch.object(
+                signal_service.repo, "session", side_effect=SQLAlchemyError("Database error")
+            ),
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
             signal_id = await signal_service.store_signal(
@@ -292,7 +295,9 @@ class TestSignalServiceCoverage:
         """
         with (
             patch.object(
-                signal_service.repo, "upsert_instrument", side_effect=Exception("Upsert error")
+                signal_service.repo,
+                "upsert_instrument",
+                side_effect=SQLAlchemyError("Upsert error"),
             ),
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
@@ -313,7 +318,9 @@ class TestSignalServiceCoverage:
         Then: Empty list returned and logger.error called with message.
         """
         with (
-            patch.object(signal_service.repo, "session", side_effect=Exception("Database error")),
+            patch.object(
+                signal_service.repo, "session", side_effect=SQLAlchemyError("Database error")
+            ),
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
             signals = await signal_service.get_recent_signals(
@@ -333,7 +340,7 @@ class TestSignalServiceCoverage:
         Then: Empty list returned and logger.error called with message.
         """
         mock_session = AsyncMock()
-        mock_session.execute.side_effect = Exception("Session execution error")
+        mock_session.execute.side_effect = SQLAlchemyError("Session execution error")
         with (
             patch.object(signal_service.repo, "session") as mock_session_manager,
             patch("snapper.application.services.signals.service.logger") as mock_logger,
@@ -363,7 +370,7 @@ class TestSignalServiceCoverage:
         mock_execute_result = MagicMock()
         mock_execute_result.scalar_one_or_none.return_value = MagicMock(id=1)
         mock_session.execute = AsyncMock(return_value=mock_execute_result)
-        mock_session.add.side_effect = Exception("Add error")
+        mock_session.add.side_effect = SQLAlchemyError("Add error")
         mock_session.commit = AsyncMock()
         mock_session.refresh = AsyncMock()
         with (
@@ -392,7 +399,7 @@ class TestSignalServiceCoverage:
         )
         mock_session = AsyncMock()
         mock_result = MagicMock()
-        mock_result.all.side_effect = Exception("Result processing error")
+        mock_result.all.side_effect = SQLAlchemyError("Result processing error")
         mock_session.execute.return_value = mock_result
         with (
             patch.object(signal_service.repo, "session") as mock_session_manager,

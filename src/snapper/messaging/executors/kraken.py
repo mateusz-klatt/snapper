@@ -26,11 +26,8 @@ Register and run via process manager::
     await executor.start()  # Listens for orders until stopped
 """
 
-from typing import Any
-
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
-from snapper.config.settings import AppSettings
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.functions import TradingExchange
@@ -74,18 +71,6 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
             executor = KrakenOrderExecutor()
             await executor.start()
     """
-
-    @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default kwargs from settings.
-
-        Args:
-            settings: Application settings (not used).
-
-        Returns:
-            Empty dictionary.
-        """
-        return {}
 
     def _create_exchange_client(self) -> KrakenExchangeClient:
         """Create authenticated Kraken client.

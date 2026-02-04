@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import desc
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.config.settings import get_settings
 from snapper.data.models import Instrument
@@ -73,7 +74,7 @@ class SignalReadService:
                 await session.commit()
                 await session.refresh(signal_event)
                 return signal_event.id
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error storing signal: {e}")
             return -1
 
@@ -120,7 +121,7 @@ class SignalReadService:
                     }
                     for signal, inst in signals_with_instruments
                 ]
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error retrieving signals: {e}")
             return []
 

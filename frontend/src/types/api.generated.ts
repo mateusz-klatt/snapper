@@ -226,6 +226,7 @@ export type Paths = {
          *     Users can change their own password. Admins can change any password.
          *
          *     Args:
+         *         request: FastAPI request (used by rate limiter).
          *         user_id: Target user ID.
          *         password_data: Current and new password.
          *         current_user: Authenticated user.
@@ -257,6 +258,7 @@ export type Paths = {
          * @description Admin endpoint to reset a user's password without current password.
          *
          *     Args:
+         *         request: FastAPI request (used by rate limiter).
          *         user_id: Target user ID.
          *         password_data: New password.
          *         current_user: Admin user with MANAGE_USERS permission.

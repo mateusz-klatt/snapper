@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -288,7 +289,7 @@ async def test_log_order_to_db_handles_exception() -> None:
     Then: Returns None without propagating error.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(side_effect=Exception("Database error"))
+    mock_repo.upsert_instrument = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
     request = ExchangeOrderRequest(
         client_order_id="client_123",
@@ -365,7 +366,7 @@ async def test_log_order_update_to_db_handles_exception() -> None:
     Then: Exception is suppressed.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.update_order = AsyncMock(side_effect=Exception("Database error"))
+    mock_repo.update_order = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
     await client._log_order_update_to_db(
         db_order_id=123,
@@ -471,7 +472,7 @@ async def test_log_execution_to_db_handles_exception() -> None:
     Then: Exception is suppressed.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.insert_execution = AsyncMock(side_effect=Exception("Database error"))
+    mock_repo.insert_execution = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
     execution = ExecutionUpdate(
         order_id="order_123",

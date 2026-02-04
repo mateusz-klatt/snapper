@@ -4,6 +4,7 @@ import time
 from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -16,6 +17,21 @@ from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.executors.paper import PaperOrderExecutor
+
+
+def _make_repo_mock() -> MagicMock:
+    """Create a mock repository with async database logging methods.
+
+    Returns:
+        MagicMock with upsert_instrument, insert_order, update_order,
+        and insert_execution configured as AsyncMock.
+    """
+    repo = MagicMock()
+    repo.upsert_instrument = AsyncMock(return_value=1)
+    repo.insert_order = AsyncMock(return_value=1)
+    repo.update_order = AsyncMock()
+    repo.insert_execution = AsyncMock()
+    return repo
 
 
 async def fake_get_market_snapshots(
@@ -81,7 +97,7 @@ class TestPaperOrderClientCoverage:
         When: A market buy order is created,
         Then: Order is created with correct symbol, side, amount and status.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         request = ExchangeOrderRequest(
@@ -107,7 +123,7 @@ class TestPaperOrderClientCoverage:
         When: A limit sell order is created,
         Then: Order is created with correct symbol, side, amount, and price.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         request = ExchangeOrderRequest(
@@ -134,7 +150,7 @@ class TestPaperOrderClientCoverage:
         When: Order is created without client_order_id,
         Then: Order is created successfully with OPEN status.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         request = ExchangeOrderRequest(
@@ -157,7 +173,7 @@ class TestPaperOrderClientCoverage:
         When: get_order is called with order ID,
         Then: Order details are returned with correct ID and symbol.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         result = await client.get_order("paper_order_123", symbol="BTC-USD")
@@ -174,7 +190,7 @@ class TestPaperOrderClientCoverage:
         When: get_order is called with non-existent ID,
         Then: Order snapshot with the ID is returned.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         result = await client.get_order("non_existent_id", symbol="ETH-USD")
@@ -190,7 +206,7 @@ class TestPaperOrderClientCoverage:
         When: cancel_order is called,
         Then: Order is returned with CANCELED status.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         result = await client.cancel_order("paper_order_789", symbol="BTC-USD")
@@ -207,7 +223,7 @@ class TestPaperOrderClientCoverage:
         When: get_orders is called,
         Then: Empty list is returned.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         results = await client.get_orders(symbol="BTC-USD", limit=10)
@@ -222,7 +238,7 @@ class TestPaperOrderClientCoverage:
         When: get_balance is called for USD,
         Then: USD balance with default 10000.0 is returned.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         result = await client.get_balance("USD")
@@ -239,7 +255,7 @@ class TestPaperOrderClientCoverage:
         When: get_balance is called without currency,
         Then: Balances for USD, BTC, ETH are returned.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         result = await client.get_balance()
@@ -256,7 +272,7 @@ class TestPaperOrderClientCoverage:
         When: get_balance is called for unknown currency,
         Then: Zero balance is returned for that currency.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         result = await client.get_balance("XYZ")
@@ -273,7 +289,7 @@ class TestPaperOrderClientCoverage:
         When: get_orders is called with filters,
         Then: Filtered orders are returned.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         await client.connect()
         await client.create_order(
@@ -312,7 +328,7 @@ class TestPaperOrderClientCoverage:
         When: Order is created and executions are subscribed,
         Then: Execution update with CLOSED status is received.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo, fill_delay=0.01)
         await client.connect()
         await client.create_order(
@@ -339,7 +355,7 @@ class TestPaperOrderClientCoverage:
         When: get_supported_pairs is called,
         Then: Common pairs like BTC/USD, ETH/USD are returned.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         pairs = client.get_supported_pairs()
         assert "BTC/USD" in pairs
@@ -354,7 +370,7 @@ class TestPaperOrderClientCoverage:
         When: disconnect is called,
         Then: Client is no longer running.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo, fill_delay=0.01)
         await client.connect()
         await client.create_order(
@@ -376,7 +392,7 @@ class TestPaperOrderClientCoverage:
         When: Used as async context manager,
         Then: Client is connected inside context and disconnected after.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         async with PaperExchangeClient(repository=mock_repo) as client:
             assert client._running
             order = await client.create_order(
@@ -398,7 +414,7 @@ class TestPaperOrderClientCoverage:
         When: create_order is called,
         Then: RuntimeError is raised.
         """
-        mock_repo = MagicMock()
+        mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
         request = ExchangeOrderRequest(
             symbol="BTC-USD",

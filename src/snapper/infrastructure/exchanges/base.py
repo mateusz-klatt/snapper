@@ -23,6 +23,7 @@ from typing import Any
 from typing import Self
 
 from loguru import logger
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
@@ -363,7 +364,7 @@ class ExchangeClientBase(ABC):
                 time_in_force=None,
             )
             return db_order_id
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Failed to log order to database: {e}")
             return None
 
@@ -395,7 +396,7 @@ class ExchangeClientBase(ABC):
                 exchange_order_id=exchange_order_id,
                 error=error,
             )
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Failed to log order update to database: {e}")
 
     async def _log_execution_to_db(
@@ -423,5 +424,5 @@ class ExchangeClientBase(ABC):
                 fee=execution.fee_usd_equiv or 0.0,
                 fee_asset="USD",
             )
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Failed to log execution to database: {e}")

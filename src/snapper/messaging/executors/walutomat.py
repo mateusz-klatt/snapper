@@ -3,11 +3,8 @@
 Processes order requests and reports fills for Walutomat FX exchange.
 """
 
-from typing import Any
-
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
-from snapper.config.settings import AppSettings
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.symbols.functions import TradingExchange
@@ -29,18 +26,6 @@ class WalutomatOrderExecutor(ExchangeExecutorService[WalutomatExchangeClient]):
 
     Processes order requests and submits them to the Walutomat API.
     """
-
-    @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Return default keyword arguments for executor initialization.
-
-        Args:
-            settings: Application settings instance.
-
-        Returns:
-            Empty dictionary as no additional kwargs are needed.
-        """
-        return {}
 
     def _create_exchange_client(self) -> WalutomatExchangeClient:
         repository = get_repository(self.settings.db_url)

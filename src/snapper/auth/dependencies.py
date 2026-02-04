@@ -261,7 +261,7 @@ class CSRFManager:
             if not self._is_timestamp_valid(timestamp):
                 return False
             return self._verify_hmac_signature(nonce, timestamp, signature)
-        except Exception:
+        except (ValueError, TypeError):
             return False
 
     def invalidate_token(self, token: str) -> None:

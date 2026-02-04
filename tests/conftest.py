@@ -63,6 +63,7 @@ from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.server.rate_limiting import limiter
 
 _background_tasks: set[asyncio.Task[None]] = set()
 
@@ -79,6 +80,14 @@ def block_external_requests(monkeypatch: pytest.MonkeyPatch) -> None:
         return original_getaddrinfo(host, *args, **kwargs)
 
     monkeypatch.setattr(socket, "getaddrinfo", assert_only_localhost)
+
+
+@pytest.fixture(autouse=True)
+def disable_rate_limiting() -> Generator[None, None, None]:
+    """Disable slowapi rate limiting during tests to prevent 429 responses."""
+    limiter.enabled = False
+    yield
+    limiter.enabled = True
 
 
 _SINGLETONS_TO_CLEAR: tuple[type[Any], ...] = (
