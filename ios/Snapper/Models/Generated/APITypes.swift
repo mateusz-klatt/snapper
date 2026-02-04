@@ -668,6 +668,8 @@ struct ValidationError: Codable, Sendable {
     let loc: [AnyCodable?]
     let msg: String
     let type: String
+    let input: AnyCodable?
+    let ctx: [String: AnyCodable]?
 }
 
 struct WebSocketStats: Codable, Sendable {

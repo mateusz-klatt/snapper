@@ -281,6 +281,8 @@ export const ValidationErrorSchema = z
     loc: z.array(z.union([z.string(), z.number().int()])),
     msg: z.string(),
     type: z.string(),
+    input: z.unknown().optional(),
+    ctx: z.object({}).passthrough().optional(),
   })
   .strict()
 
