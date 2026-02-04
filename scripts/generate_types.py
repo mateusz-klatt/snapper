@@ -1768,17 +1768,27 @@ def _run_ios_generator(args: GenerateTypesArgs, project_root: Path) -> None:
         generate_ios_types(project_root)
 
 
+def strip_eslint_disable_file(file_path: Path) -> None:
+    """Remove the eslint-disable header from a generated TypeScript file.
+
+    Args:
+        file_path: Path to the generated file.
+    """
+    if not file_path.is_file():
+        return
+    source = file_path.read_text(encoding="utf-8")
+    header = "/* eslint-disable */\n"
+    if source.startswith(header):
+        file_path.write_text(source[len(header) :], encoding="utf-8")
+
+
 def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> None:
     """Strip eslint-disable header from the generated frontend file when requested."""
     if not args.strip_eslint_disable:
         return
 
     file_path = project_root.resolve() / _STRIP_ESLINT_DISABLE_TARGET
-    if file_path.is_file():
-        content = file_path.read_text(encoding="utf-8")
-        header = "/* eslint-disable */\n"
-        if content.startswith(header):
-            file_path.write_text(content[len(header) :], encoding="utf-8")
+    strip_eslint_disable_file(file_path)
 
 
 def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: Path) -> None:

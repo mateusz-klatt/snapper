@@ -41,6 +41,7 @@ from scripts.generate_types import main
 from scripts.generate_types import make_const_fields_required
 from scripts.generate_types import postprocess_openapi_typescript_file
 from scripts.generate_types import snake_to_camel
+from scripts.generate_types import strip_eslint_disable_file
 from scripts.generate_types import strip_primitive_titles
 from scripts.generate_types import to_camel_case
 from scripts.generate_types import topological_sort_schemas
@@ -341,6 +342,29 @@ class TestRunOpenapiTypescriptPostprocess:
         updated = target.read_text(encoding="utf-8")
         assert "export type Paths" in updated
         assert "Operations['op']" in updated
+
+
+class TestStripEslintDisableFile:
+    """Tests for strip_eslint_disable_file function."""
+
+    def test_strips_header_when_present(self, tmp_path: Path) -> None:
+        """Removes eslint-disable header from a file that starts with it."""
+        target = tmp_path / "ws.generated.ts"
+        target.write_text("/* eslint-disable */\nexport const x = 1;\n", encoding="utf-8")
+        strip_eslint_disable_file(target)
+        assert target.read_text(encoding="utf-8") == "export const x = 1;\n"
+
+    def test_leaves_file_without_header(self, tmp_path: Path) -> None:
+        """Leaves a file unchanged when no eslint-disable header is present."""
+        target = tmp_path / "ws.generated.ts"
+        original = "export const x = 1;\n"
+        target.write_text(original, encoding="utf-8")
+        strip_eslint_disable_file(target)
+        assert target.read_text(encoding="utf-8") == original
+
+    def test_skips_missing_file(self, tmp_path: Path) -> None:
+        """Does nothing when the file does not exist."""
+        strip_eslint_disable_file(tmp_path / "nonexistent.ts")
 
 
 class TestRunStripEslintDisable:
