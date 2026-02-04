@@ -1,6 +1,9 @@
 """Unit tests for TA-Lib adapter with Python fallback."""
 
+import importlib
+import sys as _sys
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -367,6 +370,44 @@ class TestTALibImportPath:
         monkeypatch.setattr(snapper.indicators.ta_lib_adapter, "_talib", None)
         result = get_backend()
         assert result == "python"
+
+    def test_use_talib_false_skips_import(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test that USE_TALIB=false skips the talib import entirely.
+
+        Given: USE_TALIB environment variable set to 'false',
+        When: the module is reloaded,
+        Then: _talib_available remains False and backend is 'python'.
+        """
+        monkeypatch.setenv("USE_TALIB", "false")
+        importlib.reload(snapper.indicators.ta_lib_adapter)
+        try:
+            assert snapper.indicators.ta_lib_adapter._talib_available is False
+            assert snapper.indicators.ta_lib_adapter._talib is None
+            assert snapper.indicators.ta_lib_adapter.get_backend() == "python"
+        finally:
+            monkeypatch.delenv("USE_TALIB")
+            importlib.reload(snapper.indicators.ta_lib_adapter)
+
+    def test_import_error_sets_talib_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test ImportError during talib import sets _talib_available to False.
+
+        Given: USE_TALIB is 'true' and talib package is not installed,
+        When: the module is reloaded and import raises ImportError,
+        Then: _talib_available is False and backend falls back to 'python'.
+        """
+        monkeypatch.setenv("USE_TALIB", "true")
+
+        saved_talib = _sys.modules.pop("talib", None)
+        try:
+            with patch.dict(_sys.modules, {"talib": None}):
+                importlib.reload(snapper.indicators.ta_lib_adapter)
+                assert snapper.indicators.ta_lib_adapter._talib_available is False
+                assert snapper.indicators.ta_lib_adapter.get_backend() == "python"
+        finally:
+            if saved_talib is not None:
+                _sys.modules["talib"] = saved_talib
+            monkeypatch.delenv("USE_TALIB")
+            importlib.reload(snapper.indicators.ta_lib_adapter)
 
 
 class TestBackendConsistency:

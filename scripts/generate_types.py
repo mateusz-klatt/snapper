@@ -384,6 +384,31 @@ def export_openapi_spec(project_root: Path) -> Path:
     return output_path
 
 
+def _register_openapi_schema(
+    name: str,
+    fixed_schema: JsonValue,
+    json_schema: dict[str, JsonValue],
+) -> None:
+    """Register a single OpenAPI schema into the combined JSON Schema document.
+
+    Adds the fixed schema to the ``definitions`` mapping and appends a
+    ``$ref`` entry to the ``oneOf`` list.  Both lookups are guarded by
+    ``isinstance`` checks so the function is safe to call even when the
+    parent document has an unexpected shape.
+
+    Args:
+        name: Schema name used as the definition key.
+        fixed_schema: Schema dict with ``$ref`` paths already rewritten.
+        json_schema: The combined JSON Schema document being assembled.
+    """
+    definitions = json_schema.get("definitions")
+    one_of = json_schema.get("oneOf")
+    if isinstance(definitions, dict):
+        definitions[name] = fixed_schema
+    if isinstance(one_of, list):
+        one_of.append({"$ref": f"{_DEFS_REF_PREFIX}{name}"})
+
+
 def export_openapi_schemas(project_root: Path) -> Path:
     """Export OpenAPI component schemas to JSON Schema format for quicktype.
 
@@ -411,12 +436,7 @@ def export_openapi_schemas(project_root: Path) -> Path:
 
     for name, schema in schemas.items():
         fixed_schema = fix_refs_openapi(schema)
-        definitions = json_schema.get("definitions")
-        one_of = json_schema.get("oneOf")
-        if isinstance(definitions, dict):
-            definitions[name] = fixed_schema
-        if isinstance(one_of, list):
-            one_of.append({"$ref": f"{_DEFS_REF_PREFIX}{name}"})
+        _register_openapi_schema(name, fixed_schema, json_schema)
 
     with output_path.open("w") as f:
         json.dump(json_schema, f, indent=2)

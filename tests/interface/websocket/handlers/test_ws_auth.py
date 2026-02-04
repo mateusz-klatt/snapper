@@ -1288,6 +1288,40 @@ async def test_websocket_endpoint_handles_unexpected_exception() -> None:
     WebSocketAuthManager.clear_instance()
 
 
+@pytest.mark.asyncio
+async def test_websocket_endpoint_handles_disconnect_during_auth() -> None:
+    """WebSocket endpoint catches WebSocketDisconnect during authentication.
+
+    Given: A WebSocket connection from an allowed origin,
+    When: The client disconnects during the authentication flow,
+    Then: The except WebSocketDisconnect handler logs and completes cleanly.
+    """
+    WebSocketAuthManager.clear_instance()
+    with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
+        mock_auth_manager = MagicMock()
+        mock_auth.return_value = mock_auth_manager
+        with patch("snapper.server.authenticated_websocket.get_ws_token_service") as mock_token_svc:
+            mock_token_svc.return_value = MagicMock()
+            manager = ConnectionManagerStub()
+            router = create_authenticated_websocket_router(manager)
+            websocket = WebSocketStub(
+                headers={"origin": "http://localhost:8000"},
+                cookies={"access_token": "valid_token"},
+                messages=[],
+            )
+            with patch(
+                "snapper.server.authenticated_websocket.authenticate_websocket",
+                new_callable=AsyncMock,
+            ) as mock_authenticate:
+                mock_authenticate.side_effect = WebSocketDisconnect()
+                endpoint = router.routes[0].endpoint
+                await endpoint(websocket)
+    assert websocket.accepted
+    assert len(manager.disconnected) == 0
+    mock_auth_manager.disconnect.assert_called_once_with(websocket)
+    WebSocketAuthManager.clear_instance()
+
+
 AUTH_WS_MODULE = cast(Any, auth_ws)
 AUTH_HANDLERS_MODULE = cast(Any, auth_handlers)
 

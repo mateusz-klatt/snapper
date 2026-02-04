@@ -14,6 +14,7 @@ import scripts.generate_types as generate_types
 from scripts.generate_types import ENTITY_EXCLUDE_FIELDS
 from scripts.generate_types import ENTITY_UNION_ID_FIELDS
 from scripts.generate_types import SWIFT_KEYWORD_RENAMES
+from scripts.generate_types import _register_openapi_schema
 from scripts.generate_types import camel_to_lower
 from scripts.generate_types import derive_entity_name
 from scripts.generate_types import discover_ws_schemas
@@ -1608,6 +1609,57 @@ class TestExportOpenapiSpec:
             result = export_openapi_spec(tmp_path)
 
             assert result.exists()
+
+
+class TestRegisterOpenapiSchema:
+    """Tests for _register_openapi_schema helper."""
+
+    def test_adds_to_definitions_and_one_of(self) -> None:
+        """Adds schema to definitions and appends ref to oneOf.
+
+        Given: A json_schema document with definitions dict and oneOf list,
+        When: _register_openapi_schema is called with a schema,
+        Then: The schema appears in definitions and a $ref is appended to oneOf.
+        """
+        json_schema: dict[str, Any] = {"definitions": {}, "oneOf": []}
+        _register_openapi_schema("User", {"type": "object"}, json_schema)
+        assert json_schema["definitions"] == {"User": {"type": "object"}}
+        assert json_schema["oneOf"] == [{"$ref": "#/definitions/User"}]
+
+    def test_skips_definitions_when_missing(self) -> None:
+        """Skips definitions update when the key is absent.
+
+        Given: A json_schema document without a definitions key,
+        When: _register_openapi_schema is called,
+        Then: No error occurs and oneOf is still updated.
+        """
+        json_schema: dict[str, Any] = {"oneOf": []}
+        _register_openapi_schema("Order", {"type": "object"}, json_schema)
+        assert "definitions" not in json_schema
+        assert json_schema["oneOf"] == [{"$ref": "#/definitions/Order"}]
+
+    def test_skips_one_of_when_missing(self) -> None:
+        """Skips oneOf update when the key is absent.
+
+        Given: A json_schema document without a oneOf key,
+        When: _register_openapi_schema is called,
+        Then: No error occurs and definitions is still updated.
+        """
+        json_schema: dict[str, Any] = {"definitions": {}}
+        _register_openapi_schema("Trade", {"type": "object"}, json_schema)
+        assert json_schema["definitions"] == {"Trade": {"type": "object"}}
+        assert "oneOf" not in json_schema
+
+    def test_skips_both_when_missing(self) -> None:
+        """Skips both updates when neither key is present.
+
+        Given: A json_schema document without definitions or oneOf keys,
+        When: _register_openapi_schema is called,
+        Then: No error occurs and the document is unchanged.
+        """
+        json_schema: dict[str, Any] = {}
+        _register_openapi_schema("Item", {"type": "string"}, json_schema)
+        assert json_schema == {}
 
 
 class TestExportOpenapiSchemas:
