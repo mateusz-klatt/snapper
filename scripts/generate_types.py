@@ -1776,10 +1776,13 @@ def strip_eslint_disable_file(file_path: Path) -> None:
     """
     if not file_path.is_file():
         return
-    source = file_path.read_text(encoding="utf-8")
+
+    content = file_path.read_text(encoding="utf-8")
     header = "/* eslint-disable */\n"
-    if source.startswith(header):
-        file_path.write_text(source[len(header) :], encoding="utf-8")
+    updated = content.removeprefix(header)
+
+    if updated != content:
+        file_path.write_text(updated, encoding="utf-8")
 
 
 def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> None:
