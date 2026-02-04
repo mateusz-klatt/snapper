@@ -324,7 +324,7 @@ class ExchangeClientBase(ABC):
         Raises:
             NotImplementedError: If exchange does not support this feature.
         """
-        raise NotImplementedError
+        ...
 
     async def _log_order_to_db(
         self,

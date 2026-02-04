@@ -282,7 +282,7 @@ class BaseStrategy(ABC):
     @abstractmethod
     async def reset(self) -> None:
         """Reset strategy state for replay or reinitialization."""
-        raise NotImplementedError
+        ...
 
     async def _setup_publisher(self) -> None:
         """Set up the ZMQ publisher socket for signal emission."""
