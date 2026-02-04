@@ -40,7 +40,10 @@
   "pnpm": {
     "overrides": {
       "lodash-es": ">=4.17.23"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "puppeteer"
+    ]
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
@@ -71,6 +74,7 @@
     "openapi-typescript": "^7.10.1",
     "postcss": "^8.5.6",
     "prettier": "^3.8.1",
+    "puppeteer": "^24.36.1",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",

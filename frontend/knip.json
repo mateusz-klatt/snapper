@@ -27,7 +27,12 @@
     "src/lib/schemas/ws.generated.zod.ts",
     "src/lib/schemas/api.generated.zod.ts"
   ],
-  "ignoreDependencies": ["tailwindcss", "@mermaid-js/mermaid-cli", "json-schema-to-zod"],
+  "ignoreDependencies": [
+    "tailwindcss",
+    "@mermaid-js/mermaid-cli",
+    "json-schema-to-zod",
+    "puppeteer"
+  ],
   "rules": {
     "files": "error",
     "dependencies": "error",
