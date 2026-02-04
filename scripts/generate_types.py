@@ -940,7 +940,7 @@ def _zod_object_type(prop: dict[str, Any], definitions: dict[str, Any]) -> str:
             return "z.record(z.string(), z.unknown())"
         value_type = json_type_to_zod(additional, True, definitions)
         return f"z.record(z.string(), {value_type})"
-    return "z.object({}).passthrough()"
+    return "z.record(z.string(), z.unknown())"
 
 
 def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str, Any]) -> str:

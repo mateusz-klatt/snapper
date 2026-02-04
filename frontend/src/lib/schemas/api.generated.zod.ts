@@ -282,7 +282,7 @@ export const ValidationErrorSchema = z
     msg: z.string(),
     type: z.string(),
     input: z.unknown().optional(),
-    ctx: z.object({}).passthrough().optional(),
+    ctx: z.record(z.string(), z.unknown()).optional(),
   })
   .strict()
 

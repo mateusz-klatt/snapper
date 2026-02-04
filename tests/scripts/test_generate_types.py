@@ -943,7 +943,7 @@ class TestJsonTypeToZod:
         """Handles plain object type."""
         prop = {"type": "object"}
         result = json_type_to_zod(prop, True, {})
-        assert result == "z.object({}).passthrough()"
+        assert result == "z.record(z.string(), z.unknown())"
 
     def test_handles_unknown_type(self) -> None:
         """Handles unknown type."""
