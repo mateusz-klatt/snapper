@@ -1,17 +1,12 @@
 import React from 'react'
 import clsx from 'clsx'
+import type { HeartbeatData } from '../../hooks/useHeartbeats'
 
 interface ProcessListItem {
   id: string
   name: string
   status: 'running' | 'stopped' | 'error'
   onStop?: () => void
-}
-interface HeartbeatData {
-  status: string
-  lag_ms?: number
-  timestamp: number
-  healthy: boolean
 }
 interface ProcessControlCardProps {
   title: string

@@ -6,6 +6,11 @@ import { apiClient } from '../../lib/apiClient'
 import { SignalCardSkeleton } from '../../components/Skeleton'
 import type { TradingSignal } from '../../types/api'
 import clsx from 'clsx'
+import {
+  SIGNAL_STRENGTH_STRONG,
+  SIGNAL_STRENGTH_MEDIUM,
+  SIGNAL_STRENGTH_WEAK,
+} from '../../lib/constants'
 
 const SignalCard: React.FC<{ signal: TradingSignal }> = ({ signal }) => {
   const getSideColor = (side: string) => {
@@ -13,17 +18,17 @@ const SignalCard: React.FC<{ signal: TradingSignal }> = ({ signal }) => {
   }
 
   const getStrengthColor = (strength: number) => {
-    if (strength >= 0.8) return 'text-green-400'
-    if (strength >= 0.6) return 'text-yellow-400'
-    if (strength >= 0.4) return 'text-orange-400'
+    if (strength >= SIGNAL_STRENGTH_STRONG) return 'text-green-400'
+    if (strength >= SIGNAL_STRENGTH_MEDIUM) return 'text-yellow-400'
+    if (strength >= SIGNAL_STRENGTH_WEAK) return 'text-orange-400'
 
     return 'text-red-400'
   }
 
   const getStrengthLabel = (strength: number) => {
-    if (strength >= 0.8) return 'Strong'
-    if (strength >= 0.6) return 'Medium'
-    if (strength >= 0.4) return 'Weak'
+    if (strength >= SIGNAL_STRENGTH_STRONG) return 'Strong'
+    if (strength >= SIGNAL_STRENGTH_MEDIUM) return 'Medium'
+    if (strength >= SIGNAL_STRENGTH_WEAK) return 'Weak'
 
     return 'Very Weak'
   }

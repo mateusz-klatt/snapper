@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import {
   useStartProcessByName,
   useStopProcessByName,
@@ -6,26 +6,20 @@ import {
   useAvailableProcesses,
   useProcessRuns,
 } from '../../hooks/queries'
-import { useWebSocketStore } from '../../stores/websocket'
+import { useHeartbeats, type HeartbeatData } from '../../hooks/useHeartbeats'
 import { ProcessControlCard } from './ProcessControlCard'
 import { ExecutionModeModal } from './ExecutionModeModal'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { ProcessesSkeleton } from '../../components/Skeleton'
 import type { ConfiguredProcess, AvailableProcess, ProcessRun } from '../../types/api'
+import { noop } from '../../lib/noop'
 
-interface HeartbeatData {
-  status: string
-  lag_ms?: number
-  timestamp: number
-  healthy: boolean
-}
 type ConfirmDialogState = {
   open: boolean
   title: string
   message: string
   onConfirm: () => void
 }
-import { noop } from '../../lib/noop'
 
 export const Processes: React.FC = () => {
   const [executionModeModal, setExecutionModeModal] = useState<{
@@ -47,8 +41,11 @@ export const Processes: React.FC = () => {
     message: '',
     onConfirm: noop,
   })
-  const [allHeartbeats, setAllHeartbeats] = useState<Record<string, HeartbeatData>>({})
-  const { wsClient } = useWebSocketStore()
+  const heartbeatTopics = React.useMemo(
+    () => ['system.heartbeats.executor.', 'system.heartbeats.feed.'],
+    []
+  )
+  const allHeartbeats = useHeartbeats(heartbeatTopics)
   const { data: configuredProcesses, isLoading } = useConfiguredProcesses()
   const { data: availableProcesses } = useAvailableProcesses()
   const { data: processRuns } = useProcessRuns({
@@ -126,58 +123,6 @@ export const Processes: React.FC = () => {
     return date.toLocaleString()
   }, [])
 
-  useEffect(() => {
-    if (!wsClient) {
-      return
-    }
-
-    const topics = ['system.heartbeats.executor.', 'system.heartbeats.feed.']
-
-    wsClient.subscribe(topics)
-    const unsubscribeConnection = wsClient.onConnection((connected: boolean) => {
-      if (connected) {
-        wsClient.subscribe(topics)
-      }
-    })
-    const unsubscribeHeartbeat = wsClient.onMessage('heartbeat', message => {
-      const heartbeat: HeartbeatData = {
-        status: message.status,
-        lag_ms: message.lag_ms || 0,
-        timestamp: Date.now(),
-        healthy: message.status === 'healthy',
-      }
-
-      setAllHeartbeats(prev => ({ ...prev, [message.component]: heartbeat }))
-    })
-
-    return () => {
-      unsubscribeConnection()
-      unsubscribeHeartbeat()
-      wsClient.unsubscribe(topics)
-    }
-  }, [wsClient])
-  const pruneStaleHeartbeats = React.useCallback(() => {
-    const now = Date.now()
-    const staleThreshold = 10000
-
-    setAllHeartbeats(prev => {
-      const updated = { ...prev }
-
-      Object.keys(updated).forEach(key => {
-        if (now - updated[key].timestamp > staleThreshold) {
-          delete updated[key]
-        }
-      })
-
-      return updated
-    })
-  }, [])
-
-  useEffect(() => {
-    const interval = setInterval(pruneStaleHeartbeats, 5000)
-
-    return () => clearInterval(interval)
-  }, [pruneStaleHeartbeats])
   const startProcess = useStartProcessByName()
   const stopProcess = useStopProcessByName()
 
