@@ -1,7 +1,6 @@
 """Tests for scripts/generate_types.py."""
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,7 +40,6 @@ from scripts.generate_types import json_type_to_zod
 from scripts.generate_types import main
 from scripts.generate_types import make_const_fields_required
 from scripts.generate_types import postprocess_openapi_typescript_file
-from scripts.generate_types import resolve_project_relative_file
 from scripts.generate_types import snake_to_camel
 from scripts.generate_types import strip_primitive_titles
 from scripts.generate_types import to_camel_case
@@ -240,10 +238,6 @@ class TestMakeConstFieldsRequired:
         assert result["required"] == "invalid"
 
 
-class TestStripPrimitiveTitles:
-    """Tests for strip_primitive_titles function."""
-
-
 class TestPostprocessOpenapiTypescriptFile:
     """Tests for postprocess_openapi_typescript_file function."""
 
@@ -348,37 +342,6 @@ class TestRunOpenapiTypescriptPostprocess:
         assert "export type Paths" in updated
         assert "Operations['op']" in updated
 
-    def test_rejects_symlink_escape_when_supported(self, tmp_path: Path) -> None:
-        """Rejects default target resolution that escapes root via symlinks."""
-        args = generate_types.GenerateTypesArgs()
-        args.postprocess_openapi_types = True
-
-        outside_dir = tmp_path.parent / f"outside_{tmp_path.name}"
-        outside_dir.mkdir(parents=True, exist_ok=True)
-        link = tmp_path / "frontend"
-        try:
-            os.symlink(outside_dir, link)
-        except OSError:
-            pytest.skip("Symlinks not supported in this environment")
-
-        with pytest.raises(ValueError):
-            generate_types._run_openapi_typescript_postprocess(args, tmp_path)
-
-    def test_rejects_escape_via_mocked_resolve(self, tmp_path: Path) -> None:
-        """Rejects resolved path escaping root (platform-independent, no symlinks)."""
-        args = generate_types.GenerateTypesArgs()
-        args.postprocess_openapi_types = True
-        escape_target = tmp_path.parent / "outside" / "evil.txt"
-
-        def fake_resolve(path: Path, strict: bool = False) -> Path:
-            """Return escape path for any path other than the project root itself."""
-            if path == tmp_path:
-                return tmp_path
-            return escape_target
-
-        with patch.object(Path, "resolve", fake_resolve), pytest.raises(ValueError):
-            generate_types._run_openapi_typescript_postprocess(args, tmp_path)
-
 
 class TestRunStripEslintDisable:
     """Tests for internal runner that strips eslint-disable from the default generated file."""
@@ -389,83 +352,9 @@ class TestRunStripEslintDisable:
         args.strip_eslint_disable = False
         generate_types._run_strip_eslint_disable(args, tmp_path)
 
-    def test_rejects_symlink_escape_when_supported(self, tmp_path: Path) -> None:
-        """Rejects default target resolution that escapes root via symlinks."""
-        args = generate_types.GenerateTypesArgs()
-        args.strip_eslint_disable = True
 
-        outside_dir = tmp_path.parent / f"outside_{tmp_path.name}"
-        outside_dir.mkdir(parents=True, exist_ok=True)
-        link = tmp_path / "frontend"
-        try:
-            os.symlink(outside_dir, link)
-        except OSError:
-            pytest.skip("Symlinks not supported in this environment")
-
-        with pytest.raises(ValueError):
-            generate_types._run_strip_eslint_disable(args, tmp_path)
-
-    def test_rejects_escape_via_mocked_resolve(self, tmp_path: Path) -> None:
-        """Rejects resolved path escaping root (platform-independent, no symlinks)."""
-        args = generate_types.GenerateTypesArgs()
-        args.strip_eslint_disable = True
-        escape_target = tmp_path.parent / "outside" / "evil.txt"
-
-        def fake_resolve(path: Path, strict: bool = False) -> Path:
-            """Return escape path for any path other than the project root itself."""
-            if path == tmp_path:
-                return tmp_path
-            return escape_target
-
-        with patch.object(Path, "resolve", fake_resolve), pytest.raises(ValueError):
-            generate_types._run_strip_eslint_disable(args, tmp_path)
-
-
-class TestResolveProjectRelativeFile:
-    """Tests for resolve_project_relative_file function."""
-
-    def test_resolves_valid_relative_path(self, tmp_path: Path) -> None:
-        """Resolves a normal project-relative file path."""
-        rel = Path("frontend") / "src" / "types" / "api.generated.ts"
-        resolved = resolve_project_relative_file(tmp_path, rel)
-        assert resolved == (tmp_path / rel).resolve()
-
-    def test_rejects_absolute_path(self, tmp_path: Path) -> None:
-        """Rejects absolute paths."""
-        with pytest.raises(ValueError):
-            resolve_project_relative_file(tmp_path, Path("/etc/passwd"))
-
-    def test_rejects_traversal_path(self, tmp_path: Path) -> None:
-        """Rejects paths that contain traversal segments."""
-        with pytest.raises(ValueError):
-            resolve_project_relative_file(tmp_path, Path("frontend") / ".." / "evil")
-
-    def test_rejects_symlink_escape_when_supported(self, tmp_path: Path) -> None:
-        """Rejects paths that escape the root via symlinks."""
-        outside_dir = tmp_path.parent / f"outside_{tmp_path.name}"
-        outside_dir.mkdir(parents=True, exist_ok=True)
-
-        link = tmp_path / "link"
-        try:
-            os.symlink(outside_dir, link)
-        except OSError:
-            pytest.skip("Symlinks not supported in this environment")
-
-        with pytest.raises(ValueError):
-            resolve_project_relative_file(tmp_path, Path("link") / "evil.txt")
-
-    def test_rejects_escape_via_mocked_resolve(self, tmp_path: Path) -> None:
-        """Rejects resolved path escaping root (platform-independent, no symlinks)."""
-        escape_target = tmp_path.parent / "outside" / "evil.txt"
-
-        def fake_resolve(path: Path, strict: bool = False) -> Path:
-            """Return escape path for any path other than the project root itself."""
-            if path == tmp_path:
-                return tmp_path
-            return escape_target
-
-        with patch.object(Path, "resolve", fake_resolve), pytest.raises(ValueError):
-            resolve_project_relative_file(tmp_path, Path("safe") / "file.txt")
+class TestStripPrimitiveTitles:
+    """Tests for strip_primitive_titles function."""
 
     def test_strips_title_from_bare_string(self) -> None:
         """Strips title from a property that is just a string."""

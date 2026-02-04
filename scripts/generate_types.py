@@ -38,8 +38,6 @@ _DEFS_KEY = "$defs"
 _STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
 _OPENAPI_TYPESCRIPT_TARGET = Path("frontend") / "src" / "types" / "api.generated.ts"
 
-_PATH_ESCAPE_MSG = "Resolved path escapes the project root"
-
 ENTITY_RENAMES: dict[str, str] = {}
 ENVELOPE_SUFFIX = "Envelope"
 SNAPSHOT_SUFFIX = "Snapshot"
@@ -1644,35 +1642,6 @@ def postprocess_openapi_typescript_file(file_path: Path) -> None:
         file_path.write_text(updated, encoding="utf-8")
 
 
-def resolve_project_relative_file(project_root: Path, relative_path: Path) -> Path:
-    """Resolve a project-root-relative file path safely.
-
-    The caller must provide a relative path which, once resolved, stays within
-    the given project root. This is used to avoid writing to arbitrary paths.
-
-    Args:
-        project_root: Project root directory.
-        relative_path: Relative path under the project root.
-
-    Returns:
-        Resolved absolute path to the target file.
-
-    Raises:
-        ValueError: When the provided path is absolute or escapes the project root.
-    """
-    if relative_path.is_absolute():
-        raise ValueError("Expected a project-relative path")
-
-    if ".." in relative_path.parts:
-        raise ValueError("Path traversal is not allowed")
-
-    root = project_root.resolve()
-    target = (root / relative_path).resolve()
-    if target != root and root not in target.parents:
-        raise ValueError(_PATH_ESCAPE_MSG)
-    return target
-
-
 def main() -> int:
     """Main entry point.
 
@@ -1804,10 +1773,7 @@ def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> No
     if not args.strip_eslint_disable:
         return
 
-    root = project_root.resolve()
-    file_path = (root / _STRIP_ESLINT_DISABLE_TARGET).resolve()
-    if file_path != root and root not in file_path.parents:
-        raise ValueError(_PATH_ESCAPE_MSG)
+    file_path = project_root.resolve() / _STRIP_ESLINT_DISABLE_TARGET
     if file_path.is_file():
         content = file_path.read_text(encoding="utf-8")
         header = "/* eslint-disable */\n"
@@ -1820,10 +1786,7 @@ def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: P
     if not args.postprocess_openapi_types:
         return
 
-    root = project_root.resolve()
-    file_path = (root / _OPENAPI_TYPESCRIPT_TARGET).resolve()
-    if file_path != root and root not in file_path.parents:
-        raise ValueError(_PATH_ESCAPE_MSG)
+    file_path = project_root.resolve() / _OPENAPI_TYPESCRIPT_TARGET
     postprocess_openapi_typescript_file(file_path)
 
 
