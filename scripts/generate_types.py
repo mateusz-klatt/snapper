@@ -1778,7 +1778,7 @@ def strip_eslint_disable_file(file_path: Path) -> None:
         return
 
     content = file_path.read_text(encoding="utf-8")
-    updated = content.removeprefix("/* eslint-disable */\n")
+    updated = content.replace("/* eslint-disable */\n", "")
 
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")
