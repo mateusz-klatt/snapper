@@ -90,10 +90,14 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
             updated_at=datetime.now(UTC),
         )
 
+    _COLLECTION_TIMEOUT_SECONDS = 120.0
+
     async def _collect_ticker_snapshots(self) -> tuple[list[MarketSnapshot], int]:
         """Collect ticker snapshots from Kraken WebSocket feed.
 
         Subscribes to all tickers and collects up to 2000 updates.
+        Enforces a timeout so the process exits even when unmapped
+        symbols prevent the counter from reaching the target.
 
         Returns:
             Tuple of (collected snapshots list, total count).
@@ -101,16 +105,22 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
         snapshots_batch: list[MarketSnapshot] = []
         count = 0
         try:
-            async for ticker_data in self.exchange_client.subscribe_ticks(["*"]):
-                if not ticker_data.symbol:
-                    continue
-                snapshots_batch.append(self._build_kraken_snapshot(ticker_data))
-                count += 1
-                if count % 100 == 0:
-                    logger.debug(f"Collected {count} market snapshots...")
-                if count >= 2000:
-                    logger.info(f"Collected {count} market snapshots - stopping")
-                    break
+            async with asyncio.timeout(self._COLLECTION_TIMEOUT_SECONDS):
+                async for ticker_data in self.exchange_client.subscribe_ticks(["*"]):
+                    if not ticker_data.symbol:
+                        continue
+                    snapshots_batch.append(self._build_kraken_snapshot(ticker_data))
+                    count += 1
+                    if count % 100 == 0:
+                        logger.debug(f"Collected {count} market snapshots...")
+                    if count >= 2000:
+                        logger.info(f"Collected {count} market snapshots - stopping")
+                        break
+        except TimeoutError:
+            logger.warning(
+                f"Snapshot collection timed out after {self._COLLECTION_TIMEOUT_SECONDS}s "
+                f"with {count} snapshots collected"
+            )
         finally:
             await self.exchange_client.disconnect_websocket()
         return snapshots_batch, count

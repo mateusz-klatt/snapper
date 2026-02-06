@@ -1651,6 +1651,27 @@ class TestCloseWsClientBranches:
         await kraken_client._close_ws_client()
         assert kraken_client._ws_client is None
 
+    @pytest.mark.asyncio
+    async def test_close_ws_client_timeout(self, kraken_client: KrakenExchangeClient) -> None:
+        """WebSocket close falls back to forced cleanup on timeout.
+
+        Given a WebSocket client whose close method hangs,
+        When _close_ws_client is called,
+        Then it times out, logs a warning, and sets client to None.
+        """
+
+        async def _hang() -> None:
+            await asyncio.sleep(999)
+
+        mock_ws_client = MagicMock()
+        mock_ws_client.close = _hang
+        kraken_client._ws_client = mock_ws_client
+        kraken_client._ws_connected = True
+        kraken_client._WS_CLOSE_TIMEOUT_SECONDS = 0.05
+        await kraken_client._close_ws_client()
+        assert kraken_client._ws_client is None
+        assert kraken_client._ws_connected is False
+
 
 class TestExecutionsSubscriptionCredentials:
     """Tests for executionsSubscriptionCredentials."""
@@ -3167,6 +3188,20 @@ async def test_on_message_ticker_parse_error() -> None:
         side_effect=ValueError("bad ticker"),
     ):
         await client._on_message({"channel": "ticker", "data": [{"symbol": "BTC/USD"}]})
+    assert client._tick_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_handle_ticker_data_skips_dict() -> None:
+    """Ticker handler ignores non-list data without error.
+
+    Given ticker data as a dict instead of a list,
+    When _handle_ticker_data is called,
+    Then no items are enqueued and no exception is raised.
+    """
+    client = KrakenExchangeClient("key", "secret")
+    client._tick_queue = asyncio.Queue()
+    await client._handle_ticker_data({"symbol": "BTC/USD", "bid": 50000.0})
     assert client._tick_queue.empty()
 
 

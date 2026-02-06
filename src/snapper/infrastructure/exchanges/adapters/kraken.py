@@ -12,11 +12,17 @@ into internal Snapper data structures. It handles:
 All parsing functions validate data using Pydantic schemas before
 converting to internal contract types. Symbol conversion from Kraken
 WebSocket format to native format is handled automatically.
+
+Each ``_list`` function catches per-item errors so that a single
+unparseable item (e.g. an unmapped symbol) does not discard the
+entire batch.
 """
 
 from datetime import datetime
 from typing import Any
 from typing import cast
+
+from loguru import logger
 
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExecType
@@ -69,13 +75,23 @@ def parse_kraken_ticker(data: dict[str, Any]) -> TickerUpdate:
 def parse_kraken_ticker_list(data: list[dict[str, Any]]) -> list[TickerUpdate]:
     """Parse a list of Kraken ticker messages.
 
+    Skips individual items that fail to parse (e.g. unmapped symbols)
+    so that one bad item does not discard the entire batch.
+
     Args:
         data: List of raw ticker data dictionaries.
 
     Returns:
-        List of TickerUpdate objects.
+        List of successfully parsed TickerUpdate objects.
     """
-    return [parse_kraken_ticker(item) for item in data]
+    results: list[TickerUpdate] = []
+    for item in data:
+        try:
+            results.append(parse_kraken_ticker(item))
+        except ValueError as exc:
+            symbol = item.get("symbol", "?") if isinstance(item, dict) else "?"
+            logger.warning(f"Skipping unparseable ticker (symbol={symbol}): {exc}")
+    return results
 
 
 def parse_kraken_candle(data: dict[str, Any]) -> CandleUpdate:
@@ -111,13 +127,23 @@ def parse_kraken_candle(data: dict[str, Any]) -> CandleUpdate:
 def parse_kraken_candle_list(data: list[dict[str, Any]]) -> list[CandleUpdate]:
     """Parse a list of Kraken candle messages.
 
+    Skips individual items that fail to parse so that one bad item
+    does not discard the entire batch.
+
     Args:
         data: List of raw candle data dictionaries.
 
     Returns:
-        List of CandleUpdate objects.
+        List of successfully parsed CandleUpdate objects.
     """
-    return [parse_kraken_candle(item) for item in data]
+    results: list[CandleUpdate] = []
+    for item in data:
+        try:
+            results.append(parse_kraken_candle(item))
+        except ValueError as exc:
+            symbol = item.get("symbol", "?") if isinstance(item, dict) else "?"
+            logger.warning(f"Skipping unparseable candle (symbol={symbol}): {exc}")
+    return results
 
 
 def parse_kraken_trade(data: dict[str, Any]) -> TradeUpdate:
@@ -145,13 +171,23 @@ def parse_kraken_trade(data: dict[str, Any]) -> TradeUpdate:
 def parse_kraken_trade_list(data: list[dict[str, Any]]) -> list[TradeUpdate]:
     """Parse a list of Kraken trade messages.
 
+    Skips individual items that fail to parse so that one bad item
+    does not discard the entire batch.
+
     Args:
         data: List of raw trade data dictionaries.
 
     Returns:
-        List of TradeUpdate objects.
+        List of successfully parsed TradeUpdate objects.
     """
-    return [parse_kraken_trade(item) for item in data]
+    results: list[TradeUpdate] = []
+    for item in data:
+        try:
+            results.append(parse_kraken_trade(item))
+        except ValueError as exc:
+            symbol = item.get("symbol", "?") if isinstance(item, dict) else "?"
+            logger.warning(f"Skipping unparseable trade (symbol={symbol}): {exc}")
+    return results
 
 
 def _parse_order_side(side: str | None) -> OrderSideEnum:
@@ -337,13 +373,22 @@ def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
 def parse_kraken_execution_list(data: list[dict[str, Any]]) -> list[ExecutionUpdate]:
     """Parse a list of Kraken execution messages.
 
+    Skips individual items that fail to parse so that one bad item
+    does not discard the entire batch.
+
     Args:
         data: List of raw execution data dictionaries.
 
     Returns:
-        List of ExecutionUpdate objects.
+        List of successfully parsed ExecutionUpdate objects.
     """
-    return [parse_kraken_execution(item) for item in data]
+    results: list[ExecutionUpdate] = []
+    for item in data:
+        try:
+            results.append(parse_kraken_execution(item))
+        except ValueError as exc:
+            logger.warning(f"Skipping unparseable execution: {exc}")
+    return results
 
 
 def parse_kraken_instrument(data: dict[str, Any]) -> InstrumentPairDescriptor:
@@ -385,13 +430,23 @@ def parse_kraken_instrument(data: dict[str, Any]) -> InstrumentPairDescriptor:
 def parse_kraken_instrument_list(data: list[dict[str, Any]]) -> list[InstrumentPairDescriptor]:
     """Parse a list of Kraken instrument specifications.
 
+    Skips individual items that fail to parse so that one bad item
+    does not discard the entire batch.
+
     Args:
         data: List of raw instrument data dictionaries.
 
     Returns:
-        List of InstrumentPairDescriptor objects.
+        List of successfully parsed InstrumentPairDescriptor objects.
     """
-    return [parse_kraken_instrument(item) for item in data]
+    results: list[InstrumentPairDescriptor] = []
+    for item in data:
+        try:
+            results.append(parse_kraken_instrument(item))
+        except ValueError as exc:
+            symbol = item.get("symbol", "?") if isinstance(item, dict) else "?"
+            logger.warning(f"Skipping unparseable instrument (symbol={symbol}): {exc}")
+    return results
 
 
 __all__ = [

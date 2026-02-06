@@ -122,6 +122,29 @@ def test_parse_kraken_ticker_list_empty() -> None:
     assert result == []
 
 
+def test_parse_kraken_ticker_list_skips_bad_item(mock_symbol_mapper: Any) -> None:
+    """List parser keeps valid tickers when one item fails.
+
+    Given: Batch with one valid and one unmapped ticker symbol,
+    When: parse_kraken_ticker_list is called,
+    Then: Returns only the successfully parsed ticker.
+    """
+
+    def _mapper(symbol: str) -> str:
+        if symbol == "UNKNOWN/USD":
+            raise ValueError(f"Unknown: {symbol}")
+        return symbol.replace("/", "-")
+
+    mock_symbol_mapper.side_effect = _mapper
+    raw_data: list[dict[str, Any]] = [
+        {"symbol": "BTC/USD", "bid": 45000.0, "ask": 45100.0, "last": 45050.0},
+        {"symbol": "UNKNOWN/USD", "bid": 1.0, "ask": 2.0, "last": 1.5},
+    ]
+    result = parse_kraken_ticker_list(raw_data)
+    assert len(result) == 1
+    assert result[0].symbol == "BTC-USD"
+
+
 def test_parse_kraken_ticker_missing_symbol() -> None:
     """Reject ticker without required symbol field.
 
@@ -193,6 +216,45 @@ def test_parse_kraken_candle_list_valid() -> None:
     assert result[0].symbol == "BTC-USD"
 
 
+def test_parse_kraken_candle_list_skips_bad_item(mock_symbol_mapper: Any) -> None:
+    """List parser keeps valid candles when one item fails.
+
+    Given: Batch with one valid candle and one with unmapped symbol,
+    When: parse_kraken_candle_list is called,
+    Then: Returns only the successfully parsed candle.
+    """
+
+    def _mapper(symbol: str) -> str:
+        if symbol == "UNKNOWN/USD":
+            raise ValueError(f"Unknown: {symbol}")
+        return symbol.replace("/", "-")
+
+    mock_symbol_mapper.side_effect = _mapper
+    raw_data: list[dict[str, Any]] = [
+        {
+            "symbol": "BTC/USD",
+            "open": 45000.0,
+            "high": 46000.0,
+            "low": 44000.0,
+            "close": 45500.0,
+            "interval_begin": "2024-12-22T10:00:00.000000Z",
+            "interval": 5,
+        },
+        {
+            "symbol": "UNKNOWN/USD",
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "interval_begin": "2024-12-22T10:00:00.000000Z",
+            "interval": 5,
+        },
+    ]
+    result = parse_kraken_candle_list(raw_data)
+    assert len(result) == 1
+    assert result[0].symbol == "BTC-USD"
+
+
 def test_parse_kraken_trade_valid() -> None:
     """Parse valid Kraken trade to TradeUpdate.
 
@@ -252,6 +314,41 @@ def test_parse_kraken_trade_list_valid() -> None:
     assert result[0].quantity == pytest.approx(0.5)
     assert result[1].symbol == "ETH-USD"
     assert result[1].quantity == pytest.approx(2.0)
+
+
+def test_parse_kraken_trade_list_skips_bad_item(mock_symbol_mapper: Any) -> None:
+    """List parser keeps valid trades when one item fails.
+
+    Given: Batch with one valid and one unmapped trade symbol,
+    When: parse_kraken_trade_list is called,
+    Then: Returns only the successfully parsed trade.
+    """
+
+    def _mapper(symbol: str) -> str:
+        if symbol == "UNKNOWN/USD":
+            raise ValueError(f"Unknown: {symbol}")
+        return symbol.replace("/", "-")
+
+    mock_symbol_mapper.side_effect = _mapper
+    raw_data: list[dict[str, Any]] = [
+        {
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "qty": 0.5,
+            "price": 45000.0,
+            "timestamp": "2024-12-22T10:00:00.000000Z",
+        },
+        {
+            "symbol": "UNKNOWN/USD",
+            "side": "sell",
+            "qty": 1.0,
+            "price": 100.0,
+            "timestamp": "2024-12-22T10:01:00.000000Z",
+        },
+    ]
+    result = parse_kraken_trade_list(raw_data)
+    assert len(result) == 1
+    assert result[0].symbol == "BTC-USD"
 
 
 def test_parse_kraken_execution_valid() -> None:
@@ -328,6 +425,45 @@ def test_parse_kraken_execution_list_valid() -> None:
     assert result[1].order_status == OrderStatusEnum.CLOSED
 
 
+def test_parse_kraken_execution_list_skips_bad_item(mock_symbol_mapper: Any) -> None:
+    """List parser keeps valid executions when one item fails.
+
+    Given: Batch with one valid execution and one with unmapped symbol,
+    When: parse_kraken_execution_list is called,
+    Then: Returns only the successfully parsed execution.
+    """
+
+    def _mapper(symbol: str) -> str:
+        if symbol == "UNKNOWN/USD":
+            raise ValueError(f"Unknown: {symbol}")
+        return symbol.replace("/", "-")
+
+    mock_symbol_mapper.side_effect = _mapper
+    raw_data: list[dict[str, Any]] = [
+        {
+            "order_id": "ORDER1",
+            "exec_type": "new",
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "order_type": "limit",
+            "order_status": "new",
+            "timestamp": "2024-12-22T10:00:00.000000Z",
+        },
+        {
+            "order_id": "ORDER2",
+            "exec_type": "filled",
+            "symbol": "UNKNOWN/USD",
+            "side": "sell",
+            "order_type": "market",
+            "order_status": "filled",
+            "timestamp": "2024-12-22T10:01:00.000000Z",
+        },
+    ]
+    result = parse_kraken_execution_list(raw_data)
+    assert len(result) == 1
+    assert result[0].symbol == "BTC-USD"
+
+
 def test_parse_kraken_instrument_valid() -> None:
     """Parse valid Kraken instrument to descriptor.
 
@@ -382,6 +518,53 @@ def test_parse_kraken_instrument_list_valid() -> None:
             "cost_min": 0.5,
             "marginable": True,
             "has_index": True,
+        },
+    ]
+    result = parse_kraken_instrument_list(raw_data)
+    assert len(result) == 1
+    assert result[0].symbol == "BTC-USD"
+
+
+def test_parse_kraken_instrument_list_skips_bad_item(mock_symbol_mapper: Any) -> None:
+    """List parser keeps valid instruments when one item fails.
+
+    Given: Batch with one valid instrument and one with unmapped symbol,
+    When: parse_kraken_instrument_list is called,
+    Then: Returns only the successfully parsed instrument.
+    """
+
+    def _mapper(symbol: str) -> str:
+        if symbol == "UNKNOWN/USD":
+            raise ValueError(f"Unknown: {symbol}")
+        return symbol.replace("/", "-")
+
+    mock_symbol_mapper.side_effect = _mapper
+    raw_data: list[dict[str, Any]] = [
+        {
+            "symbol": "BTC/USD",
+            "status": "online",
+            "base": "BTC",
+            "quote": "USD",
+            "qty_precision": 8,
+            "qty_increment": 0.00000001,
+            "qty_min": 0.0001,
+            "price_precision": 2,
+            "price_increment": 0.01,
+            "cost_precision": 5,
+            "cost_min": 0.5,
+        },
+        {
+            "symbol": "UNKNOWN/USD",
+            "status": "online",
+            "base": "UNK",
+            "quote": "USD",
+            "qty_precision": 2,
+            "qty_increment": 0.01,
+            "qty_min": 1.0,
+            "price_precision": 2,
+            "price_increment": 0.01,
+            "cost_precision": 2,
+            "cost_min": 1.0,
         },
     ]
     result = parse_kraken_instrument_list(raw_data)

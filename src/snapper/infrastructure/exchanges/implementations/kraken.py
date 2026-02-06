@@ -170,19 +170,31 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"Failed to connect to Kraken: {e}")
             raise
 
+    _WS_CLOSE_TIMEOUT_SECONDS = 10.0
+
     async def _close_ws_client(self) -> None:
+        """Close WebSocket client with timeout protection.
+
+        Ensures the process does not hang indefinitely when the Kraken
+        SDK fails to close the connection or its underlying aiohttp
+        session in a timely manner.
+        """
         if not self._ws_client:
             return
         try:
-            if self._ws_connected:
-                await self._ws_client.close()
-                self._ws_connected = False
-                logger.info("Kraken WebSocket disconnected")
-            if hasattr(self._ws_client, "_SpotAsyncClient__session"):
-                session = getattr(self._ws_client, "_SpotAsyncClient__session", None)
-                if session and not session.closed:
-                    await session.close()
-                    logger.debug("Closed aiohttp session from kraken websocket client")
+            async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
+                if self._ws_connected:
+                    await self._ws_client.close()
+                    self._ws_connected = False
+                    logger.info("Kraken WebSocket disconnected")
+                if hasattr(self._ws_client, "_SpotAsyncClient__session"):
+                    session = getattr(self._ws_client, "_SpotAsyncClient__session", None)
+                    if session and not session.closed:
+                        await session.close()
+                        logger.debug("Closed aiohttp session from kraken websocket client")
+        except TimeoutError:
+            logger.warning("WebSocket close timed out - forcing cleanup")
+            self._ws_connected = False
         finally:
             self._ws_client = None
 
@@ -1189,12 +1201,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         Args:
             data: Raw ticker data from WebSocket.
         """
-        try:
-            ticker_list = parse_kraken_ticker_list(data)
-            for ticker_data in ticker_list:
-                await self._tick_queue.put(ticker_data)
-        except ValueError as e:
-            logger.warning(f"Failed to parse ticker data: {e}")
+        if not isinstance(data, list):
+            return
+        ticker_list = parse_kraken_ticker_list(data)
+        for ticker_data in ticker_list:
+            await self._tick_queue.put(ticker_data)
 
     async def _handle_trade_data(self, data: Any) -> None:
         """Parse and enqueue trade data.
