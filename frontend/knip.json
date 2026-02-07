@@ -30,6 +30,7 @@
   "ignoreDependencies": [
     "tailwindcss",
     "@mermaid-js/mermaid-cli",
+    "@vitest/coverage-v8",
     "json-schema-to-zod",
     "puppeteer"
   ],

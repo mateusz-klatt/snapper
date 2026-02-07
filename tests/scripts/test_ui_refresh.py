@@ -1,19 +1,26 @@
 """Tests for UI dependency refresh script."""
 
+import json
 import subprocess
 from pathlib import Path
+from typing import Any
+from unittest.mock import call
 from unittest.mock import patch
 
 import pytest
 
 from scripts.ui_refresh import ensure_pnpm_installed
+from scripts.ui_refresh import get_dependency_spec
 from scripts.ui_refresh import install_dependencies
 from scripts.ui_refresh import main
+from scripts.ui_refresh import read_package_json
 from scripts.ui_refresh import refresh_ui
 from scripts.ui_refresh import remove_lock_file
 from scripts.ui_refresh import remove_node_modules
+from scripts.ui_refresh import restore_dependency_spec
 from scripts.ui_refresh import run_cmd
 from scripts.ui_refresh import upgrade_dependencies
+from scripts.ui_refresh import write_package_json
 
 
 class TestRunCmd:
@@ -260,6 +267,193 @@ class TestUpgradeDependencies:
             mock_run.assert_called_once_with(["pnpm", "up", "--latest"], cwd=tmp_path, check=True)
             captured = capsys.readouterr()
             assert "Upgrading UI direct dependencies" in captured.out
+
+    def test_restores_protected_deps_after_latest_upgrade(self, tmp_path: Path) -> None:
+        """Verify upgrade_dependencies restores protected deps after pnpm up --latest.
+
+        Given: A package.json with eslint and @eslint/js pinned to 9.x ranges,
+        When: upgrade_dependencies runs and the upgrade step rewrites both to 10.x,
+        Then: package.json is restored to the original version specs.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text(
+            json.dumps(
+                {
+                    "name": "snapper-ui",
+                    "devDependencies": {
+                        "eslint": "^9.39.2",
+                        "@eslint/js": "^9.39.2",
+                        "eslint-plugin-react": "^7.37.5",
+                    },
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        def side_effect(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            _ = kwargs
+            if args == ["pnpm", "up", "--latest"]:
+                data = json.loads(package_json.read_text(encoding="utf-8"))
+                data["devDependencies"]["eslint"] = "^10.0.0"
+                data["devDependencies"]["@eslint/js"] = "^10.0.0"
+                package_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch("scripts.ui_refresh.run_cmd", side_effect=side_effect) as mock_run:
+            upgrade_dependencies(tmp_path)
+
+        updated = json.loads(package_json.read_text(encoding="utf-8"))
+        assert updated["devDependencies"]["eslint"] == "^9.39.2"
+        assert updated["devDependencies"]["@eslint/js"] == "^9.39.2"
+        assert mock_run.call_args_list == [
+            call(["pnpm", "up", "--latest"], cwd=tmp_path, check=True),
+            call(["pnpm", "up"], cwd=tmp_path, check=True),
+        ]
+
+    def test_does_not_write_package_json_when_no_change_needed(self, tmp_path: Path) -> None:
+        """Verify upgrade_dependencies does not rewrite package.json when nothing changes.
+
+        Given: package.json includes eslint in a protected range,
+        When: pnpm up --latest does not modify eslint spec,
+        Then: write_package_json is not called.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text(
+            json.dumps(
+                {"devDependencies": {"eslint": "^9.39.2", "@eslint/js": "^9.39.2"}},
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("scripts.ui_refresh.run_cmd") as mock_run,
+            patch("scripts.ui_refresh.write_package_json") as mock_write,
+        ):
+            mock_run.return_value = subprocess.CompletedProcess([], 0)
+
+            upgrade_dependencies(tmp_path)
+
+            mock_write.assert_not_called()
+            assert mock_run.call_count == 2
+            assert mock_run.call_args_list[1] == call(["pnpm", "up"], cwd=tmp_path, check=True)
+
+
+class TestPackageJsonHelpers:
+    """Test suite for package.json helper functions."""
+
+    def test_read_package_json_raises_on_non_object(self, tmp_path: Path) -> None:
+        """Verify read_package_json rejects non-object JSON.
+
+        Given: A package.json file containing a JSON array,
+        When: read_package_json is called,
+        Then: ValueError is raised.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text("[]\n", encoding="utf-8")
+
+        with pytest.raises(ValueError):
+            read_package_json(package_json)
+
+    def test_write_package_json_roundtrips(self, tmp_path: Path) -> None:
+        """Verify write_package_json writes valid JSON that can be read back.
+
+        Given: A dictionary to write,
+        When: write_package_json writes it,
+        Then: json.loads reads the same structure.
+        """
+        package_json = tmp_path / "package.json"
+        data: dict[str, object] = {"name": "snapper-ui", "devDependencies": {"eslint": "^9.39.2"}}
+        write_package_json(package_json, data)
+
+        loaded = json.loads(package_json.read_text(encoding="utf-8"))
+        assert loaded == data
+
+    def test_restore_dependency_spec_moves_between_sections(self) -> None:
+        """Verify restore_dependency_spec moves dependency to target section.
+
+        Given: Dependency exists in dependencies,
+        When: restoring it into devDependencies with a specific version,
+        Then: it is removed from dependencies and present in devDependencies.
+        """
+        package_data: dict[str, Any] = {
+            "dependencies": {"eslint": "^10.0.0"},
+            "devDependencies": {},
+        }
+
+        modified = restore_dependency_spec(package_data, "eslint", "devDependencies", "^9.39.2")
+
+        assert modified is True
+        assert "eslint" not in package_data["dependencies"]
+        assert package_data["devDependencies"]["eslint"] == "^9.39.2"
+
+    def test_get_dependency_spec_returns_none_for_non_string_spec(self) -> None:
+        """Verify get_dependency_spec returns a section with None for non-string values.
+
+        Given: A dependency present with a non-string value,
+        When: get_dependency_spec is called,
+        Then: It returns the section name and a None spec.
+        """
+        package_data: dict[str, Any] = {"dependencies": {"eslint": 123}}
+        section, spec = get_dependency_spec(package_data, "eslint")
+        assert section == "dependencies"
+        assert spec is None
+
+    def test_restore_dependency_spec_creates_target_section_when_missing(self) -> None:
+        """Verify restore_dependency_spec creates the target section when absent.
+
+        Given: Target section does not exist,
+        When: restoring a dependency into that section,
+        Then: The section is created and dependency spec is set.
+        """
+        package_data: dict[str, Any] = {"dependencies": {}}
+        modified = restore_dependency_spec(package_data, "eslint", "devDependencies", "^9.39.2")
+        assert modified is True
+        assert package_data["devDependencies"]["eslint"] == "^9.39.2"
+
+    def test_restore_dependency_spec_is_noop_when_already_matches(self) -> None:
+        """Verify restore_dependency_spec returns False when no change is needed.
+
+        Given: Dependency already exists in the target section with the same spec,
+        When: restore_dependency_spec is called,
+        Then: It returns False and leaves data unchanged.
+        """
+        package_data: dict[str, Any] = {"devDependencies": {"eslint": "^9.39.2"}}
+        modified = restore_dependency_spec(package_data, "eslint", "devDependencies", "^9.39.2")
+        assert modified is False
+        assert package_data["devDependencies"]["eslint"] == "^9.39.2"
+
+    def test_restore_dependency_spec_does_not_delete_when_dependency_disappears(self) -> None:
+        """Verify restore_dependency_spec handles missing key at delete time.
+
+        Given: A mapping that reports a dependency for discovery but not for deletion,
+        When: restore_dependency_spec attempts to move it,
+        Then: It skips deletion safely and still applies the target spec.
+        """
+
+        class FlakyDict(dict[str, Any]):
+            """Dictionary that changes get() behavior after first access."""
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)
+                self._dependencies_reads = 0
+
+            def get(self, key: str, default: Any = None) -> Any:
+                if key == "dependencies":
+                    self._dependencies_reads += 1
+                    if self._dependencies_reads >= 2:
+                        return default
+                return super().get(key, default)
+
+        package_data: dict[str, Any] = FlakyDict({"dependencies": {"eslint": "^10.0.0"}})
+
+        modified = restore_dependency_spec(package_data, "eslint", "devDependencies", "^9.39.2")
+
+        assert modified is True
+        assert package_data["devDependencies"]["eslint"] == "^9.39.2"
 
 
 class TestInstallDependencies:
