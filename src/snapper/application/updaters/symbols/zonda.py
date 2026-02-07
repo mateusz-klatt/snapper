@@ -167,10 +167,26 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                             ccxt_symbol,
                             now,
                         )
+                    self._upsert_capability(
+                        session,
+                        native_symbol,
+                        "zonda",
+                        True,
+                        True,
+                        "zonda_updater",
+                        None,
+                        now,
+                    )
+                processed_symbols = {s["native_symbol"] for s in symbols}
+                now = datetime.now(UTC)
+                deactivated = self._reconcile_capabilities(
+                    session, "zonda", processed_symbols, "zonda_updater", now
+                )
                 session.commit()
                 logger.info(
                     f"Zonda update complete: {created_count} created, "
-                    f"{updated_count} updated (total: {len(symbols)})"
+                    f"{updated_count} updated, {deactivated} deactivated "
+                    f"(total: {len(symbols)})"
                 )
         except Exception as e:
             logger.error(f"Error in Zonda symbol mapping update: {e}", exc_info=True)

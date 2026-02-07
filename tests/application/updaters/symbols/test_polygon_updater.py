@@ -19,6 +19,7 @@ from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterSer
 from snapper.config.settings import AppSettings
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
@@ -1182,3 +1183,50 @@ def test_determine_polygon_asset_type(ticker: str, expected_asset_type: str) -> 
     """
     updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     assert updater.determine_asset_type_public(ticker) == expected_asset_type
+
+
+@pytest.mark.asyncio()
+async def test_update_database_creates_capability_rows(
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
+) -> None:
+    """Verify update_database creates SymbolExchangeCapability rows.
+
+    Given: Existing BTC-USD catalog entry in database,
+    When: Update database called with BTC-USD ticker,
+    Then: Capability row created with can_market_data=True, can_trade=False,
+          source=polygon_updater.
+    """
+    updater, repository = polygon_updater
+    original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.commit()
+    symbols: list[dict[str, Any]] = [
+        {
+            "ticker": "X:BTCUSD",
+            "base_currency_symbol": "BTC",
+            "currency_symbol": "USD",
+        },
+    ]
+    await updater.update_database_public(symbols)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        caps = session.execute(select(SymbolExchangeCapability)).scalars().all()
+        assert len(caps) == 1
+        cap = caps[0]
+        assert cap.native_symbol == "BTC-USD"
+        assert cap.exchange == "polygon"
+        assert cap.can_market_data is True
+        assert cap.can_trade is False
+        assert cap.source == "polygon_updater"
+        assert cap.reason is None

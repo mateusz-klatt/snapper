@@ -270,24 +270,26 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     async def verify_websocket_symbols(
         self,
         ws_symbols: set[str],
-    ) -> set[str]:
-        """Verify symbols exist via WebSocket v2 API.
+    ) -> tuple[set[str], list[dict[str, str]]]:
+        """Verify symbols and discover WS-only instruments via WebSocket v2 API.
 
-        Subscribes to instrument feed and collects available symbols
-        to verify they're tradeable.
+        Subscribes to instrument feed, verifies REST-derived symbols exist,
+        and collects symbols present only on WebSocket (not in REST markets).
 
         Args:
-            ws_symbols: Set of symbols to verify.
+            ws_symbols: Set of REST-derived symbols to verify.
 
         Returns:
-            Set of verified symbols that exist on WebSocket feed.
+            Tuple of (verified symbols, WS-only instrument dicts).
+            On error fallback, returns (all ws_symbols, empty WS-only list).
         """
         logger.info("Verifying {} symbols against WebSocket v2 API", len(ws_symbols))
         verified_symbols: set[str] = set()
+        ws_only_instruments: list[dict[str, str]] = []
         max_snapshot_time = 5.0
         client = self._create_exchange_client()
         try:
-            verified_symbols = await self._collect_verified_symbols(
+            verified_symbols, ws_only_instruments = await self._collect_verified_symbols(
                 client, ws_symbols, max_snapshot_time
             )
         except asyncio.CancelledError:
@@ -300,46 +302,63 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         except Exception as e:
             logger.error(f"Error verifying symbols via WebSocket: {e}")
             logger.warning("Falling back to assume all symbols valid")
-            return ws_symbols
+            return ws_symbols, []
         finally:
             await self._safe_disconnect_ws(client)
         self._log_unverified_symbols(verified_symbols, ws_symbols)
-        return verified_symbols
+        return verified_symbols, ws_only_instruments
 
     async def _collect_verified_symbols(
         self,
         client: Any,
         ws_symbols: set[str],
         timeout_seconds: float,
-    ) -> set[str]:
-        """Collect verified symbols from WebSocket instrument feed.
+    ) -> tuple[set[str], list[dict[str, str]]]:
+        """Collect verified symbols and WS-only instruments from feed.
+
+        Reads the full instrument snapshot to both verify REST-derived symbols
+        and discover symbols present only on WebSocket (not in REST markets).
 
         Args:
             client: Kraken exchange client.
-            ws_symbols: Set of symbols to look for.
+            ws_symbols: Set of REST-derived WS symbols to verify.
             timeout_seconds: Maximum time to spend collecting.
 
         Returns:
-            Set of symbols confirmed on the instrument feed.
+            Tuple of (verified REST symbols, WS-only instrument dicts).
+            Each WS-only dict has keys: symbol, base, quote.
         """
         verified: set[str] = set()
+        ws_only: list[dict[str, str]] = []
         try:
             async with asyncio.timeout(timeout_seconds):
                 async for raw_instrument in client.subscribe_instruments(raw=True):
                     ws_symbol = raw_instrument.get("symbol")
-                    if isinstance(ws_symbol, str) and ws_symbol in ws_symbols:
+                    if not isinstance(ws_symbol, str):
+                        continue
+                    if ws_symbol in ws_symbols:
                         verified.add(ws_symbol)
-                    if len(verified) == len(ws_symbols):
-                        logger.info("All {} symbols verified via WebSocket", len(ws_symbols))
-                        return verified
+                    else:
+                        base = raw_instrument.get("base", "")
+                        quote = raw_instrument.get("quote", "")
+                        if base and quote:
+                            ws_only.append({"symbol": ws_symbol, "base": base, "quote": quote})
         except TimeoutError:
             logger.info(
-                "Snapshot collection timeout ({:.1f}s): verified {}/{} symbols",
+                "Snapshot collection timeout ({:.1f}s): verified {}/{} symbols, "
+                "{} WS-only discovered",
                 timeout_seconds,
                 len(verified),
                 len(ws_symbols),
+                len(ws_only),
             )
-        return verified
+        if len(verified) == len(ws_symbols) and ws_symbols:
+            logger.info(
+                "All {} symbols verified via WebSocket, {} WS-only discovered",
+                len(ws_symbols),
+                len(ws_only),
+            )
+        return verified, ws_only
 
     @staticmethod
     async def _safe_disconnect_ws(client: Any) -> None:
@@ -475,11 +494,60 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             }
         return mappings, ws_symbols_to_verify
 
+    @staticmethod
+    def _is_tokenized_base(base: str) -> bool:
+        """Detect Kraken tokenized asset (xStock) from base currency name.
+
+        Kraken xStock bases end with lowercase ``x`` and have mixed case
+        (e.g., ``NVDAx``, ``BTGOx``), while standard crypto bases are
+        all-uppercase (``BTC``, ``ETH``).
+
+        Args:
+            base: Base currency code from exchange.
+
+        Returns:
+            True if the base matches the tokenized asset naming convention.
+        """
+        return len(base) > 1 and base.endswith("x") and base != base.upper()
+
+    @staticmethod
+    def _build_ws_only_mapping(instrument: dict[str, str]) -> dict[str, str]:
+        """Build a mapping dict for a WS-only instrument.
+
+        WS-only instruments have no REST/CCXT representation and are
+        marked with ``ws_only=true`` for downstream processing.
+        Asset class is inferred from the base currency naming convention:
+        mixed-case bases ending in lowercase ``x`` are tokenized assets.
+
+        Args:
+            instrument: Dict with keys: symbol, base, quote.
+
+        Returns:
+            Mapping dict compatible with ``_update_database``.
+        """
+        ws_symbol = instrument["symbol"]
+        base = instrument["base"]
+        quote = instrument["quote"]
+        native_symbol = make_native_symbol(base, quote)
+        asset_class = (
+            "tokenized_asset" if KrakenSymbolUpdaterService._is_tokenized_base(base) else "crypto"
+        )
+        return {
+            "native_symbol": native_symbol,
+            "kraken_websocket_symbol": ws_symbol,
+            "kraken_rest_symbol": "",
+            "ccxt_symbol": "",
+            "base_currency": base,
+            "quote_currency": quote,
+            "asset_class": asset_class,
+            "ws_only": "true",
+        }
+
     async def build_verified_mappings(self) -> tuple[dict[str, dict[str, str]], bool]:
         """Build verified symbol data from REST and WebSocket data.
 
-        Loads symbols from REST, verifies via WebSocket, and returns
-        symbol data dicts.
+        Loads symbols from REST, verifies via WebSocket, discovers WS-only
+        symbols, and returns all symbol data dicts.
 
         Returns:
             Tuple of (mappings dict keyed by native_symbol, success boolean).
@@ -488,7 +556,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             kraken_rest_symbols = await self.load_kraken_rest_symbols()
             logger.info(f"Loaded {len(kraken_rest_symbols)} symbols from REST API")
             mappings, ws_symbols_to_verify = self._build_mappings_from_rest(kraken_rest_symbols)
-            verified_ws_symbols = await self.verify_websocket_symbols(ws_symbols_to_verify)
+            verified_ws_symbols, ws_only_instruments = await self.verify_websocket_symbols(
+                ws_symbols_to_verify,
+            )
             verification_threshold = 0.95
             verification_rate = (
                 len(verified_ws_symbols) / len(ws_symbols_to_verify)
@@ -501,8 +571,15 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     f"Verification rate {verification_rate:.1%} below threshold "
                     f"{verification_threshold:.0%}"
                 )
+            ws_only_count = 0
+            for instrument in ws_only_instruments:
+                ws_only_mapping = self._build_ws_only_mapping(instrument)
+                native = ws_only_mapping["native_symbol"]
+                if native not in mappings:
+                    mappings[native] = ws_only_mapping
+                    ws_only_count += 1
             logger.info(
-                f"Built {len(mappings)} mappings, "
+                f"Built {len(mappings)} mappings ({ws_only_count} WS-only), "
                 f"verification: {len(verified_ws_symbols)}/{len(ws_symbols_to_verify)} "
                 f"({verification_rate:.1%})"
             )
@@ -533,11 +610,99 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         logger.info(f"Fetched and verified {len(mappings)} Kraken symbols")
         return list(mappings.values())
 
+    def _persist_ws_only_symbol(
+        self, session: Any, symbol_data: dict[str, Any], now: datetime
+    ) -> tuple[int, int]:
+        """Persist a WS-only symbol: one WS alias + market-data-only capability.
+
+        Args:
+            session: SQLAlchemy session.
+            symbol_data: Symbol data dict with ws_only flag.
+            now: Current UTC timestamp.
+
+        Returns:
+            Tuple of (created_count, updated_count) for alias operations.
+        """
+        native_symbol = symbol_data["native_symbol"]
+        created = 0
+        updated = 0
+        ws_symbol = symbol_data.get("kraken_websocket_symbol", "")
+        if ws_symbol:
+            result = self._upsert_alias(session, native_symbol, "kraken", "ws", ws_symbol, now)
+            if result == "created":
+                created += 1
+            elif result == "updated":
+                updated += 1
+        self._upsert_capability(
+            session,
+            native_symbol,
+            "kraken",
+            True,
+            False,
+            "kraken_updater",
+            "WS-only, not in REST markets",
+            now,
+        )
+        return created, updated
+
+    def _persist_rest_symbol(
+        self, session: Any, symbol_data: dict[str, Any], now: datetime
+    ) -> tuple[int, int]:
+        """Persist a REST symbol: ws/rest/ccxt aliases + full capability.
+
+        Args:
+            session: SQLAlchemy session.
+            symbol_data: Symbol data dict from REST resolution.
+            now: Current UTC timestamp.
+
+        Returns:
+            Tuple of (created_count, updated_count) for alias operations.
+        """
+        native_symbol = symbol_data["native_symbol"]
+        created = 0
+        updated = 0
+        for exchange, channel, key in (
+            ("kraken", "ws", "kraken_websocket_symbol"),
+            ("kraken", "rest", "kraken_rest_symbol"),
+            ("kraken", "ccxt", "ccxt_symbol"),
+        ):
+            exchange_symbol = symbol_data.get(key)
+            if not exchange_symbol:
+                continue
+            result = self._upsert_alias(
+                session,
+                native_symbol,
+                exchange,
+                channel,
+                exchange_symbol,
+                now,
+            )
+            if result == "created":
+                created += 1
+            elif result == "updated":
+                updated += 1
+        self._upsert_capability(
+            session,
+            native_symbol,
+            "kraken",
+            True,
+            True,
+            "kraken_updater",
+            None,
+            now,
+        )
+        return created, updated
+
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Persist symbol catalog and alias rows to the database.
 
-        Each symbol produces one catalog row and up to three alias rows
-        (kraken ws, kraken rest, kraken ccxt).
+        Each REST symbol produces one catalog row, up to three alias rows
+        (kraken ws, kraken rest, kraken ccxt), and a capability row with
+        ``can_trade=True``.
+
+        WS-only symbols (``ws_only=true``) produce one catalog row, one WS
+        alias, and a capability row with ``can_trade=False`` and a reason
+        explaining they are not available via REST.
 
         Args:
             symbols: List of symbol data dicts from Kraken.
@@ -545,6 +710,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         assert self.repository is not None, "Repository not initialized"
         created_count = 0
         updated_count = 0
+        ws_only_count = 0
         try:
             with self.repository.get_session() as session:
                 for symbol_data in symbols:
@@ -563,30 +729,24 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                         asset_type,
                         now,
                     )
-                    for exchange, channel, key in (
-                        ("kraken", "ws", "kraken_websocket_symbol"),
-                        ("kraken", "rest", "kraken_rest_symbol"),
-                        ("kraken", "ccxt", "ccxt_symbol"),
-                    ):
-                        exchange_symbol = symbol_data.get(key)
-                        if not exchange_symbol:
-                            continue
-                        result = self._upsert_alias(
-                            session,
-                            native_symbol,
-                            exchange,
-                            channel,
-                            exchange_symbol,
-                            now,
-                        )
-                        if result == "created":
-                            created_count += 1
-                        elif result == "updated":
-                            updated_count += 1
+                    is_ws_only = symbol_data.get("ws_only") == "true"
+                    if is_ws_only:
+                        c, u = self._persist_ws_only_symbol(session, symbol_data, now)
+                        ws_only_count += 1
+                    else:
+                        c, u = self._persist_rest_symbol(session, symbol_data, now)
+                    created_count += c
+                    updated_count += u
+                processed_symbols = {s["native_symbol"] for s in symbols}
+                now = datetime.now(UTC)
+                deactivated = self._reconcile_capabilities(
+                    session, "kraken", processed_symbols, "kraken_updater", now
+                )
                 session.commit()
                 logger.info(
                     f"Kraken update complete: {created_count} created, "
-                    f"{updated_count} updated (total: {len(symbols)})"
+                    f"{updated_count} updated, {ws_only_count} WS-only, "
+                    f"{deactivated} deactivated (total: {len(symbols)})"
                 )
         except Exception as e:
             logger.error(f"Error updating database: {e}")

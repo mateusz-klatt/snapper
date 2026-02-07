@@ -14,6 +14,7 @@ from typing import Any
 import zmq
 import zmq.asyncio
 from loguru import logger
+from sqlalchemy import or_
 from sqlalchemy import select
 
 from snapper.application.process_manager.models import RegisterableProcess
@@ -24,6 +25,7 @@ from snapper.config.settings import get_settings_with_service
 from snapper.data.models import Setting
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -205,6 +207,165 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             existing.updated_at = now
             return "updated"
         return "unchanged"
+
+    @staticmethod
+    def _upsert_capability(
+        session: Any,
+        native_symbol: str,
+        exchange: str,
+        can_market_data: bool,
+        can_trade: bool,
+        source: str | None,
+        reason: str | None,
+        now: datetime,
+    ) -> str:
+        """Upsert a SymbolExchangeCapability row.
+
+        Args:
+            session: SQLAlchemy session.
+            native_symbol: Native symbol (FK to symbol_catalog).
+            exchange: Exchange name (lowercase).
+            can_market_data: Whether exchange provides market data for this symbol.
+            can_trade: Whether exchange supports trading this symbol.
+            source: Origin of the capability information (e.g., updater name).
+            reason: Human-readable explanation for the capability values.
+            now: Current UTC timestamp.
+
+        Returns:
+            One of ``created``, ``updated``, or ``unchanged``.
+        """
+        existing = session.execute(
+            select(SymbolExchangeCapability).where(
+                SymbolExchangeCapability.native_symbol == native_symbol,
+                SymbolExchangeCapability.exchange == exchange,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(
+                SymbolExchangeCapability(
+                    native_symbol=native_symbol,
+                    exchange=exchange,
+                    can_market_data=can_market_data,
+                    can_trade=can_trade,
+                    source=source,
+                    reason=reason,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return "created"
+        changed = False
+        if existing.can_market_data != can_market_data:
+            existing.can_market_data = can_market_data
+            changed = True
+        if existing.can_trade != can_trade:
+            existing.can_trade = can_trade
+            changed = True
+        if existing.source != source:
+            existing.source = source
+            changed = True
+        if existing.reason != reason:
+            existing.reason = reason
+            changed = True
+        if changed:
+            existing.updated_at = now
+            return "updated"
+        return "unchanged"
+
+    @staticmethod
+    def _deactivate_stale_capabilities(
+        session: Any,
+        exchange: str,
+        active_symbols: set[str],
+        source: str,
+        now: datetime,
+    ) -> int:
+        """Deactivate capabilities for symbols no longer seen on the exchange.
+
+        Sets ``can_trade=False`` and ``can_market_data=False`` for capability
+        rows belonging to ``exchange`` whose ``native_symbol`` is not in
+        ``active_symbols``.
+
+        Args:
+            session: SQLAlchemy session.
+            exchange: Exchange name (lowercase).
+            active_symbols: Set of native symbols still active on the exchange.
+            source: Updater source tag for the deactivation record.
+            now: Current UTC timestamp.
+
+        Returns:
+            Number of deactivated capability rows.
+        """
+        stmt = select(SymbolExchangeCapability).where(
+            SymbolExchangeCapability.exchange == exchange,
+            or_(
+                SymbolExchangeCapability.can_trade.is_(True),
+                SymbolExchangeCapability.can_market_data.is_(True),
+            ),
+        )
+        active_caps = session.execute(stmt).scalars().all()
+        deactivated = 0
+        for cap in active_caps:
+            if cap.native_symbol not in active_symbols:
+                cap.can_trade = False
+                cap.can_market_data = False
+                cap.source = source
+                cap.reason = "Delisted: not seen in updater run"
+                cap.updated_at = now
+                deactivated += 1
+        return deactivated
+
+    @staticmethod
+    def _reconcile_capabilities(
+        session: Any,
+        exchange: str,
+        active_symbols: set[str],
+        source: str,
+        now: datetime,
+        min_active_ratio: float = 0.5,
+    ) -> int:
+        """Reconcile capabilities: deactivate stale rows with safety threshold.
+
+        Skips deactivation when the ratio of active symbols to previously
+        known active capabilities is below ``min_active_ratio``, guarding
+        against mass deactivation caused by partial API responses.
+
+        Args:
+            session: SQLAlchemy session.
+            exchange: Exchange name (lowercase).
+            active_symbols: Set of native symbols seen in the current updater run.
+            source: Updater source tag.
+            now: Current UTC timestamp.
+            min_active_ratio: Minimum ratio of active / existing to proceed.
+
+        Returns:
+            Number of deactivated rows (0 if skipped due to safety threshold).
+        """
+        existing_count_stmt = select(SymbolExchangeCapability).where(
+            SymbolExchangeCapability.exchange == exchange,
+            or_(
+                SymbolExchangeCapability.can_trade.is_(True),
+                SymbolExchangeCapability.can_market_data.is_(True),
+            ),
+        )
+        existing_count = len(session.execute(existing_count_stmt).scalars().all())
+        if existing_count > 0:
+            ratio = len(active_symbols) / existing_count
+            if ratio < min_active_ratio:
+                logger.warning(
+                    f"Skipping capability reconciliation for {exchange}: "
+                    f"active/existing ratio {ratio:.1%} < threshold {min_active_ratio:.0%} "
+                    f"({len(active_symbols)} active vs {existing_count} existing)"
+                )
+                return 0
+        deactivated = SymbolUpdaterService._deactivate_stale_capabilities(
+            session, exchange, active_symbols, source, now
+        )
+        if deactivated > 0:
+            logger.info(
+                f"Reconciled {exchange} capabilities: deactivated {deactivated} stale symbols"
+            )
+        return deactivated
 
     def _get_last_update_timestamp(self) -> datetime | None:
         """Retrieve the timestamp of the last symbol mapping update from database.

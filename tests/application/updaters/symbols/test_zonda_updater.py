@@ -28,6 +28,7 @@ from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.data.models import Base
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.indicators.ta_lib_adapter import macd
 from snapper.indicators.ta_lib_adapter import rsi
@@ -400,15 +401,20 @@ async def test_load_zonda_markets_filters_invalid(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.asyncio
 async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify update_database creates catalog and alias rows.
+    """Verify update_database creates catalog, alias, and capability rows.
 
     Given: Session mock with no existing catalog or alias rows,
     When: Update database called with one symbol (including ccxt_symbol),
-    Then: Session add called for catalog + ws alias + ccxt alias (three times).
+    Then: Session add called for catalog + ws alias + ccxt alias + capability (four times).
     """
     svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
     fake_session = SimpleNamespace(
-        execute=Mock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None)),
+        execute=Mock(
+            return_value=SimpleNamespace(
+                scalar_one_or_none=lambda: None,
+                scalars=lambda: SimpleNamespace(all=lambda: []),
+            )
+        ),
         add=Mock(),
         commit=Mock(),
     )
@@ -439,7 +445,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
         }
     ]
     await svc._update_database(symbols)
-    assert fake_session.add.call_count == 3
+    assert fake_session.add.call_count == 4
 
 
 def test_get_default_kwargs_and_setting_key() -> None:
@@ -593,8 +599,11 @@ async def test_update_database_handles_commit_error(monkeypatch: pytest.MonkeyPa
             """No cleanup required on context exit."""
 
         def execute(self, _stmt: Any) -> Any:
-            """Return empty result for all select queries."""
-            return SimpleNamespace(scalar_one_or_none=lambda: None)
+            """Return stub supporting both scalar_one_or_none and scalars().all()."""
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: None,
+                scalars=lambda: SimpleNamespace(all=lambda: []),
+            )
 
         def add(self, _obj: Any) -> None:
             """Accept any add call without action."""
@@ -622,3 +631,46 @@ async def test_update_database_handles_commit_error(monkeypatch: pytest.MonkeyPa
     ]
     with pytest.raises(RuntimeError):
         await svc._update_database(symbols)
+
+
+@pytest.mark.asyncio()
+async def test_update_database_creates_capability_rows(
+    updater_with_repository: tuple[ExposedZondaSymbolUpdater, DatabaseRepository],
+) -> None:
+    """Verify _update_database creates SymbolExchangeCapability rows.
+
+    Given: Empty database,
+    When: _update_database called with two symbols,
+    Then: Capability row created per symbol with exchange=zonda,
+          can_market_data=True, can_trade=True, source=zonda_updater.
+    """
+    updater, repository = updater_with_repository
+    payload = [
+        {
+            "native_symbol": "BTC-USD",
+            "zonda_symbol": "BTC-USD",
+            "ccxt_symbol": "BTC/USD",
+            "base": "BTC",
+            "quote": "USD",
+        },
+        {
+            "native_symbol": "ETH-USD",
+            "zonda_symbol": "ETH-USD",
+            "ccxt_symbol": "ETH/USD",
+            "base": "ETH",
+            "quote": "USD",
+        },
+    ]
+    await updater.update_database_public(payload)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        caps = session.execute(select(SymbolExchangeCapability)).scalars().all()
+        assert len(caps) == 2
+        cap_map = {c.native_symbol: c for c in caps}
+        for native_symbol in ("BTC-USD", "ETH-USD"):
+            cap = cap_map[native_symbol]
+            assert cap.exchange == "zonda"
+            assert cap.can_market_data is True
+            assert cap.can_trade is True
+            assert cap.source == "zonda_updater"
+            assert cap.reason is None

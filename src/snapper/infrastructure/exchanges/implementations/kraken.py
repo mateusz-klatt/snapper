@@ -43,7 +43,7 @@ from snapper.config.settings import get_settings
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution_list
-from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_instrument_list
+from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_instrument
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_ticker_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_trade_list
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -1265,9 +1265,9 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.warning(f"Invalid instrument data, skipping: {e}")
             return
         try:
-            instrument_pair = parse_kraken_instrument_list([pair_dict])[0]
+            instrument_pair = parse_kraken_instrument(pair_dict)
             await self._instrument_queue.put(instrument_pair)
-        except (ValueError, IndexError) as e:
+        except ValueError as e:
             logger.debug(f"Skipping instrument parse (raw available): {e}")
 
     async def _get_or_create_ws_client(self) -> Any:

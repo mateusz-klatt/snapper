@@ -22,6 +22,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import Base
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
+from snapper.data.models import SymbolExchangeCapability
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 
@@ -162,9 +163,10 @@ class TestKrakenSymbolUpdater:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = AsyncMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            result = await updater.verify_websocket_symbols(ws_symbols_to_verify)
-        assert len(result) == 1
-        assert "BTC/USD" in result
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
+        assert len(verified) == 1
+        assert "BTC/USD" in verified
+        assert ws_only == []
         mock_client.disconnect_websocket.assert_called_once()
 
     @pytest.mark.asyncio
@@ -190,10 +192,10 @@ class TestKrakenSymbolUpdater:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = AsyncMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            result = await updater.verify_websocket_symbols(ws_symbols_to_verify)
-        assert len(result) == 1
-        assert "BTC/USD" in result
-        assert "ETH/USD" not in result
+            verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
+        assert len(verified) == 1
+        assert "BTC/USD" in verified
+        assert "ETH/USD" not in verified
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_all_verified_via_timeout(
@@ -214,9 +216,9 @@ class TestKrakenSymbolUpdater:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = AsyncMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            result = await updater.verify_websocket_symbols(ws_symbols_to_verify)
-        assert len(result) == 1
-        assert "BTC/USD" in result
+            verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
+        assert len(verified) == 1
+        assert "BTC/USD" in verified
 
     @pytest.mark.asyncio
     async def test_build_verified_mappings(self, updater: KrakenSymbolUpdaterService) -> None:
@@ -235,7 +237,7 @@ class TestKrakenSymbolUpdater:
         }
         with (
             patch.object(updater, "load_kraken_rest_symbols", return_value=mock_rest),
-            patch.object(updater, "verify_websocket_symbols", return_value={"BTC-USD"}),
+            patch.object(updater, "verify_websocket_symbols", return_value=({"BTC-USD"}, [])),
         ):
             mappings, success = await updater.build_verified_mappings()
         assert success is True
@@ -273,11 +275,11 @@ class TestKrakenSymbolUpdater:
 
     @pytest.mark.asyncio
     async def test_update_database(self, updater: KrakenSymbolUpdaterService) -> None:
-        """Verify _update_database persists catalog and alias rows.
+        """Verify _update_database persists catalog, alias, and capability rows.
 
         Given: Mock session and symbol list,
         When: _update_database called,
-        Then: Session add called for catalog and aliases, commit called.
+        Then: Session add called for catalog, aliases, and capability; commit called.
         """
         symbols = [
             {
@@ -297,7 +299,7 @@ class TestKrakenSymbolUpdater:
         mock_repo.get_session.return_value = mock_session
         with patch.object(updater, "repository", mock_repo):
             await updater._update_database(symbols)
-        assert mock_session.add.call_count == 4
+        assert mock_session.add.call_count == 5
         mock_session.commit.assert_called_once()
 
 
@@ -390,7 +392,7 @@ async def test_build_verified_mappings_verification_threshold(
         },
     }
     monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=fake_symbols))
-    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value={"BTC/USD"}))
+    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value=({"BTC/USD"}, [])))
     mappings, success = await svc.build_verified_mappings()
     assert not success
     assert "XBT-USD" in mappings
@@ -416,7 +418,7 @@ async def test_build_verified_mappings_skips_invalid_tokenized(
         },
     }
     monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=fake_symbols))
-    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value=set()))
+    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value=(set(), [])))
     mappings, success = await svc.build_verified_mappings()
     assert mappings == {}
     assert success is False
@@ -581,7 +583,11 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
             return None
 
         def execute(self, _stmt: Any) -> Any:
-            return SimpleNamespace(scalar_one_or_none=lambda: None)
+            """Return stub supporting both scalar_one_or_none and scalars().all()."""
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: None,
+                scalars=lambda: SimpleNamespace(all=lambda: []),
+            )
 
         def add(self, _obj: Any) -> None:
             return None
@@ -777,8 +783,8 @@ class TestVerifyWebsocketSymbols:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            result = await updater.verify_websocket_symbols(ws_symbols)
-        assert result == ws_symbols
+            verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols)
+        assert verified == ws_symbols
 
     @pytest.mark.asyncio
     async def test_verify_timeout_partial_verification(
@@ -807,8 +813,8 @@ class TestVerifyWebsocketSymbols:
                 side_effect=asyncio.TimeoutError,
             ),
         ):
-            result = await updater.verify_websocket_symbols(ws_symbols)
-        assert isinstance(result, set)
+            verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols)
+        assert isinstance(verified, set)
 
     @pytest.mark.asyncio
     async def test_verify_exception_fallback(self, updater: KrakenSymbolUpdaterService) -> None:
@@ -816,7 +822,7 @@ class TestVerifyWebsocketSymbols:
 
         Given: WebSocket connection that raises error,
         When: verify_websocket_symbols called,
-        Then: All requested symbols returned as fallback.
+        Then: All requested symbols returned as fallback with empty WS-only.
         """
         ws_symbols = {"BTC/USD"}
 
@@ -828,8 +834,9 @@ class TestVerifyWebsocketSymbols:
         mock_client.subscribe_instruments = error_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            result = await updater.verify_websocket_symbols(ws_symbols)
-        assert result == ws_symbols
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
+        assert verified == ws_symbols
+        assert ws_only == []
 
 
 class TestTokenizedAssetWarnings:
@@ -871,7 +878,7 @@ class TestTokenizedAssetWarnings:
         }
         with (
             patch.object(updater, "load_kraken_rest_symbols", return_value=kraken_rest_symbols),
-            patch.object(updater, "verify_websocket_symbols", return_value=set()),
+            patch.object(updater, "verify_websocket_symbols", return_value=(set(), [])),
         ):
             result, _changed = await updater.build_verified_mappings()
         assert len(result) == 0
@@ -895,7 +902,7 @@ class TestTokenizedAssetWarnings:
         }
         with (
             patch.object(updater, "load_kraken_rest_symbols", return_value=kraken_rest_symbols),
-            patch.object(updater, "verify_websocket_symbols", return_value=set()),
+            patch.object(updater, "verify_websocket_symbols", return_value=(set(), [])),
         ):
             result, _changed = await updater.build_verified_mappings()
         assert len(result) == 0
@@ -941,8 +948,9 @@ class TestWebSocketDisconnectError:
         mock_client.subscribe_instruments = MagicMock(return_value=mock_instrument_iterator())
         mock_client.disconnect_websocket = disconnect_with_error
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            result = await updater.verify_websocket_symbols({"BTC/USD"})
-        assert "BTC/USD" in result
+            verified, ws_only = await updater.verify_websocket_symbols({"BTC/USD"})
+        assert "BTC/USD" in verified
+        assert ws_only == []
 
 
 def _create_mock_settings() -> MagicMock:
@@ -1064,8 +1072,9 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == ws_symbols
+        assert ws_only == []
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_timeout_partial(
@@ -1087,9 +1096,10 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
         assert len(verified) < len(ws_symbols)
+        assert ws_only == []
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_cancelled(
@@ -1136,8 +1146,9 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == ws_symbols
+        assert ws_only == []
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_async_disconnect(
@@ -1162,8 +1173,9 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = mock_async_disconnect
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == ws_symbols
+        assert ws_only == []
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_empty_set_branch(
@@ -1185,8 +1197,9 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == set()
+        assert ws_only == []
 
 
 class TestKrakenBuildVerifiedMappings:
@@ -1223,7 +1236,7 @@ class TestKrakenBuildVerifiedMappings:
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = set()
+            mock_verify.return_value = (set(), [])
             mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 0
 
@@ -1252,7 +1265,7 @@ class TestKrakenBuildVerifiedMappings:
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = set()
+            mock_verify.return_value = (set(), [])
             mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 0
 
@@ -1287,7 +1300,7 @@ class TestKrakenBuildVerifiedMappings:
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = {"BTC/USD"}
+            mock_verify.return_value = ({"BTC/USD"}, [])
             mappings, success = await updater.build_verified_mappings()
             assert len(mappings) == 2
             assert success is False
@@ -1345,7 +1358,7 @@ class TestKrakenBuildVerifiedMappings:
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = {"BTC/USD"}
+            mock_verify.return_value = ({"BTC/USD"}, [])
             mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 1
             assert "BTC-USD" in mappings
@@ -1667,7 +1680,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
 
     @pytest.mark.asyncio
@@ -1691,7 +1704,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
         assert "SOL/USD" not in verified
 
@@ -1715,7 +1728,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
         mock_client = MagicMock(spec=["subscribe_instruments"])
         mock_client.subscribe_instruments = mock_subscribe
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
         assert len(verified) < len(ws_symbols)
 
@@ -1740,7 +1753,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = "not_a_callable_string"
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified = await updater.verify_websocket_symbols(ws_symbols)
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
 
 
@@ -2128,3 +2141,656 @@ class TestKrakenUpdateDatabaseBranches:
             all_aliases = session.query(SymbolAlias).filter_by(native_symbol="BTC-USD").all()
             channels = {a.channel for a in all_aliases}
             assert channels == {"ws", "rest"}
+
+    @pytest.mark.asyncio
+    async def test_update_database_creates_capability_rows(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _update_database creates SymbolExchangeCapability rows.
+
+        Given: Empty database,
+        When: _update_database called with two symbols,
+        Then: Capability row created per symbol with exchange=kraken,
+              can_market_data=True, can_trade=True, source=kraken_updater.
+        """
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
+        symbols = [
+            {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            },
+            {
+                "native_symbol": "ETH-USD",
+                "kraken_websocket_symbol": "ETH/USD",
+                "kraken_rest_symbol": "XETHZUSD",
+                "ccxt_symbol": "ETH/USD",
+                "base_currency": "ETH",
+                "quote_currency": "USD",
+            },
+        ]
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            caps = session.query(SymbolExchangeCapability).all()
+            assert len(caps) == 2
+            cap_map = {c.native_symbol: c for c in caps}
+            for native_symbol in ("BTC-USD", "ETH-USD"):
+                cap = cap_map[native_symbol]
+                assert cap.exchange == "kraken"
+                assert cap.can_market_data is True
+                assert cap.can_trade is True
+                assert cap.source == "kraken_updater"
+                assert cap.reason is None
+
+    @pytest.mark.asyncio
+    async def test_update_database_ws_only_symbol(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify WS-only symbols get one alias and can_trade=False capability.
+
+        Given: Empty database,
+        When: _update_database called with a WS-only symbol,
+        Then: One WS alias created, capability has can_trade=False and reason set.
+        """
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
+        symbols: list[dict[str, Any]] = [
+            {
+                "native_symbol": "BTGOX-USD",
+                "kraken_websocket_symbol": "BTGOx/USD",
+                "kraken_rest_symbol": "",
+                "ccxt_symbol": "",
+                "base_currency": "BTGOx",
+                "quote_currency": "USD",
+                "asset_class": "crypto",
+                "ws_only": "true",
+            }
+        ]
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            aliases = session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD").all()
+            assert len(aliases) == 1
+            assert aliases[0].channel == "ws"
+            assert aliases[0].exchange_symbol == "BTGOx/USD"
+
+            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="BTGOX-USD").one()
+            assert cap.exchange == "kraken"
+            assert cap.can_market_data is True
+            assert cap.can_trade is False
+            assert cap.source == "kraken_updater"
+            assert cap.reason == "WS-only, not in REST markets"
+
+    @pytest.mark.asyncio
+    async def test_update_database_mixed_rest_and_ws_only(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify mixed REST and WS-only symbols are persisted correctly.
+
+        Given: Empty database,
+        When: _update_database called with one REST and one WS-only symbol,
+        Then: REST symbol gets 3 aliases + can_trade=True,
+              WS-only gets 1 alias + can_trade=False.
+        """
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
+        symbols: list[dict[str, Any]] = [
+            {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            },
+            {
+                "native_symbol": "BTGOX-USD",
+                "kraken_websocket_symbol": "BTGOx/USD",
+                "kraken_rest_symbol": "",
+                "ccxt_symbol": "",
+                "base_currency": "BTGOx",
+                "quote_currency": "USD",
+                "asset_class": "crypto",
+                "ws_only": "true",
+            },
+        ]
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            rest_aliases = session.query(SymbolAlias).filter_by(native_symbol="BTC-USD").all()
+            assert len(rest_aliases) == 3
+            rest_cap = (
+                session.query(SymbolExchangeCapability).filter_by(native_symbol="BTC-USD").one()
+            )
+            assert rest_cap.can_trade is True
+
+            ws_aliases = session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD").all()
+            assert len(ws_aliases) == 1
+            ws_cap = (
+                session.query(SymbolExchangeCapability).filter_by(native_symbol="BTGOX-USD").one()
+            )
+            assert ws_cap.can_trade is False
+            assert ws_cap.reason == "WS-only, not in REST markets"
+
+
+class TestKrakenIsTokenizedBase:
+    """Test cases for _is_tokenized_base static method."""
+
+    def test_tokenized_base_mixed_case_trailing_x(self) -> None:
+        """Verify mixed-case base ending in lowercase x is detected as tokenized.
+
+        Given: Base currency ``NVDAx`` (xStock naming convention),
+        When: _is_tokenized_base called,
+        Then: Returns True.
+        """
+        assert KrakenSymbolUpdaterService._is_tokenized_base("NVDAx") is True
+
+    def test_tokenized_base_btgox(self) -> None:
+        """Verify BTGOx is detected as tokenized asset.
+
+        Given: Base currency ``BTGOx``,
+        When: _is_tokenized_base called,
+        Then: Returns True.
+        """
+        assert KrakenSymbolUpdaterService._is_tokenized_base("BTGOx") is True
+
+    def test_standard_crypto_all_uppercase(self) -> None:
+        """Verify standard all-uppercase crypto is not tokenized.
+
+        Given: Base currency ``BTC`` (standard crypto),
+        When: _is_tokenized_base called,
+        Then: Returns False.
+        """
+        assert KrakenSymbolUpdaterService._is_tokenized_base("BTC") is False
+
+    def test_all_uppercase_ending_x(self) -> None:
+        """Verify all-uppercase ticker ending in X is not tokenized.
+
+        Given: Base currency ``HEX`` (all uppercase, ends in X),
+        When: _is_tokenized_base called,
+        Then: Returns False (uppercase X, not lowercase x).
+        """
+        assert KrakenSymbolUpdaterService._is_tokenized_base("HEX") is False
+
+    def test_single_char_x(self) -> None:
+        """Verify single-character ``x`` is not tokenized.
+
+        Given: Single-character base ``x``,
+        When: _is_tokenized_base called,
+        Then: Returns False (too short).
+        """
+        assert KrakenSymbolUpdaterService._is_tokenized_base("x") is False
+
+
+class TestKrakenBuildWsOnlyMapping:
+    """Test cases for _build_ws_only_mapping static method."""
+
+    def test_build_ws_only_mapping_tokenized_asset(self) -> None:
+        """Verify WS-only tokenized asset gets asset_class=tokenized_asset.
+
+        Given: WS-only instrument with mixed-case base ending in x,
+        When: _build_ws_only_mapping called,
+        Then: asset_class is tokenized_asset (not crypto).
+        """
+        instrument = {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+        mapping = KrakenSymbolUpdaterService._build_ws_only_mapping(instrument)
+        assert mapping["native_symbol"] == "BTGOX-USD"
+        assert mapping["kraken_websocket_symbol"] == "BTGOx/USD"
+        assert mapping["kraken_rest_symbol"] == ""
+        assert mapping["ccxt_symbol"] == ""
+        assert mapping["base_currency"] == "BTGOx"
+        assert mapping["quote_currency"] == "USD"
+        assert mapping["asset_class"] == "tokenized_asset"
+        assert mapping["ws_only"] == "true"
+
+    def test_build_ws_only_mapping_standard_crypto(self) -> None:
+        """Verify WS-only standard crypto keeps asset_class=crypto.
+
+        Given: WS-only instrument with all-uppercase base,
+        When: _build_ws_only_mapping called,
+        Then: asset_class remains crypto.
+        """
+        instrument = {"symbol": "SPV/EUR", "base": "SPV", "quote": "EUR"}
+        mapping = KrakenSymbolUpdaterService._build_ws_only_mapping(instrument)
+        assert mapping["native_symbol"] == "SPV-EUR"
+        assert mapping["kraken_websocket_symbol"] == "SPV/EUR"
+        assert mapping["asset_class"] == "crypto"
+
+
+class TestKrakenCollectVerifiedSymbolsWsOnly:
+    """Test cases for WS-only instrument discovery in _collect_verified_symbols."""
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater instance for WS-only collection tests."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    @pytest.mark.asyncio
+    async def test_collect_verified_symbols_discovers_ws_only(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify WS-only instruments are collected alongside verified symbols.
+
+        Given: WS feed with both REST-known and WS-only instruments,
+        When: _collect_verified_symbols called,
+        Then: REST symbols in verified set, WS-only instruments in ws_only list.
+        """
+        ws_symbols = {"BTC/USD"}
+
+        async def mock_subscribe(raw: bool = False) -> Any:
+            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
+            yield {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+
+        mock_client = MagicMock()
+        mock_client.subscribe_instruments = mock_subscribe
+        verified, ws_only = await updater._collect_verified_symbols(mock_client, ws_symbols, 5.0)
+        assert verified == {"BTC/USD"}
+        assert len(ws_only) == 1
+        assert ws_only[0] == {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+
+    @pytest.mark.asyncio
+    async def test_collect_verified_symbols_ws_only_missing_base_quote(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify WS-only instruments without base/quote are skipped.
+
+        Given: WS feed with unknown symbol missing base or quote fields,
+        When: _collect_verified_symbols called,
+        Then: Instrument not added to ws_only list.
+        """
+        ws_symbols = {"BTC/USD"}
+
+        async def mock_subscribe(raw: bool = False) -> Any:
+            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
+            yield {"symbol": "UNKNOWN/X", "base": "", "quote": "USD"}
+            yield {"symbol": "ANOTHER/Y", "base": "FOO", "quote": ""}
+            yield {"symbol": "NOQUOTE/Z"}
+
+        mock_client = MagicMock()
+        mock_client.subscribe_instruments = mock_subscribe
+        verified, ws_only = await updater._collect_verified_symbols(mock_client, ws_symbols, 5.0)
+        assert verified == {"BTC/USD"}
+        assert ws_only == []
+
+    @pytest.mark.asyncio
+    async def test_collect_verified_symbols_multiple_ws_only(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify multiple WS-only instruments are collected.
+
+        Given: WS feed with several WS-only instruments,
+        When: _collect_verified_symbols called,
+        Then: All valid WS-only instruments in ws_only list.
+        """
+        ws_symbols = {"BTC/USD"}
+
+        async def mock_subscribe(raw: bool = False) -> Any:
+            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
+            yield {"symbol": "FOO/USD", "base": "FOO", "quote": "USD"}
+            yield {"symbol": "BAR/EUR", "base": "BAR", "quote": "EUR"}
+
+        mock_client = MagicMock()
+        mock_client.subscribe_instruments = mock_subscribe
+        verified, ws_only = await updater._collect_verified_symbols(mock_client, ws_symbols, 5.0)
+        assert verified == {"BTC/USD"}
+        assert len(ws_only) == 2
+        ws_only_symbols = {w["symbol"] for w in ws_only}
+        assert ws_only_symbols == {"FOO/USD", "BAR/EUR"}
+
+
+class TestKrakenBuildVerifiedMappingsWsOnly:
+    """Test cases for WS-only symbol integration in build_verified_mappings."""
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater instance for WS-only mapping tests."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    @pytest.mark.asyncio
+    async def test_build_verified_mappings_includes_ws_only(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify WS-only symbols are included in final mappings.
+
+        Given: REST returns BTC/USD, WS returns BTC/USD + BTGOx/USD,
+        When: build_verified_mappings called,
+        Then: Mappings contain both BTC-USD (REST) and BTGOX-USD (WS-only).
+        """
+        mock_rest_symbols = {
+            "XXBTZUSD": {
+                "base": "XXBT",
+                "quote": "ZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "asset_class": "currency",
+            }
+        }
+        ws_only_instruments = [
+            {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"},
+        ]
+        with (
+            patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
+            patch.object(
+                updater, "verify_websocket_symbols", new_callable=AsyncMock
+            ) as mock_verify,
+        ):
+            mock_load.return_value = mock_rest_symbols
+            mock_verify.return_value = ({"BTC/USD"}, ws_only_instruments)
+            mappings, success = await updater.build_verified_mappings()
+
+        assert success is True
+        assert "BTC-USD" in mappings
+        assert "BTGOX-USD" in mappings
+        assert mappings["BTGOX-USD"]["ws_only"] == "true"
+        assert mappings["BTGOX-USD"]["kraken_websocket_symbol"] == "BTGOx/USD"
+        assert mappings["BTGOX-USD"]["kraken_rest_symbol"] == ""
+
+    @pytest.mark.asyncio
+    async def test_build_verified_mappings_ws_only_skips_duplicates(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify WS-only symbols that duplicate REST symbols are skipped.
+
+        Given: REST and WS-only both produce same native_symbol,
+        When: build_verified_mappings called,
+        Then: REST mapping kept, WS-only duplicate skipped.
+        """
+        mock_rest_symbols = {
+            "XXBTZUSD": {
+                "base": "XXBT",
+                "quote": "ZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "asset_class": "currency",
+            }
+        }
+        ws_only_instruments = [
+            {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"},
+        ]
+        with (
+            patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
+            patch.object(
+                updater, "verify_websocket_symbols", new_callable=AsyncMock
+            ) as mock_verify,
+        ):
+            mock_load.return_value = mock_rest_symbols
+            mock_verify.return_value = ({"BTC/USD"}, ws_only_instruments)
+            mappings, success = await updater.build_verified_mappings()
+
+        assert success is True
+        assert "BTC-USD" in mappings
+        assert mappings["BTC-USD"].get("ws_only") != "true"
+
+
+class TestKrakenPersistHelpers:
+    """Test cases for _persist_ws_only_symbol and _persist_rest_symbol helpers."""
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater instance for persist helper tests."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    @pytest.fixture
+    def db_session_factory(self) -> sessionmaker:
+        """Create in-memory SQLite session factory with schema."""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine)
+
+    def test_persist_ws_only_symbol_creates_alias_and_capability(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_ws_only_symbol creates WS alias and market-data capability.
+
+        Given: Empty database with catalog entry,
+        When: _persist_ws_only_symbol called,
+        Then: One WS alias + capability with can_trade=False created.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTGOX-USD",
+                    base="BTGOx",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        with db_session_factory() as session:
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "BTGOX-USD",
+                "kraken_websocket_symbol": "BTGOx/USD",
+            }
+            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            session.commit()
+            assert created == 1
+            assert updated == 0
+
+        with db_session_factory() as session:
+            alias = (
+                session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD", channel="ws").one()
+            )
+            assert alias.exchange_symbol == "BTGOx/USD"
+            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="BTGOX-USD").one()
+            assert cap.can_trade is False
+            assert cap.can_market_data is True
+            assert cap.reason == "WS-only, not in REST markets"
+
+    def test_persist_ws_only_symbol_empty_ws_symbol(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_ws_only_symbol skips alias when ws symbol is empty.
+
+        Given: Symbol data with empty kraken_websocket_symbol,
+        When: _persist_ws_only_symbol called,
+        Then: No alias created, capability still created.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="FOO-USD",
+                    base="FOO",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        with db_session_factory() as session:
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "FOO-USD",
+                "kraken_websocket_symbol": "",
+            }
+            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            session.commit()
+            assert created == 0
+            assert updated == 0
+
+        with db_session_factory() as session:
+            aliases = session.query(SymbolAlias).filter_by(native_symbol="FOO-USD").all()
+            assert len(aliases) == 0
+            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="FOO-USD").one()
+            assert cap.can_trade is False
+
+    def test_persist_ws_only_symbol_updates_existing_alias(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_ws_only_symbol updates alias when symbol changes.
+
+        Given: Existing WS alias with old exchange_symbol,
+        When: _persist_ws_only_symbol called with new symbol,
+        Then: Alias updated, updated count incremented.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTGOX-USD",
+                    base="BTGOX",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTGOX-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    exchange_symbol="OLD/USD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        with db_session_factory() as session:
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "BTGOX-USD",
+                "kraken_websocket_symbol": "BTGOx/USD",
+            }
+            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            session.commit()
+            assert created == 0
+            assert updated == 1
+
+        with db_session_factory() as session:
+            alias = (
+                session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD", channel="ws").one()
+            )
+            assert alias.exchange_symbol == "BTGOx/USD"
+
+    def test_persist_ws_only_symbol_unchanged_alias(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_ws_only_symbol returns zero counts when alias unchanged.
+
+        Given: Existing WS alias with identical exchange_symbol,
+        When: _persist_ws_only_symbol called with same symbol,
+        Then: No created or updated counts.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTGOX-USD",
+                    base="BTGOX",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTGOX-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    exchange_symbol="BTGOx/USD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        with db_session_factory() as session:
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "BTGOX-USD",
+                "kraken_websocket_symbol": "BTGOx/USD",
+            }
+            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            session.commit()
+            assert created == 0
+            assert updated == 0
+
+    def test_persist_rest_symbol_creates_three_aliases_and_capability(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_rest_symbol creates ws/rest/ccxt aliases and full capability.
+
+        Given: Empty database with catalog entry,
+        When: _persist_rest_symbol called,
+        Then: Three aliases + capability with can_trade=True created.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        with db_session_factory() as session:
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+            }
+            created, updated = updater._persist_rest_symbol(session, symbol_data, now)
+            session.commit()
+            assert created == 3
+            assert updated == 0
+
+        with db_session_factory() as session:
+            aliases = session.query(SymbolAlias).filter_by(native_symbol="BTC-USD").all()
+            channels = {a.channel for a in aliases}
+            assert channels == {"ws", "rest", "ccxt"}
+            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="BTC-USD").one()
+            assert cap.can_trade is True
+            assert cap.can_market_data is True
+            assert cap.reason is None

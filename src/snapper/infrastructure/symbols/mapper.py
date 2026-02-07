@@ -21,13 +21,32 @@ Example:
     "BTC-USD"
 """
 
+from typing import NamedTuple
+
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
+
+
+class CapabilityInfo(NamedTuple):
+    """Cached capability data for a (native_symbol, exchange) pair.
+
+    Attributes:
+        can_market_data: Whether exchange provides market data for this symbol.
+        can_trade: Whether exchange supports trading this symbol.
+        source: Origin of the capability information.
+        reason: Human-readable explanation for the capability values.
+    """
+
+    can_market_data: bool
+    can_trade: bool
+    source: str | None
+    reason: str | None
 
 
 def _get_bootstrap_settings() -> BootstrapSettingsLoader:
@@ -39,7 +58,7 @@ def _get_bootstrap_settings() -> BootstrapSettingsLoader:
     return BootstrapSettingsLoader()
 
 
-__all__ = ["SymbolMapperService", "make_native_symbol", "NATIVE_SEPARATOR"]
+__all__ = ["SymbolMapperService", "make_native_symbol", "NATIVE_SEPARATOR", "CapabilityInfo"]
 NATIVE_SEPARATOR = "-"
 
 
@@ -177,6 +196,7 @@ class SymbolMapperService:
         self.walutomat_rest_to_native: dict[str, str] = {}
         self.native_to_polygon: dict[str, str] = {}
         self.polygon_to_native: dict[str, str] = {}
+        self.capabilities: dict[tuple[str, str], CapabilityInfo] = {}
         self._cache_loaded = False
         try:
             self.trigger_cache_invalidation(fail_fast=True)
@@ -238,6 +258,53 @@ class SymbolMapperService:
         for exchange, channel, attr_name in _COMPAT_REVERSE:
             setattr(self, attr_name, rev.get((exchange, channel), {}))
 
+    def load_capabilities_from_db(self) -> list[SymbolExchangeCapability]:
+        """Load all symbol exchange capabilities from the database.
+
+        Queries the symbol_exchange_capabilities table. If the table
+        does not exist (before migrations), returns an empty list.
+
+        Returns:
+            List of SymbolExchangeCapability ORM objects.
+
+        Raises:
+            OperationalError: If database error occurs (except missing table).
+        """
+        try:
+            with self.repository.get_session() as session:
+                stmt = select(SymbolExchangeCapability)
+                result = session.execute(stmt)
+                capabilities = result.scalars().all()
+                logger.info(f"Loaded {len(capabilities)} symbol capabilities from database")
+                return list(capabilities)
+        except OperationalError as exc:
+            error_message = str(exc).lower()
+            if "no such table" in error_message and "symbol_exchange_capabilities" in error_message:
+                logger.warning(
+                    "Symbol capabilities table missing; skipping until migrations finish."
+                )
+                return []
+            raise
+
+    def _populate_capabilities_from_rows(
+        self,
+        rows: list[SymbolExchangeCapability],
+    ) -> None:
+        """Populate capabilities cache from database rows.
+
+        Args:
+            rows: List of SymbolExchangeCapability ORM objects.
+        """
+        caps: dict[tuple[str, str], CapabilityInfo] = {}
+        for row in rows:
+            caps[(row.native_symbol, row.exchange)] = CapabilityInfo(
+                can_market_data=row.can_market_data,
+                can_trade=row.can_trade,
+                source=row.source,
+                reason=row.reason,
+            )
+        self.capabilities = caps
+
     def to_exchange(self, native_symbol: str, exchange: str, channel: str) -> str:
         """Convert a native symbol to an exchange-specific format.
 
@@ -279,10 +346,10 @@ class SymbolMapperService:
         return result
 
     def load_cache_if_needed(self, fail_fast: bool = False) -> None:
-        """Load symbol aliases into cache if not already loaded.
+        """Load symbol aliases and capabilities into cache if not already loaded.
 
-        Populates all bidirectional mapping dictionaries from database
-        records.
+        Populates all bidirectional mapping dictionaries and capability
+        cache from database records.
 
         Args:
             fail_fast: If True, re-raise exceptions on load failure.
@@ -293,7 +360,12 @@ class SymbolMapperService:
         try:
             aliases = self.load_mappings_from_db()
             self._populate_maps_from_aliases(aliases)
-            logger.info(f"Loaded symbol maps cache with {len(self.native_to_ws)} native symbols")
+            capabilities = self.load_capabilities_from_db()
+            self._populate_capabilities_from_rows(capabilities)
+            logger.info(
+                f"Loaded symbol maps cache with {len(self.native_to_ws)} native symbols "
+                f"and {len(self.capabilities)} capabilities"
+            )
         except Exception as e:
             logger.error(f"Error loading symbol maps cache: {e}")
             if fail_fast:

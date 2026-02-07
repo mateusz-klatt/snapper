@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.exc import OperationalError
 
+import snapper.infrastructure.symbols.functions as functions
 import snapper.infrastructure.symbols.mapper as symbol_mapper_module
 from snapper.core.types import AllExchange
 from snapper.core.types import MarketSubscribeExchange
@@ -20,6 +21,7 @@ from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaySourceExchange
 from snapper.core.types import TradingExchange
 from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolExchangeCapability
 from snapper.infrastructure.symbols.functions import ccxt_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_exchanges
@@ -32,8 +34,12 @@ from snapper.infrastructure.symbols.functions import get_available_walutomat_res
 from snapper.infrastructure.symbols.functions import get_available_walutomat_symbols
 from snapper.infrastructure.symbols.functions import get_available_ws_symbols
 from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
+from snapper.infrastructure.symbols.functions import get_market_data_symbols
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
 from snapper.infrastructure.symbols.functions import get_replay_source_exchanges
+from snapper.infrastructure.symbols.functions import get_tradeable_symbols
+from snapper.infrastructure.symbols.functions import is_market_data_available
+from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import kraken_rest_to_native
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_ccxt
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
@@ -49,6 +55,7 @@ from snapper.infrastructure.symbols.functions import validate_symbol
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
 from snapper.infrastructure.symbols.functions import walutomat_to_native
 from snapper.infrastructure.symbols.functions import zonda_to_native
+from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
@@ -559,6 +566,7 @@ def _make_mapper_with_empty_cache() -> SymbolMapperService:
     mapper.walutomat_rest_to_native = {}
     mapper.native_to_polygon = {}
     mapper.polygon_to_native = {}
+    mapper.capabilities = {}
     mapper._cache_loaded = False
     mapper.context = None
     mapper.subscriber = None
@@ -1759,3 +1767,371 @@ class TestGetAvailableExchanges:
         assert set(get_args(OrderExchange)).issubset(all_args)
         assert set(get_args(ReplaySourceExchange)).issubset(all_args)
         assert set(get_args(MarketSubscribeExchange)).issubset(all_args)
+
+
+class TestCapabilityInfo:
+    """Tests for CapabilityInfo NamedTuple."""
+
+    def test_capability_info_fields(self) -> None:
+        """Access all fields on CapabilityInfo.
+
+        Given: A CapabilityInfo with all fields set,
+        When: Individual fields are accessed,
+        Then: Each field returns the expected value.
+        """
+        cap = CapabilityInfo(
+            can_market_data=True,
+            can_trade=False,
+            source="kraken_updater",
+            reason="symbol delisted",
+        )
+        assert cap.can_market_data is True
+        assert cap.can_trade is False
+        assert cap.source == "kraken_updater"
+        assert cap.reason == "symbol delisted"
+
+    def test_capability_info_equality(self) -> None:
+        """Two identical CapabilityInfo instances are equal.
+
+        Given: Two CapabilityInfo instances with the same values,
+        When: They are compared with ==,
+        Then: They are equal.
+        """
+        cap_a = CapabilityInfo(True, True, "source_a", None)
+        cap_b = CapabilityInfo(True, True, "source_a", None)
+        assert cap_a == cap_b
+
+
+class TestLoadCapabilitiesFromDb:
+    """Tests for SymbolMapperService.load_capabilities_from_db."""
+
+    @pytest.fixture(autouse=True)
+    def clear_singleton(self) -> None:
+        """Clear singleton instance before each test."""
+        SymbolMapperService.clear_instance()
+
+    def test_load_capabilities_from_db_no_such_table(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Return empty list when capabilities table does not exist.
+
+        Given: Session that raises 'no such table: symbol_exchange_capabilities',
+        When: load_capabilities_from_db is called,
+        Then: Returns empty list.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            error = Exception("no such table: symbol_exchange_capabilities")
+            mock_session.execute.side_effect = OperationalError(
+                "no such table: symbol_exchange_capabilities",
+                params=None,
+                orig=error,
+            )
+            result = mapper.load_capabilities_from_db()
+            assert result == []
+
+    def test_load_capabilities_from_db_other_error_raises(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Propagate non-table-missing operational errors.
+
+        Given: Session that raises 'database is locked' error,
+        When: load_capabilities_from_db is called,
+        Then: Raises OperationalError.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            error = Exception("database is locked")
+            mock_session.execute.side_effect = OperationalError(
+                "database is locked",
+                params=None,
+                orig=error,
+            )
+            with pytest.raises(OperationalError, match="database is locked"):
+                mapper.load_capabilities_from_db()
+
+
+class TestPopulateCapabilitiesFromRows:
+    """Tests for SymbolMapperService._populate_capabilities_from_rows."""
+
+    def test_populate_capabilities_from_rows(self) -> None:
+        """Build capabilities dict from mock capability rows.
+
+        Given: Mock SymbolExchangeCapability objects with known attributes,
+        When: _populate_capabilities_from_rows is called,
+        Then: Mapper capabilities dict is populated with correct keys and values.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        row1 = MagicMock(spec=SymbolExchangeCapability)
+        row1.native_symbol = "BTC-USD"
+        row1.exchange = "kraken"
+        row1.can_market_data = True
+        row1.can_trade = True
+        row1.source = "kraken_updater"
+        row1.reason = None
+        row2 = MagicMock(spec=SymbolExchangeCapability)
+        row2.native_symbol = "ETH-USD"
+        row2.exchange = "polygon"
+        row2.can_market_data = True
+        row2.can_trade = False
+        row2.source = "polygon_updater"
+        row2.reason = "data only"
+        mapper._populate_capabilities_from_rows([row1, row2])
+        assert ("BTC-USD", "kraken") in mapper.capabilities
+        assert ("ETH-USD", "polygon") in mapper.capabilities
+        cap_btc = mapper.capabilities[("BTC-USD", "kraken")]
+        assert cap_btc == CapabilityInfo(True, True, "kraken_updater", None)
+        cap_eth = mapper.capabilities[("ETH-USD", "polygon")]
+        assert cap_eth == CapabilityInfo(True, False, "polygon_updater", "data only")
+        SymbolMapperService.clear_instance()
+
+
+class TestLoadCacheIfNeededCapabilities:
+    """Tests for load_cache_if_needed populating capabilities."""
+
+    def test_load_cache_if_needed_populates_capabilities(self) -> None:
+        """Cache loading populates capabilities alongside alias mappings.
+
+        Given: Mapper with sample aliases and capability rows,
+        When: load_cache_if_needed is called,
+        Then: Both alias maps and capabilities dict are populated.
+        """
+        aliases = [
+            SymbolAlias(
+                native_symbol="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
+            ),
+        ]
+        cap_row = MagicMock(spec=SymbolExchangeCapability)
+        cap_row.native_symbol = "BTC-USD"
+        cap_row.exchange = "kraken"
+        cap_row.can_market_data = True
+        cap_row.can_trade = True
+        cap_row.source = "kraken_updater"
+        cap_row.reason = None
+        mapper = _make_mapper_with_empty_cache()
+        cast(Any, mapper).load_mappings_from_db = MagicMock(return_value=aliases)
+        cast(Any, mapper).load_capabilities_from_db = MagicMock(return_value=[cap_row])
+        mapper._cache_loaded = False
+        _call_original_load_cache_if_needed(mapper)
+        assert mapper.native_to_ws["BTC-USD"] == "BTC/USD"
+        assert ("BTC-USD", "kraken") in mapper.capabilities
+        assert mapper.capabilities[("BTC-USD", "kraken")].can_trade is True
+        SymbolMapperService.clear_instance()
+
+
+class TestCapabilityQueryFunctions:
+    """Tests for capability query functions: is_tradeable, is_market_data_available, etc."""
+
+    def test_is_tradeable_paper_known_symbol_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Paper exchange returns True for symbol that has aliases.
+
+        Given: A symbol that exists in forward maps on paper exchange,
+        When: is_tradeable is called,
+        Then: Returns True.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.forward = {
+            ("kraken", "ws"): {"BTC-USD": "XBT/USD"},
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_tradeable("BTC-USD", "paper") is True
+
+    def test_is_tradeable_paper_unknown_symbol_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Paper exchange returns False for symbol without any aliases.
+
+        Given: A nonexistent symbol on paper exchange,
+        When: is_tradeable is called,
+        Then: Returns False (no aliases exist).
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.forward = {
+            ("kraken", "ws"): {"BTC-USD": "XBT/USD"},
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_tradeable("NONEXISTENT", "paper") is False
+
+    def test_is_tradeable_with_capability_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return True when capability row has can_trade=True.
+
+        Given: Mapper with (BTC-USD, kraken) can_trade=True,
+        When: is_tradeable is called,
+        Then: Returns True.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "kraken"): CapabilityInfo(True, True, "kraken_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_tradeable("BTC-USD", "kraken") is True
+
+    def test_is_tradeable_with_capability_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return False when capability row has can_trade=False.
+
+        Given: Mapper with (BTC-USD, polygon) can_trade=False,
+        When: is_tradeable is called,
+        Then: Returns False.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "polygon"): CapabilityInfo(True, False, "polygon_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_tradeable("BTC-USD", "polygon") is False
+
+    def test_is_tradeable_missing_row_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return False when no capability row exists (default-deny).
+
+        Given: Mapper with no capability for (ETH-USD, kraken),
+        When: is_tradeable is called,
+        Then: Returns False.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {}
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_tradeable("ETH-USD", "kraken") is False
+
+    def test_is_market_data_available_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return True when capability row has can_market_data=True.
+
+        Given: Mapper with (BTC-USD, kraken) can_market_data=True,
+        When: is_market_data_available is called,
+        Then: Returns True.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "kraken"): CapabilityInfo(True, True, "kraken_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_market_data_available("BTC-USD", "kraken") is True
+
+    def test_is_market_data_available_missing_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return False when no capability row exists (default-deny).
+
+        Given: Mapper with no capability for (ETH-USD, polygon),
+        When: is_market_data_available is called,
+        Then: Returns False.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {}
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_market_data_available("ETH-USD", "polygon") is False
+
+    def test_is_market_data_available_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return False when capability row has can_market_data=False.
+
+        Given: Mapper with (BTC-USD, zonda) can_market_data=False,
+        When: is_market_data_available is called,
+        Then: Returns False.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "zonda"): CapabilityInfo(False, True, "zonda_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_market_data_available("BTC-USD", "zonda") is False
+
+    def test_get_tradeable_symbols_kraken(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return sorted tradeable symbols for a live exchange.
+
+        Given: Mapper with capabilities for kraken,
+        When: get_tradeable_symbols('kraken') is called,
+        Then: Returns sorted list of symbols with can_trade=True.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "kraken"): CapabilityInfo(True, True, "kraken_updater", None),
+            ("ETH-USD", "kraken"): CapabilityInfo(True, True, "kraken_updater", None),
+            ("XRP-USD", "kraken"): CapabilityInfo(True, False, "kraken_updater", "restricted"),
+            ("BTC-USD", "polygon"): CapabilityInfo(True, False, "polygon_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        result = get_tradeable_symbols("kraken")
+        assert result == ["BTC-USD", "ETH-USD"]
+
+    def test_get_tradeable_symbols_paper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return union of all forward map keys for paper exchange.
+
+        Given: Mapper with forward maps for multiple exchanges,
+        When: get_tradeable_symbols('paper') is called,
+        Then: Returns sorted union of all forward map keys.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.forward = {
+            ("kraken", "ws"): {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"},
+            ("zonda", "ws"): {"BTC-USD": "BTC-USD"},
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        result = get_tradeable_symbols("paper")
+        assert result == ["BTC-USD", "ETH-USD"]
+
+    def test_get_tradeable_symbols_empty_exchange(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return empty list for exchange with no capabilities.
+
+        Given: Mapper with no capabilities for walutomat,
+        When: get_tradeable_symbols('walutomat') is called,
+        Then: Returns empty list.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "kraken"): CapabilityInfo(True, True, "kraken_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        result = get_tradeable_symbols("walutomat")
+        assert result == []
+
+    def test_get_market_data_symbols(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return sorted market data symbols for an exchange.
+
+        Given: Mapper with capabilities for polygon,
+        When: get_market_data_symbols('polygon') is called,
+        Then: Returns sorted list of symbols with can_market_data=True.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "polygon"): CapabilityInfo(True, False, "polygon_updater", None),
+            ("ETH-USD", "polygon"): CapabilityInfo(True, False, "polygon_updater", None),
+            ("XRP-USD", "polygon"): CapabilityInfo(False, False, "polygon_updater", "removed"),
+            ("BTC-USD", "kraken"): CapabilityInfo(True, True, "kraken_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        result = get_market_data_symbols("polygon")
+        assert result == ["BTC-USD", "ETH-USD"]
+
+    def test_get_market_data_symbols_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Return empty list for exchange with no capabilities.
+
+        Given: Mapper with no capabilities for walutomat,
+        When: get_market_data_symbols('walutomat') is called,
+        Then: Returns empty list.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "kraken"): CapabilityInfo(True, True, "kraken_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        result = get_market_data_symbols("walutomat")
+        assert result == []

@@ -62,6 +62,10 @@ __all__ = [
     "get_replay_source_exchanges",
     "get_available_polygon_rest_symbols",
     "get_available_walutomat_rest_symbols",
+    "is_tradeable",
+    "is_market_data_available",
+    "get_tradeable_symbols",
+    "get_market_data_symbols",
     "_get_db_mapper",
 ]
 
@@ -516,3 +520,90 @@ def get_replay_source_exchanges() -> list[ReplaySourceExchange]:
         Excludes 'paper' — paper is the consumer, not a source.
     """
     return ["kraken", "polygon", "walutomat", "zonda"]
+
+
+def is_tradeable(native_symbol: str, exchange: str) -> bool:
+    """Check if a symbol is tradeable on the given exchange.
+
+    Paper exchange returns True only for symbols that have at least one
+    alias in any forward map (paper has no rows in
+    symbol_exchange_capabilities but can trade any known symbol).
+    For other exchanges, returns False if no capability row exists
+    (default-deny policy).
+
+    Args:
+        native_symbol: Native symbol (e.g., ``BTC-USD``).
+        exchange: Exchange identifier (e.g., ``kraken``, ``paper``).
+
+    Returns:
+        True if the symbol is tradeable on the exchange, False otherwise.
+    """
+    if exchange == "paper":
+        mapper = _get_db_mapper()
+        return any(native_symbol in fwd_map for fwd_map in mapper.forward.values())
+    mapper = _get_db_mapper()
+    cap = mapper.capabilities.get((native_symbol, exchange))
+    if cap is None:
+        return False
+    return cap.can_trade
+
+
+def is_market_data_available(native_symbol: str, exchange: str) -> bool:
+    """Check if market data is available for a symbol on the given exchange.
+
+    Returns False if no capability row exists (default-deny).
+
+    Args:
+        native_symbol: Native symbol (e.g., ``BTC-USD``).
+        exchange: Exchange identifier (e.g., ``kraken``).
+
+    Returns:
+        True if market data is available, False otherwise.
+    """
+    mapper = _get_db_mapper()
+    cap = mapper.capabilities.get((native_symbol, exchange))
+    if cap is None:
+        return False
+    return cap.can_market_data
+
+
+def get_tradeable_symbols(exchange: str) -> list[str]:
+    """Get all tradeable native symbols for an exchange.
+
+    Paper exchange returns all symbols that have any alias
+    (union of all forward map keys).
+
+    Args:
+        exchange: Exchange identifier (e.g., ``kraken``, ``paper``).
+
+    Returns:
+        Sorted list of native symbols tradeable on the exchange.
+    """
+    mapper = _get_db_mapper()
+    if exchange == "paper":
+        all_symbols: set[str] = set()
+        for fwd_map in mapper.forward.values():
+            all_symbols.update(fwd_map.keys())
+        return sorted(all_symbols)
+    return sorted(
+        sym
+        for (sym, exch), cap in mapper.capabilities.items()
+        if exch == exchange and cap.can_trade
+    )
+
+
+def get_market_data_symbols(exchange: str) -> list[str]:
+    """Get all native symbols with market data on an exchange.
+
+    Args:
+        exchange: Exchange identifier (e.g., ``kraken``, ``polygon``).
+
+    Returns:
+        Sorted list of native symbols with market data on the exchange.
+    """
+    mapper = _get_db_mapper()
+    return sorted(
+        sym
+        for (sym, exch), cap in mapper.capabilities.items()
+        if exch == exchange and cap.can_market_data
+    )

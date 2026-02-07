@@ -3580,35 +3580,16 @@ class TestBrokerProxyLoop:
 class TestBaseStrategyValidation:
     """Test suite for BaseStrategy output validation."""
 
-    def test_validate_outputs_unknown_exchange_skips(self) -> None:
-        """Verify unknown exchange skips output validation.
+    def test_validate_outputs_non_tradeable_rejects(self) -> None:
+        """Verify non-tradeable instruments are rejected (fail-fast).
 
-        Given: StrategyConfig with unknown_exchange,
+        Given: StrategyConfig where is_tradeable returns False for outputs,
         When: _validate_output_instruments called,
-        Then: No validation error.
+        Then: ValueError raised with 'not tradeable' message.
         """
-        config = object.__new__(StrategyConfig)
-        config.name = "test"
-        config.strategy_class = "Test"
-        config.inputs = ["market.paper.kraken.BTC-USD.candles.1h"]
-        config.outputs = ["BTC-USD"]
-        config.exchange = "unknown_exchange"
-        config.params = {}
-        config._validate_output_instruments()
-
-    def test_validate_outputs_no_symbols_logs_warning(self) -> None:
-        """Verify empty symbol set logs warning.
-
-        Given: get_available_zonda_symbols returns empty,
-        When: _validate_output_instruments called,
-        Then: 'No symbols loaded' warning logged.
-        """
-        with (
-            patch(
-                "snapper.strategies.models.get_available_zonda_symbols",
-                return_value=set(),
-            ),
-            patch("snapper.strategies.models.logger") as mock_logger,
+        with patch(
+            "snapper.strategies.models.is_tradeable",
+            return_value=False,
         ):
             config = object.__new__(StrategyConfig)
             config.name = "test"
@@ -3617,10 +3598,61 @@ class TestBaseStrategyValidation:
             config.outputs = ["BTC-PLN"]
             config.exchange = "zonda"
             config.params = {}
+            with pytest.raises(ValueError, match="not tradeable on zonda"):
+                config._validate_output_instruments()
+
+    def test_validate_outputs_paper_accepts_known_symbols(self) -> None:
+        """Verify paper exchange accepts symbols that have aliases.
+
+        Given: StrategyConfig with exchange='paper' and known symbol,
+        When: _validate_output_instruments called,
+        Then: No error (symbol exists in forward maps).
+        """
+        config = object.__new__(StrategyConfig)
+        config.name = "test"
+        config.strategy_class = "Test"
+        config.inputs = ["market.paper.kraken.BTC-USD.candles.1h"]
+        config.outputs = ["BTC-USD"]
+        config.exchange = "paper"
+        config.params = {}
+        config._validate_output_instruments()
+
+    def test_validate_outputs_paper_rejects_unknown_symbols(self) -> None:
+        """Verify paper exchange rejects symbols without any aliases.
+
+        Given: StrategyConfig with exchange='paper' and unknown symbol,
+        When: _validate_output_instruments called,
+        Then: ValueError raised.
+        """
+        config = object.__new__(StrategyConfig)
+        config.name = "test"
+        config.strategy_class = "Test"
+        config.inputs = ["market.paper.kraken.ANYTHING-USD.candles.1h"]
+        config.outputs = ["ANYTHING-USD"]
+        config.exchange = "paper"
+        config.params = {}
+        with pytest.raises(ValueError, match="not tradeable on paper"):
             config._validate_output_instruments()
-            assert any(
-                "No symbols loaded" in str(call) for call in mock_logger.warning.call_args_list
-            )
+
+    def test_validate_outputs_all_tradeable_passes(self) -> None:
+        """Verify all-tradeable outputs pass without error.
+
+        Given: StrategyConfig where all outputs are tradeable,
+        When: _validate_output_instruments called,
+        Then: No error raised.
+        """
+        with patch(
+            "snapper.strategies.models.is_tradeable",
+            return_value=True,
+        ):
+            config = object.__new__(StrategyConfig)
+            config.name = "test"
+            config.strategy_class = "Test"
+            config.inputs = ["market.kraken.BTC-USD.candles.1h"]
+            config.outputs = ["BTC-USD"]
+            config.exchange = "kraken"
+            config.params = {}
+            config._validate_output_instruments()
 
 
 class TestBaseStrategyFeedHeartbeat:
@@ -4763,12 +4795,12 @@ async def test_macd_actual_bearish_crossover(
     assert "histogram" in signal.metadata
 
 
-def test_paper_exchange_validates_instruments() -> None:
-    """Verify paper exchange instrument validation.
+def test_paper_exchange_accepts_known_symbols() -> None:
+    """Verify paper exchange accepts symbols that have aliases.
 
-    Given: Paper exchange config,
-    When: Valid or invalid instruments,
-    Then: Accepts valid, rejects invalid.
+    Given: Paper exchange config with known instruments,
+    When: StrategyConfig is created,
+    Then: Config accepted (symbols exist in forward maps).
     """
     config = StrategyConfig(
         name="test_paper",
@@ -4778,12 +4810,21 @@ def test_paper_exchange_validates_instruments() -> None:
         exchange="paper",
     )
     assert config.outputs == ["BTC-USD", "ETH-USD", "EUR-PLN"]
-    with pytest.raises(ValueError, match="Invalid output instruments for Paper"):
+
+
+def test_paper_exchange_rejects_unknown_symbols() -> None:
+    """Verify paper exchange rejects symbols without any aliases.
+
+    Given: Paper exchange config with unknown instrument,
+    When: StrategyConfig is created,
+    Then: ValueError raised.
+    """
+    with pytest.raises(ValueError, match="not tradeable on paper"):
         StrategyConfig(
-            name="test_paper_invalid",
+            name="test_paper_unknown",
             strategy_class="TestStrategy",
-            inputs=["market.paper.kraken.INVALID-SYMBOL.candles"],
-            outputs=["INVALID-SYMBOL"],
+            inputs=["market.paper.kraken.UNKNOWN-SYMBOL.candles"],
+            outputs=["UNKNOWN-SYMBOL"],
             exchange="paper",
         )
 
@@ -4795,7 +4836,7 @@ def test_walutomat_rejects_non_fx_instruments() -> None:
     When: Non-FX instrument (BTC-USD),
     Then: ValueError raised.
     """
-    with pytest.raises(ValueError, match="Invalid output instruments for Walutomat"):
+    with pytest.raises(ValueError, match="not tradeable on walutomat"):
         StrategyConfig(
             name="test_walutomat_invalid",
             strategy_class="TestStrategy",
@@ -4829,7 +4870,7 @@ def test_zonda_rejects_invalid_symbols() -> None:
     When: Invalid pair,
     Then: ValueError raised.
     """
-    with pytest.raises(ValueError, match="Invalid output instruments for Zonda"):
+    with pytest.raises(ValueError, match="not tradeable on zonda"):
         StrategyConfig(
             name="test_zonda_invalid",
             strategy_class="TestStrategy",
@@ -4863,7 +4904,7 @@ def test_kraken_rejects_invalid_symbols() -> None:
     When: Invalid pair,
     Then: ValueError raised.
     """
-    with pytest.raises(ValueError, match="Invalid output instruments for Kraken"):
+    with pytest.raises(ValueError, match="not tradeable on kraken"):
         StrategyConfig(
             name="test_kraken_invalid",
             strategy_class="TestStrategy",
@@ -4897,7 +4938,7 @@ def test_multiple_outputs_all_must_be_valid() -> None:
     When: One is invalid,
     Then: ValueError raised.
     """
-    with pytest.raises(ValueError, match="Invalid output instruments for Kraken"):
+    with pytest.raises(ValueError, match="not tradeable on kraken"):
         StrategyConfig(
             name="test_multi_invalid",
             strategy_class="TestStrategy",

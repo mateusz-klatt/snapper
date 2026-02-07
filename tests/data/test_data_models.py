@@ -16,6 +16,7 @@ from snapper.data.models import Position
 from snapper.data.models import SignalEvent
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
 
@@ -447,6 +448,109 @@ class TestSymbolAliasModel:
         assert alias.exchange == "polygon"
         assert alias.channel == "rest"
         assert alias.exchange_symbol == "X:BTCUSD"
+
+
+class TestSymbolExchangeCapabilityModel:
+    """Tests for SymbolExchangeCapability SQLAlchemy ORM model."""
+
+    def test_capability_tablename(self) -> None:
+        """Test SymbolExchangeCapability tablename is correct.
+
+        Given: SymbolExchangeCapability model class,
+        When: Checking __tablename__,
+        Then: Returns 'symbol_exchange_capabilities'.
+        """
+        assert SymbolExchangeCapability.__tablename__ == "symbol_exchange_capabilities"
+
+    def test_capability_creation_with_all_fields(self) -> None:
+        """Test SymbolExchangeCapability with all fields populated.
+
+        Given: All capability parameters including source and reason,
+        When: SymbolExchangeCapability is created,
+        Then: All fields match provided values.
+        """
+        now = datetime.now(UTC)
+        cap = SymbolExchangeCapability(
+            native_symbol="BTC-USD",
+            exchange="kraken",
+            can_market_data=True,
+            can_trade=True,
+            source="kraken_updater",
+            reason="Listed on exchange ticker list",
+            created_at=now,
+            updated_at=now,
+        )
+        assert cap.native_symbol == "BTC-USD"
+        assert cap.exchange == "kraken"
+        assert cap.can_market_data is True
+        assert cap.can_trade is True
+        assert cap.source == "kraken_updater"
+        assert cap.reason == "Listed on exchange ticker list"
+        assert cap.created_at == now
+        assert cap.updated_at == now
+
+    def test_capability_default_booleans(self) -> None:
+        """Test SymbolExchangeCapability with False boolean flags.
+
+        Given: Capability parameters with both booleans set to False,
+        When: SymbolExchangeCapability is created,
+        Then: Both can_market_data and can_trade are False.
+        """
+        now = datetime.now(UTC)
+        cap = SymbolExchangeCapability(
+            native_symbol="BTC-USD",
+            exchange="zonda",
+            can_market_data=False,
+            can_trade=False,
+            source="seed",
+            reason=None,
+            created_at=now,
+            updated_at=now,
+        )
+        assert cap.can_market_data is False
+        assert cap.can_trade is False
+
+    def test_capability_nullable_source_and_reason(self) -> None:
+        """Test SymbolExchangeCapability with None source and reason.
+
+        Given: Capability parameters with source=None and reason=None,
+        When: SymbolExchangeCapability is created,
+        Then: Source and reason are None.
+        """
+        now = datetime.now(UTC)
+        cap = SymbolExchangeCapability(
+            native_symbol="ETH-USD",
+            exchange="kraken",
+            can_market_data=True,
+            can_trade=False,
+            source=None,
+            reason=None,
+            created_at=now,
+            updated_at=now,
+        )
+        assert cap.source is None
+        assert cap.reason is None
+
+    def test_capability_with_source_and_reason(self) -> None:
+        """Test SymbolExchangeCapability with actual source and reason values.
+
+        Given: Capability parameters with populated source and reason,
+        When: SymbolExchangeCapability is created,
+        Then: Source and reason match provided values.
+        """
+        now = datetime.now(UTC)
+        cap = SymbolExchangeCapability(
+            native_symbol="SOL-USD",
+            exchange="kraken",
+            can_market_data=True,
+            can_trade=True,
+            source="kraken_updater",
+            reason="WS-only, no REST ticker",
+            created_at=now,
+            updated_at=now,
+        )
+        assert cap.source == "kraken_updater"
+        assert cap.reason == "WS-only, no REST ticker"
 
 
 class TestSignalEventModel:

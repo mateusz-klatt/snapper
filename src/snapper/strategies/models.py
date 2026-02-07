@@ -5,8 +5,6 @@ Signal for trade signal emission and StrategyConfig for strategy
 instance configuration.
 """
 
-import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
@@ -14,12 +12,7 @@ from typing import Any
 from snapper.core.types import TradeSide
 from snapper.infrastructure.symbols.functions import TradingExchange
 from snapper.infrastructure.symbols.functions import get_available_exchanges
-from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
-from snapper.infrastructure.symbols.functions import get_available_symbols
-from snapper.infrastructure.symbols.functions import get_available_walutomat_symbols
-from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
-
-logger = logging.getLogger(__name__)
+from snapper.infrastructure.symbols.functions import is_tradeable
 
 
 @dataclass
@@ -43,26 +36,6 @@ class Signal:
     price: float
     timestamp: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-def _get_exchange_instrument_resolver(
-    exchange: str,
-) -> tuple[Callable[[], list[str]], str] | None:
-    """Look up the instrument resolver and label for an exchange.
-
-    Args:
-        exchange: Exchange name to look up.
-
-    Returns:
-        Tuple of (resolver_callable, label) or None if exchange unknown.
-    """
-    resolvers: dict[str, tuple[Callable[[], list[str]], str]] = {
-        "paper": (get_available_symbols, "Paper (all exchanges)"),
-        "walutomat": (get_available_walutomat_symbols, "Walutomat (FX pairs only)"),
-        "zonda": (get_available_zonda_symbols, "Zonda"),
-        "kraken": (get_available_kraken_symbols, "Kraken"),
-    }
-    return resolvers.get(exchange)
 
 
 @dataclass
@@ -134,21 +107,19 @@ class StrategyConfig:
         self._validate_paper_inputs()
 
     def _validate_output_instruments(self) -> None:
-        """Validate that output instruments are valid for the exchange."""
-        resolver = _get_exchange_instrument_resolver(self.exchange)
-        if resolver is None:
-            return
-        get_instruments, exchange_label = resolver
-        valid_instruments = get_instruments()
-        if not valid_instruments:
-            logger.warning(
-                f"Strategy {self.name}: No symbols loaded for {exchange_label}, "
-                "skipping output validation (DB may be empty)"
-            )
-            return
-        invalid_instruments = [inst for inst in self.outputs if inst not in valid_instruments]
-        if invalid_instruments:
+        """Validate that output instruments are tradeable on the configured exchange.
+
+        For live exchanges, each output instrument must have a capability row
+        with ``can_trade=True``. For paper exchange, ``is_tradeable`` checks
+        that the symbol has at least one alias in any forward map (paper has
+        no rows in symbol_exchange_capabilities but can trade any known
+        symbol). An empty tradeable set is treated as a hard error (fail-fast)
+        to prevent strategies from entering trading mode without capability
+        data loaded.
+        """
+        non_tradeable = [inst for inst in self.outputs if not is_tradeable(inst, self.exchange)]
+        if non_tradeable:
             raise ValueError(
-                f"Strategy {self.name}: Invalid output instruments for {exchange_label}: "
-                f"{invalid_instruments}. Valid instruments: {valid_instruments[:20]}..."
+                f"Strategy {self.name}: instruments not tradeable on "
+                f"{self.exchange}: {non_tradeable}"
             )

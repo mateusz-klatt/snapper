@@ -109,8 +109,24 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     created_count += 1
                 elif rest_result == "updated":
                     updated_count += 1
+                self._upsert_capability(
+                    session,
+                    native_symbol,
+                    "walutomat",
+                    True,
+                    True,
+                    "walutomat_updater",
+                    None,
+                    now,
+                )
+            processed_symbols = {s["native_symbol"] for s in symbols}
+            now = datetime.now(UTC)
+            deactivated = self._reconcile_capabilities(
+                session, "walutomat", processed_symbols, "walutomat_updater", now
+            )
             session.commit()
         logger.info(
             f"Walutomat update complete: {created_count} created, "
-            f"{updated_count} updated (total: {len(symbols)})"
+            f"{updated_count} updated, {deactivated} deactivated "
+            f"(total: {len(symbols)})"
         )

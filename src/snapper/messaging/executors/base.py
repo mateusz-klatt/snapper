@@ -31,6 +31,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.symbols.functions import TradingExchange
+from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.schemas import FillStatus
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -367,6 +368,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order: Order request envelope containing order details.
         """
         exchange_name = self._get_exchange_name()
+        if not is_tradeable(order.instrument, exchange_name):
+            logger.warning(
+                f"[{exchange_name}] Rejecting order {order.client_order_id}: "
+                f"instrument {order.instrument} not tradeable"
+            )
+            self.pending_orders.pop(order.client_order_id, None)
+            await self._publish_order_status(order, "rejected")
+            return
         try:
             self.pending_orders[order.client_order_id] = order
             await self._publish_order_status(order, "submitted")

@@ -15,6 +15,7 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 
@@ -273,3 +274,46 @@ def test_get_setting_key_returns_expected_value() -> None:
     """
     updater = ExposedWalutomatSymbolUpdater(update_threshold_hours=1, force=True)
     assert updater.get_setting_key_public() == "walutomat_symbols_last_update"
+
+
+@pytest.mark.asyncio()
+async def test_update_database_creates_capability_rows(
+    updater_with_repository: tuple[ExposedWalutomatSymbolUpdater, DatabaseRepository],
+) -> None:
+    """Verify _update_database creates SymbolExchangeCapability rows.
+
+    Given: Empty database,
+    When: _update_database called with two symbols,
+    Then: Capability row created per symbol with exchange=walutomat,
+          can_market_data=True, can_trade=True, source=walutomat_updater.
+    """
+    updater, repository = updater_with_repository
+    symbols: list[dict[str, Any]] = [
+        {
+            "symbol": "EUR_PLN",
+            "walutomat_rest_symbol": "EURPLN",
+            "native_symbol": "EUR-PLN",
+            "base": "EUR",
+            "quote": "PLN",
+        },
+        {
+            "symbol": "USD_PLN",
+            "walutomat_rest_symbol": "USDPLN",
+            "native_symbol": "USD-PLN",
+            "base": "USD",
+            "quote": "PLN",
+        },
+    ]
+    await updater.update_database_public(symbols)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        caps = session.execute(select(SymbolExchangeCapability)).scalars().all()
+        assert len(caps) == 2
+        cap_map = {c.native_symbol: c for c in caps}
+        for native_symbol in ("EUR-PLN", "USD-PLN"):
+            cap = cap_map[native_symbol]
+            assert cap.exchange == "walutomat"
+            assert cap.can_market_data is True
+            assert cap.can_trade is True
+            assert cap.source == "walutomat_updater"
+            assert cap.reason is None

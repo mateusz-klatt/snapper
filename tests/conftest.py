@@ -62,6 +62,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
+from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.server.rate_limiting import limiter
 
@@ -98,15 +99,22 @@ _SINGLETONS_TO_CLEAR: tuple[type[Any], ...] = (
     WebSocketTokenRotator,
 )
 
-_EXCHANGE_MAP_ATTRS: tuple[tuple[str, str], ...] = (
-    ("native_to_ws", "ws_to_native"),
-    ("native_to_rest", "rest_to_native"),
-    ("native_to_ccxt", "ccxt_to_native"),
-    ("native_to_zonda", "zonda_to_native"),
-    ("native_to_walutomat", "walutomat_to_native"),
-    ("native_to_walutomat_rest", "walutomat_rest_to_native"),
-    ("native_to_polygon", "polygon_to_native"),
+_EXCHANGE_MAP_ATTRS: tuple[tuple[str, str, str, str], ...] = (
+    ("native_to_ws", "ws_to_native", "kraken", "ws"),
+    ("native_to_rest", "rest_to_native", "kraken", "rest"),
+    ("native_to_ccxt", "ccxt_to_native", "kraken", "ccxt"),
+    ("native_to_zonda", "zonda_to_native", "zonda", "ws"),
+    ("native_to_walutomat", "walutomat_to_native", "walutomat", "ws"),
+    ("native_to_walutomat_rest", "walutomat_rest_to_native", "walutomat", "rest"),
+    ("native_to_polygon", "polygon_to_native", "polygon", "rest"),
 )
+
+_TEST_EXCHANGE_CAPABILITIES: dict[str, tuple[bool, bool]] = {
+    "kraken": (True, True),
+    "zonda": (True, True),
+    "walutomat": (True, True),
+    "polygon": (True, False),
+}
 
 _TEST_SYMBOL_MAPPINGS: dict[str, tuple[str | None, ...]] = {
     "BTC-USD": ("BTC/USD", "XXBTZUSD", "BTC/USD", "BTC-USD", None, None, "X:BTCUSD"),
@@ -193,15 +201,29 @@ def _build_mock_settings() -> Mock:
 
 
 def _mock_load_cache_if_needed(self: Any, fail_fast: bool = False) -> None:
-    """Populate symbol mapper cache with test mappings."""
+    """Populate symbol mapper cache with test mappings and capabilities."""
     if self._cache_loaded:
         return
+    seen_caps: set[tuple[str, str]] = set()
     for native, exchange_symbols in _TEST_SYMBOL_MAPPINGS.items():
-        for idx, (fwd_attr, rev_attr) in enumerate(_EXCHANGE_MAP_ATTRS):
+        for idx, (fwd_attr, rev_attr, exchange, channel) in enumerate(_EXCHANGE_MAP_ATTRS):
             exchange_symbol = exchange_symbols[idx]
             if exchange_symbol:
                 getattr(self, fwd_attr)[native] = exchange_symbol
                 getattr(self, rev_attr)[exchange_symbol] = native
+                key = (exchange, channel)
+                self.forward.setdefault(key, {})[native] = exchange_symbol
+                self.reverse.setdefault(key, {})[exchange_symbol] = native
+                cap_key = (native, exchange)
+                if cap_key not in seen_caps:
+                    seen_caps.add(cap_key)
+                    can_md, can_trade = _TEST_EXCHANGE_CAPABILITIES[exchange]
+                    self.capabilities[cap_key] = CapabilityInfo(
+                        can_market_data=can_md,
+                        can_trade=can_trade,
+                        source="test",
+                        reason=None,
+                    )
     self._cache_loaded = True
 
 

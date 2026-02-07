@@ -2854,7 +2854,7 @@ async def test_on_message_instrument_raw_queue_when_parse_fails() -> None:
     client._instrument_queue = asyncio.Queue()
     payload = {"symbol": "BTC/USD", "status": "online"}
     with patch(
-        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument_list",
+        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument",
         side_effect=ValueError("bad mapping"),
     ):
         await client._on_message({"channel": "instrument", "data": {"pairs": [payload]}})
@@ -3316,8 +3316,8 @@ async def test_on_message_instrument_with_dict_having_pairs() -> None:
     client._raw_instrument_queue = asyncio.Queue()
     client._instrument_queue = asyncio.Queue()
     with patch(
-        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument_list",
-        return_value=[],
+        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument",
+        side_effect=ValueError("mocked"),
     ):
         await client._on_message(
             {
@@ -3340,8 +3340,8 @@ async def test_on_message_instrument_with_empty_pairs() -> None:
     client._raw_instrument_queue = asyncio.Queue()
     client._instrument_queue = asyncio.Queue()
     with patch(
-        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument_list",
-        return_value=[],
+        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument",
+        side_effect=ValueError("mocked"),
     ):
         await client._on_message(
             {
@@ -3850,8 +3850,8 @@ class TestKrakenAdditionalCoverage:
             has_index=False,
         )
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument_list",
-            return_value=[sentinel],
+            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_instrument",
+            return_value=sentinel,
         ):
             message = {
                 "channel": "instrument",

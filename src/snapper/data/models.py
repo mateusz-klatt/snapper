@@ -56,6 +56,7 @@ __all__ = [
     "Setting",
     "SymbolCatalog",
     "SymbolAlias",
+    "SymbolExchangeCapability",
     "ProcessRun",
     "InstrumentSpec",
     "MarketSnapshot",
@@ -327,6 +328,61 @@ class SymbolAlias(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime())
     catalog: Mapped["SymbolCatalog"] = relationship(back_populates="aliases")
+
+
+class SymbolExchangeCapability(Base):
+    """Exchange-specific symbol capabilities.
+
+    Separates symbol translation (what format?) from capabilities (what can I
+    do?). Each row declares whether a given native_symbol is tradeable and/or
+    has market data on a specific exchange. Paper exchange is handled as a
+    special case in code and has no rows in this table.
+
+    Attributes:
+        native_symbol: FK to symbol_catalog. Part of composite PK.
+        exchange: Exchange identifier (lowercase). Part of composite PK.
+        can_market_data: Whether exchange provides market data for this symbol.
+        can_trade: Whether exchange supports trading this symbol.
+        source: Origin of the capability information (e.g., updater name).
+        reason: Human-readable explanation for the capability values.
+        created_at: Row creation timestamp (UTC).
+        updated_at: Last modification timestamp (UTC).
+        catalog: Relationship to SymbolCatalog.
+    """
+
+    __tablename__ = "symbol_exchange_capabilities"
+    __table_args__ = (
+        CheckConstraint(
+            "exchange = LOWER(exchange)",
+            name="ck_sec_exchange_lower",
+        ),
+        Index("ix_sec_exchange", "exchange"),
+        Index(
+            "ix_sec_exchange_trade",
+            "exchange",
+            "can_trade",
+            sqlite_where=text("can_trade = 1"),
+        ),
+        Index(
+            "ix_sec_exchange_md",
+            "exchange",
+            "can_market_data",
+            sqlite_where=text("can_market_data = 1"),
+        ),
+    )
+    native_symbol: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("symbol_catalog.native_symbol"),
+        primary_key=True,
+    )
+    exchange: Mapped[str] = mapped_column(String(20), primary_key=True)
+    can_market_data: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    can_trade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    catalog: Mapped["SymbolCatalog"] = relationship()
 
 
 class ProcessRun(Base):

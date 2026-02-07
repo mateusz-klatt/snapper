@@ -181,6 +181,16 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             ticker,
             now,
         )
+        self._upsert_capability(
+            session,
+            native_symbol,
+            "polygon",
+            True,
+            False,
+            "polygon_updater",
+            None,
+            now,
+        )
         if alias_result == "created":
             stats["inserted"] += 1
         elif alias_result == "updated":
@@ -195,6 +205,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         assert self.repository is not None
         stats = {"updated": 0, "inserted": 0, "skipped": 0}
         now = datetime.now(UTC)
+        processed_symbols: set[str] = set()
         try:
             with self.repository.get_session() as session:
                 for symbol_data in symbols:
@@ -209,11 +220,16 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                     self._upsert_polygon_mapping(
                         session, native_symbol, ticker, base, quote, now, stats
                     )
+                    processed_symbols.add(native_symbol)
                     total_processed = stats["updated"] + stats["inserted"]
                     if total_processed % 1000 == 0 and total_processed > 0:
                         session.commit()
                         logger.info(f"Committed batch: {stats}")
+                deactivated = self._reconcile_capabilities(
+                    session, "polygon", processed_symbols, "polygon_updater", now
+                )
                 session.commit()
+                stats["deactivated"] = deactivated
                 logger.info(f"Polygon update complete: {stats}")
         except Exception as e:
             logger.error(f"Error updating database: {e}")

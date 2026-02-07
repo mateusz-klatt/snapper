@@ -102,6 +102,20 @@ SYMBOL_ALIASES = [
     ("GBP-USD", "polygon", "rest", "C:GBPUSD"),
     ("EUR-GBP", "polygon", "rest", "C:EURGBP"),
 ]
+_EXCHANGE_CAPABILITIES: dict[str, tuple[bool, bool]] = {
+    "kraken": (True, True),
+    "polygon": (True, False),
+    "zonda": (True, True),
+    "walutomat": (True, True),
+}
+SYMBOL_CAPABILITIES: list[tuple[str, str, bool, bool]] = []
+_seen_pairs: set[tuple[str, str]] = set()
+for _alias in SYMBOL_ALIASES:
+    _pair = (_alias[0], _alias[1])
+    if _pair not in _seen_pairs:
+        _seen_pairs.add(_pair)
+        _can_md, _can_trade = _EXCHANGE_CAPABILITIES[_alias[1]]
+        SYMBOL_CAPABILITIES.append((_alias[0], _alias[1], _can_md, _can_trade))
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -168,6 +182,36 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_symbol_aliases_native_symbol", "symbol_aliases", ["native_symbol"])
+    op.create_table(
+        "symbol_exchange_capabilities",
+        sa.Column("native_symbol", sa.String(32), nullable=False),
+        sa.Column("exchange", sa.String(20), nullable=False),
+        sa.Column("can_market_data", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("can_trade", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("source", sa.String(50), nullable=True),
+        sa.Column("reason", sa.String(1024), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["native_symbol"], ["symbol_catalog.native_symbol"]),
+        sa.PrimaryKeyConstraint("native_symbol", "exchange"),
+        sa.CheckConstraint(
+            "exchange = LOWER(exchange)",
+            name="ck_sec_exchange_lower",
+        ),
+    )
+    op.create_index("ix_sec_exchange", "symbol_exchange_capabilities", ["exchange"])
+    op.create_index(
+        "ix_sec_exchange_trade",
+        "symbol_exchange_capabilities",
+        ["exchange", "can_trade"],
+        sqlite_where=text("can_trade = 1"),
+    )
+    op.create_index(
+        "ix_sec_exchange_md",
+        "symbol_exchange_capabilities",
+        ["exchange", "can_market_data"],
+        sqlite_where=text("can_market_data = 1"),
+    )
     op.create_table(
         "instruments",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -456,6 +500,23 @@ def upgrade() -> None:
                 "updated_at": now,
             },
         )
+    for cap in SYMBOL_CAPABILITIES:
+        conn.execute(
+            text("""
+                INSERT INTO symbol_exchange_capabilities
+                (native_symbol, exchange, can_market_data, can_trade, source, created_at, updated_at)
+                VALUES (:native_symbol, :exchange, :can_market_data, :can_trade, :source, :created_at, :updated_at)
+                """),
+            {
+                "native_symbol": cap[0],
+                "exchange": cap[1],
+                "can_market_data": cap[2],
+                "can_trade": cap[3],
+                "source": "seed",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
 
 
 def downgrade() -> None:
@@ -476,5 +537,6 @@ def downgrade() -> None:
     op.drop_table("trades")
     op.drop_table("candles")
     op.drop_table("instruments")
+    op.drop_table("symbol_exchange_capabilities")
     op.drop_table("symbol_aliases")
     op.drop_table("symbol_catalog")

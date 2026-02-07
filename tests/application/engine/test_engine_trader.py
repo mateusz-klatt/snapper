@@ -503,6 +503,39 @@ class TestTraderCoverage:
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
+    async def test_on_signal_drops_non_tradeable_instrument(
+        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+    ) -> None:
+        """Verify signal for non-tradeable instrument is dropped.
+
+        Given: TraderCoordinator with is_tradeable returning False,
+        When: Signal arrives for a non-tradeable instrument,
+        Then: Signal is dropped and no engine is created.
+        """
+        mock_settings = MagicMock()
+        mock_settings.instruments = {"kraken": ["BTC-USD"]}
+        mock_settings.db_url = "sqlite:///test.db"
+        mock_get_settings.return_value = mock_settings
+        mock_get_repository.return_value = MagicMock()
+        trader = TraderCoordinator()
+        trader.execution_publisher = MagicMock()
+        signal_msg = SignalEnvelope(
+            strategy_name="test_strategy",
+            instrument="NONTRADEABLE-USD",
+            side="buy",
+            strength=0.8,
+            price=100.0,
+            exchange="kraken",
+            reason="test",
+        )
+        trader._current_topic = "signals.kraken.NONTRADEABLE-USD.live"
+        with patch("snapper.application.engine.trader.is_tradeable", return_value=False):
+            await trader._on_signal(signal_msg)
+        assert "NONTRADEABLE-USD@kraken-live" not in trader.engines
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.engine.trader.get_repository")
+    @patch("snapper.application.engine.trader.get_settings")
     async def test_on_signal_no_execution_publisher(
         self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
     ) -> None:

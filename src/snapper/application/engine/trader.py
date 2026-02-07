@@ -35,6 +35,7 @@ from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.data.repository import get_repository
 from snapper.infrastructure.symbols.functions import TradingExchange
+from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -466,6 +467,12 @@ class TraderCoordinator(RegisterableProcess):
             return
         exchange = cast(TradingExchange, exchange_str)
         instrument = signal.instrument
+        if not is_tradeable(instrument, exchange):
+            logger.warning(
+                f"ZMQTrader: instrument {instrument} not tradeable on {exchange}, "
+                f"dropping signal"
+            )
+            return
         side = signal.side
         strength = signal.strength
         price = signal.price

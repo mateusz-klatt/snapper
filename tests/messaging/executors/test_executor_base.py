@@ -234,6 +234,28 @@ def make_order(**overrides: Any) -> OrderRequestEnvelope:
 
 
 @pytest.mark.asyncio
+async def test_process_order_rejects_non_tradeable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test order rejection when instrument is not tradeable.
+
+    Given: An executor where is_tradeable returns False,
+    When: _process_order is called,
+    Then: Order is rejected before reaching _execute_live_order.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
+    ex.running = True
+    ex._publish_order_status = AsyncMock()
+    ex._execute_live_order = AsyncMock()
+    monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: False)
+    order = make_order(instrument="NONTRADEABLE-USD")
+    await ex._process_order(order)
+    ex._execute_live_order.assert_not_awaited()
+    ex._publish_order_status.assert_awaited_once()
+    rejected_call = ex._publish_order_status.call_args
+    assert rejected_call[0][1] == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test order rejection when execution fails.
 
@@ -247,6 +269,7 @@ async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.Monkey
     ex._publish_fill = AsyncMock()
     ex._publish_order_status = AsyncMock()
     ex._execute_live_order = AsyncMock(side_effect=RuntimeError("fail"))
+    monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
     order = make_order()
     await ex._process_order(order)
     ex._publish_fill.assert_not_awaited()
