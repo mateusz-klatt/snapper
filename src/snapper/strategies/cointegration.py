@@ -9,6 +9,7 @@ from loguru import logger
 
 from snapper.core.types import TradeSide
 from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.topics.builders import parse_market_topic
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
@@ -22,8 +23,8 @@ from snapper.strategies.decorators import register_strategy
     default_config={
         "name": "cointegration_btc_eth",
         "inputs": [
-            "market.paper.BTC-USD.candles.1h",
-            "market.paper.ETH-USD.candles.1h",
+            "market.paper.kraken.BTC-USD.candles.1h",
+            "market.paper.kraken.ETH-USD.candles.1h",
         ],
         "outputs": ["BTC-USD", "ETH-USD"],
         "exchange": "paper",
@@ -89,9 +90,9 @@ class CointegrationPairs(BaseStrategy):
         Returns:
             Extracted instrument symbol.
         """
-        parts = topic.split(".")
-        if len(parts) >= 3:
-            return parts[2]
+        parsed = parse_market_topic(topic)
+        if parsed is not None:
+            return parsed.instrument
         return topic
 
     async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:

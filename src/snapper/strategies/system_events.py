@@ -75,10 +75,10 @@ class SystemMessageRouter:
             f"symbols={heartbeat.meta.get('symbol_count', 0)}"
         )
 
-    def handle_symbol_mappings_update(self) -> None:
-        """Handle symbol_mappings system message by refreshing cache."""
+    def handle_symbol_aliases_update(self) -> None:
+        """Handle symbol_aliases system message by refreshing cache."""
         logger.info(
-            f"Strategy {self.strategy.name}: Received symbol_mappings update, refreshing cache"
+            f"Strategy {self.strategy.name}: Received symbol_aliases update, refreshing cache"
         )
         _get_db_mapper().trigger_cache_invalidation(fail_fast=False)
 

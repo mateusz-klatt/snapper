@@ -1,4 +1,4 @@
-"""Base class for symbol mapping updater services.
+"""Base class for symbol updater services.
 
 Provides common functionality for fetching and persisting exchange symbol
 mappings to the database.
@@ -22,14 +22,16 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.data.models import Setting
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolCatalog
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.schemas.messages import SymbolMappingUpdateEnvelope
+from snapper.messaging.schemas.messages import SymbolAliasUpdateEnvelope
 from snapper.utils.logging import set_log_context
 
 
-class SymbolMappingUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
+class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
     """Base service for updating exchange symbol mappings in the database."""
 
     def __init__(self, update_threshold_hours: int, force: bool = False) -> None:
@@ -99,12 +101,110 @@ class SymbolMappingUpdaterService[T: ExchangeClientBase](RegisterableProcess, AB
         if not self.publisher:
             await self._setup_zmq()
         if self.publisher:
-            envelope = SymbolMappingUpdateEnvelope()
-            topic = "system.symbol_mappings"
+            envelope = SymbolAliasUpdateEnvelope()
+            topic = "system.symbol_aliases"
             await self.publisher.send_multipart(topic, envelope.to_json().encode())
             logger.info(f"Broadcasted cache invalidation: {topic}")
         else:
             logger.warning("ZMQ publisher not available, skipping cache invalidation broadcast")
+
+    @staticmethod
+    def _upsert_catalog(
+        session: Any,
+        native_symbol: str,
+        base: str,
+        quote: str | None,
+        asset_type: str,
+        now: datetime,
+    ) -> bool:
+        """Upsert a SymbolCatalog row.
+
+        Args:
+            session: SQLAlchemy session.
+            native_symbol: Native symbol (PK).
+            base: Base currency code.
+            quote: Quote currency code, or None for equity/index.
+            asset_type: One of crypto, forex, equity, index.
+            now: Current UTC timestamp.
+
+        Returns:
+            True if a new row was created, False if it already existed.
+        """
+        existing = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == native_symbol)
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(
+                SymbolCatalog(
+                    native_symbol=native_symbol,
+                    base=base,
+                    quote=quote,
+                    asset_type=asset_type,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return True
+        changed = False
+        if existing.base != base:
+            existing.base = base
+            changed = True
+        if existing.quote != quote:
+            existing.quote = quote
+            changed = True
+        if existing.asset_type != asset_type:
+            existing.asset_type = asset_type
+            changed = True
+        if changed:
+            existing.updated_at = now
+        return False
+
+    @staticmethod
+    def _upsert_alias(
+        session: Any,
+        native_symbol: str,
+        exchange: str,
+        channel: str,
+        exchange_symbol: str,
+        now: datetime,
+    ) -> str:
+        """Upsert a SymbolAlias row.
+
+        Args:
+            session: SQLAlchemy session.
+            native_symbol: Native symbol (FK to symbol_catalog).
+            exchange: Exchange name (lowercase).
+            channel: Channel type (ws, rest, or ccxt).
+            exchange_symbol: Exchange-specific symbol string.
+            now: Current UTC timestamp.
+
+        Returns:
+            One of ``created``, ``updated``, or ``unchanged``.
+        """
+        existing = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == native_symbol,
+                SymbolAlias.exchange == exchange,
+                SymbolAlias.channel == channel,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(
+                SymbolAlias(
+                    native_symbol=native_symbol,
+                    exchange=exchange,
+                    channel=channel,
+                    exchange_symbol=exchange_symbol,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return "created"
+        if existing.exchange_symbol != exchange_symbol:
+            existing.exchange_symbol = exchange_symbol
+            existing.updated_at = now
+            return "updated"
+        return "unchanged"
 
     def _get_last_update_timestamp(self) -> datetime | None:
         """Retrieve the timestamp of the last symbol mapping update from database.

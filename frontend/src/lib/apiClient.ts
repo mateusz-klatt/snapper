@@ -282,10 +282,11 @@ class APIClient {
   }
   async getCandles(
     instrument: string,
+    exchange: string,
     timeframe: string = '1m',
     limit: number = 100
   ): Promise<CandleSnapshot[]> {
-    const params = new URLSearchParams({ instrument, timeframe, limit: String(limit) })
+    const params = new URLSearchParams({ instrument, exchange, timeframe, limit: String(limit) })
     const response = await this.get(`/api/candles?${params}`)
 
     if (response.status === 204) {
@@ -303,12 +304,17 @@ class APIClient {
   async getOrders(
     symbol?: string,
     limit: number = 100,
-    offset: number = 0
+    offset: number = 0,
+    exchange?: string
   ): Promise<OrderStatus[]> {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
 
     if (symbol) {
       params.set('symbol', symbol)
+    }
+
+    if (exchange) {
+      params.set('exchange', exchange)
     }
 
     const data = await this.getJSON(`/api/orders?${params}`)
@@ -330,7 +336,8 @@ class APIClient {
     strategy?: string,
     limit: number = 100,
     instrument?: string,
-    hours: number = 24
+    hours: number = 24,
+    exchange?: string
   ): Promise<TradingSignal[]> {
     const params = new URLSearchParams({
       limit: String(limit),
@@ -339,9 +346,20 @@ class APIClient {
 
     if (strategy) params.set('strategy', strategy)
     if (instrument) params.set('instrument', instrument)
+    if (exchange) params.set('exchange', exchange)
     const data = await this.getJSON(`/api/signals?${params}`)
 
     return validateResponse(data, z.array(TradingSignalSchema), '/signals')
+  }
+  async getExchanges(): Promise<string[]> {
+    const data = await this.getJSON('/api/exchanges')
+
+    return validateResponse(data, z.array(z.string()), '/exchanges')
+  }
+  async getExchangeInstruments(exchange: string): Promise<string[]> {
+    const data = await this.getJSON(`/api/exchanges/${encodeURIComponent(exchange)}/instruments`)
+
+    return validateResponse(data, z.array(z.string()), `/exchanges/${exchange}/instruments`)
   }
   async getSettings(category?: string): Promise<SettingRead[]> {
     const params = category ? new URLSearchParams({ category }) : ''

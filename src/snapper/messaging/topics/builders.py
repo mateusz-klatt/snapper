@@ -24,8 +24,10 @@ Builder Functions:
     admin_topic: Build admin topic string.
 
 Parser Functions:
+    parse_market_topic: Parse market.* topic into components.
     parse_order_command_topic: Parse orders.commands.* topic into components.
     parse_order_event_topic: Parse orders.events.* topic into components.
+    parse_signal_topic: Parse signals.* topic into components.
 """
 
 from dataclasses import dataclass
@@ -48,6 +50,7 @@ def market_topic(
     instrument: str,
     data_type: MarketDataType,
     timeframe: str | None = None,
+    source_exchange: str | None = None,
 ) -> str:
     """Build a market data topic string.
 
@@ -56,9 +59,11 @@ def market_topic(
         instrument: Trading instrument symbol (e.g., 'BTC-USD').
         data_type: Type of market data ('tick', 'trades', 'book', 'candles').
         timeframe: Candle timeframe (required when data_type is 'candles').
+        source_exchange: Source exchange for paper replay topics.
 
     Returns:
-        Formatted topic string like 'market.kraken.BTC-USD.candles.1m'.
+        Formatted topic string. For paper replay with source exchange,
+        returns 'market.paper.{source_exchange}.{instrument}.{type}[.{timeframe}]'.
 
     Raises:
         ValueError: If timeframe is missing for candles data type.
@@ -68,8 +73,18 @@ def market_topic(
         'market.kraken.BTC-USD.tick'
         >>> market_topic("kraken", "BTC-USD", "candles", "1m")
         'market.kraken.BTC-USD.candles.1m'
+        >>> market_topic("paper", "BTC-USD", "ticks", source_exchange="kraken")
+        'market.paper.kraken.BTC-USD.ticks'
     """
     exchange_str = exchange
+    if exchange_str == "paper":
+        if not source_exchange:
+            raise ValueError("source_exchange is required for paper market topics")
+        if data_type == "candles":
+            if not timeframe:
+                raise ValueError("timeframe is required for candles data type")
+            return f"market.paper.{source_exchange}.{instrument}.candles.{timeframe}"
+        return f"market.paper.{source_exchange}.{instrument}.{data_type}"
     if data_type == "candles":
         if not timeframe:
             raise ValueError("timeframe is required for candles data type")
@@ -179,14 +194,14 @@ def system_topic(topic_type: str) -> str:
     """Build a system topic string.
 
     Args:
-        topic_type: System topic type (e.g., 'symbol_mappings', 'settings').
+        topic_type: System topic type (e.g., 'symbol_aliases', 'settings').
 
     Returns:
-        Formatted topic string like 'system.symbol_mappings'.
+        Formatted topic string like 'system.symbol_aliases'.
 
     Examples:
-        >>> system_topic("symbol_mappings")
-        'system.symbol_mappings'
+        >>> system_topic("symbol_aliases")
+        'system.symbol_aliases'
         >>> system_topic("settings")
         'system.settings'
     """
@@ -264,6 +279,101 @@ class ParsedOrderTopic:
     suffix: str
 
 
+@dataclass(frozen=True, slots=True)
+class ParsedMarketTopic:
+    """Parsed components of a market data topic.
+
+    Attributes:
+        exchange: Main exchange segment (or 'paper' for replay topics).
+        instrument: Instrument symbol from topic.
+        data_type: Market data type (candles/ticks/trades/book/tick).
+        timeframe: Optional timeframe for candles topics.
+        source_exchange: Source exchange for paper replay topics.
+    """
+
+    exchange: str
+    instrument: str
+    data_type: str
+    timeframe: str | None
+    source_exchange: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSignalTopic:
+    """Parsed components of a signal topic."""
+
+    exchange: str
+    instrument: str
+    signal_type: str
+
+
+_MARKET_DATA_TYPES: set[str] = {"tick", "ticks", "trades", "book", "candles"}
+
+
+def _build_market_topic_result(
+    exchange: str,
+    instrument: str,
+    data_type: str,
+    timeframe: str | None,
+    source_exchange: str | None,
+) -> ParsedMarketTopic | None:
+    """Validate parsed market topic fields and build dataclass result."""
+    if not exchange or not instrument or not data_type:
+        return None
+    if data_type not in _MARKET_DATA_TYPES:
+        return None
+    if data_type == "candles" and not timeframe:
+        return None
+    if data_type != "candles" and timeframe is not None:
+        return None
+    return ParsedMarketTopic(
+        exchange=exchange,
+        instrument=instrument,
+        data_type=data_type,
+        timeframe=timeframe,
+        source_exchange=source_exchange,
+    )
+
+
+def parse_market_topic(topic: str) -> ParsedMarketTopic | None:
+    """Parse a market topic into its components.
+
+    Supports two market topic variants:
+    - Live: market.{exchange}.{instrument}.{type}[.{timeframe}]
+    - Paper replay: market.paper.{source_exchange}.{instrument}.{type}[.{timeframe}]
+
+    Args:
+        topic: Full topic string to parse.
+
+    Returns:
+        ParsedMarketTopic on success, None for malformed topics.
+    """
+    parts = topic.split(".")
+    if len(parts) < 4 or parts[0] != "market":
+        return None
+    if parts[1] != "paper":
+        if len(parts) not in (4, 5):
+            return None
+        timeframe = parts[4] if len(parts) == 5 else None
+        return _build_market_topic_result(
+            exchange=parts[1],
+            instrument=parts[2],
+            data_type=parts[3],
+            timeframe=timeframe,
+            source_exchange=None,
+        )
+    if len(parts) not in (5, 6):
+        return None
+    timeframe = parts[5] if len(parts) == 6 else None
+    return _build_market_topic_result(
+        exchange="paper",
+        instrument=parts[3],
+        data_type=parts[4],
+        timeframe=timeframe,
+        source_exchange=parts[2],
+    )
+
+
 def parse_order_command_topic(topic: str) -> ParsedOrderTopic | None:
     """Parse an order command topic into its components.
 
@@ -314,6 +424,27 @@ def parse_order_event_topic(topic: str) -> ParsedOrderTopic | None:
     if parts[0] != "orders" or parts[1] != "events":
         return None
     return ParsedOrderTopic(exchange=parts[2], instrument=parts[3], suffix=parts[4])
+
+
+def parse_signal_topic(topic: str) -> ParsedSignalTopic | None:
+    """Parse a signal topic into its components.
+
+    Valid format: signals.{exchange}.{instrument}.{signal_type}
+
+    Args:
+        topic: Full topic string to parse.
+
+    Returns:
+        ParsedSignalTopic on success, None for malformed topics.
+    """
+    parts = topic.split(".")
+    if len(parts) != 4:
+        return None
+    if parts[0] != "signals":
+        return None
+    if not parts[1] or not parts[2] or not parts[3]:
+        return None
+    return ParsedSignalTopic(exchange=parts[1], instrument=parts[2], signal_type=parts[3])
 
 
 def is_order_topic(topic: str) -> bool:

@@ -557,6 +557,46 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/exchanges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Exchanges
+         * @description Return distinct exchange names from symbol_aliases.
+         */
+        get: Operations["get_exchanges_api_exchanges_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/exchanges/{exchange}/instruments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Exchange Instruments
+         * @description Return distinct native symbols available on a given exchange.
+         */
+        get: Operations["get_exchange_instruments_api_exchanges__exchange__instruments_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orders": {
         parameters: {
             query?: never;
@@ -990,7 +1030,7 @@ export type Components = {
          *         fee_asset: Currency of the fee.
          *         instrument: Trading instrument symbol.
          *         side: Trade side (buy/sell).
-         *         exchange: Exchange name (empty string if not specified).
+         *         exchange: Exchange name.
          */
         ExecutionRecord: {
             /** Id */
@@ -1017,10 +1057,7 @@ export type Components = {
              * @enum {string}
              */
             side: "buy" | "sell";
-            /**
-             * Exchange
-             * @default
-             */
+            /** Exchange */
             exchange: string;
         };
         /** HTTPValidationError */
@@ -1149,7 +1186,7 @@ export type Components = {
          *     Attributes:
          *         id: Unique internal order identifier.
          *         instrument: Trading instrument symbol.
-         *         exchange: Exchange name (empty string if not specified).
+         *         exchange: Exchange name.
          *         client_order_id: Client-assigned order ID.
          *         exchange_order_id: Exchange-assigned order ID.
          *         created_at: Order creation timestamp.
@@ -1167,10 +1204,7 @@ export type Components = {
             id: number;
             /** Instrument */
             instrument: string;
-            /**
-             * Exchange
-             * @default
-             */
+            /** Exchange */
             exchange: string;
             /** Client Order Id */
             client_order_id: string | null;
@@ -1216,7 +1250,7 @@ export type Components = {
          *     Attributes:
          *         id: Unique position identifier.
          *         instrument: Trading instrument symbol.
-         *         exchange: Exchange name (empty string if not specified).
+         *         exchange: Exchange name.
          *         quantity: Position size (positive for long, negative for short).
          *         average_price: Average entry price.
          *         unrealized_pnl: Unrealized profit/loss.
@@ -1228,10 +1262,7 @@ export type Components = {
             id: number;
             /** Instrument */
             instrument: string;
-            /**
-             * Exchange
-             * @default
-             */
+            /** Exchange */
             exchange: string;
             /** Quantity */
             quantity: number;
@@ -1812,7 +1843,7 @@ export type Components = {
          *     Attributes:
          *         id: Unique signal identifier.
          *         instrument: Trading instrument symbol.
-         *         exchange: Exchange name (empty string if not specified).
+         *         exchange: Exchange name.
          *         timestamp: When the signal was generated.
          *         side: Trade direction (buy/sell).
          *         strength: Signal strength (0.0-1.0).
@@ -1825,10 +1856,7 @@ export type Components = {
             id: number;
             /** Instrument */
             instrument: string;
-            /**
-             * Exchange
-             * @default
-             */
+            /** Exchange */
             exchange: string;
             /**
              * Timestamp
@@ -2776,6 +2804,8 @@ export interface Operations {
             query: {
                 /** @description Instrument symbol */
                 instrument: string;
+                /** @description Exchange name */
+                exchange: string;
                 /** @description Timeframe */
                 timeframe: string;
                 /** @description Number of candles to return */
@@ -2814,6 +2844,8 @@ export interface Operations {
                 instrument?: string | null;
                 /** @description Filter by strategy */
                 strategy?: string | null;
+                /** @description Filter by exchange */
+                exchange?: string | null;
                 /** @description Hours of history to return */
                 hours?: number;
                 /** @description Number of signals to return */
@@ -2845,11 +2877,64 @@ export interface Operations {
             };
         };
     };
+    get_exchanges_api_exchanges_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string[];
+                };
+            };
+        };
+    };
+    get_exchange_instruments_api_exchanges__exchange__instruments_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                exchange: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string[];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_orders_api_orders_get: {
         parameters: {
             query?: {
                 /** @description Symbol to filter by */
                 symbol?: string | null;
+                /** @description Filter by exchange */
+                exchange?: string | null;
                 /** @description Number of orders to return */
                 limit?: number;
                 /** @description Number of orders to skip */

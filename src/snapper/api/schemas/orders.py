@@ -20,7 +20,7 @@ class OrderStatus(StrictApiSchema):
     Attributes:
         id: Unique internal order identifier.
         instrument: Trading instrument symbol.
-        exchange: Exchange name (empty string if not specified).
+        exchange: Exchange name.
         client_order_id: Client-assigned order ID.
         exchange_order_id: Exchange-assigned order ID.
         created_at: Order creation timestamp.
@@ -36,7 +36,7 @@ class OrderStatus(StrictApiSchema):
 
     id: int
     instrument: str
-    exchange: str = ""
+    exchange: str
     client_order_id: str | None
     exchange_order_id: str | None
     created_at: datetime

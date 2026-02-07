@@ -231,7 +231,7 @@ class TestCreateApiRouter:
         mock_instrument.id = 1
         mock_instrument.symbol = "BTC-USD"
         mock_inst_result = MagicMock()
-        mock_inst_result.scalar_one_or_none.return_value = mock_instrument
+        mock_inst_result.scalars.return_value.first.return_value = mock_instrument
         mock_candle = MagicMock(spec=Candle)
         mock_candle.timeframe = "1h"
         mock_candle.timestamp = datetime(2023, 1, 1, 12, 0)
@@ -252,7 +252,9 @@ class TestCreateApiRouter:
                 return mock_candles_result
 
         mock_session.execute = mock_execute
-        response = self.client.get("/api/candles?instrument=BTC-USD&timeframe=1h&limit=10")
+        response = self.client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=10"
+        )
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -291,7 +293,7 @@ class TestCreateApiRouter:
         mock_instrument.id = 1
         mock_instrument.symbol = "BTC-USD"
         mock_inst_result = MagicMock()
-        mock_inst_result.scalar_one_or_none.return_value = mock_instrument
+        mock_inst_result.scalars.return_value.first.return_value = mock_instrument
         mock_candles_result = MagicMock()
         mock_candles_result.scalars.return_value.all.return_value = []
 
@@ -302,7 +304,9 @@ class TestCreateApiRouter:
                 return mock_candles_result
 
         mock_session.execute = mock_execute
-        response = self.client.get("/api/candles?instrument=BTC-USD&timeframe=1h&limit=10")
+        response = self.client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=10"
+        )
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -330,13 +334,13 @@ class TestCreateApiRouter:
         mock_repo.session.return_value = mock_session_context
         mock_get_repo.return_value = mock_repo
         mock_inst_result = MagicMock()
-        mock_inst_result.scalar_one_or_none.return_value = None
+        mock_inst_result.scalars.return_value.first.return_value = None
 
         async def mock_execute(query: Any) -> Any:
             return mock_inst_result
 
         mock_session.execute = mock_execute
-        response = self.client.get("/api/candles?instrument=INVALID&timeframe=1h")
+        response = self.client.get("/api/candles?instrument=INVALID&exchange=kraken&timeframe=1h")
         assert response.status_code == 204
         assert response.content == b""
 
@@ -883,7 +887,7 @@ class TestCandlesEndpointWithErrors:
             mock_session.__aexit__ = AsyncMock()
             mock_repo.session.return_value = mock_session
             mock_get_repo.return_value = mock_repo
-            response = client.get("/api/candles?instrument=BTC-USD&timeframe=1h")
+            response = client.get("/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h")
             assert response.status_code == 500
             assert "Failed to fetch candle data" in response.json()["detail"]
 
@@ -1121,10 +1125,11 @@ class TestAppCoverageImprovement:
 class MockInstrument:
     """Mock instrument for testing endpoint responses."""
 
-    def __init__(self, inst_id: int = 1, symbol: str = "BTC-USD") -> None:
+    def __init__(self, inst_id: int = 1, symbol: str = "BTC-USD", exchange: str = "kraken") -> None:
         """Initialize the instance."""
         self.id = inst_id
         self.symbol = symbol
+        self.exchange = exchange
 
 
 class MockOrderRecord:
@@ -1134,7 +1139,6 @@ class MockOrderRecord:
         """Initialize the instance."""
         self.id = 1
         self.instrument_id = 1
-        self.exchange = "kraken"
         self.client_order_id = "client_123"
         self.exchange_order_id = "exch_456"
         self.created_at = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
@@ -1155,7 +1159,6 @@ class MockSignalEvent:
         """Initialize the instance."""
         self.id = 1
         self.instrument_id = 1
-        self.exchange = "kraken"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.side = "buy"
         self.strength = 0.8
@@ -1171,7 +1174,6 @@ class MockExecution:
         """Initialize the instance."""
         self.id = 1
         self.order_id = 1
-        self.exchange = "kraken"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 1, tzinfo=dt.UTC)
         self.price = 50000.0
         self.size = 1.0
@@ -1186,7 +1188,6 @@ class MockPosition:
         """Initialize the instance."""
         self.id = 1
         self.instrument_id = 1
-        self.exchange = "kraken"
         self.quantity = 1.5
         self.average_price = 48000.0
         self.unrealized_pnl = 3000.0
@@ -1568,6 +1569,154 @@ class TestSystemStatusProcessError:
         assert data["strategies"][0]["status"] == "running"
 
 
+class TestSignalsExchangeFilter:
+    """Tests for signals endpoint exchange filtering."""
+
+    def test_get_signals_with_exchange_filter(self) -> None:
+        """Verify signals endpoint filters by exchange.
+
+        Given: Repository with signal records for a specific exchange,
+        When: GET /signals is called with exchange filter,
+        Then: Response contains only matching signals.
+        """
+        signal = MockSignalEvent()
+        instrument = MockInstrument()
+        repo = MockRepository(session_result=[(signal, instrument)])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/signals?exchange=kraken")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["exchange"] == "kraken"
+
+
+class TestOrdersExchangeFilter:
+    """Tests for orders endpoint exchange filtering."""
+
+    def test_get_orders_with_exchange_filter(self) -> None:
+        """Verify orders endpoint filters by exchange.
+
+        Given: Repository with order records for a specific exchange,
+        When: GET /orders is called with exchange filter,
+        Then: Response contains only matching orders.
+        """
+        order = MockOrderRecord()
+        instrument = MockInstrument()
+        repo = MockRepository(session_result=[(order, instrument)])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/orders?exchange=kraken")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["exchange"] == "kraken"
+
+
+class MockSymbolAlias:
+    """Mock symbol alias for testing exchange discovery endpoints."""
+
+    def __init__(self, exchange: str = "kraken", native_symbol: str = "BTC-USD") -> None:
+        """Initialize the instance."""
+        self.id = 1
+        self.exchange = exchange
+        self.native_symbol = native_symbol
+        self.channel = "ws"
+        self.exchange_symbol = "XXBTZUSD"
+
+
+class TestExchangesEndpoint:
+    """Tests for exchanges discovery endpoint."""
+
+    def test_get_exchanges_returns_list(self) -> None:
+        """Verify exchanges endpoint returns distinct exchange names.
+
+        Given: Repository with symbol alias records,
+        When: GET /exchanges is called,
+        Then: Response contains distinct exchange names as strings.
+        """
+        repo = MockRepository(session_result=["kraken", "zonda"])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert "kraken" in data
+        assert "zonda" in data
+
+    def test_get_exchanges_empty(self) -> None:
+        """Verify exchanges endpoint returns empty list when no data.
+
+        Given: Repository with no symbol alias records,
+        When: GET /exchanges is called,
+        Then: Response is 200 with empty list.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == []
+
+    def test_get_exchanges_handles_database_error(self) -> None:
+        """Verify exchanges endpoint returns 500 on database error.
+
+        Given: A repository that raises database exception,
+        When: GET /exchanges is called,
+        Then: Response is 500 with error detail.
+        """
+        repo = MockRepository(error=Exception("Database connection failed"))
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges")
+        assert response.status_code == 500
+        assert "Failed to fetch exchanges" in response.json()["detail"]
+
+
+class TestExchangeInstrumentsEndpoint:
+    """Tests for exchange instruments discovery endpoint."""
+
+    def test_get_exchange_instruments_returns_list(self) -> None:
+        """Verify instruments endpoint returns native symbols for exchange.
+
+        Given: Repository with symbol alias records for an exchange,
+        When: GET /exchanges/kraken/instruments is called,
+        Then: Response contains native symbol strings.
+        """
+        repo = MockRepository(session_result=["BTC-USD", "ETH-USD"])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges/kraken/instruments")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert "BTC-USD" in data
+        assert "ETH-USD" in data
+
+    def test_get_exchange_instruments_empty(self) -> None:
+        """Verify instruments endpoint returns empty list for unknown exchange.
+
+        Given: Repository with no symbol alias records for the exchange,
+        When: GET /exchanges/unknown/instruments is called,
+        Then: Response is 200 with empty list.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges/unknown/instruments")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == []
+
+    def test_get_exchange_instruments_handles_database_error(self) -> None:
+        """Verify instruments endpoint returns 500 on database error.
+
+        Given: A repository that raises database exception,
+        When: GET /exchanges/kraken/instruments is called,
+        Then: Response is 500 with error detail.
+        """
+        repo = MockRepository(error=Exception("Database connection failed"))
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges/kraken/instruments")
+        assert response.status_code == 500
+        assert "Failed to fetch instruments" in response.json()["detail"]
+
+
 class TestCandlesHttpExceptionReraise:
     """Tests for candles endpoint HTTP exception propagation."""
 
@@ -1598,7 +1747,7 @@ class TestCandlesHttpExceptionReraise:
             mock_session.__aexit__ = AsyncMock()
             mock_repo.session.return_value = mock_session
             mock_get_repo.return_value = mock_repo
-            response = client.get("/api/candles?instrument=BTC-USD&timeframe=1h")
+            response = client.get("/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h")
             assert response.status_code == 403
             assert "Forbidden" in response.json()["detail"]
 

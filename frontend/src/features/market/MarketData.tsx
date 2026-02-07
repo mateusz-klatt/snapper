@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { Card, Button, LoadingSpinner } from '../../components/ui'
 import { LightweightChart } from '../../components/LightweightChart'
-import { useCandles } from '../../hooks/queries'
+import { useCandles, useExchanges, useExchangeInstruments } from '../../hooks/queries'
 import { useMarketStore } from '../../stores/market'
 import { useAppStore } from '../../stores/app'
 import * as Select from '@radix-ui/react-select'
@@ -24,30 +24,26 @@ const timeframes = [
   { value: '4h', label: '4 Hours' },
   { value: '1d', label: '1 Day' },
 ]
-const instruments = [
-  { value: 'EUR-USD', label: 'EUR-USD' },
-  { value: 'GBP-USD', label: 'GBP-USD' },
-  { value: 'USD-JPY', label: 'USD-JPY' },
-  { value: 'USD-CHF', label: 'USD-CHF' },
-  { value: 'AUD-USD', label: 'AUD-USD' },
-  { value: 'USD-CAD', label: 'USD-CAD' },
-  { value: 'NZD-USD', label: 'NZD-USD' },
-  { value: 'EUR-JPY', label: 'EUR-JPY' },
-  { value: 'GBP-JPY', label: 'GBP-JPY' },
-  { value: 'EUR-GBP', label: 'EUR-GBP' },
-]
 
 export function MarketData() {
-  const { selectedInstrument, selectedTimeframe, setSelectedInstrument, setSelectedTimeframe } =
-    useMarketStore()
+  const {
+    selectedExchange,
+    selectedInstrument,
+    selectedTimeframe,
+    setSelectedExchange,
+    setSelectedInstrument,
+    setSelectedTimeframe,
+  } = useMarketStore()
   const { isConnected } = useAppStore()
+  const { data: exchanges } = useExchanges()
+  const { data: instruments } = useExchangeInstruments(selectedExchange)
   const {
     data: candles,
     isLoading,
     error,
     isFetching,
     refetch,
-  } = useCandles(selectedInstrument || 'EUR-USD', selectedTimeframe)
+  } = useCandles(selectedInstrument ?? '', selectedExchange ?? '', selectedTimeframe)
   const chartData: FormattedCandle[] = useMemo(() => {
     if (!candles || isFetching) return []
     const sortedCandles = [...candles].sort((a, b) => {
@@ -131,18 +127,15 @@ export function MarketData() {
       {}
       <div className='flex items-center space-x-4'>
         <div className='flex items-center space-x-2'>
-          <label htmlFor='instrument-select' className='text-sm font-medium text-dark-300'>
-            Instrument:
+          <label htmlFor='exchange-select' className='text-sm font-medium text-dark-300'>
+            Exchange:
           </label>
-          <Select.Root
-            value={selectedInstrument || 'EUR-USD'}
-            onValueChange={setSelectedInstrument}
-          >
+          <Select.Root value={selectedExchange ?? undefined} onValueChange={setSelectedExchange}>
             <Select.Trigger
-              id='instrument-select'
+              id='exchange-select'
               className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
             >
-              <Select.Value />
+              <Select.Value placeholder='Select exchange' />
               <Select.Icon className='ml-2'>
                 <ChevronDownIcon size={16} />
               </Select.Icon>
@@ -150,13 +143,48 @@ export function MarketData() {
             <Select.Portal>
               <Select.Content className='overflow-hidden bg-dark-800 rounded-md shadow-lg border border-dark-600'>
                 <Select.Viewport className='p-1'>
-                  {instruments.map(instrument => (
+                  {(exchanges ?? []).map(ex => (
                     <Select.Item
-                      key={instrument.value}
-                      value={instrument.value}
+                      key={ex}
+                      value={ex}
                       className='flex select-none items-center px-3 py-2 text-sm text-white rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
                     >
-                      <Select.ItemText>{instrument.label}</Select.ItemText>
+                      <Select.ItemText>{ex}</Select.ItemText>
+                    </Select.Item>
+                  ))}
+                </Select.Viewport>
+              </Select.Content>
+            </Select.Portal>
+          </Select.Root>
+        </div>
+        <div className='flex items-center space-x-2'>
+          <label htmlFor='instrument-select' className='text-sm font-medium text-dark-300'>
+            Instrument:
+          </label>
+          <Select.Root
+            value={selectedInstrument ?? undefined}
+            onValueChange={setSelectedInstrument}
+            disabled={!selectedExchange}
+          >
+            <Select.Trigger
+              id='instrument-select'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50'
+            >
+              <Select.Value placeholder='Select instrument' />
+              <Select.Icon className='ml-2'>
+                <ChevronDownIcon size={16} />
+              </Select.Icon>
+            </Select.Trigger>
+            <Select.Portal>
+              <Select.Content className='overflow-hidden bg-dark-800 rounded-md shadow-lg border border-dark-600'>
+                <Select.Viewport className='p-1'>
+                  {(instruments ?? []).map(inst => (
+                    <Select.Item
+                      key={inst}
+                      value={inst}
+                      className='flex select-none items-center px-3 py-2 text-sm text-white rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
+                    >
+                      <Select.ItemText>{inst}</Select.ItemText>
                     </Select.Item>
                   ))}
                 </Select.Viewport>

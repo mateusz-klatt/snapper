@@ -161,7 +161,7 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub.settings.timeframes = []
     pub.settings.zmq_heartbeat_interval_ms = 0
     pub._heartbeat_loop = AsyncMock()
-    pub._symbol_mappings_loop = AsyncMock()
+    pub._symbol_aliases_loop = AsyncMock()
     pub._tick_loop = AsyncMock()
     pub._trade_loop = AsyncMock()
     pub._candle_loop = AsyncMock()
@@ -338,10 +338,10 @@ async def test_publish_heartbeat_when_running() -> None:
 
 
 @pytest.mark.asyncio
-async def test_symbol_mappings_loop_invokes_invalidation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test symbol mappings loop invalidates cache.
+async def test_symbol_aliases_loop_invokes_invalidation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test symbol aliases loop invalidates cache.
 
-    Given: A publisher receiving symbol mapping update,
+    Given: A publisher receiving symbol alias update,
     When: Update message arrives,
     Then: Symbol cache is invalidated.
     """
@@ -353,7 +353,7 @@ async def test_symbol_mappings_loop_invokes_invalidation(monkeypatch: pytest.Mon
         nonlocal calls
         calls += 1
         if calls == 1:
-            return "system.symbol_mappings", b"{}"
+            return "system.symbol_aliases", b"{}"
         pub.running = False
         await asyncio.sleep(0)
         return "noop", b"{}"
@@ -363,7 +363,7 @@ async def test_symbol_mappings_loop_invokes_invalidation(monkeypatch: pytest.Mon
     pub.running = True
     invalidate_mock = AsyncMock()
     monkeypatch.setattr(pub, "_invalidate_symbol_cache", invalidate_mock)
-    await pub._symbol_mappings_loop()
+    await pub._symbol_aliases_loop()
     invalidate_mock.assert_awaited_once()
 
 
@@ -483,7 +483,7 @@ async def test_start_handles_cancelled_tasks(monkeypatch: pytest.MonkeyPatch) ->
         return None
 
     pub._heartbeat_loop = noop
-    pub._symbol_mappings_loop = noop
+    pub._symbol_aliases_loop = noop
     pub._tick_loop = noop
     pub._trade_loop = noop
     pub._candle_loop = noop
@@ -694,8 +694,8 @@ async def test_save_to_db_logs_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_symbol_mappings_loop_without_subscriber() -> None:
-    """Test symbol mappings loop without subscriber.
+async def test_symbol_aliases_loop_without_subscriber() -> None:
+    """Test symbol aliases loop without subscriber.
 
     Given: A publisher without subscriber,
     When: Symbol mappings loop is called,
@@ -703,12 +703,12 @@ async def test_symbol_mappings_loop_without_subscriber() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    await pub._symbol_mappings_loop()
+    await pub._symbol_aliases_loop()
 
 
 @pytest.mark.asyncio
-async def test_symbol_mappings_loop_outer_exception() -> None:
-    """Test symbol mappings loop handles outer exception.
+async def test_symbol_aliases_loop_outer_exception() -> None:
+    """Test symbol aliases loop handles outer exception.
 
     Given: A publisher with failing running check,
     When: Exception raised in loop,
@@ -722,7 +722,7 @@ async def test_symbol_mappings_loop_outer_exception() -> None:
             raise RuntimeError("boom")
 
     pub.running = Boom()
-    await pub._symbol_mappings_loop()
+    await pub._symbol_aliases_loop()
 
 
 def test_init_warns_when_no_symbols() -> None:
@@ -908,10 +908,10 @@ async def test_save_to_db_uses_cached_instrument() -> None:
 
 
 @pytest.mark.asyncio
-async def test_symbol_mappings_loop_retries_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify symbol mappings loop retries after error.
+async def test_symbol_aliases_loop_retries_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify symbol aliases loop retries after error.
 
-    Given a publisher running the symbol mappings loop,
+    Given a publisher running the symbol aliases loop,
     When recv_multipart raises a RuntimeError,
     Then the loop retries after sleeping.
     """
@@ -931,7 +931,7 @@ async def test_symbol_mappings_loop_retries_on_error(monkeypatch: pytest.MonkeyP
 
     subscriber.recv_multipart.side_effect = recv
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
-    await pub._symbol_mappings_loop()
+    await pub._symbol_aliases_loop()
     assert calls == 2
 
 
@@ -1047,10 +1047,10 @@ async def test_heartbeat_loop_breaks_after_sleep(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_symbol_mappings_loop_handles_timeout() -> None:
-    """Verify symbol mappings loop handles timeout gracefully.
+async def test_symbol_aliases_loop_handles_timeout() -> None:
+    """Verify symbol aliases loop handles timeout gracefully.
 
-    Given a publisher running the symbol mappings loop,
+    Given a publisher running the symbol aliases loop,
     When recv_multipart raises a TimeoutError,
     Then the loop continues without crashing.
     """
@@ -1069,11 +1069,11 @@ async def test_symbol_mappings_loop_handles_timeout() -> None:
         return ("noop", b"{}")
 
     subscriber.recv_multipart.side_effect = recv
-    await pub._symbol_mappings_loop()
+    await pub._symbol_aliases_loop()
 
 
 @pytest.mark.asyncio
-async def test_symbol_mappings_loop_handles_settings_update(
+async def test_symbol_aliases_loop_handles_settings_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify symbol mappings loop processes settings updates.
@@ -1103,7 +1103,7 @@ async def test_symbol_mappings_loop_handles_settings_update(
     pub.running = True
     handle_mock = AsyncMock()
     monkeypatch.setattr(pub, "_handle_settings_update", handle_mock)
-    await pub._symbol_mappings_loop()
+    await pub._symbol_aliases_loop()
     handle_mock.assert_awaited_once()
 
 
@@ -1240,7 +1240,7 @@ class TestFeedPublisherCoverage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         with (
             patch.object(publisher, "_heartbeat_loop", new=AsyncMock()),
-            patch.object(publisher, "_symbol_mappings_loop", new=AsyncMock()),
+            patch.object(publisher, "_symbol_aliases_loop", new=AsyncMock()),
             patch(
                 "snapper.application.services.settings.zmq.asyncio.Context",
                 return_value=mock_context,
@@ -1656,15 +1656,15 @@ class TestFeedPublisherCoverage:
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
     @patch("snapper.infrastructure.symbols.mapper.SymbolMapperService.get_instance")
-    async def test_symbol_mappings_loop_refreshes_cache(
+    async def test_symbol_aliases_loop_refreshes_cache(
         self,
         mock_get_instance: MagicMock,
         mock_get_settings: MagicMock,
     ) -> None:
-        """Verify symbol mappings loop refreshes cache.
+        """Verify symbol aliases loop refreshes cache.
 
         Given: A running publisher with symbol mapper,
-        When: _symbol_mappings_loop receives message,
+        When: _symbol_aliases_loop receives message,
         Then: Cache invalidation is triggered.
         """
         mock_settings = MagicMock()
@@ -1678,10 +1678,10 @@ class TestFeedPublisherCoverage:
 
         async def recv_stub() -> tuple[str, bytes]:
             publisher_any.running = False
-            return ("system.symbol_mappings", b"{}")
+            return ("system.symbol_aliases", b"{}")
 
         publisher_any.subscriber = SimpleNamespace(recv_multipart=recv_stub)
-        await publisher_any._symbol_mappings_loop()
+        await publisher_any._symbol_aliases_loop()
         mock_db_mapper.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
 
 
@@ -1745,6 +1745,7 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     assert repo.instrument_calls == [
         {
             "symbol": "EUR-USD",
+            "exchange": "kraken",
             "base": "EUR",
             "quote": "USD",
             "tick_size": 0.0,

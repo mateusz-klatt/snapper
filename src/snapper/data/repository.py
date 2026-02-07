@@ -47,6 +47,7 @@ from urllib.parse import urlencode
 from loguru import logger
 from sqlalchemy import and_
 from sqlalchemy import create_engine as create_sync_engine
+from sqlalchemy import event
 from sqlalchemy import insert
 from sqlalchemy import select
 from sqlalchemy import update
@@ -86,6 +87,24 @@ __all__ = [
 ]
 
 
+_INSTRUMENT_COLUMNS = frozenset(c.key for c in Instrument.__table__.columns if c.key != "id")
+
+
+def _filter_instrument_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Strip kwargs not in the Instrument model columns.
+
+    Callers may pass tick_size / lot_size which were moved to
+    InstrumentSpec; silently drop them so Instrument(**kwargs) works.
+
+    Args:
+        kwargs: Raw keyword arguments from callers.
+
+    Returns:
+        Filtered dict containing only valid Instrument column keys.
+    """
+    return {k: v for k, v in kwargs.items() if k in _INSTRUMENT_COLUMNS}
+
+
 class Repository(ABC):
     """Abstract base class defining the repository interface.
 
@@ -119,7 +138,7 @@ class Repository(ABC):
 
     @abstractmethod
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument, returning its ID."""
+        """Insert or retrieve instrument by (symbol, exchange), returning its ID."""
         ...
 
     @abstractmethod
@@ -170,20 +189,27 @@ class Repository(ABC):
         size: float,
         fee: float,
         fee_asset: str,
+        exec_id: str | None = None,
+        trade_id: str | None = None,
     ) -> int:
         """Insert execution record, returning execution ID."""
         ...
 
     @abstractmethod
     async def get_candles(
-        self, instrument: str, timeframe: str, start: datetime, end: datetime
+        self,
+        instrument: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        exchange: str,
     ) -> list[dict[str, Any]]:
         """Retrieve candles for instrument in time range."""
         ...
 
     @abstractmethod
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime
+        self, instrument: str, start: datetime, end: datetime, exchange: str
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument in time range."""
         ...
@@ -194,6 +220,25 @@ class Repository(ABC):
     ) -> list[dict[str, Any]]:
         """Retrieve market snapshots for symbols in time range."""
         ...
+
+
+def _register_sqlite_fk_pragma(engine: Any) -> None:
+    """Register PRAGMA foreign_keys=ON for every new SQLite connection.
+
+    SQLite disables foreign-key enforcement by default; this event
+    listener ensures it is enabled on each connection.
+
+    Args:
+        engine: Sync or async-sync SQLAlchemy engine to register on.
+    """
+    if not isinstance(engine, SyncEngine):
+        return
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_fk(dbapi_connection: Any, _connection_record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 class SQLAlchemyRepository(Repository):
@@ -230,6 +275,8 @@ class SQLAlchemyRepository(Repository):
         self.engine: AsyncEngine = create_async_engine(
             db_url, future=True, connect_args=connect_args, poolclass=poolclass
         )
+        if "sqlite" in db_url:
+            _register_sqlite_fk_pragma(self.engine.sync_engine)
         self.session_factory = async_sessionmaker(
             self.engine, expire_on_commit=False, class_=AsyncSession
         )
@@ -257,21 +304,34 @@ class SQLAlchemyRepository(Repository):
                 raise
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument by symbol, returning its ID."""
+        """Insert or retrieve instrument by (symbol, exchange), returning its ID."""
+        filtered = _filter_instrument_kwargs(kwargs)
+        exchange = filtered["exchange"]
         async with self.session() as s:
-            q = await s.execute(select(Instrument).where(Instrument.symbol == kwargs["symbol"]))
+            q = await s.execute(
+                select(Instrument).where(
+                    and_(Instrument.symbol == kwargs["symbol"], Instrument.exchange == exchange)
+                )
+            )
             inst = q.scalar_one_or_none()
             if inst is None:
-                inst = Instrument(**kwargs)
+                inst = Instrument(**filtered)
                 s.add(inst)
                 try:
                     await s.commit()
-                except IntegrityError:
+                except IntegrityError as exc:
                     await s.rollback()
                     q2 = await s.execute(
-                        select(Instrument).where(Instrument.symbol == kwargs["symbol"])
+                        select(Instrument).where(
+                            and_(
+                                Instrument.symbol == kwargs["symbol"],
+                                Instrument.exchange == exchange,
+                            )
+                        )
                     )
-                    inst = q2.scalar_one()
+                    inst = q2.scalar_one_or_none()
+                    if inst is None:
+                        raise exc
                 await s.refresh(inst)
                 return int(inst.id)
             else:
@@ -418,11 +478,15 @@ class SQLAlchemyRepository(Repository):
         size: float,
         fee: float,
         fee_asset: str,
+        exec_id: str | None = None,
+        trade_id: str | None = None,
     ) -> int:
         """Insert execution record and return generated ID."""
         async with self.session() as s:
             execution = Execution(
                 order_id=order_id,
+                exec_id=exec_id,
+                trade_id=trade_id,
                 timestamp=timestamp,
                 price=price,
                 size=size,
@@ -435,12 +499,21 @@ class SQLAlchemyRepository(Repository):
             return int(execution.id)
 
     async def get_candles(
-        self, instrument: str, timeframe: str, start: datetime, end: datetime
+        self,
+        instrument: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        exchange: str,
     ) -> list[dict[str, Any]]:
         """Retrieve candles for instrument within time range."""
         async with self.session() as s:
-            q_inst = await s.execute(select(Instrument).where(Instrument.symbol == instrument))
-            inst = q_inst.scalar_one_or_none()
+            q_inst = await s.execute(
+                select(Instrument).where(
+                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                )
+            )
+            inst = q_inst.scalars().first()
             if inst is None:
                 return []
             q = await s.execute(
@@ -482,12 +555,16 @@ class SQLAlchemyRepository(Repository):
             ]
 
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime
+        self, instrument: str, start: datetime, end: datetime, exchange: str
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument within time range."""
         async with self.session() as s:
-            q_inst = await s.execute(select(Instrument).where(Instrument.symbol == instrument))
-            inst = q_inst.scalar_one_or_none()
+            q_inst = await s.execute(
+                select(Instrument).where(
+                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                )
+            )
+            inst = q_inst.scalars().first()
             if inst is None:
                 return []
             q = await s.execute(
@@ -717,23 +794,36 @@ class MSSQLRepository(Repository):
         raise NotImplementedError("MSSQLRepository session() not implemented for server use")
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument via sync thread."""
+        """Insert or retrieve instrument by (symbol, exchange) via sync thread."""
+        filtered = _filter_instrument_kwargs(kwargs)
+        exchange = filtered["exchange"]
 
         def _work() -> int:
             with self.session_factory() as s:
-                q = s.execute(select(Instrument).where(Instrument.symbol == kwargs["symbol"]))
+                q = s.execute(
+                    select(Instrument).where(
+                        and_(Instrument.symbol == kwargs["symbol"], Instrument.exchange == exchange)
+                    )
+                )
                 inst = q.scalar_one_or_none()
                 if inst is None:
-                    inst = Instrument(**kwargs)
+                    inst = Instrument(**filtered)
                     s.add(inst)
                     try:
                         s.commit()
-                    except IntegrityError:
+                    except IntegrityError as exc:
                         s.rollback()
                         q2 = s.execute(
-                            select(Instrument).where(Instrument.symbol == kwargs["symbol"])
+                            select(Instrument).where(
+                                and_(
+                                    Instrument.symbol == kwargs["symbol"],
+                                    Instrument.exchange == exchange,
+                                )
+                            )
                         )
-                        inst = q2.scalar_one()
+                        inst = q2.scalar_one_or_none()
+                        if inst is None:
+                            raise exc
                     s.refresh(inst)
                     return int(inst.id)
                 else:
@@ -858,6 +948,8 @@ class MSSQLRepository(Repository):
         size: float,
         fee: float,
         fee_asset: str,
+        exec_id: str | None = None,
+        trade_id: str | None = None,
     ) -> int:
         """Insert execution record via sync thread."""
 
@@ -865,6 +957,8 @@ class MSSQLRepository(Repository):
             with self.session_factory() as s:
                 execution = Execution(
                     order_id=order_id,
+                    exec_id=exec_id,
+                    trade_id=trade_id,
                     timestamp=timestamp,
                     price=price,
                     size=size,
@@ -879,14 +973,23 @@ class MSSQLRepository(Repository):
         return await asyncio.to_thread(_work)
 
     async def get_candles(
-        self, instrument: str, timeframe: str, start: datetime, end: datetime
+        self,
+        instrument: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        exchange: str,
     ) -> list[dict[str, Any]]:
         """Retrieve candles via sync thread."""
 
         def _work() -> list[dict[str, Any]]:
             with self.session_factory() as s:
-                q_inst = s.execute(select(Instrument).where(Instrument.symbol == instrument))
-                inst = q_inst.scalar_one_or_none()
+                q_inst = s.execute(
+                    select(Instrument).where(
+                        and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                    )
+                )
+                inst = q_inst.scalars().first()
                 if inst is None:
                     return []
                 q = s.execute(
@@ -930,14 +1033,18 @@ class MSSQLRepository(Repository):
         return await asyncio.to_thread(_work)
 
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime
+        self, instrument: str, start: datetime, end: datetime, exchange: str
     ) -> list[dict[str, Any]]:
         """Retrieve trades via sync thread."""
 
         def _work() -> list[dict[str, Any]]:
             with self.session_factory() as s:
-                q_inst = s.execute(select(Instrument).where(Instrument.symbol == instrument))
-                inst = q_inst.scalar_one_or_none()
+                q_inst = s.execute(
+                    select(Instrument).where(
+                        and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                    )
+                )
+                inst = q_inst.scalars().first()
                 if inst is None:
                     return []
                 q = s.execute(
@@ -1027,6 +1134,8 @@ class DatabaseRepository:
         """
         self.db_url = self._convert_to_sync_url(db_url)
         self.engine: SyncEngine = create_sync_engine(self.db_url, future=True)
+        if "sqlite" in self.db_url:
+            _register_sqlite_fk_pragma(self.engine)
         self.session_factory = sync_sessionmaker(
             self.engine, expire_on_commit=False, class_=SyncSession
         )

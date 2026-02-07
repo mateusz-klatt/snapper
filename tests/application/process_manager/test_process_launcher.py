@@ -752,7 +752,7 @@ class TestStartProcessByName:
         mock_setting = MagicMock()
         mock_setting.value = json.dumps(
             {
-                "class": "snapper.services.symbol_mapping_updater.SymbolMappingUpdaterService",
+                "class": "snapper.services.symbol_updater.SymbolUpdaterService",
                 "method": "start",
                 "mode": "thread",
                 "args": [],
@@ -773,7 +773,7 @@ class TestStartProcessByName:
         settings = MagicMock()
         settings.db_url = "sqlite:///:memory:"
         factory = ProcessLauncherService(settings)
-        result = await factory.start_process_by_name("symbol_mapping_updater")
+        result = await factory.start_process_by_name("symbol_updater")
         assert result["status"] == "success"
         assert "executed successfully" in result["message"]
         updated_config = json.loads(mock_setting.value)

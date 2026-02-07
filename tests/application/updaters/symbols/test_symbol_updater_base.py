@@ -1,4 +1,4 @@
-"""Tests for symbol mapping updater base class."""
+"""Tests for symbol updater base class."""
 
 import json
 from collections.abc import AsyncIterator
@@ -15,8 +15,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from snapper.application.updaters.symbols.base import SymbolMappingUpdaterService
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import Setting
+from snapper.data.models import SymbolCatalog
 from snapper.data.repository import DatabaseRepository
 
 
@@ -54,8 +55,8 @@ class DummyExchangeClient:
             yield payload
 
 
-class DummySymbolMappingUpdater(SymbolMappingUpdaterService[Any]):
-    """Concrete implementation of SymbolMappingUpdaterService for testing."""
+class DummySymbolUpdater(SymbolUpdaterService[Any]):
+    """Concrete implementation of SymbolUpdaterService for testing."""
 
     def __init__(self, update_threshold_hours: int, *, force: bool = False) -> None:
         """Initialize the instance."""
@@ -71,7 +72,7 @@ class DummySymbolMappingUpdater(SymbolMappingUpdaterService[Any]):
         return DummyExchangeClient(self._client_symbols)
 
     def _get_setting_key(self) -> str:
-        return "test_symbol_mapping_last_update"
+        return "test_symbols_last_update"
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         self.updated_payloads.append(symbols)
@@ -145,11 +146,11 @@ class StubContext:
 @pytest.fixture()
 def updater_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-) -> Callable[[int, bool], DummySymbolMappingUpdater]:
+) -> Callable[[int, bool], DummySymbolUpdater]:
     """Provide factory function for creating test updater instances."""
     created_repositories: list[DatabaseRepository] = []
 
-    def factory(update_threshold_hours: int, force: bool = False) -> DummySymbolMappingUpdater:
+    def factory(update_threshold_hours: int, force: bool = False) -> DummySymbolUpdater:
         db_path = tmp_path / f"symbols_{len(created_repositories)}.sqlite"
         settings = DummySettings(
             db_url=f"sqlite:///{db_path}",
@@ -162,7 +163,7 @@ def updater_factory(
             "snapper.application.updaters.symbols.base.get_settings",
             lambda settings=settings: settings,
         )
-        updater = DummySymbolMappingUpdater(update_threshold_hours, force=force)
+        updater = DummySymbolUpdater(update_threshold_hours, force=force)
         repository = DatabaseRepository(settings.db_url)
         repository.create_all()
         updater.repository = repository
@@ -178,7 +179,7 @@ def updater_factory(
 
 
 def test_get_last_update_timestamp_returns_none_when_missing(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify get_last_update_timestamp returns None when no setting.
 
@@ -191,7 +192,7 @@ def test_get_last_update_timestamp_returns_none_when_missing(
 
 
 def test_set_last_update_timestamp_creates_setting(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify set_last_update_timestamp creates new setting.
 
@@ -206,14 +207,14 @@ def test_set_last_update_timestamp_creates_setting(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         setting = session.execute(
-            select(Setting).where(Setting.key == "test_symbol_mapping_last_update")
+            select(Setting).where(Setting.key == "test_symbols_last_update")
         ).scalar_one()
     assert setting.value == timestamp.isoformat()
     assert setting.updated_at == timestamp
 
 
 def test_get_last_update_timestamp_handles_invalid_value(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify get_last_update_timestamp returns None for invalid value.
 
@@ -227,7 +228,7 @@ def test_get_last_update_timestamp_handles_invalid_value(
         assert isinstance(session, Session)
         session.add(
             Setting(
-                key="test_symbol_mapping_last_update",
+                key="test_symbols_last_update",
                 value="not-a-timestamp",
                 category="system",
                 description="Invalid value for testing",
@@ -239,7 +240,7 @@ def test_get_last_update_timestamp_handles_invalid_value(
 
 
 def test_should_update_returns_true_when_force_enabled(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify should_update returns True when force enabled.
 
@@ -252,7 +253,7 @@ def test_should_update_returns_true_when_force_enabled(
 
 
 def test_should_update_returns_false_when_recently_updated(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify should_update returns False when recently updated.
 
@@ -267,7 +268,7 @@ def test_should_update_returns_false_when_recently_updated(
 
 
 def test_should_update_returns_true_when_threshold_elapsed(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify should_update returns True when threshold elapsed.
 
@@ -282,7 +283,7 @@ def test_should_update_returns_true_when_threshold_elapsed(
 
 
 def test_should_update_returns_true_when_never_updated(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify should_update returns True when never updated.
 
@@ -296,7 +297,7 @@ def test_should_update_returns_true_when_never_updated(
 
 @pytest.mark.asyncio()
 async def test_fetch_symbols_collects_async_generator(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify _fetch_symbols collects all items from async generator.
 
@@ -317,7 +318,7 @@ async def test_fetch_symbols_collects_async_generator(
 
 @pytest.mark.asyncio()
 async def test_setup_and_cleanup_zmq_manage_resources(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify ZMQ setup creates context/socket and cleanup releases them.
@@ -353,7 +354,7 @@ async def test_setup_and_cleanup_zmq_manage_resources(
 
 @pytest.mark.asyncio()
 async def test_broadcast_cache_invalidation_uses_socket(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify broadcast_cache_invalidation sends message via socket.
@@ -372,16 +373,16 @@ async def test_broadcast_cache_invalidation_uses_socket(
     await updater.broadcast_cache_invalidation()
     assert socket.sent_multipart, "Expected broadcast message to be sent"
     topic, payload = socket.sent_multipart[0]
-    assert topic == "system.symbol_mappings"
+    assert topic == "system.symbol_aliases"
     payload_data = json.loads(payload.decode("utf-8"))
-    assert payload_data["event"] == "symbol_mappings_updated"
+    assert payload_data["event"] == "symbol_aliases_updated"
     assert payload_data["action"] == "clear_cache"
     assert "timestamp" in payload_data
 
 
 @pytest.mark.asyncio()
 async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify broadcast_cache_invalidation skips setup when publisher exists.
@@ -404,14 +405,14 @@ async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
     assert setup_called is False
     assert socket.sent_multipart, "Expected broadcast message when publisher present"
     topic, payload = socket.sent_multipart[0]
-    assert topic == "system.symbol_mappings"
+    assert topic == "system.symbol_aliases"
     payload_data = json.loads(payload.decode("utf-8"))
-    assert payload_data["event"] == "symbol_mappings_updated"
+    assert payload_data["event"] == "symbol_aliases_updated"
 
 
 @pytest.mark.asyncio()
 async def test_cleanup_safe_when_no_resources(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify _cleanup_zmq is safe when no resources allocated.
 
@@ -427,7 +428,7 @@ async def test_cleanup_safe_when_no_resources(
 
 @pytest.mark.asyncio()
 async def test_start_skips_update_when_not_needed(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify start skips update when threshold not elapsed.
@@ -464,7 +465,7 @@ async def test_start_skips_update_when_not_needed(
 
 @pytest.mark.asyncio()
 async def test_start_performs_full_update_workflow(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify start performs complete update workflow.
@@ -532,7 +533,7 @@ async def test_start_performs_full_update_workflow(
     with repo_ref.get_session() as session:
         assert isinstance(session, Session)
         setting = session.execute(
-            select(Setting).where(Setting.key == "test_symbol_mapping_last_update")
+            select(Setting).where(Setting.key == "test_symbols_last_update")
         ).scalar_one_or_none()
     assert setting is not None
     last_update = datetime.fromisoformat(setting.value.replace("Z", "+00:00"))
@@ -541,7 +542,7 @@ async def test_start_performs_full_update_workflow(
 
 @pytest.mark.asyncio()
 async def test_start_cleans_up_on_exception(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify start cleans up resources on exception.
@@ -599,7 +600,7 @@ async def test_start_cleans_up_on_exception(
 
 @pytest.mark.asyncio()
 async def test_start_handles_repository_initialization_failure(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify start handles repository initialization failure.
@@ -640,7 +641,7 @@ async def test_start_handles_repository_initialization_failure(
 
 @pytest.mark.asyncio()
 async def test_setup_zmq_skips_when_already_setup(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify _setup_zmq skips when already initialized.
@@ -670,7 +671,7 @@ async def test_setup_zmq_skips_when_already_setup(
 
 @pytest.mark.asyncio()
 async def test_broadcast_cache_invalidation_handles_missing_publisher(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify broadcast_cache_invalidation handles missing publisher.
@@ -690,7 +691,7 @@ async def test_broadcast_cache_invalidation_handles_missing_publisher(
 
 @pytest.mark.asyncio()
 async def test_set_last_update_timestamp_updates_existing(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify set_last_update_timestamp updates existing setting.
 
@@ -708,7 +709,7 @@ async def test_set_last_update_timestamp_updates_existing(
         assert isinstance(session, Session)
         settings = list(
             session.execute(
-                select(Setting).where(Setting.key == "test_symbol_mapping_last_update")
+                select(Setting).where(Setting.key == "test_symbols_last_update")
             ).scalars()
         )
     assert len(settings) == 1
@@ -716,7 +717,7 @@ async def test_set_last_update_timestamp_updates_existing(
 
 
 def test_set_last_update_timestamp_raises_on_repository_error(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify set_last_update_timestamp propagates repository errors.
 
@@ -736,7 +737,7 @@ def test_set_last_update_timestamp_raises_on_repository_error(
 
 
 def test_get_last_update_timestamp_returns_none_for_null_value(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify get_last_update_timestamp returns None for 'null' value.
 
@@ -750,7 +751,7 @@ def test_get_last_update_timestamp_returns_none_for_null_value(
         assert isinstance(session, Session)
         session.add(
             Setting(
-                key="test_symbol_mapping_last_update",
+                key="test_symbols_last_update",
                 value="null",
                 category="system",
                 description="Null value for testing",
@@ -762,7 +763,7 @@ def test_get_last_update_timestamp_returns_none_for_null_value(
 
 
 def test_get_last_update_timestamp_returns_none_for_empty_value(
-    updater_factory: Callable[[int, bool], DummySymbolMappingUpdater],
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify get_last_update_timestamp returns None for empty value.
 
@@ -776,7 +777,7 @@ def test_get_last_update_timestamp_returns_none_for_empty_value(
         assert isinstance(session, Session)
         session.add(
             Setting(
-                key="test_symbol_mapping_last_update",
+                key="test_symbols_last_update",
                 value="",
                 category="system",
                 description="Empty value for testing",
@@ -785,3 +786,199 @@ def test_get_last_update_timestamp_returns_none_for_empty_value(
         )
         session.commit()
     assert updater.get_last_update_timestamp_public() is None
+
+
+def test_upsert_catalog_creates_new_entry(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify _upsert_catalog creates new catalog entry when none exists.
+
+    Given: Empty database,
+    When: _upsert_catalog called with new native_symbol,
+    Then: New SymbolCatalog row created and True returned.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    now = datetime(2024, 6, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result = SymbolUpdaterService._upsert_catalog(
+            session, "BTC-USD", "BTC", "USD", "crypto", now
+        )
+        session.commit()
+    assert result is True
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        ).scalar_one()
+    assert catalog.base == "BTC"
+    assert catalog.quote == "USD"
+    assert catalog.asset_type == "crypto"
+
+
+def test_upsert_catalog_updates_base_currency(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify _upsert_catalog updates base currency when changed.
+
+    Given: Existing catalog entry with base=BTC,
+    When: _upsert_catalog called with base=XBT,
+    Then: Base updated to XBT and updated_at refreshed.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    original_time = datetime(2024, 1, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_time,
+                updated_at=original_time,
+            )
+        )
+        session.commit()
+    update_time = datetime(2024, 6, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result = SymbolUpdaterService._upsert_catalog(
+            session, "BTC-USD", "XBT", "USD", "crypto", update_time
+        )
+        session.commit()
+    assert result is False
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        ).scalar_one()
+    assert catalog.base == "XBT"
+    assert catalog.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+
+
+def test_upsert_catalog_updates_quote_currency(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify _upsert_catalog updates quote currency when changed.
+
+    Given: Existing catalog entry with quote=USD,
+    When: _upsert_catalog called with quote=USDT,
+    Then: Quote updated to USDT and updated_at refreshed.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    original_time = datetime(2024, 1, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_time,
+                updated_at=original_time,
+            )
+        )
+        session.commit()
+    update_time = datetime(2024, 6, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result = SymbolUpdaterService._upsert_catalog(
+            session, "BTC-USD", "BTC", "USDT", "crypto", update_time
+        )
+        session.commit()
+    assert result is False
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        ).scalar_one()
+    assert catalog.quote == "USDT"
+    assert catalog.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+
+
+def test_upsert_catalog_updates_asset_type(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify _upsert_catalog updates asset_type when changed.
+
+    Given: Existing catalog entry with asset_type=crypto,
+    When: _upsert_catalog called with asset_type=forex,
+    Then: Asset type updated to forex and updated_at refreshed.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    original_time = datetime(2024, 1, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolCatalog(
+                native_symbol="EUR-USD",
+                base="EUR",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_time,
+                updated_at=original_time,
+            )
+        )
+        session.commit()
+    update_time = datetime(2024, 6, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result = SymbolUpdaterService._upsert_catalog(
+            session, "EUR-USD", "EUR", "USD", "forex", update_time
+        )
+        session.commit()
+    assert result is False
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "EUR-USD")
+        ).scalar_one()
+    assert catalog.asset_type == "forex"
+    assert catalog.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+
+
+def test_upsert_catalog_preserves_timestamp_when_unchanged(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify _upsert_catalog preserves updated_at when no fields changed.
+
+    Given: Existing catalog entry with identical values,
+    When: _upsert_catalog called with same values,
+    Then: updated_at timestamp preserved unchanged.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    original_time = datetime(2024, 1, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_time,
+                updated_at=original_time,
+            )
+        )
+        session.commit()
+    update_time = datetime(2024, 6, 1, tzinfo=UTC)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result = SymbolUpdaterService._upsert_catalog(
+            session, "BTC-USD", "BTC", "USD", "crypto", update_time
+        )
+        session.commit()
+    assert result is False
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        ).scalar_one()
+    assert catalog.updated_at.replace(tzinfo=None) == original_time.replace(tzinfo=None)

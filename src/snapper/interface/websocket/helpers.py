@@ -11,6 +11,10 @@ from fastapi import WebSocket
 from snapper.auth.domain.roles import UserRole
 from snapper.config.app import AppSettings
 from snapper.interface.websocket.schemas import WSAuthFailedResponse
+from snapper.messaging.topics.builders import parse_market_topic
+from snapper.messaging.topics.builders import parse_order_command_topic
+from snapper.messaging.topics.builders import parse_order_event_topic
+from snapper.messaging.topics.builders import parse_signal_topic
 from snapper.messaging.topics.schemas import get_topics_by_category
 
 __all__ = [
@@ -165,21 +169,35 @@ def determine_topic_category(topic: str) -> str | None:
     Returns:
         Category name or None if unknown.
     """
-    prefix_map = {
+    direct_prefix_map = {
         "market": "market",
-        "orders.commands": "trade",
-        "orders.events": "trade",
+        "market.": "market",
         "signals": "strategy",
+        "signals.": "strategy",
         "strategy": "strategy",
+        "strategy.": "strategy",
         "system": "system",
+        "system.": "system",
         "admin": "admin",
+        "admin.": "admin",
     }
-    parts = topic.split(".")
-    if len(parts) >= 2:
-        two_level = f"{parts[0]}.{parts[1]}"
-        if two_level in prefix_map:
-            return prefix_map[two_level]
-        return prefix_map.get(parts[0])
+    direct_result = direct_prefix_map.get(topic)
+    if direct_result is not None:
+        return direct_result
+    if parse_order_command_topic(topic) is not None or parse_order_event_topic(topic) is not None:
+        return "trade"
+    if parse_market_topic(topic) is not None:
+        return "market"
+    if parse_signal_topic(topic) is not None:
+        return "strategy"
+    if topic.startswith("market."):
+        return "market"
+    if topic.startswith("signals.") or topic.startswith("strategy."):
+        return "strategy"
+    if topic.startswith("system."):
+        return "system"
+    if topic.startswith("admin."):
+        return "admin"
     category_map = {
         "bar": "market",
         "tick": "market",
@@ -188,9 +206,6 @@ def determine_topic_category(topic: str) -> str | None:
         "fill": "trade",
         "heartbeat": "system",
     }
-    result = prefix_map.get(topic)
-    if result is not None:
-        return result
     return category_map.get(topic)
 
 

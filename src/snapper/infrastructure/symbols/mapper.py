@@ -15,9 +15,9 @@ exchange-specific formats vary:
 
 Example:
     >>> mapper = SymbolMapperService.get_instance()
-    >>> mapper.native_to_ws["BTC-USD"]
+    >>> mapper.to_exchange("BTC-USD", "kraken", "ws")
     "XBT/USD"
-    >>> mapper.ws_to_native["XBT/USD"]
+    >>> mapper.to_native("XBT/USD", "kraken", "ws")
     "BTC-USD"
 """
 
@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
-from snapper.data.models import SymbolMapping
+from snapper.data.models import SymbolAlias
 from snapper.data.repository import DatabaseRepository
 
 
@@ -70,6 +70,27 @@ def make_native_symbol(base: str, quote: str) -> str:
     return f"{base_clean}{NATIVE_SEPARATOR}{quote_clean}"
 
 
+_COMPAT_FORWARD: tuple[tuple[str, str, str], ...] = (
+    ("kraken", "ws", "native_to_ws"),
+    ("kraken", "rest", "native_to_rest"),
+    ("kraken", "ccxt", "native_to_ccxt"),
+    ("zonda", "ws", "native_to_zonda"),
+    ("walutomat", "ws", "native_to_walutomat"),
+    ("walutomat", "rest", "native_to_walutomat_rest"),
+    ("polygon", "rest", "native_to_polygon"),
+)
+
+_COMPAT_REVERSE: tuple[tuple[str, str, str], ...] = (
+    ("kraken", "ws", "ws_to_native"),
+    ("kraken", "rest", "rest_to_native"),
+    ("kraken", "ccxt", "ccxt_to_native"),
+    ("zonda", "ws", "zonda_to_native"),
+    ("walutomat", "ws", "walutomat_to_native"),
+    ("walutomat", "rest", "walutomat_rest_to_native"),
+    ("polygon", "rest", "polygon_to_native"),
+)
+
+
 class SymbolMapperService:
     """Singleton service for symbol mapping across exchanges.
 
@@ -80,27 +101,36 @@ class SymbolMapperService:
     The singleton pattern ensures consistent mappings across the application
     and efficient memory usage.
 
+    The canonical data store is ``forward`` and ``reverse`` dicts keyed by
+    ``(exchange, channel)`` tuples. Legacy named attributes (``native_to_ws``,
+    ``ws_to_native``, etc.) are kept as direct references into those dicts
+    for backward compatibility with ``functions.py``.
+
     Attributes:
-        repository: Database repository for loading symbol mappings.
-        native_to_ws: Native to Kraken WebSocket symbol mapping.
-        native_to_rest: Native to Kraken REST symbol mapping.
-        native_to_ccxt: Native to CCXT symbol mapping.
-        native_to_zonda: Native to Zonda symbol mapping.
-        native_to_walutomat: Native to Walutomat WebSocket symbol mapping.
-        native_to_walutomat_rest: Native to Walutomat REST symbol mapping.
-        native_to_polygon: Native to Polygon symbol mapping.
-        ws_to_native: Kraken WebSocket to native symbol mapping.
-        rest_to_native: Kraken REST to native symbol mapping.
-        ccxt_to_native: CCXT to native symbol mapping.
-        zonda_to_native: Zonda to native symbol mapping.
-        walutomat_to_native: Walutomat WebSocket to native symbol mapping.
-        walutomat_rest_to_native: Walutomat REST to native symbol mapping.
-        polygon_to_native: Polygon to native symbol mapping.
+        repository: Database repository for loading symbol aliases.
+        forward: Native-to-exchange maps keyed by ``(exchange, channel)``.
+        reverse: Exchange-to-native maps keyed by ``(exchange, channel)``.
+        native_to_ws: Alias for ``forward[("kraken", "ws")]``.
+        native_to_rest: Alias for ``forward[("kraken", "rest")]``.
+        native_to_ccxt: Alias for ``forward[("kraken", "ccxt")]``.
+        native_to_zonda: Alias for ``forward[("zonda", "ws")]``.
+        native_to_walutomat: Alias for ``forward[("walutomat", "ws")]``.
+        native_to_walutomat_rest: Alias for ``forward[("walutomat", "rest")]``.
+        native_to_polygon: Alias for ``forward[("polygon", "rest")]``.
+        ws_to_native: Alias for ``reverse[("kraken", "ws")]``.
+        rest_to_native: Alias for ``reverse[("kraken", "rest")]``.
+        ccxt_to_native: Alias for ``reverse[("kraken", "ccxt")]``.
+        zonda_to_native: Alias for ``reverse[("zonda", "ws")]``.
+        walutomat_to_native: Alias for ``reverse[("walutomat", "ws")]``.
+        walutomat_rest_to_native: Alias for ``reverse[("walutomat", "rest")]``.
+        polygon_to_native: Alias for ``reverse[("polygon", "rest")]``.
 
     Example:
         >>> mapper = SymbolMapperService.get_instance()
-        >>> kraken_ws = mapper.native_to_ws.get("BTC-USD")
-        >>> native = mapper.ws_to_native.get("XBT/USD")
+        >>> mapper.to_exchange("BTC-USD", "kraken", "ws")
+        "XBT/USD"
+        >>> mapper.to_native("XBT/USD", "kraken", "ws")
+        "BTC-USD"
     """
 
     _instance: "SymbolMapperService | None" = None
@@ -118,19 +148,21 @@ class SymbolMapperService:
         return cls._instance
 
     def __init__(self) -> None:
-        """Initialize the service with database mappings.
+        """Initialize the service with database aliases.
 
-        Loads symbol mappings from the database on first initialization.
+        Loads symbol aliases from the database on first initialization.
         Subsequent calls are no-ops due to singleton pattern.
 
         Raises:
-            Exception: If database connection or mapping load fails.
+            Exception: If database connection or alias load fails.
         """
         if self._initialized:
             return
         self._initialized = True
         settings = _get_bootstrap_settings()
         self.repository = DatabaseRepository(settings.db_url)
+        self.forward: dict[tuple[str, str], dict[str, str]] = {}
+        self.reverse: dict[tuple[str, str], dict[str, str]] = {}
         self.native_to_ws: dict[str, str] = {}
         self.native_to_rest: dict[str, str] = {}
         self.native_to_ccxt: dict[str, str] = {}
@@ -153,100 +185,104 @@ class SymbolMapperService:
             logger.error(f"SymbolMapperService warm-up failed: {e}")
             raise
 
-    def load_mappings_from_db(self) -> list[SymbolMapping]:
-        """Load all symbol mappings from the database.
+    def load_mappings_from_db(self) -> list[SymbolAlias]:
+        """Load all symbol aliases from the database.
 
-        Queries the symbol_mappings table for all defined mappings. If the
+        Queries the symbol_aliases table for all defined aliases. If the
         table doesn't exist (before migrations), returns an empty list.
 
         Returns:
-            List of SymbolMapping ORM objects from the database.
+            List of SymbolAlias ORM objects from the database.
 
         Raises:
             OperationalError: If database error occurs (except missing table).
         """
         try:
             with self.repository.get_session() as session:
-                stmt = select(SymbolMapping)
+                stmt = select(SymbolAlias)
                 result = session.execute(stmt)
-                mappings = result.scalars().all()
-                logger.info(f"Loaded {len(mappings)} symbol mappings from database")
-                return list(mappings)
+                aliases = result.scalars().all()
+                logger.info(f"Loaded {len(aliases)} symbol aliases from database")
+                return list(aliases)
         except OperationalError as exc:
             error_message = str(exc).lower()
-            if "no such table" in error_message and "symbol_mappings" in error_message:
+            if "no such table" in error_message and "symbol_aliases" in error_message:
                 logger.warning(
-                    "Symbol mappings table missing; skipping cache warm-up until migrations finish."
+                    "Symbol aliases table missing; skipping cache warm-up until migrations finish."
                 )
                 return []
             raise
 
-    _EXCHANGE_SYMBOL_ATTRS: tuple[tuple[str, str, str], ...] = (
-        ("kraken_websocket_symbol", "native_to_ws", "ws_to_native"),
-        ("kraken_rest_symbol", "native_to_rest", "rest_to_native"),
-        ("ccxt_symbol", "native_to_ccxt", "ccxt_to_native"),
-        ("zonda_symbol", "native_to_zonda", "zonda_to_native"),
-        ("walutomat_symbol", "native_to_walutomat", "walutomat_to_native"),
-        ("walutomat_rest_symbol", "native_to_walutomat_rest", "walutomat_rest_to_native"),
-        ("polygon_symbol", "native_to_polygon", "polygon_to_native"),
-    )
+    def _populate_maps_from_aliases(
+        self,
+        aliases: list[SymbolAlias],
+    ) -> None:
+        """Populate all bidirectional mapping dicts from alias rows.
 
-    @staticmethod
-    def _resolve_native_symbol(mapping: SymbolMapping) -> str:
-        """Determine the native symbol for a given mapping row.
-
-        Currency pairs use ``BASE-QUOTE`` format. Single-ticker instruments
-        (e.g. stocks without a Polygon crypto/forex prefix) use just the
-        base currency.
+        Builds fresh forward and reverse dicts keyed by ``(exchange, channel)``
+        and updates backward-compatible named attributes atomically.
 
         Args:
-            mapping: Database mapping row.
+            aliases: List of SymbolAlias ORM objects.
+        """
+        fwd: dict[tuple[str, str], dict[str, str]] = {}
+        rev: dict[tuple[str, str], dict[str, str]] = {}
+        for alias in aliases:
+            key = (alias.exchange, alias.channel)
+            fwd.setdefault(key, {})[alias.native_symbol] = alias.exchange_symbol
+            rev.setdefault(key, {})[alias.exchange_symbol] = alias.native_symbol
+        self.forward = fwd
+        self.reverse = rev
+        for exchange, channel, attr_name in _COMPAT_FORWARD:
+            setattr(self, attr_name, fwd.get((exchange, channel), {}))
+        for exchange, channel, attr_name in _COMPAT_REVERSE:
+            setattr(self, attr_name, rev.get((exchange, channel), {}))
+
+    def to_exchange(self, native_symbol: str, exchange: str, channel: str) -> str:
+        """Convert a native symbol to an exchange-specific format.
+
+        Args:
+            native_symbol: Native symbol (e.g., ``BTC-USD``).
+            exchange: Exchange identifier (e.g., ``kraken``).
+            channel: Channel identifier (``ws``, ``rest``, or ``ccxt``).
 
         Returns:
-            Native symbol string.
+            Exchange-specific symbol string.
+
+        Raises:
+            ValueError: If no alias exists for the given combination.
         """
-        polygon_symbol = mapping.polygon_symbol or ""
-        is_polygon_pair = polygon_symbol.startswith(("C:", "X:"))
-        if mapping.quote_currency and (is_polygon_pair or not polygon_symbol):
-            return make_native_symbol(mapping.base_currency, mapping.quote_currency)
-        return mapping.base_currency
+        fwd = self.forward.get((exchange, channel), {})
+        result = fwd.get(native_symbol)
+        if result is None:
+            raise ValueError(f"No alias for {native_symbol} on {exchange}/{channel}")
+        return result
 
-    def _populate_maps_from_mappings(
-        self,
-        mappings: list[SymbolMapping],
-    ) -> None:
-        """Populate all bidirectional mapping dicts from database rows.
-
-        Builds fresh dicts for each exchange and assigns them to
-        instance attributes atomically.
+    def to_native(self, exchange_symbol: str, exchange: str, channel: str) -> str:
+        """Convert an exchange-specific symbol to native format.
 
         Args:
-            mappings: List of SymbolMapping ORM objects.
+            exchange_symbol: Exchange symbol (e.g., ``XBT/USD``).
+            exchange: Exchange identifier (e.g., ``kraken``).
+            channel: Channel identifier (``ws``, ``rest``, or ``ccxt``).
+
+        Returns:
+            Native symbol string in ``BASE-QUOTE`` format.
+
+        Raises:
+            ValueError: If no alias exists for the given combination.
         """
-        forward_maps: dict[str, dict[str, str]] = {
-            attr[1]: {} for attr in self._EXCHANGE_SYMBOL_ATTRS
-        }
-        reverse_maps: dict[str, dict[str, str]] = {
-            attr[2]: {} for attr in self._EXCHANGE_SYMBOL_ATTRS
-        }
-        for mapping in mappings:
-            native_symbol = self._resolve_native_symbol(mapping)
-            for db_attr, fwd_name, rev_name in self._EXCHANGE_SYMBOL_ATTRS:
-                exchange_symbol = getattr(mapping, db_attr, None)
-                if exchange_symbol:
-                    forward_maps[fwd_name][native_symbol] = exchange_symbol
-                    reverse_maps[rev_name][exchange_symbol] = native_symbol
-        for attr_name, map_dict in forward_maps.items():
-            setattr(self, attr_name, map_dict)
-        for attr_name, map_dict in reverse_maps.items():
-            setattr(self, attr_name, map_dict)
+        rev = self.reverse.get((exchange, channel), {})
+        result = rev.get(exchange_symbol)
+        if result is None:
+            raise ValueError(f"No native symbol for {exchange_symbol} on {exchange}/{channel}")
+        return result
 
     def load_cache_if_needed(self, fail_fast: bool = False) -> None:
-        """Load symbol mappings into cache if not already loaded.
+        """Load symbol aliases into cache if not already loaded.
 
         Populates all bidirectional mapping dictionaries from database
-        records. Handles both currency pair symbols and single-ticker
-        symbols (stocks).
+        records.
 
         Args:
             fail_fast: If True, re-raise exceptions on load failure.
@@ -255,8 +291,8 @@ class SymbolMapperService:
         if self._cache_loaded:
             return
         try:
-            mappings = self.load_mappings_from_db()
-            self._populate_maps_from_mappings(mappings)
+            aliases = self.load_mappings_from_db()
+            self._populate_maps_from_aliases(aliases)
             logger.info(f"Loaded symbol maps cache with {len(self.native_to_ws)} native symbols")
         except Exception as e:
             logger.error(f"Error loading symbol maps cache: {e}")
@@ -268,10 +304,10 @@ class SymbolMapperService:
             self._cache_loaded = True
 
     def trigger_cache_invalidation(self, fail_fast: bool = False) -> None:
-        """Invalidate and reload the symbol mapping cache.
+        """Invalidate and reload the symbol alias cache.
 
         Marks the cache as stale and triggers a fresh load from the database.
-        Useful after symbol mapping updates in the database.
+        Useful after symbol alias updates in the database.
 
         Args:
             fail_fast: If True, re-raise exceptions on reload failure.

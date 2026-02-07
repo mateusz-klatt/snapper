@@ -16,7 +16,6 @@ from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
@@ -29,7 +28,8 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
-from snapper.data.models import SymbolMapping
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolCatalog
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
@@ -206,14 +206,16 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """Get all symbols with Polygon mapping from database.
 
         Returns:
-            List of polygon_symbol strings.
+            List of polygon exchange_symbol strings.
         """
         assert self._db_sync is not None
         with self._db_sync.get_session() as session:
             stmt = (
-                select(SymbolMapping.polygon_symbol)
-                .where(SymbolMapping.polygon_symbol.is_not(None))
-                .order_by(SymbolMapping.polygon_symbol)
+                select(SymbolAlias.exchange_symbol)
+                .where(SymbolAlias.exchange == "polygon")
+                .where(SymbolAlias.channel == "rest")
+                .where(SymbolAlias.exchange_symbol.is_not(None))
+                .order_by(SymbolAlias.exchange_symbol)
             )
             result = session.execute(stmt).scalars().all()
             return [str(symbol) for symbol in result if symbol]
@@ -562,41 +564,73 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             )
             chunk_end = chunk_start - timedelta(days=1)
 
-    def _mapping_to_context(self, mapping: SymbolMapping) -> _SymbolContext | None:
-        """Convert a SymbolMapping row to a _SymbolContext if valid.
+    def _lookup_context_by_native(self, native_symbol: str) -> _SymbolContext | None:
+        """Look up catalog and polygon alias for a native symbol.
+
+        Queries SymbolCatalog for base/quote, then SymbolAlias for the
+        polygon rest exchange_symbol.
 
         Args:
-            mapping: Database SymbolMapping instance.
+            native_symbol: Internal normalized symbol (e.g., "BTC-USD").
 
         Returns:
-            _SymbolContext or None if polygon_symbol is missing.
-        """
-        if not mapping.polygon_symbol:
-            return None
-        return _SymbolContext(
-            native_symbol=mapping.native_symbol,
-            polygon_symbol=mapping.polygon_symbol,
-            base_currency=mapping.base_currency,
-            quote_currency=mapping.quote_currency or mapping.base_currency,
-        )
-
-    def _lookup_mapping_by_column(self, column: Any, value: str) -> _SymbolContext | None:
-        """Query a single SymbolMapping row and convert to context.
-
-        Args:
-            column: SQLAlchemy column to filter on.
-            value: Filter value.
-
-        Returns:
-            _SymbolContext or None if not found.
+            _SymbolContext or None if catalog or polygon alias not found.
         """
         assert self._db_sync is not None
         with self._db_sync.get_session() as session:
-            stmt = select(SymbolMapping).where(column == value)
-            mapping = session.execute(stmt).scalar_one_or_none()
-            if mapping:
-                return self._mapping_to_context(mapping)
-        return None
+            catalog = session.execute(
+                select(SymbolCatalog).where(SymbolCatalog.native_symbol == native_symbol)
+            ).scalar_one_or_none()
+            if not catalog:
+                return None
+            alias = session.execute(
+                select(SymbolAlias)
+                .where(SymbolAlias.native_symbol == native_symbol)
+                .where(SymbolAlias.exchange == "polygon")
+                .where(SymbolAlias.channel == "rest")
+            ).scalar_one_or_none()
+            if not alias:
+                return None
+            return _SymbolContext(
+                native_symbol=catalog.native_symbol,
+                polygon_symbol=alias.exchange_symbol,
+                base_currency=catalog.base,
+                quote_currency=catalog.quote or catalog.base,
+            )
+
+    def _lookup_context_by_polygon_symbol(self, polygon_symbol: str) -> _SymbolContext | None:
+        """Look up alias and catalog for a polygon exchange symbol.
+
+        Queries SymbolAlias for polygon rest alias, then SymbolCatalog
+        for base/quote.
+
+        Args:
+            polygon_symbol: Polygon API symbol (e.g., "X:BTCUSD").
+
+        Returns:
+            _SymbolContext or None if alias or catalog not found.
+        """
+        assert self._db_sync is not None
+        with self._db_sync.get_session() as session:
+            alias = session.execute(
+                select(SymbolAlias)
+                .where(SymbolAlias.exchange == "polygon")
+                .where(SymbolAlias.channel == "rest")
+                .where(SymbolAlias.exchange_symbol == polygon_symbol)
+            ).scalar_one_or_none()
+            if not alias:
+                return None
+            catalog = session.execute(
+                select(SymbolCatalog).where(SymbolCatalog.native_symbol == alias.native_symbol)
+            ).scalar_one_or_none()
+            if not catalog:
+                return None
+            return _SymbolContext(
+                native_symbol=catalog.native_symbol,
+                polygon_symbol=alias.exchange_symbol,
+                base_currency=catalog.base,
+                quote_currency=catalog.quote or catalog.base,
+            )
 
     def _resolve_polygon_symbol(self, symbol: str) -> _SymbolContext | None:
         """Resolve a Polygon-format symbol (contains ':') to context.
@@ -609,13 +643,13 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """
         native_symbol = self._symbol_mapper.polygon_to_native.get(symbol)
         if native_symbol:
-            return self._lookup_mapping_by_column(SymbolMapping.native_symbol, native_symbol)
+            return self._lookup_context_by_native(native_symbol)
         return None
 
     def _resolve_native_symbol_context(self, symbol: str) -> _SymbolContext | None:
         """Resolve a native-format symbol to context.
 
-        Tries direct polygon_symbol lookup, then mapper-based lookup.
+        Tries direct polygon exchange_symbol lookup, then mapper-based lookup.
 
         Args:
             symbol: Native symbol string.
@@ -623,12 +657,12 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         Returns:
             _SymbolContext or None.
         """
-        context = self._lookup_mapping_by_column(SymbolMapping.polygon_symbol, symbol)
+        context = self._lookup_context_by_polygon_symbol(symbol)
         if context:
             return context
         polygon_symbol = self._symbol_mapper.native_to_polygon.get(symbol)
         if polygon_symbol:
-            return self._lookup_mapping_by_column(SymbolMapping.polygon_symbol, polygon_symbol)
+            return self._lookup_context_by_polygon_symbol(polygon_symbol)
         return None
 
     def _resolve_symbol_context(self, symbol: str) -> _SymbolContext | None:
@@ -674,6 +708,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         quote_value = context.quote_currency or context.base_currency
         instrument_id = await self._db_async.upsert_instrument(
             symbol=context.native_symbol,
+            exchange="polygon",
             base=context.base_currency,
             quote=quote_value,
             tick_size=0.0,

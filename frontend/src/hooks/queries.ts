@@ -26,7 +26,10 @@ const queryKeys = {
   processSchema: (name: string) => ['processes', 'schema', name] as const,
   processRuns: (name?: string, limit?: number) =>
     ['processes', 'runs', name ?? 'all', limit ?? 50] as const,
-  candles: (instrument: string, timeframe: string) => ['candles', instrument, timeframe] as const,
+  candles: (instrument: string, exchange: string, timeframe: string) =>
+    ['candles', instrument, exchange, timeframe] as const,
+  exchanges: ['exchanges'] as const,
+  exchangeInstruments: (exchange: string) => ['exchanges', exchange, 'instruments'] as const,
   orders: (filters?: { symbol?: string; limit?: number; offset?: number }) =>
     ['orders', filters] as const,
   executions: (filters?: { limit?: number }) => ['executions', filters] as const,
@@ -49,6 +52,7 @@ export const useSystemStatus = () => {
 
 export const useCandles = (
   instrument: string,
+  exchange: string,
   timeframe: string = '1m',
   limit: number = 100,
   enabled: boolean = true
@@ -56,12 +60,37 @@ export const useCandles = (
   const { isAuthenticated } = useAuth()
 
   return useQuery({
-    queryKey: queryKeys.candles(instrument, timeframe),
-    queryFn: () => apiClient.getCandles(instrument, timeframe, limit),
-    enabled: enabled && !!instrument && isAuthenticated,
+    queryKey: queryKeys.candles(instrument, exchange, timeframe),
+    queryFn: () => apiClient.getCandles(instrument, exchange, timeframe, limit),
+    enabled: enabled && !!instrument && !!exchange && isAuthenticated,
     staleTime: 2000,
     throwOnError: false,
     retry: 2,
+  })
+}
+
+export const useExchanges = () => {
+  const { isAuthenticated } = useAuth()
+
+  return useQuery({
+    queryKey: queryKeys.exchanges,
+    queryFn: () => apiClient.getExchanges(),
+    enabled: isAuthenticated,
+    staleTime: 5 * 60 * 1000,
+    throwOnError: false,
+  })
+}
+
+export const useExchangeInstruments = (exchange: string | null) => {
+  const { isAuthenticated } = useAuth()
+  const exchangeKey = exchange ?? ''
+
+  return useQuery({
+    queryKey: queryKeys.exchangeInstruments(exchangeKey),
+    queryFn: () => apiClient.getExchangeInstruments(exchangeKey),
+    enabled: isAuthenticated && !!exchange,
+    staleTime: 5 * 60 * 1000,
+    throwOnError: false,
   })
 }
 

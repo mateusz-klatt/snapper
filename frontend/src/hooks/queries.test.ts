@@ -5,6 +5,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   useSystemStatus,
   useCandles,
+  useExchanges,
+  useExchangeInstruments,
   useOrders,
   useExecutions,
   useAvailableProcesses,
@@ -25,6 +27,8 @@ vi.mock('../lib/apiClient', () => ({
   apiClient: {
     getSystemStatus: vi.fn(() => Promise.resolve({ trader: { status: 'running' } })),
     getCandles: vi.fn(() => Promise.resolve([])),
+    getExchanges: vi.fn(() => Promise.resolve(['kraken', 'binance'])),
+    getExchangeInstruments: vi.fn(() => Promise.resolve(['BTC/USD', 'ETH/USD'])),
     getOrders: vi.fn(() => Promise.resolve([])),
     getExecutions: vi.fn(() => Promise.resolve([])),
     getPositions: vi.fn(() => Promise.resolve([])),
@@ -71,6 +75,8 @@ vi.mock('../lib/transforms', () => ({
 const mockedApiClient = apiClient as unknown as {
   getSystemStatus: Mock
   getCandles: Mock
+  getExchanges: Mock
+  getExchangeInstruments: Mock
   getOrders: Mock
   getExecutions: Mock
   getPositions: Mock
@@ -122,7 +128,9 @@ describe('queries', () => {
   })
   describe('useCandles', () => {
     it('returns data when authenticated', async () => {
-      const { result } = renderHook(() => useCandles('EUR-USD', '1h'), { wrapper: createWrapper() })
+      const { result } = renderHook(() => useCandles('EUR-USD', 'kraken', '1h'), {
+        wrapper: createWrapper(),
+      })
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
@@ -130,7 +138,7 @@ describe('queries', () => {
       expect(result.current.data).toBeDefined()
     })
     it('does not fetch when enabled is false', async () => {
-      const { result } = renderHook(() => useCandles('EUR-USD', '1h', 100, false), {
+      const { result } = renderHook(() => useCandles('EUR-USD', 'kraken', '1h', 100, false), {
         wrapper: createWrapper(),
       })
 
@@ -138,6 +146,39 @@ describe('queries', () => {
         expect(result.current.isLoading).toBe(false)
       })
       expect(result.current.data).toBeUndefined()
+    })
+  })
+  describe('useExchanges', () => {
+    it('returns data when authenticated', async () => {
+      const { result } = renderHook(() => useExchanges(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toEqual(['kraken', 'binance'])
+    })
+  })
+  describe('useExchangeInstruments', () => {
+    it('returns data when exchange is provided', async () => {
+      const { result } = renderHook(() => useExchangeInstruments('kraken'), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toEqual(['BTC/USD', 'ETH/USD'])
+    })
+    it('does not fetch when exchange is null', async () => {
+      const { result } = renderHook(() => useExchangeInstruments(null), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeUndefined()
+      expect(mockedApiClient.getExchangeInstruments).not.toHaveBeenCalled()
     })
   })
   describe('useOrders', () => {
@@ -538,7 +579,9 @@ describe('queries', () => {
     })
     it('useCandles does not fetch when not authenticated', async () => {
       vi.mocked(useAuth).mockReturnValue({ isAuthenticated: false } as ReturnType<typeof useAuth>)
-      const { result } = renderHook(() => useCandles('BTC/USD'), { wrapper: createWrapper() })
+      const { result } = renderHook(() => useCandles('BTC/USD', 'kraken'), {
+        wrapper: createWrapper(),
+      })
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)

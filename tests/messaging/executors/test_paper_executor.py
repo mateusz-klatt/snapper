@@ -56,7 +56,7 @@ async def fake_get_market_snapshots(
 
 
 async def fake_get_candles(
-    symbol: str, interval: str, start_dt: datetime, end_dt: datetime
+    symbol: str, interval: str, start_dt: datetime, end_dt: datetime, exchange: str
 ) -> list[dict]:
     """Return fake candle data for testing."""
     return [
@@ -73,7 +73,9 @@ async def fake_get_candles(
     ]
 
 
-async def fake_get_trades(symbol: str, start_dt: datetime, end_dt: datetime) -> list[dict]:
+async def fake_get_trades(
+    symbol: str, start_dt: datetime, end_dt: datetime, exchange: str
+) -> list[dict]:
     """Return fake trade data for testing."""
     return [
         {
@@ -576,6 +578,130 @@ class TestPaperMarketDataMethods:
             assert trade.price == pytest.approx(50000.0)
             break
         await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_candles_replay_multiple_symbols_sorted(self) -> None:
+        """Test candle replay supports multiple symbols in timestamp order.
+
+        Given: A connected paper client and repository with two symbols,
+        When: subscribe_candles is called with both symbols,
+        Then: Candles are yielded for both symbols in ascending timestamp order.
+        """
+
+        class MultiSymbolRepo:
+            async def get_candles(
+                self,
+                symbol: str,
+                interval: str,
+                start_dt: datetime,
+                end_dt: datetime,
+                exchange: str,
+            ) -> list[dict]:
+                _ = interval
+                _ = start_dt
+                _ = end_dt
+                _ = exchange
+                base = datetime(2024, 1, 1, tzinfo=UTC)
+                if symbol == "BTC-USD":
+                    return [
+                        {
+                            "timestamp": base.replace(minute=2),
+                            "open": 2.0,
+                            "high": 2.1,
+                            "low": 1.9,
+                            "close": 2.0,
+                            "volume": 1.0,
+                            "vwap": 2.0,
+                            "trades": 1,
+                        }
+                    ]
+                if symbol == "ETH-USD":
+                    return [
+                        {
+                            "timestamp": base.replace(minute=1),
+                            "open": 1.0,
+                            "high": 1.1,
+                            "low": 0.9,
+                            "close": 1.0,
+                            "volume": 1.0,
+                            "vwap": 1.0,
+                            "trades": 1,
+                        }
+                    ]
+                return []
+
+        start_ts = datetime(2024, 1, 1, tzinfo=UTC).timestamp()
+        end_ts = datetime(2024, 1, 1, 0, 10, tzinfo=UTC).timestamp()
+        client = PaperExchangeClient(
+            repository=MultiSymbolRepo(),
+            start_time=start_ts,
+            end_time=end_ts,
+        )
+        await client.connect()
+        candles: list[tuple[str, datetime]] = []
+        async for candle in client.subscribe_candles(["BTC-USD", "ETH-USD"], "1m"):
+            candles.append((candle.symbol, candle.interval_begin))
+        await client.disconnect()
+        assert candles == [
+            ("ETH-USD", datetime(2024, 1, 1, 0, 1, tzinfo=UTC)),
+            ("BTC-USD", datetime(2024, 1, 1, 0, 2, tzinfo=UTC)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_subscribe_trades_replay_multiple_symbols_sorted(self) -> None:
+        """Test trades replay supports multiple symbols in timestamp order.
+
+        Given: A connected paper client and repository with two symbols,
+        When: subscribe_trades is called with both symbols,
+        Then: Trades are yielded for both symbols in ascending timestamp order.
+        """
+
+        class MultiSymbolRepo:
+            async def get_trades(
+                self, symbol: str, start_dt: datetime, end_dt: datetime, exchange: str
+            ) -> list[dict]:
+                _ = start_dt
+                _ = end_dt
+                _ = exchange
+                base = datetime(2024, 1, 1, tzinfo=UTC)
+                if symbol == "BTC-USD":
+                    return [
+                        {
+                            "side": "buy",
+                            "size": 1.0,
+                            "price": 2.0,
+                            "trade_id": 2,
+                            "timestamp": base.replace(minute=2),
+                        }
+                    ]
+                if symbol == "ETH-USD":
+                    return [
+                        {
+                            "side": "sell",
+                            "size": 1.0,
+                            "price": 1.0,
+                            "trade_id": 1,
+                            "timestamp": base.replace(minute=1),
+                        }
+                    ]
+                return []
+
+        start_ts = datetime(2024, 1, 1, tzinfo=UTC).timestamp()
+        end_ts = datetime(2024, 1, 1, 0, 10, tzinfo=UTC).timestamp()
+        client = PaperExchangeClient(
+            repository=MultiSymbolRepo(),
+            start_time=start_ts,
+            end_time=end_ts,
+        )
+        await client.connect()
+        trades: list[tuple[str, datetime]] = []
+        async for trade in client.subscribe_trades(["BTC-USD", "ETH-USD"]):
+            trades.append((trade.symbol, trade.timestamp))
+        await client.disconnect()
+        assert trades == [
+            ("ETH-USD", datetime(2024, 1, 1, 0, 1, tzinfo=UTC)),
+            ("BTC-USD", datetime(2024, 1, 1, 0, 2, tzinfo=UTC)),
+        ]
 
     @pytest.mark.asyncio
     async def test_parse_interval_to_minutes(self) -> None:

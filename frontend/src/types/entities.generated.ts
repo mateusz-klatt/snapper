@@ -193,10 +193,10 @@ export interface Signal {
 }
 
 /**
- * Canonical SymbolMappingUpdate entity.
- * From WebSocket SymbolMappingUpdateEnvelope.
+ * Canonical SymbolAliasUpdate entity.
+ * From WebSocket SymbolAliasUpdateEnvelope.
  */
-export interface SymbolMappingUpdate {
+export interface SymbolAliasUpdate {
   timestamp?: Date
   event: string
   action: string
@@ -253,7 +253,7 @@ export interface Candle {
 export interface Position {
   id: string | number
   instrument: string
-  exchange?: string
+  exchange: string
   quantity: number
   averagePrice: number
   unrealizedPnl: number

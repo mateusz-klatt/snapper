@@ -1,4 +1,4 @@
-"""Tests for Kraken symbol mapping updater service."""
+"""Tests for Kraken symbol updater service."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -6,6 +6,7 @@ from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -15,16 +16,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
-from snapper.application.updaters.symbols.kraken import KrakenSymbolMappingUpdaterService
+from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import Base
-from snapper.data.models import SymbolMapping
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolCatalog
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 
-class TestKrakenSymbolMappingUpdater:
-    """Test cases for KrakenSymbolMappingUpdaterService basic functionality."""
+class TestKrakenSymbolUpdater:
+    """Test cases for KrakenSymbolUpdaterService basic functionality."""
 
     @pytest.fixture
     def mock_settings(self) -> MagicMock:
@@ -35,16 +37,16 @@ class TestKrakenSymbolMappingUpdater:
         return settings
 
     @pytest.fixture
-    def updater(self, mock_settings: MagicMock) -> KrakenSymbolMappingUpdaterService:
-        """Create KrakenSymbolMappingUpdaterService with mock settings."""
+    def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
+        """Create KrakenSymbolUpdaterService with mock settings."""
         with patch(
             "snapper.config.settings.get_settings",
             return_value=mock_settings,
         ):
-            updater = KrakenSymbolMappingUpdaterService(update_threshold_hours=6)
+            updater = KrakenSymbolUpdaterService(update_threshold_hours=6)
             return updater
 
-    def test_init(self, updater: KrakenSymbolMappingUpdaterService) -> None:
+    def test_init(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify service initializes with correct attributes.
 
         Given: Mock settings for Kraken service,
@@ -54,16 +56,16 @@ class TestKrakenSymbolMappingUpdater:
         assert updater.update_threshold_hours == 6
         assert updater._kraken_client is None
 
-    def test_get_setting_key(self, updater: KrakenSymbolMappingUpdaterService) -> None:
+    def test_get_setting_key(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify _get_setting_key returns correct identifier.
 
         Given: Kraken updater instance,
         When: _get_setting_key called,
         Then: Expected setting key returned.
         """
-        assert updater._get_setting_key() == "kraken_symbol_mappings_last_update"
+        assert updater._get_setting_key() == "kraken_symbols_last_update"
 
-    def test_create_exchange_client(self, updater: KrakenSymbolMappingUpdaterService) -> None:
+    def test_create_exchange_client(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify _create_exchange_client returns KrakenExchangeClient.
 
         Given: Kraken updater instance,
@@ -73,9 +75,7 @@ class TestKrakenSymbolMappingUpdater:
         client = updater._create_exchange_client()
         assert isinstance(client, KrakenExchangeClient)
 
-    async def test_load_kraken_rest_symbols(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    async def test_load_kraken_rest_symbols(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify load_kraken_rest_symbols loads and parses markets.
 
         Given: Mock CCXT client with market and tokenized data,
@@ -142,9 +142,7 @@ class TestKrakenSymbolMappingUpdater:
         assert mock_ccxt.publicGetAssetPairs.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_verify_websocket_symbols(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    async def test_verify_websocket_symbols(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify verify_websocket_symbols confirms symbols via WebSocket.
 
         Given: Set of symbols to verify and mock WS responses,
@@ -171,7 +169,7 @@ class TestKrakenSymbolMappingUpdater:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_partial_verification(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify verify_websocket_symbols returns partial results.
 
@@ -199,7 +197,7 @@ class TestKrakenSymbolMappingUpdater:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_all_verified_via_timeout(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify verify_websocket_symbols completes before timeout.
 
@@ -221,14 +219,12 @@ class TestKrakenSymbolMappingUpdater:
         assert "BTC/USD" in result
 
     @pytest.mark.asyncio
-    async def test_build_verified_mappings(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
-        """Verify build_verified_mappings creates symbol mappings.
+    async def test_build_verified_mappings(self, updater: KrakenSymbolUpdaterService) -> None:
+        """Verify build_verified_mappings creates symbol data dicts.
 
         Given: Mock REST symbols and WS verification,
         When: build_verified_mappings called,
-        Then: SymbolMapping objects created with correct attributes.
+        Then: Dict mappings created with correct attributes.
         """
         mock_rest = {
             "XXBTZUSD": {
@@ -246,12 +242,12 @@ class TestKrakenSymbolMappingUpdater:
         assert len(mappings) == 1
         assert "BTC-USD" in mappings
         mapping = mappings["BTC-USD"]
-        assert isinstance(mapping, SymbolMapping)
-        assert mapping.kraken_websocket_symbol == "BTC/USD"
-        assert mapping.kraken_rest_symbol == "XXBTZUSD"
+        assert isinstance(mapping, dict)
+        assert mapping["kraken_websocket_symbol"] == "BTC/USD"
+        assert mapping["kraken_rest_symbol"] == "XXBTZUSD"
 
     @pytest.mark.asyncio
-    async def test_fetch_symbols(self, updater: KrakenSymbolMappingUpdaterService) -> None:
+    async def test_fetch_symbols(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify _fetch_symbols returns list of mapping dictionaries.
 
         Given: Mock verified mappings,
@@ -259,36 +255,36 @@ class TestKrakenSymbolMappingUpdater:
         Then: List of dict representations returned.
         """
         mock_mappings = {
-            "BTC-USD": SymbolMapping(
-                native_symbol="BTC-USD",
-                kraken_websocket_symbol="BTC-USD",
-                kraken_rest_symbol="XXBTZUSD",
-                ccxt_symbol="BTC-USD",
-                base_currency="BTC",
-                quote_currency="USD",
-            ),
+            "BTC-USD": {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC-USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            },
         }
         mock_client = AsyncMock()
         with patch.object(updater, "build_verified_mappings", return_value=(mock_mappings, True)):
             result = await updater._fetch_symbols(mock_client)
         assert len(result) == 1
         assert isinstance(result[0], dict)
-        assert result[0]["kraken_websocket_symbol"] == "BTC-USD"
+        assert result[0]["kraken_websocket_symbol"] == "BTC/USD"
 
     @pytest.mark.asyncio
-    async def test_update_database(self, updater: KrakenSymbolMappingUpdaterService) -> None:
-        """Verify _update_database persists symbol mappings.
+    async def test_update_database(self, updater: KrakenSymbolUpdaterService) -> None:
+        """Verify _update_database persists catalog and alias rows.
 
         Given: Mock session and symbol list,
         When: _update_database called,
-        Then: Session add and commit called.
+        Then: Session add called for catalog and aliases, commit called.
         """
         symbols = [
             {
                 "native_symbol": "BTC-USD",
-                "kraken_websocket_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
                 "kraken_rest_symbol": "XXBTZUSD",
-                "ccxt_symbol": "BTC-USD",
+                "ccxt_symbol": "BTC/USD",
                 "base_currency": "BTC",
                 "quote_currency": "USD",
             },
@@ -301,7 +297,7 @@ class TestKrakenSymbolMappingUpdater:
         mock_repo.get_session.return_value = mock_session
         with patch.object(updater, "repository", mock_repo):
             await updater._update_database(symbols)
-        mock_session.add.assert_called_once()
+        assert mock_session.add.call_count == 4
         mock_session.commit.assert_called_once()
 
 
@@ -343,11 +339,11 @@ async def test_load_kraken_rest_symbols_handles_tokenized(monkeypatch: pytest.Mo
     """
     markets = {"BTC/USD": _market("BTC/USD", "XXBTZUSD", "XBT", "ZUSD")}
     tokenized = {"GSUSD": {"base": "GSX", "quote": "ZUSD"}}
-    svc = KrakenSymbolMappingUpdaterService()
+    svc = KrakenSymbolUpdaterService()
     client: Any = DummyKrakenClient(markets, tokenized)
     client.connect = AsyncMock()
     monkeypatch.setattr(
-        "snapper.application.updaters.symbols.kraken.KrakenSymbolMappingUpdaterService._create_exchange_client",
+        "snapper.application.updaters.symbols.kraken.KrakenSymbolUpdaterService._create_exchange_client",
         lambda self: client,
     )
     symbols = await svc.load_kraken_rest_symbols()
@@ -362,7 +358,7 @@ def test_normalize_currency_mapping_and_fallbacks() -> None:
     When: _normalize_currency called with various formats,
     Then: Correct normalized currency codes returned.
     """
-    svc = KrakenSymbolMappingUpdaterService()
+    svc = KrakenSymbolUpdaterService()
     assert svc._normalize_currency("ZUSD") == "USD"
     assert svc._normalize_currency("XETH") == "ETH"
     assert svc._normalize_currency("ABC") == "ABC"
@@ -378,7 +374,7 @@ async def test_build_verified_mappings_verification_threshold(
     When: build_verified_mappings called,
     Then: Success flag is False.
     """
-    svc = KrakenSymbolMappingUpdaterService()
+    svc = KrakenSymbolUpdaterService()
     fake_symbols = {
         "XXBTZUSD": {
             "base": "XBT",
@@ -410,7 +406,7 @@ async def test_build_verified_mappings_skips_invalid_tokenized(
     When: build_verified_mappings called,
     Then: Empty mappings returned.
     """
-    svc = KrakenSymbolMappingUpdaterService()
+    svc = KrakenSymbolUpdaterService()
     fake_symbols = {
         "BAD": {
             "base": "BAD",
@@ -434,7 +430,7 @@ async def test_fetch_symbols_requires_verification(monkeypatch: pytest.MonkeyPat
     When: _fetch_symbols called,
     Then: RuntimeError raised.
     """
-    svc = KrakenSymbolMappingUpdaterService()
+    svc = KrakenSymbolUpdaterService()
     monkeypatch.setattr(svc, "build_verified_mappings", AsyncMock(return_value=({}, False)))
     with pytest.raises(RuntimeError):
         await svc._fetch_symbols(None)
@@ -448,17 +444,15 @@ async def test_fetch_symbols_success(monkeypatch: pytest.MonkeyPatch) -> None:
     When: _fetch_symbols called,
     Then: List of mapping dicts returned.
     """
-    svc = KrakenSymbolMappingUpdaterService()
-    fake_mapping = SymbolMapping(
-        native_symbol="BTC-USD",
-        kraken_websocket_symbol="BTC/USD",
-        kraken_rest_symbol="XXBTZUSD",
-        ccxt_symbol="BTC/USD",
-        base_currency="BTC",
-        quote_currency="USD",
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
+    svc = KrakenSymbolUpdaterService()
+    fake_mapping = {
+        "native_symbol": "BTC-USD",
+        "kraken_websocket_symbol": "BTC/USD",
+        "kraken_rest_symbol": "XXBTZUSD",
+        "ccxt_symbol": "BTC/USD",
+        "base_currency": "BTC",
+        "quote_currency": "USD",
+    }
     monkeypatch.setattr(
         svc,
         "build_verified_mappings",
@@ -472,32 +466,62 @@ async def test_fetch_symbols_success(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify _update_database handles inserts and updates.
 
-    Given: Database with existing BTC mapping,
+    Given: Database with existing BTC catalog and alias rows,
     When: _update_database called with BTC and ETH,
-    Then: BTC updated, ETH inserted.
+    Then: BTC aliases updated, ETH catalog and aliases inserted.
     """
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     session_local = sessionmaker(bind=engine)
+    now = datetime.now(UTC)
     with session_local() as session:
-        mapping = SymbolMapping(
-            native_symbol="BTC-USD",
-            kraken_websocket_symbol="OLD/WS",
-            kraken_rest_symbol="OLDREST",
-            ccxt_symbol="OLD/CCXT",
-            base_currency="BTC",
-            quote_currency="USD",
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                updated_at=now,
+            )
         )
-        session.add(mapping)
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="kraken",
+                channel="ws",
+                exchange_symbol="OLD/WS",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="kraken",
+                channel="rest",
+                exchange_symbol="OLDREST",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="kraken",
+                channel="ccxt",
+                exchange_symbol="OLD/CCXT",
+                created_at=now,
+                updated_at=now,
+            )
+        )
         session.commit()
 
     class Repo:
         def get_session(self) -> Session:
             return session_local()
 
-    svc = KrakenSymbolMappingUpdaterService()
+    svc = KrakenSymbolUpdaterService()
     svc.repository = Repo()
     symbols = [
         {
@@ -519,10 +543,22 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
     ]
     await svc._update_database(symbols)
     with session_local() as session:
-        btc = session.query(SymbolMapping).filter_by(native_symbol="BTC-USD").one()
-        eth = session.query(SymbolMapping).filter_by(native_symbol="ETH-USD").one()
-        assert btc.kraken_rest_symbol == "XXBTZUSD"
-        assert eth.kraken_websocket_symbol == "ETH/USD"
+        btc_catalog = session.query(SymbolCatalog).filter_by(native_symbol="BTC-USD").one()
+        eth_catalog = session.query(SymbolCatalog).filter_by(native_symbol="ETH-USD").one()
+        assert btc_catalog.base == "BTC"
+        assert eth_catalog.base == "ETH"
+        btc_rest = (
+            session.query(SymbolAlias)
+            .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="rest")
+            .one()
+        )
+        eth_ws = (
+            session.query(SymbolAlias)
+            .filter_by(native_symbol="ETH-USD", exchange="kraken", channel="ws")
+            .one()
+        )
+        assert btc_rest.exchange_symbol == "XXBTZUSD"
+        assert eth_ws.exchange_symbol == "ETH/USD"
 
 
 @pytest.mark.asyncio
@@ -533,9 +569,11 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
     When: _update_database called,
     Then: RuntimeError propagated.
     """
-    svc = KrakenSymbolMappingUpdaterService()
+    svc = KrakenSymbolUpdaterService()
 
     class FaultySession:
+        """Session stub that fails on commit."""
+
         def __enter__(self) -> "FaultySession":
             return self
 
@@ -552,6 +590,8 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
             raise RuntimeError("fail")
 
     class Repo:
+        """Repository stub returning FaultySession."""
+
         def get_session(self) -> FaultySession:
             return FaultySession()
 
@@ -582,16 +622,16 @@ class TestKrakenUpdaterClientCaching:
         return settings
 
     @pytest.fixture
-    def updater(self, mock_settings: MagicMock) -> KrakenSymbolMappingUpdaterService:
+    def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
         """Create updater instance for caching tests."""
         with patch(
             "snapper.config.settings.get_settings",
             return_value=mock_settings,
         ):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     def test_create_exchange_client_returns_cached(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify _create_exchange_client returns cached instance.
 
@@ -617,16 +657,16 @@ class TestLoadKrakenRestSymbolsFallback:
         return settings
 
     @pytest.fixture
-    def updater(self, mock_settings: MagicMock) -> KrakenSymbolMappingUpdaterService:
+    def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
         """Create updater instance for fallback tests."""
         with patch(
             "snapper.config.settings.get_settings",
             return_value=mock_settings,
         ):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     async def test_load_symbols_missing_info_fallback(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify load_kraken_rest_symbols uses fallback for missing info.
 
@@ -662,7 +702,7 @@ class TestLoadKrakenRestSymbolsFallback:
         assert result["XXBTZUSD"]["quote"] == "USD"
 
     async def test_load_symbols_empty_info_base_quote(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify load_kraken_rest_symbols handles empty info fields.
 
@@ -711,18 +751,16 @@ class TestVerifyWebsocketSymbols:
         return settings
 
     @pytest.fixture
-    def updater(self, mock_settings: MagicMock) -> KrakenSymbolMappingUpdaterService:
+    def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
         """Create updater instance for WebSocket tests."""
         with patch(
             "snapper.config.settings.get_settings",
             return_value=mock_settings,
         ):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
-    async def test_verify_all_symbols_found(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    async def test_verify_all_symbols_found(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify all WebSocket symbols found when available.
 
         Given: WebSocket returning both requested symbols,
@@ -744,7 +782,7 @@ class TestVerifyWebsocketSymbols:
 
     @pytest.mark.asyncio
     async def test_verify_timeout_partial_verification(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify partial verification on timeout.
 
@@ -773,9 +811,7 @@ class TestVerifyWebsocketSymbols:
         assert isinstance(result, set)
 
     @pytest.mark.asyncio
-    async def test_verify_exception_fallback(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    async def test_verify_exception_fallback(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify fallback to all symbols on exception.
 
         Given: WebSocket connection that raises error,
@@ -808,16 +844,16 @@ class TestTokenizedAssetWarnings:
         return settings
 
     @pytest.fixture
-    def updater(self, mock_settings: MagicMock) -> KrakenSymbolMappingUpdaterService:
+    def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
         """Create updater instance for tokenized asset tests."""
         with patch(
             "snapper.config.settings.get_settings",
             return_value=mock_settings,
         ):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     async def test_tokenized_asset_without_x_suffix(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify tokenized assets without x suffix are skipped.
 
@@ -841,7 +877,7 @@ class TestTokenizedAssetWarnings:
         assert len(result) == 0
 
     async def test_tokenized_asset_unexpected_quote(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify tokenized assets with unexpected quote are skipped.
 
@@ -877,16 +913,16 @@ class TestWebSocketDisconnectError:
         return settings
 
     @pytest.fixture
-    def updater(self, mock_settings: MagicMock) -> KrakenSymbolMappingUpdaterService:
+    def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
         """Create updater instance for disconnect error tests."""
         with patch(
             "snapper.config.settings.get_settings",
             return_value=mock_settings,
         ):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     async def test_disconnect_websocket_error_is_logged(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify disconnect WebSocket error is logged but not raised.
 
@@ -928,7 +964,7 @@ class TestKrakenGetDefaultKwargs:
         """
         bootstrap = BootstrapSettingsLoader()
         settings = AppSettings(bootstrap, None)
-        kwargs = KrakenSymbolMappingUpdaterService.get_default_kwargs(settings)
+        kwargs = KrakenSymbolUpdaterService.get_default_kwargs(settings)
         assert kwargs["update_threshold_hours"] == 6
         assert kwargs["force"] is False
 
@@ -937,12 +973,12 @@ class TestKrakenNormalizeCurrency:
     """Test cases for currency normalization logic."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for normalization tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
-    def test_normalize_fiat_currencies(self, updater: KrakenSymbolMappingUpdaterService) -> None:
+    def test_normalize_fiat_currencies(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify fiat currencies with Z prefix are normalized.
 
         Given: Kraken updater instance,
@@ -957,9 +993,7 @@ class TestKrakenNormalizeCurrency:
         assert updater._normalize_currency("ZAUD") == "AUD"
         assert updater._normalize_currency("ZCHF") == "CHF"
 
-    def test_normalize_single_x_prefix_crypto(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    def test_normalize_single_x_prefix_crypto(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify crypto currencies with single X prefix are normalized.
 
         Given: Kraken updater instance,
@@ -973,9 +1007,7 @@ class TestKrakenNormalizeCurrency:
         assert updater._normalize_currency("XZEC") == "ZEC"
         assert updater._normalize_currency("XMLN") == "MLN"
 
-    def test_normalize_double_x_prefix_crypto(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    def test_normalize_double_x_prefix_crypto(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify crypto currencies with double X prefix are normalized.
 
         Given: Kraken updater instance,
@@ -989,7 +1021,7 @@ class TestKrakenNormalizeCurrency:
         assert updater._normalize_currency("XXMR") == "XMR"
 
     def test_normalize_unknown_currency_passthrough(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify unknown currencies pass through unchanged.
 
@@ -1007,14 +1039,14 @@ class TestKrakenVerifyWebsocketSymbols:
     """Test cases for WebSocket symbol verification scenarios."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for verification tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_all_verified(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify all symbols verified via WebSocket.
 
@@ -1037,7 +1069,7 @@ class TestKrakenVerifyWebsocketSymbols:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_timeout_partial(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify partial symbols on WebSocket timeout.
 
@@ -1061,7 +1093,7 @@ class TestKrakenVerifyWebsocketSymbols:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_cancelled(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify CancelledError is propagated.
 
@@ -1086,7 +1118,7 @@ class TestKrakenVerifyWebsocketSymbols:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_error_fallback(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify fallback to all symbols on connection error.
 
@@ -1109,7 +1141,7 @@ class TestKrakenVerifyWebsocketSymbols:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_async_disconnect(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify async disconnect is awaited properly.
 
@@ -1135,7 +1167,7 @@ class TestKrakenVerifyWebsocketSymbols:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_empty_set_branch(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify empty symbol set returns empty result.
 
@@ -1161,14 +1193,14 @@ class TestKrakenBuildVerifiedMappings:
     """Test cases for building verified symbol mappings."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for mapping tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
     async def test_build_verified_mappings_tokenized_asset_invalid_base(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify tokenized assets with invalid base are skipped.
 
@@ -1197,7 +1229,7 @@ class TestKrakenBuildVerifiedMappings:
 
     @pytest.mark.asyncio
     async def test_build_verified_mappings_tokenized_asset_invalid_quote(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify tokenized assets with invalid quote are skipped.
 
@@ -1226,7 +1258,7 @@ class TestKrakenBuildVerifiedMappings:
 
     @pytest.mark.asyncio
     async def test_build_verified_mappings_low_verification_rate(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify low verification rate returns success=False.
 
@@ -1262,7 +1294,7 @@ class TestKrakenBuildVerifiedMappings:
 
     @pytest.mark.asyncio
     async def test_build_verified_mappings_exception(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify exception returns empty mappings with success=False.
 
@@ -1278,7 +1310,7 @@ class TestKrakenBuildVerifiedMappings:
 
     @pytest.mark.asyncio
     async def test_build_verified_mappings_empty_base_or_quote_skipped(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify symbols with empty base or quote are skipped.
 
@@ -1323,14 +1355,14 @@ class TestKrakenFetchSymbols:
     """Test cases for symbol fetching functionality."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for fetch tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
     async def test_fetch_symbols_verification_failed(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify _fetch_symbols raises on verification failure.
 
@@ -1338,7 +1370,7 @@ class TestKrakenFetchSymbols:
         When: _fetch_symbols called,
         Then: RuntimeError raised with verification failed message.
         """
-        mock_mappings: dict[str, SymbolMapping] = {}
+        mock_mappings: dict[str, dict[str, str]] = {}
         with patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build:
             mock_build.return_value = (mock_mappings, False)
             mock_client = MagicMock()
@@ -1346,9 +1378,7 @@ class TestKrakenFetchSymbols:
                 await updater._fetch_symbols(mock_client)
 
     @pytest.mark.asyncio
-    async def test_fetch_symbols_no_mappings(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    async def test_fetch_symbols_no_mappings(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify _fetch_symbols raises when no mappings generated.
 
         Given: build_verified_mappings returns empty dict,
@@ -1362,21 +1392,21 @@ class TestKrakenFetchSymbols:
                 await updater._fetch_symbols(mock_client)
 
     @pytest.mark.asyncio
-    async def test_fetch_symbols_success(self, updater: KrakenSymbolMappingUpdaterService) -> None:
+    async def test_fetch_symbols_success(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify _fetch_symbols returns mapping dicts on success.
 
         Given: Valid verified mappings,
         When: _fetch_symbols called,
         Then: List of symbol dicts returned.
         """
-        mock_mapping = SymbolMapping(
-            native_symbol="BTC-USD",
-            kraken_websocket_symbol="BTC/USD",
-            kraken_rest_symbol="XXBTZUSD",
-            ccxt_symbol="BTC/USD",
-            base_currency="BTC",
-            quote_currency="USD",
-        )
+        mock_mapping = {
+            "native_symbol": "BTC-USD",
+            "kraken_websocket_symbol": "BTC/USD",
+            "kraken_rest_symbol": "XXBTZUSD",
+            "ccxt_symbol": "BTC/USD",
+            "base_currency": "BTC",
+            "quote_currency": "USD",
+        }
         with patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build:
             mock_build.return_value = ({"BTC-USD": mock_mapping}, True)
             mock_client = MagicMock()
@@ -1390,10 +1420,10 @@ class TestKrakenUpdateDatabase:
     """Test cases for database update operations."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for database tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     def test_update_database_requires_repository(self) -> None:
         """Verify repository is None before initialization.
@@ -1403,7 +1433,7 @@ class TestKrakenUpdateDatabase:
         Then: Repository is None.
         """
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            updater = KrakenSymbolMappingUpdaterService()
+            updater = KrakenSymbolUpdaterService()
         assert updater.repository is None
 
 
@@ -1411,14 +1441,14 @@ class TestKrakenLoadRestSymbolsEdgeCases:
     """Test cases for REST symbol loading edge cases."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for edge case tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
     async def test_load_rest_symbols_empty_rest_id(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify symbols with empty REST ID are skipped.
 
@@ -1452,7 +1482,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
 
     @pytest.mark.asyncio
     async def test_load_rest_symbols_missing_base_quote(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify symbols without base/quote are skipped.
 
@@ -1485,7 +1515,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
 
     @pytest.mark.asyncio
     async def test_load_rest_symbols_tokenized_invalid_pair_data(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify tokenized assets with invalid pair data are skipped.
 
@@ -1518,7 +1548,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
 
     @pytest.mark.asyncio
     async def test_load_rest_symbols_tokenized_missing_base_quote(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify tokenized assets with missing base/quote are skipped.
 
@@ -1553,9 +1583,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         assert len(result) == 0
 
     @pytest.mark.asyncio
-    async def test_load_rest_symbols_api_error(
-        self, updater: KrakenSymbolMappingUpdaterService
-    ) -> None:
+    async def test_load_rest_symbols_api_error(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify API error is propagated.
 
         Given: CCXT client raising ConnectionError,
@@ -1580,7 +1608,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
 
     @pytest.mark.asyncio
     async def test_load_rest_symbols_invalid_tokenized_result_type(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify invalid tokenized result type raises error.
 
@@ -1612,14 +1640,14 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
     """Test cases for WebSocket symbol verification branch coverage."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for branch tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_non_string_symbol(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify non-string symbols are ignored.
 
@@ -1644,7 +1672,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_symbol_not_in_set(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify symbols not in request set are ignored.
 
@@ -1669,7 +1697,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_disconnect_none(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify missing disconnect_websocket is handled.
 
@@ -1693,7 +1721,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_disconnect_not_callable(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self, updater: KrakenSymbolUpdaterService
     ) -> None:
         """Verify non-callable disconnect_websocket is handled.
 
@@ -1717,30 +1745,85 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
 
 
 class TestKrakenUpdateDatabaseBranches:
-    """Test cases for database update branch coverage."""
+    """Test cases for database update branch coverage using SymbolCatalog and SymbolAlias."""
 
     @pytest.fixture
-    def updater(self) -> KrakenSymbolMappingUpdaterService:
+    def updater(self) -> KrakenSymbolUpdaterService:
         """Create updater instance for branch tests."""
         with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
-            return KrakenSymbolMappingUpdaterService()
+            return KrakenSymbolUpdaterService()
+
+    @pytest.fixture
+    def db_session_factory(self) -> sessionmaker:
+        """Create in-memory SQLite session factory with schema."""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine)
 
     @pytest.mark.asyncio
-    async def test_update_database_only_kraken_ws_symbol_changed(
-        self, updater: KrakenSymbolMappingUpdaterService
+    async def test_update_database_only_ws_alias_changed(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
     ) -> None:
-        """Verify database update when only WS symbol changes.
+        """Verify database update when only WS alias changes.
 
-        Given: Existing mapping with old WebSocket symbol,
+        Given: Existing catalog and aliases with old WebSocket symbol,
         When: _update_database called with new WS symbol,
-        Then: WebSocket symbol updated and committed.
+        Then: WS alias exchange_symbol updated.
         """
-        existing_mapping = MagicMock(spec=SymbolMapping)
-        existing_mapping.native_symbol = "BTC-USD"
-        existing_mapping.kraken_websocket_symbol = "OLD/WS"
-        existing_mapping.kraken_rest_symbol = "XXBTZUSD"
-        existing_mapping.ccxt_symbol = "BTC/USD"
-        existing_mapping.updated_at = datetime(2020, 1, 1)
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    exchange_symbol="OLD/WS",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="rest",
+                    exchange_symbol="XXBTZUSD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ccxt",
+                    exchange_symbol="BTC/USD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
         symbols = [
             {
                 "native_symbol": "BTC-USD",
@@ -1751,33 +1834,79 @@ class TestKrakenUpdateDatabaseBranches:
                 "quote_currency": "USD",
             }
         ]
-        mock_session = MagicMock()
-        mock_session.__enter__.return_value = mock_session
-        mock_session.__exit__.return_value = None
-        mock_session.execute.return_value.scalar_one_or_none.return_value = existing_mapping
-        mock_repo = MagicMock()
-        mock_repo.get_session.return_value = mock_session
-        with patch.object(updater, "repository", mock_repo):
-            await updater._update_database(symbols)
-        assert existing_mapping.kraken_websocket_symbol == "BTC/USD"
-        mock_session.commit.assert_called_once()
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            ws_alias = (
+                session.query(SymbolAlias)
+                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="ws")
+                .one()
+            )
+            assert ws_alias.exchange_symbol == "BTC/USD"
 
     @pytest.mark.asyncio
-    async def test_update_database_only_rest_symbol_changed(
-        self, updater: KrakenSymbolMappingUpdaterService
+    async def test_update_database_only_rest_alias_changed(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
     ) -> None:
-        """Verify database update when only REST symbol changes.
+        """Verify database update when only REST alias changes.
 
-        Given: Existing mapping with old REST symbol,
+        Given: Existing catalog and aliases with old REST symbol,
         When: _update_database called with new REST symbol,
-        Then: REST symbol updated and committed.
+        Then: REST alias exchange_symbol updated.
         """
-        existing_mapping = MagicMock(spec=SymbolMapping)
-        existing_mapping.native_symbol = "BTC-USD"
-        existing_mapping.kraken_websocket_symbol = "BTC/USD"
-        existing_mapping.kraken_rest_symbol = "OLDREST"
-        existing_mapping.ccxt_symbol = "BTC/USD"
-        existing_mapping.updated_at = datetime(2020, 1, 1)
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    exchange_symbol="BTC/USD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="rest",
+                    exchange_symbol="OLDREST",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ccxt",
+                    exchange_symbol="BTC/USD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
         symbols = [
             {
                 "native_symbol": "BTC-USD",
@@ -1788,33 +1917,79 @@ class TestKrakenUpdateDatabaseBranches:
                 "quote_currency": "USD",
             }
         ]
-        mock_session = MagicMock()
-        mock_session.__enter__.return_value = mock_session
-        mock_session.__exit__.return_value = None
-        mock_session.execute.return_value.scalar_one_or_none.return_value = existing_mapping
-        mock_repo = MagicMock()
-        mock_repo.get_session.return_value = mock_session
-        with patch.object(updater, "repository", mock_repo):
-            await updater._update_database(symbols)
-        assert existing_mapping.kraken_rest_symbol == "XXBTZUSD"
-        mock_session.commit.assert_called_once()
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            rest_alias = (
+                session.query(SymbolAlias)
+                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="rest")
+                .one()
+            )
+            assert rest_alias.exchange_symbol == "XXBTZUSD"
 
     @pytest.mark.asyncio
-    async def test_update_database_only_ccxt_symbol_changed(
-        self, updater: KrakenSymbolMappingUpdaterService
+    async def test_update_database_only_ccxt_alias_changed(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
     ) -> None:
-        """Verify database update when only CCXT symbol changes.
+        """Verify database update when only CCXT alias changes.
 
-        Given: Existing mapping with old CCXT symbol,
+        Given: Existing catalog and aliases with old CCXT symbol,
         When: _update_database called with new CCXT symbol,
-        Then: CCXT symbol updated and committed.
+        Then: CCXT alias exchange_symbol updated.
         """
-        existing_mapping = MagicMock(spec=SymbolMapping)
-        existing_mapping.native_symbol = "BTC-USD"
-        existing_mapping.kraken_websocket_symbol = "BTC/USD"
-        existing_mapping.kraken_rest_symbol = "XXBTZUSD"
-        existing_mapping.ccxt_symbol = "OLD/CCXT"
-        existing_mapping.updated_at = datetime(2020, 1, 1)
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    exchange_symbol="BTC/USD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="rest",
+                    exchange_symbol="XXBTZUSD",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ccxt",
+                    exchange_symbol="OLD/CCXT",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
         symbols = [
             {
                 "native_symbol": "BTC-USD",
@@ -1825,34 +2000,79 @@ class TestKrakenUpdateDatabaseBranches:
                 "quote_currency": "USD",
             }
         ]
-        mock_session = MagicMock()
-        mock_session.__enter__.return_value = mock_session
-        mock_session.__exit__.return_value = None
-        mock_session.execute.return_value.scalar_one_or_none.return_value = existing_mapping
-        mock_repo = MagicMock()
-        mock_repo.get_session.return_value = mock_session
-        with patch.object(updater, "repository", mock_repo):
-            await updater._update_database(symbols)
-        assert existing_mapping.ccxt_symbol == "BTC/USD"
-        mock_session.commit.assert_called_once()
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            ccxt_alias = (
+                session.query(SymbolAlias)
+                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="ccxt")
+                .one()
+            )
+            assert ccxt_alias.exchange_symbol == "BTC/USD"
 
     @pytest.mark.asyncio
     async def test_update_database_no_changes_needed(
-        self, updater: KrakenSymbolMappingUpdaterService
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
     ) -> None:
-        """Verify no update when mapping unchanged.
+        """Verify no alias updated_at change when values are identical.
 
-        Given: Existing mapping with identical values,
+        Given: Existing catalog and aliases with identical values,
         When: _update_database called,
-        Then: updated_at timestamp unchanged.
+        Then: Alias updated_at timestamps unchanged.
         """
-        original_updated_at = datetime(2020, 1, 1)
-        existing_mapping = MagicMock(spec=SymbolMapping)
-        existing_mapping.native_symbol = "BTC-USD"
-        existing_mapping.kraken_websocket_symbol = "BTC/USD"
-        existing_mapping.kraken_rest_symbol = "XXBTZUSD"
-        existing_mapping.ccxt_symbol = "BTC/USD"
-        existing_mapping.updated_at = original_updated_at
+        original_updated_at = datetime(2020, 1, 1, tzinfo=UTC)
+        with db_session_factory() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=original_updated_at,
+                    updated_at=original_updated_at,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    exchange_symbol="BTC/USD",
+                    created_at=original_updated_at,
+                    updated_at=original_updated_at,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="rest",
+                    exchange_symbol="XXBTZUSD",
+                    created_at=original_updated_at,
+                    updated_at=original_updated_at,
+                )
+            )
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ccxt",
+                    exchange_symbol="BTC/USD",
+                    created_at=original_updated_at,
+                    updated_at=original_updated_at,
+                )
+            )
+            session.commit()
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
         symbols = [
             {
                 "native_symbol": "BTC-USD",
@@ -1863,13 +2083,48 @@ class TestKrakenUpdateDatabaseBranches:
                 "quote_currency": "USD",
             }
         ]
-        mock_session = MagicMock()
-        mock_session.__enter__.return_value = mock_session
-        mock_session.__exit__.return_value = None
-        mock_session.execute.return_value.scalar_one_or_none.return_value = existing_mapping
-        mock_repo = MagicMock()
-        mock_repo.get_session.return_value = mock_session
-        with patch.object(updater, "repository", mock_repo):
-            await updater._update_database(symbols)
-        assert existing_mapping.updated_at == original_updated_at
-        mock_session.commit.assert_called_once()
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            ws_alias = (
+                session.query(SymbolAlias)
+                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="ws")
+                .one()
+            )
+            assert ws_alias.updated_at == original_updated_at
+
+    @pytest.mark.asyncio
+    async def test_update_database_skips_empty_ccxt_symbol(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Skip alias creation when exchange_symbol is empty.
+
+        Given: Symbol data with empty ccxt_symbol,
+        When: _update_database is called,
+        Then: Only ws and rest aliases are created, ccxt alias is skipped.
+        """
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
+        symbols = [
+            {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            }
+        ]
+        await updater._update_database(symbols)
+        with db_session_factory() as session:
+            all_aliases = session.query(SymbolAlias).filter_by(native_symbol="BTC-USD").all()
+            channels = {a.channel for a in all_aliases}
+            assert channels == {"ws", "rest"}

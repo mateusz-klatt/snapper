@@ -9,6 +9,7 @@ export interface AppState {
   connectionLag: number
 }
 export interface MarketDataState {
+  selectedExchange: string | null
   selectedInstrument: string | null
   selectedTimeframe: string
   lastPrice: number | null

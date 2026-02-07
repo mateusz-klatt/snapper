@@ -10,7 +10,7 @@ Modules:
         database-backed cache.
     functions: Stateless conversion functions for symbol format transformations.
 
-The native symbol format is ``BASE/QUOTE`` (e.g., ``BTC/USD``), while
-exchange-specific formats vary (e.g., ``XBT/USD`` for Kraken WebSocket,
-``BTC-USD`` for Zonda).
+The native symbol format is ``BASE-QUOTE`` (e.g., ``BTC-USD``), while
+exchange-specific formats vary (e.g., ``BTC/USD`` for Kraken WebSocket,
+``BTC-PLN`` for Zonda).
 """

@@ -21,7 +21,7 @@ export type WebSocketMessages =
   | ReplayStartEnvelope
   | SettingChangedEnvelope
   | SignalEnvelope
-  | SymbolMappingUpdateEnvelope
+  | SymbolAliasUpdateEnvelope
   | TickEnvelope
   | TradeEnvelope
   | WSAuthCompleteResponse
@@ -89,8 +89,8 @@ export type Side3 = "buy" | "sell";
 export type Price2 = number | null;
 export type StrategyName = string | null;
 export type Id = string | null;
-export type Type12 = "symbol_mapping_update";
-export type Event1 = "symbol_mappings_updated";
+export type Type12 = "symbol_alias_update";
+export type Event1 = "symbol_aliases_updated";
 export type Action = "clear_cache";
 export type Type13 = "tick";
 export type Bid = number | null;
@@ -586,17 +586,17 @@ export interface Meta11 {
   [k: string]: unknown;
 }
 /**
- * Symbol mapping cache invalidation message.
+ * Symbol alias cache invalidation message.
  *
- * Published when symbol mappings are updated in the database.
+ * Published when symbol aliases are updated in the database.
  * Subscribers should clear their symbol mapper caches.
  *
  * Attributes:
- *     type: Fixed as 'symbol_mapping_update' for message routing.
- *     event: Event type (always 'symbol_mappings_updated').
+ *     type: Fixed as 'symbol_alias_update' for message routing.
+ *     event: Event type (always 'symbol_aliases_updated').
  *     action: Required action (always 'clear_cache').
  */
-export interface SymbolMappingUpdateEnvelope {
+export interface SymbolAliasUpdateEnvelope {
   type: Type12;
   timestamp?: string;
   meta?: Meta12;

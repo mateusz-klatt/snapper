@@ -18,7 +18,7 @@ Classes:
     OrderStatusEnvelope: Order status update.
     HeartbeatEnvelope: Component health heartbeat.
     SettingChangedEnvelope: Configuration change notification.
-    SymbolMappingUpdateEnvelope: Symbol mapping cache invalidation.
+    SymbolAliasUpdateEnvelope: Symbol alias cache invalidation.
     ReplayStartEnvelope: Historical data replay start marker.
     ReplayEndEnvelope: Historical data replay end marker.
 
@@ -342,20 +342,20 @@ class SettingChangedEnvelope(MessageEnvelopeBase):
     updated_by: str | None = None
 
 
-class SymbolMappingUpdateEnvelope(MessageEnvelopeBase):
-    """Symbol mapping cache invalidation message.
+class SymbolAliasUpdateEnvelope(MessageEnvelopeBase):
+    """Symbol alias cache invalidation message.
 
-    Published when symbol mappings are updated in the database.
+    Published when symbol aliases are updated in the database.
     Subscribers should clear their symbol mapper caches.
 
     Attributes:
-        type: Fixed as 'symbol_mapping_update' for message routing.
-        event: Event type (always 'symbol_mappings_updated').
+        type: Fixed as 'symbol_alias_update' for message routing.
+        event: Event type (always 'symbol_aliases_updated').
         action: Required action (always 'clear_cache').
     """
 
-    type: Literal["symbol_mapping_update"] = "symbol_mapping_update"
-    event: Literal["symbol_mappings_updated"] = "symbol_mappings_updated"
+    type: Literal["symbol_alias_update"] = "symbol_alias_update"
+    event: Literal["symbol_aliases_updated"] = "symbol_aliases_updated"
     action: Literal["clear_cache"] = "clear_cache"
 
 
@@ -410,7 +410,7 @@ MESSAGE_TYPE_MAP: dict[str, type[MessageEnvelopeBase]] = {
     "heartbeat": HeartbeatEnvelope,
     "setting_changed": SettingChangedEnvelope,
     "order_status": OrderStatusEnvelope,
-    "symbol_mapping_update": SymbolMappingUpdateEnvelope,
+    "symbol_alias_update": SymbolAliasUpdateEnvelope,
     "replay_start": ReplayStartEnvelope,
     "replay_end": ReplayEndEnvelope,
 }

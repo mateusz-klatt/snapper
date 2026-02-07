@@ -348,8 +348,11 @@ class ExchangeClientBase(ABC):
         if self.repository is None:
             return None
         try:
+            parts = request.symbol.split("-") if "-" in request.symbol else [request.symbol]
+            base = parts[0]
+            quote = parts[1] if len(parts) > 1 else "USD"
             instrument_id = await self.repository.upsert_instrument(
-                symbol=request.symbol, exchange=self.exchange_name
+                symbol=request.symbol, exchange=self.exchange_name, base=base, quote=quote
             )
             db_order_id = await self.repository.insert_order(
                 instrument_id=instrument_id,
@@ -423,6 +426,8 @@ class ExchangeClientBase(ABC):
                 size=execution.last_qty or execution.cum_qty or 0.0,
                 fee=execution.fee_usd_equiv or 0.0,
                 fee_asset="USD",
+                exec_id=execution.exec_id,
+                trade_id=str(execution.trade_id) if execution.trade_id is not None else None,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log execution to database: {e}")

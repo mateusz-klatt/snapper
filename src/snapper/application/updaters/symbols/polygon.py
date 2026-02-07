@@ -1,4 +1,4 @@
-"""Polygon.io symbol mapping updater service.
+"""Polygon.io symbol updater service.
 
 Fetches and persists ticker symbols from Polygon.io API (44k+ tickers).
 """
@@ -13,16 +13,16 @@ from sqlalchemy import select
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
-from snapper.application.updaters.symbols.base import SymbolMappingUpdaterService
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
-from snapper.data.models import SymbolMapping
+from snapper.data.models import SymbolCatalog
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
 
 @register_process(
-    "polygon_symbol_mapping_updater",
+    "polygon_symbol_updater",
     method="start",
-    description="Polygon symbol mapping updater (44k+ tickers from API)",
+    description="Polygon symbol updater (44k+ tickers from API)",
     priority=11,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
@@ -31,7 +31,7 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonExch
     mode="thread",
     args=[],
 )
-class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExchangeClient]):
+class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
     """Service for updating Polygon symbol mappings from REST API."""
 
     @staticmethod
@@ -91,7 +91,7 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
         Returns:
             Settings key name for tracking last update time.
         """
-        return "polygon_symbol_mappings_last_update"
+        return "polygon_symbols_last_update"
 
     @staticmethod
     def _split_native_symbol(
@@ -116,6 +116,23 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
         quote_value: str | None = currency.upper() if currency else None
         return native_symbol, quote_value
 
+    def _determine_polygon_asset_type(self, ticker: str) -> str:
+        """Determine asset type from Polygon ticker prefix.
+
+        Args:
+            ticker: Polygon ticker (e.g., ``X:BTCUSD``, ``C:EURUSD``, ``I:SPX``).
+
+        Returns:
+            Asset type string: crypto, forex, index, or equity.
+        """
+        if ticker.startswith("X:"):
+            return "crypto"
+        if ticker.startswith("C:"):
+            return "forex"
+        if ticker.startswith("I:"):
+            return "index"
+        return "equity"
+
     def _upsert_polygon_mapping(
         self,
         session: Any,
@@ -126,7 +143,10 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
         now: datetime,
         stats: dict[str, int],
     ) -> None:
-        """Insert or update a single Polygon symbol mapping.
+        """Insert or update Polygon catalog and alias rows.
+
+        When ``insert_new`` is False, only updates aliases for symbols that
+        already have a catalog entry. New symbols are skipped.
 
         Args:
             session: SQLAlchemy session.
@@ -137,25 +157,33 @@ class PolygonSymbolMappingUpdaterService(SymbolMappingUpdaterService[PolygonExch
             now: Current timestamp for created_at/updated_at.
             stats: Mutable stats dict to increment counters.
         """
-        stmt = select(SymbolMapping).where(SymbolMapping.native_symbol == native_symbol)
-        mapping = session.execute(stmt).scalar_one_or_none()
-        if mapping is None:
+        existing_catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == native_symbol)
+        ).scalar_one_or_none()
+        if existing_catalog is None:
             if not self.insert_new:
                 stats["skipped"] += 1
                 return
-            new_mapping = SymbolMapping(
-                native_symbol=native_symbol,
-                base_currency=base,
-                quote_currency=quote,
-                polygon_symbol=ticker,
-                created_at=now,
-                updated_at=now,
+            asset_type = self._determine_polygon_asset_type(ticker)
+            self._upsert_catalog(
+                session,
+                native_symbol,
+                base,
+                quote,
+                asset_type,
+                now,
             )
-            session.add(new_mapping)
+        alias_result = self._upsert_alias(
+            session,
+            native_symbol,
+            "polygon",
+            "rest",
+            ticker,
+            now,
+        )
+        if alias_result == "created":
             stats["inserted"] += 1
-        else:
-            mapping.polygon_symbol = ticker
-            mapping.updated_at = now
+        elif alias_result == "updated":
             stats["updated"] += 1
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:

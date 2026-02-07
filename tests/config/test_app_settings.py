@@ -276,6 +276,19 @@ class TestAppSettingsTradingProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.timeframes == ["1m", "5m", "1h"]
 
+    def test_paper_instruments_returns_value(self) -> None:
+        """Verify paper_instruments returns configured source map.
+
+        Given service with paper_instruments dict set,
+        When accessing settings.paper_instruments,
+        Then configured dict is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        custom_sources = {"kraken": ["BTC-USD"], "polygon": ["AAPL"]}
+        service = MockSettingsService({"paper_instruments": custom_sources})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.paper_instruments == custom_sources
+
     def test_backfill_days_returns_value(self) -> None:
         """Verify backfill_days returns configured value.
 

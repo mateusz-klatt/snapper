@@ -1,4 +1,8 @@
-"""Tests for Zonda symbol mapping updater service."""
+"""Tests for Zonda symbol updater service.
+
+Validates that the Zonda updater correctly creates SymbolCatalog and
+SymbolAlias rows via _upsert_catalog / _upsert_alias.
+"""
 
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
@@ -18,11 +22,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
-from snapper.application.updaters.symbols.zonda import ZondaSymbolMappingUpdaterService
+from snapper.application.updaters.symbols.zonda import ZondaSymbolUpdaterService
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.data.models import Base
-from snapper.data.models import SymbolMapping
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolCatalog
 from snapper.data.repository import DatabaseRepository
 from snapper.indicators.ta_lib_adapter import macd
 from snapper.indicators.ta_lib_adapter import rsi
@@ -51,17 +56,17 @@ class TestTokensWebSocketRotatorSingleton:
 
 
 class TestZondaSymbolUpdaterMethods:
-    """Test cases for ZondaSymbolMappingUpdaterService methods."""
+    """Test cases for ZondaSymbolUpdaterService methods."""
 
     @pytest.mark.asyncio
     async def test_create_exchange_client(self) -> None:
         """Verify _create_exchange_client returns ZondaExchangeClient.
 
-        Given: ZondaSymbolMappingUpdaterService instance,
+        Given: ZondaSymbolUpdaterService instance,
         When: _create_exchange_client called,
         Then: ZondaExchangeClient instance returned.
         """
-        service = ZondaSymbolMappingUpdaterService(update_threshold_hours=6, force=False)
+        service = ZondaSymbolUpdaterService(update_threshold_hours=6, force=False)
         client = service._create_exchange_client()
         assert isinstance(client, ZondaExchangeClient)
 
@@ -73,7 +78,7 @@ class TestZondaSymbolUpdaterMethods:
         When: _fetch_symbols called,
         Then: Returns expected symbols from load_zonda_markets.
         """
-        service = ZondaSymbolMappingUpdaterService(update_threshold_hours=6, force=False)
+        service = ZondaSymbolUpdaterService(update_threshold_hours=6, force=False)
         mock_client = MagicMock()
         expected_symbols: list[dict[str, Any]] = [
             {
@@ -134,7 +139,7 @@ class StubZondaClient:
             yield market
 
 
-class ExposedZondaSymbolMappingUpdater(ZondaSymbolMappingUpdaterService):
+class ExposedZondaSymbolUpdater(ZondaSymbolUpdaterService):
     """Exposed updater for testing protected methods."""
 
     async def load_zonda_markets_public(self, client: StubZondaClient) -> list[dict[str, Any]]:
@@ -149,12 +154,12 @@ class ExposedZondaSymbolMappingUpdater(ZondaSymbolMappingUpdaterService):
 @pytest.fixture()
 def updater_with_repository(
     tmp_path: Path,
-) -> Iterator[tuple[ExposedZondaSymbolMappingUpdater, DatabaseRepository]]:
+) -> Iterator[tuple[ExposedZondaSymbolUpdater, DatabaseRepository]]:
     """Provide Zonda updater instance with test database."""
     db_path = tmp_path / "zonda_symbols.sqlite"
     repository = DatabaseRepository(f"sqlite:///{db_path}")
     repository.create_all()
-    updater = ExposedZondaSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedZondaSymbolUpdater(update_threshold_hours=1, force=True)
     updater.repository = repository
     yield updater, repository
     repository.engine.dispose()
@@ -194,7 +199,7 @@ async def test_load_zonda_markets_filters_invalid_entries() -> None:
         },
     ]
     client = StubZondaClient(markets)
-    updater = ExposedZondaSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedZondaSymbolUpdater(update_threshold_hours=1, force=True)
     parsed = await updater.load_zonda_markets_public(client)
     assert parsed == [
         {
@@ -209,24 +214,34 @@ async def test_load_zonda_markets_filters_invalid_entries() -> None:
 
 @pytest.mark.asyncio()
 async def test_update_database_handles_inserts_and_updates(
-    updater_with_repository: tuple[ExposedZondaSymbolMappingUpdater, DatabaseRepository],
+    updater_with_repository: tuple[ExposedZondaSymbolUpdater, DatabaseRepository],
 ) -> None:
     """Verify update_database handles both inserts and updates.
 
-    Given: Existing BTC-USD mapping with old zonda_symbol,
+    Given: Existing BTC-USD catalog+alias with old exchange_symbol,
     When: Update database called with updated BTC and new ETH,
-    Then: BTC updated, ETH inserted with correct timestamps.
+    Then: BTC ws alias updated, ETH catalog+aliases inserted with correct timestamps.
     """
     updater, repository = updater_with_repository
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
-            SymbolMapping(
+            SymbolCatalog(
                 native_symbol="BTC-USD",
-                zonda_symbol="BTC-USD-OLD",
-                base_currency="BTC",
-                quote_currency="USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="zonda",
+                channel="ws",
+                exchange_symbol="BTC-USD-OLD",
                 created_at=original_timestamp,
                 updated_at=original_timestamp,
             )
@@ -249,41 +264,71 @@ async def test_update_database_handles_inserts_and_updates(
     await updater.update_database_public(payload)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        btc_mapping = session.execute(
-            select(SymbolMapping).where(SymbolMapping.native_symbol == "BTC-USD")
+        btc_ws = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "zonda",
+                SymbolAlias.channel == "ws",
+            )
         ).scalar_one()
-        eth_mapping = session.execute(
-            select(SymbolMapping).where(SymbolMapping.native_symbol == "ETH-USD")
+        eth_catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "ETH-USD")
         ).scalar_one()
-    assert btc_mapping.zonda_symbol == "BTC-USD"
-    assert btc_mapping.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
-    assert eth_mapping.zonda_symbol == "ETH-USD"
-    assert eth_mapping.base_currency == "ETH"
-    assert eth_mapping.quote_currency == "USD"
-    assert eth_mapping.created_at == eth_mapping.updated_at
+        eth_ws = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "ETH-USD",
+                SymbolAlias.exchange == "zonda",
+                SymbolAlias.channel == "ws",
+            )
+        ).scalar_one()
+    assert btc_ws.exchange_symbol == "BTC-USD"
+    assert btc_ws.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert eth_ws.exchange_symbol == "ETH-USD"
+    assert eth_catalog.base == "ETH"
+    assert eth_catalog.quote == "USD"
+    assert eth_ws.created_at == eth_ws.updated_at
 
 
 @pytest.mark.asyncio()
 async def test_update_database_skips_unchanged_mapping(
-    updater_with_repository: tuple[ExposedZondaSymbolMappingUpdater, DatabaseRepository],
+    updater_with_repository: tuple[ExposedZondaSymbolUpdater, DatabaseRepository],
 ) -> None:
-    """Verify update_database skips update when mapping unchanged.
+    """Verify update_database skips update when alias exchange_symbol unchanged.
 
-    Given: Existing mapping with same values as payload,
+    Given: Existing catalog+aliases with same values as payload,
     When: Update database called,
-    Then: updated_at timestamp preserved unchanged.
+    Then: updated_at timestamps preserved unchanged on alias rows.
     """
     updater, repository = updater_with_repository
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
-            SymbolMapping(
+            SymbolCatalog(
                 native_symbol="BTC-USD",
-                zonda_symbol="BTC-USD",
-                ccxt_symbol="BTC/USD",
-                base_currency="BTC",
-                quote_currency="USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="zonda",
+                channel="ws",
+                exchange_symbol="BTC-USD",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="zonda",
+                channel="ccxt",
+                exchange_symbol="BTC/USD",
                 created_at=original_timestamp,
                 updated_at=original_timestamp,
             )
@@ -301,12 +346,23 @@ async def test_update_database_skips_unchanged_mapping(
     await updater.update_database_public(payload)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        btc_mapping = session.execute(
-            select(SymbolMapping).where(SymbolMapping.native_symbol == "BTC-USD")
+        btc_ws = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "zonda",
+                SymbolAlias.channel == "ws",
+            )
         ).scalar_one()
-    assert btc_mapping.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
-    assert btc_mapping.zonda_symbol == "BTC-USD"
-    assert btc_mapping.ccxt_symbol == "BTC/USD"
+        btc_ccxt = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "zonda",
+                SymbolAlias.channel == "ccxt",
+            )
+        ).scalar_one()
+    assert btc_ws.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
+    assert btc_ws.exchange_symbol == "BTC-USD"
+    assert btc_ccxt.exchange_symbol == "BTC/USD"
 
 
 class DummyClient(SimpleNamespace):
@@ -336,7 +392,7 @@ async def test_load_zonda_markets_filters_invalid(monkeypatch: pytest.MonkeyPatc
         {"id": None, "symbol": "ETH/USD", "base": "ETH", "quote": "USD"},
         {"id": "BAD", "symbol": None, "base": "X", "quote": "Y"},
     ]
-    svc = ZondaSymbolMappingUpdaterService(update_threshold_hours=24, force=True)
+    svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
     result = await svc.load_zonda_markets(cast(Any, DummyClient(markets)))
     assert len(result) == 1
     assert result[0]["zonda_symbol"] == "BTC-USD"
@@ -344,13 +400,13 @@ async def test_load_zonda_markets_filters_invalid(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.asyncio
 async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify update_database creates new mappings.
+    """Verify update_database creates catalog and alias rows.
 
-    Given: Session mock with no existing mapping,
-    When: Update database called with symbols,
-    Then: Session add called for new mapping.
+    Given: Session mock with no existing catalog or alias rows,
+    When: Update database called with one symbol (including ccxt_symbol),
+    Then: Session add called for catalog + ws alias + ccxt alias (three times).
     """
-    svc = ZondaSymbolMappingUpdaterService(update_threshold_hours=24, force=True)
+    svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
     fake_session = SimpleNamespace(
         execute=Mock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None)),
         add=Mock(),
@@ -358,15 +414,18 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
     )
 
     class DummyRepo(SimpleNamespace):
+        """Fake repository returning a context-managed fake session."""
+
         def get_session(self) -> "DummyRepo":
+            """Return self as the context manager."""
             return self
 
         def __enter__(self) -> Any:
+            """Provide the fake session on context entry."""
             return fake_session
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
             """No cleanup required on context exit."""
-            pass
 
     repo: Any = DummyRepo()
     svc.repository = repo
@@ -380,20 +439,20 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
         }
     ]
     await svc._update_database(symbols)
-    fake_session.add.assert_called_once()
+    assert fake_session.add.call_count == 3
 
 
 def test_get_default_kwargs_and_setting_key() -> None:
     """Verify get_default_kwargs and _get_setting_key return expected values.
 
-    Given: ZondaSymbolMappingUpdaterService instance,
+    Given: ZondaSymbolUpdaterService instance,
     When: get_default_kwargs and _get_setting_key called,
     Then: Expected threshold hours and setting key returned.
     """
-    svc = ZondaSymbolMappingUpdaterService(update_threshold_hours=1, force=False)
+    svc = ZondaSymbolUpdaterService(update_threshold_hours=1, force=False)
     defaults = svc.get_default_kwargs(object())
     assert defaults["update_threshold_hours"] == 24
-    assert svc._get_setting_key() == "zonda_symbol_mapping_last_update"
+    assert svc._get_setting_key() == "zonda_symbols_last_update"
 
 
 @pytest.mark.asyncio
@@ -404,7 +463,7 @@ async def test_load_zonda_markets_raises_on_error() -> None:
     When: load_zonda_markets called,
     Then: RuntimeError propagated.
     """
-    svc = ZondaSymbolMappingUpdaterService(update_threshold_hours=24, force=True)
+    svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
 
     class FailingClient:
         async def subscribe_instruments(self) -> AsyncIterator[dict[str, Any]]:
@@ -417,31 +476,55 @@ async def test_load_zonda_markets_raises_on_error() -> None:
 
 @pytest.mark.asyncio
 async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify update_database updates existing and inserts new mappings.
+    """Verify update_database updates existing aliases and inserts new ones.
 
-    Given: Database with existing BTC-USD mapping,
+    Given: Database with existing BTC-USD catalog and ws/ccxt aliases with OLD symbols,
     When: Update database called with updated BTC and new ETH,
-    Then: BTC zonda_symbol updated, ETH inserted.
+    Then: BTC aliases updated, ETH catalog+aliases inserted.
     """
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     session_local = sessionmaker(bind=engine)
-    svc = ZondaSymbolMappingUpdaterService(update_threshold_hours=24, force=True)
+    svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
+    seed_time = datetime.now(UTC)
     with session_local() as session:
-        mapping = SymbolMapping(
-            native_symbol="BTC-USD",
-            zonda_symbol="OLD",
-            base_currency="BTC",
-            quote_currency="USD",
-            ccxt_symbol="OLD/USDT",
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=seed_time,
+                updated_at=seed_time,
+            )
         )
-        session.add(mapping)
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="zonda",
+                channel="ws",
+                exchange_symbol="OLD",
+                created_at=seed_time,
+                updated_at=seed_time,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="zonda",
+                channel="ccxt",
+                exchange_symbol="OLD/USDT",
+                created_at=seed_time,
+                updated_at=seed_time,
+            )
+        )
         session.commit()
 
     class Repo:
+        """Minimal repository exposing a session factory."""
+
         def get_session(self) -> Session:
+            """Return a new SQLAlchemy session."""
             return session_local()
 
     svc.repository = Repo()
@@ -463,11 +546,30 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
     ]
     await svc._update_database(symbols)
     with session_local() as session:
-        btc = session.query(SymbolMapping).filter_by(native_symbol="BTC-USD").one()
-        eth = session.query(SymbolMapping).filter_by(native_symbol="ETH-USD").one()
-        assert btc.zonda_symbol == "BTC-USD"
-        assert btc.ccxt_symbol == "BTC/USD"
-        assert eth.zonda_symbol == "ETH-USD"
+        btc_ws = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "zonda",
+                SymbolAlias.channel == "ws",
+            )
+        ).scalar_one()
+        btc_ccxt = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "zonda",
+                SymbolAlias.channel == "ccxt",
+            )
+        ).scalar_one()
+        eth_ws = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "ETH-USD",
+                SymbolAlias.exchange == "zonda",
+                SymbolAlias.channel == "ws",
+            )
+        ).scalar_one()
+        assert btc_ws.exchange_symbol == "BTC-USD"
+        assert btc_ccxt.exchange_symbol == "BTC/USD"
+        assert eth_ws.exchange_symbol == "ETH-USD"
 
 
 @pytest.mark.asyncio
@@ -475,29 +577,37 @@ async def test_update_database_handles_commit_error(monkeypatch: pytest.MonkeyPa
     """Verify update_database propagates commit errors.
 
     Given: Session that raises RuntimeError on commit,
-    When: Update database called,
+    When: Update database called with catalog and alias upserts,
     Then: RuntimeError propagated.
     """
-    svc = ZondaSymbolMappingUpdaterService(update_threshold_hours=24, force=True)
+    svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
 
     class FaultySession:
+        """Session stub that raises on commit."""
+
         def __enter__(self) -> "FaultySession":
+            """Return self on context entry."""
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-            return None
+            """No cleanup required on context exit."""
 
         def execute(self, _stmt: Any) -> Any:
+            """Return empty result for all select queries."""
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, _obj: Any) -> None:
-            return None
+            """Accept any add call without action."""
 
         def commit(self) -> None:
+            """Raise RuntimeError to simulate commit failure."""
             raise RuntimeError("fail")
 
     class Repo:
+        """Minimal repository returning a faulty session."""
+
         def get_session(self) -> FaultySession:
+            """Return a new FaultySession instance."""
             return FaultySession()
 
     svc.repository = Repo()

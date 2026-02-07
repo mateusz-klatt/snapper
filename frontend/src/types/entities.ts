@@ -17,7 +17,7 @@ export type {
   ReplayStart,
   SettingChanged,
   Signal,
-  SymbolMappingUpdate,
+  SymbolAliasUpdate,
   Tick,
   Trade,
   // API Snapshot entities

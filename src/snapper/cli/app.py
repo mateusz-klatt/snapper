@@ -59,10 +59,10 @@ from sqlalchemy.pool import NullPool
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
-from snapper.application.updaters.symbols.kraken import KrakenSymbolMappingUpdaterService
-from snapper.application.updaters.symbols.polygon import PolygonSymbolMappingUpdaterService
-from snapper.application.updaters.symbols.walutomat import WalutomatSymbolMappingUpdaterService
-from snapper.application.updaters.symbols.zonda import ZondaSymbolMappingUpdaterService
+from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
+from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
+from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
+from snapper.application.updaters.symbols.zonda import ZondaSymbolUpdaterService
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
@@ -555,7 +555,7 @@ def update_kraken_symbols(
     """
 
     async def run_symbol_update() -> None:
-        updater = KrakenSymbolMappingUpdaterService(force=force)
+        updater = KrakenSymbolUpdaterService(force=force)
         try:
             typer.echo("Starting Kraken symbol mapping update...")
             await updater.start()
@@ -590,7 +590,7 @@ def update_zonda_symbols(
     """
 
     async def run_zonda_update() -> None:
-        updater = ZondaSymbolMappingUpdaterService(update_threshold_hours=24, force=force)
+        updater = ZondaSymbolUpdaterService(update_threshold_hours=24, force=force)
         try:
             typer.echo("Starting Zonda symbol mapping update...")
             await updater.start()
@@ -625,7 +625,7 @@ def update_walutomat_symbols(
     """
 
     async def run_walutomat_update() -> None:
-        updater = WalutomatSymbolMappingUpdaterService(update_threshold_hours=24, force=force)
+        updater = WalutomatSymbolUpdaterService(update_threshold_hours=24, force=force)
         try:
             typer.echo("Starting Walutomat symbol mapping update...")
             await updater.start()
@@ -652,7 +652,7 @@ def update_polygon_symbols(
     """
 
     async def run_polygon_update() -> None:
-        updater = PolygonSymbolMappingUpdaterService(
+        updater = PolygonSymbolUpdaterService(
             update_threshold_hours=168, force=force, insert_new=insert_new
         )
         try:

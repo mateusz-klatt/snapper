@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import JSON
 from sqlalchemy import Boolean
+from sqlalchemy import CheckConstraint
 from sqlalchemy import DateTime
 from sqlalchemy import Float
 from sqlalchemy import ForeignKey
@@ -13,6 +14,7 @@ from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import UniqueConstraint
+from sqlalchemy import text
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
@@ -49,15 +51,14 @@ __all__ = [
     "OrderRecord",
     "Execution",
     "Position",
-    "StrategyRun",
     "SignalEvent",
     "User",
     "Setting",
-    "SymbolMapping",
+    "SymbolCatalog",
+    "SymbolAlias",
     "ProcessRun",
     "InstrumentSpec",
     "MarketSnapshot",
-    "PolygonImportLog",
 ]
 
 
@@ -72,12 +73,19 @@ class Instrument(Base):
     """SQLAlchemy model for tradeable financial instruments."""
 
     __tablename__ = "instruments"
+    __table_args__ = (
+        UniqueConstraint("symbol", "exchange", name="uq_instrument_symbol_exchange"),
+        CheckConstraint("exchange = LOWER(exchange)", name="ck_instrument_exchange_lower"),
+        Index("ix_instruments_exchange", "exchange"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("symbol_catalog.native_symbol"), index=True
+    )
+    exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
-    tick_size: Mapped[float] = mapped_column(Float)
-    lot_size: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     candles: Mapped[list["Candle"]] = relationship(back_populates="instrument")
     trades: Mapped[list["Trade"]] = relationship(back_populates="instrument")
 
@@ -126,9 +134,24 @@ class OrderRecord(Base):
     """SQLAlchemy model for trading order records."""
 
     __tablename__ = "orders"
+    __table_args__ = (
+        Index(
+            "uq_orders_client_oid",
+            "instrument_id",
+            "client_order_id",
+            unique=True,
+            sqlite_where=text("client_order_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_orders_exchange_oid",
+            "instrument_id",
+            "exchange_order_id",
+            unique=True,
+            sqlite_where=text("exchange_order_id IS NOT NULL"),
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
-    exchange: Mapped[str] = mapped_column(String(32), default="", server_default="")
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
@@ -139,16 +162,33 @@ class OrderRecord(Base):
     size: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(16))
     time_in_force: Mapped[str | None] = mapped_column(String(16))
-    error: Mapped[str | None] = mapped_column(String(256))
+    error: Mapped[str | None] = mapped_column(String(512))
 
 
 class Execution(Base):
     """SQLAlchemy model for order execution fills."""
 
     __tablename__ = "executions"
+    __table_args__ = (
+        Index(
+            "uq_executions_order_exec",
+            "order_id",
+            "exec_id",
+            unique=True,
+            sqlite_where=text("exec_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_executions_order_trade",
+            "order_id",
+            "trade_id",
+            unique=True,
+            sqlite_where=text("trade_id IS NOT NULL"),
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
-    exchange: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    exec_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
@@ -161,26 +201,14 @@ class Position(Base):
     """SQLAlchemy model for open trading positions."""
 
     __tablename__ = "positions"
+    __table_args__ = (UniqueConstraint("instrument_id", name="uq_positions_instrument_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
-    exchange: Mapped[str] = mapped_column(String(32), default="", server_default="")
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
     unrealized_pnl: Mapped[float] = mapped_column(Float)
     realized_pnl: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(TZDateTime())
-
-
-class StrategyRun(Base):
-    """SQLAlchemy model for strategy execution runs and metrics."""
-
-    __tablename__ = "strategy_runs"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(64), index=True)
-    params: Mapped[dict[str, Any]] = mapped_column(JSON)
-    started_at: Mapped[datetime] = mapped_column(TZDateTime())
-    ended_at: Mapped[datetime | None] = mapped_column(TZDateTime())
-    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class SignalEvent(Base):
@@ -189,7 +217,6 @@ class SignalEvent(Base):
     __tablename__ = "signal_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
-    exchange: Mapped[str] = mapped_column(String(32), default="", server_default="")
     timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
@@ -227,61 +254,79 @@ class Setting(Base):
     updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
-class SymbolMapping(Base):
-    """SQLAlchemy model for cross-exchange symbol mappings."""
+class SymbolCatalog(Base):
+    """SQLAlchemy model for the native symbol registry.
 
-    __tablename__ = "symbol_mappings"
+    Authoritative source for native_symbol, base, and asset_type.
+    Quote is authoritative for pairs (crypto/forex) where it is encoded
+    in the native symbol; informational for single-asset (equity/index)
+    where the exchange determines the denomination.
+    """
+
+    __tablename__ = "symbol_catalog"
     __table_args__ = (
-        Index("ix_symbol_mappings_kraken_websocket", "kraken_websocket_symbol"),
-        Index("ix_symbol_mappings_kraken_rest", "kraken_rest_symbol"),
-        Index("ix_symbol_mappings_base_quote", "base_currency", "quote_currency"),
-        Index("ix_symbol_mappings_zonda", "zonda_symbol"),
-        Index("ix_symbol_mappings_polygon", "polygon_symbol"),
-        Index("ix_symbol_mappings_walutomat", "walutomat_symbol"),
-        Index("ix_symbol_mappings_walutomat_rest", "walutomat_rest_symbol"),
+        CheckConstraint(
+            "asset_type IN ('crypto', 'forex', 'equity', 'index')",
+            name="ck_symbol_catalog_asset_type",
+        ),
+        CheckConstraint(
+            "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
+            name="ck_symbol_catalog_quote_required_for_pairs",
+        ),
+        Index("ix_sc_base_quote", "base", "quote"),
     )
-    native_symbol: Mapped[str] = mapped_column(
-        String(20), primary_key=True, comment="First-class citizen symbol (e.g., BTC-USD)"
-    )
-    kraken_websocket_symbol: Mapped[str | None] = mapped_column(
-        String(20), nullable=True, comment="WebSocket v2 format (e.g., BTC/USD)"
-    )
-    kraken_rest_symbol: Mapped[str | None] = mapped_column(
-        String(20), nullable=True, comment="REST API format (e.g., XXBTZUSD)"
-    )
-    ccxt_symbol: Mapped[str | None] = mapped_column(
-        String(30), nullable=True, comment="CCXT unified market symbol (e.g., BTC/USD)"
-    )
-    zonda_symbol: Mapped[str | None] = mapped_column(
-        String(20),
-        nullable=True,
-        comment="Zonda (BitBay) symbol format (e.g., BTC-PLN, ETH-EUR)",
-    )
-    polygon_symbol: Mapped[str | None] = mapped_column(
-        String(30),
-        nullable=True,
-        comment="Polygon.io symbol (e.g., C:EURUSD, X:BTCUSD, AAPL)",
-    )
-    walutomat_symbol: Mapped[str | None] = mapped_column(
-        String(10),
-        nullable=True,
-        comment="Walutomat FX symbol format (e.g., EUR_PLN, USD_PLN)",
-    )
-    walutomat_rest_symbol: Mapped[str | None] = mapped_column(
-        String(10),
-        nullable=True,
-        comment="Walutomat v2 API symbol format (e.g., EURPLN, USDPLN)",
-    )
-    base_currency: Mapped[str] = mapped_column(
-        String(10), nullable=False, comment="Base currency normalized (e.g., BTC, AAPL for stocks)"
-    )
-    quote_currency: Mapped[str | None] = mapped_column(
-        String(10),
-        nullable=True,
-        comment="Quote currency (e.g., USD). NULL only for indices without currency info.",
-    )
+    native_symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    base: Mapped[str] = mapped_column(String(16), nullable=False)
+    quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    asset_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="crypto")
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    aliases: Mapped[list["SymbolAlias"]] = relationship(back_populates="catalog")
+
+
+class SymbolAlias(Base):
+    """SQLAlchemy model for exchange-specific symbol aliases.
+
+    Normalized: one row per (native_symbol, exchange, channel) instead
+    of one column per exchange. Replaces the old SymbolMapping table.
+    """
+
+    __tablename__ = "symbol_aliases"
+    __table_args__ = (
+        CheckConstraint(
+            "exchange = LOWER(exchange)",
+            name="ck_symbol_alias_exchange_lower",
+        ),
+        CheckConstraint(
+            "channel IN ('ws', 'rest', 'ccxt')",
+            name="ck_symbol_alias_channel",
+        ),
+        UniqueConstraint(
+            "native_symbol",
+            "exchange",
+            "channel",
+            name="uq_alias_native_exchange_channel",
+        ),
+        UniqueConstraint(
+            "exchange",
+            "channel",
+            "exchange_symbol",
+            name="uq_alias_exchange_channel_symbol",
+        ),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    native_symbol: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("symbol_catalog.native_symbol"),
+        nullable=False,
+        index=True,
+    )
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False)
+    channel: Mapped[str] = mapped_column(String(10), nullable=False)
+    exchange_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    catalog: Mapped["SymbolCatalog"] = relationship(back_populates="aliases")
 
 
 class ProcessRun(Base):
@@ -306,9 +351,10 @@ class InstrumentSpec(Base):
     """SQLAlchemy model for instrument trading specifications."""
 
     __tablename__ = "instrument_specs"
+    __table_args__ = (UniqueConstraint("instrument_id", name="uq_instrument_spec_instrument"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(
-        String(20), unique=True, index=True, comment="Trading pair symbol (e.g., BTC-USD)"
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey(_INSTRUMENT_FK), nullable=False, index=True
     )
     tick_size: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="Minimum price increment"
@@ -393,31 +439,4 @@ class MarketSnapshot(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         TZDateTime(), index=True, comment="Snapshot timestamp"
-    )
-
-
-class PolygonImportLog(Base):
-    """SQLAlchemy model for Polygon.io data import tracking."""
-
-    __tablename__ = "polygon_import_log"
-    __table_args__ = (
-        Index("ix_polygon_import_log_s3_key", "s3_key", unique=True),
-        Index("ix_polygon_import_log_imported_at", "imported_at"),
-    )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    s3_key: Mapped[str] = mapped_column(
-        String(255), unique=True, comment="S3 object key (e.g., global_forex/aggregates_v1/...)"
-    )
-    file_date: Mapped[datetime] = mapped_column(
-        TZDateTime(), comment="Date extracted from filename (2024-03-07)"
-    )
-    data_type: Mapped[str] = mapped_column(
-        String(50), comment="Data type: trades_v1, quotes_v1, aggregates_v1"
-    )
-    prefix: Mapped[str] = mapped_column(
-        String(50), comment="Prefix: global_forex, global_crypto, us_indices, etc."
-    )
-    records_imported: Mapped[int] = mapped_column(Integer, comment="Number of records imported")
-    imported_at: Mapped[datetime] = mapped_column(
-        TZDateTime(), default=datetime.now, comment="When the file was imported"
     )

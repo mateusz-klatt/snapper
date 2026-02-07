@@ -1,6 +1,6 @@
-"""Kraken symbol mapping updater module.
+"""Kraken symbol updater module.
 
-This module provides symbol mapping updates for Kraken exchange.
+This module provides symbol updates for Kraken exchange.
 It fetches trading pairs via both REST API and WebSocket verification,
 including support for tokenized assets.
 """
@@ -12,22 +12,20 @@ from datetime import datetime
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
-from snapper.application.updaters.symbols.base import SymbolMappingUpdaterService
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
-from snapper.data.models import SymbolMapping
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
 
 @register_process(
-    "kraken_symbol_mapping_updater",
+    "kraken_symbol_updater",
     method="start",
-    description="Kraken symbol mapping updater (REST + WebSocket verification)",
+    description="Kraken symbol updater (REST + WebSocket verification)",
     priority=15,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
@@ -36,8 +34,8 @@ from snapper.infrastructure.symbols.mapper import make_native_symbol
     mode="thread",
     args=[],
 )
-class KrakenSymbolMappingUpdaterService(SymbolMappingUpdaterService[KrakenExchangeClient]):
-    """Symbol mapping updater for Kraken exchange.
+class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
+    """Symbol updater for Kraken exchange.
 
     Fetches trading pairs from Kraken via:
     - CCXT load_markets() for standard pairs
@@ -90,7 +88,7 @@ class KrakenSymbolMappingUpdaterService(SymbolMappingUpdaterService[KrakenExchan
         Returns:
             Settings key string.
         """
-        return "kraken_symbol_mappings_last_update"
+        return "kraken_symbols_last_update"
 
     @staticmethod
     def _extract_ccxt_market_pair(symbol: str, market: dict[str, Any]) -> dict[str, str] | None:
@@ -406,7 +404,8 @@ class KrakenSymbolMappingUpdaterService(SymbolMappingUpdaterService[KrakenExchan
                 f"unexpected quote '{quote_currency}' - skipping"
             )
             return None
-        return base[:-1].upper(), f"{base}/{quote_currency}", base, quote_currency
+        canonical_base = base[:-1].upper()
+        return canonical_base, f"{base}/{quote_currency}", canonical_base, quote_currency
 
     def _resolve_standard_pair(self, base: str, quote: str) -> tuple[str, str, str, str]:
         """Resolve standard currency pair into mapping components.
@@ -448,16 +447,16 @@ class KrakenSymbolMappingUpdaterService(SymbolMappingUpdaterService[KrakenExchan
 
     def _build_mappings_from_rest(
         self, kraken_rest_symbols: dict[str, dict[str, str]]
-    ) -> tuple[dict[str, SymbolMapping], set[str]]:
-        """Build SymbolMapping instances from REST symbol data.
+    ) -> tuple[dict[str, dict[str, str]], set[str]]:
+        """Build symbol data dicts from REST symbol data.
 
         Args:
             kraken_rest_symbols: Dict mapping REST symbol to pair info.
 
         Returns:
-            Tuple of (mappings dict, ws_symbols_to_verify set).
+            Tuple of (mappings dict keyed by native_symbol, ws_symbols_to_verify set).
         """
-        mappings: dict[str, SymbolMapping] = {}
+        mappings: dict[str, dict[str, str]] = {}
         ws_symbols_to_verify: set[str] = set()
         for kraken_rest_symbol, pair_info in kraken_rest_symbols.items():
             resolved = self._resolve_pair(kraken_rest_symbol, pair_info)
@@ -465,26 +464,25 @@ class KrakenSymbolMappingUpdaterService(SymbolMappingUpdaterService[KrakenExchan
                 continue
             native_symbol, ws_symbol, base_currency, quote_currency = resolved
             ws_symbols_to_verify.add(ws_symbol)
-            mappings[native_symbol] = SymbolMapping(
-                native_symbol=native_symbol,
-                kraken_websocket_symbol=ws_symbol,
-                kraken_rest_symbol=kraken_rest_symbol,
-                ccxt_symbol=pair_info.get("ccxt_symbol"),
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
-            )
+            mappings[native_symbol] = {
+                "native_symbol": native_symbol,
+                "kraken_websocket_symbol": ws_symbol,
+                "kraken_rest_symbol": kraken_rest_symbol,
+                "ccxt_symbol": pair_info.get("ccxt_symbol", ""),
+                "base_currency": base_currency,
+                "quote_currency": quote_currency,
+                "asset_class": pair_info.get("asset_class", "currency"),
+            }
         return mappings, ws_symbols_to_verify
 
-    async def build_verified_mappings(self) -> tuple[dict[str, SymbolMapping], bool]:
-        """Build verified symbol mappings from REST and WebSocket data.
+    async def build_verified_mappings(self) -> tuple[dict[str, dict[str, str]], bool]:
+        """Build verified symbol data from REST and WebSocket data.
 
-        Loads symbols from REST, verifies via WebSocket, and creates
-        SymbolMapping instances.
+        Loads symbols from REST, verifies via WebSocket, and returns
+        symbol data dicts.
 
         Returns:
-            Tuple of (mappings dict, success boolean).
+            Tuple of (mappings dict keyed by native_symbol, success boolean).
         """
         try:
             kraken_rest_symbols = await self.load_kraken_rest_symbols()
@@ -532,88 +530,59 @@ class KrakenSymbolMappingUpdaterService(SymbolMappingUpdaterService[KrakenExchan
             raise RuntimeError("WebSocket verification failed - aborting update")
         if not mappings:
             raise RuntimeError("No mappings generated - aborting update")
-        symbols = []
-        for native_symbol, mapping in mappings.items():
-            symbols.append(
-                {
-                    "native_symbol": native_symbol,
-                    "kraken_websocket_symbol": mapping.kraken_websocket_symbol,
-                    "kraken_rest_symbol": mapping.kraken_rest_symbol,
-                    "ccxt_symbol": mapping.ccxt_symbol,
-                    "base_currency": mapping.base_currency,
-                    "quote_currency": mapping.quote_currency,
-                }
-            )
-        logger.info(f"Fetched and verified {len(symbols)} Kraken symbols")
-        return symbols
-
-    _KRAKEN_UPDATE_FIELDS: tuple[str, ...] = (
-        "kraken_websocket_symbol",
-        "kraken_rest_symbol",
-        "ccxt_symbol",
-    )
-
-    @staticmethod
-    def _apply_kraken_field_updates(
-        existing: SymbolMapping,
-        symbol_data: dict[str, Any],
-        fields: tuple[str, ...],
-    ) -> bool:
-        """Apply field-level updates to an existing mapping if values differ.
-
-        Args:
-            existing: Existing SymbolMapping ORM object.
-            symbol_data: New symbol data dictionary.
-            fields: Tuple of field names to compare and update.
-
-        Returns:
-            True if any field was updated.
-        """
-        updated = False
-        for field_name in fields:
-            if getattr(existing, field_name) != symbol_data[field_name]:
-                setattr(existing, field_name, symbol_data[field_name])
-                updated = True
-        return updated
+        logger.info(f"Fetched and verified {len(mappings)} Kraken symbols")
+        return list(mappings.values())
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
-        """Update database with Kraken symbol data.
+        """Persist symbol catalog and alias rows to the database.
 
-        Creates new mappings or updates existing ones with
-        kraken_websocket_symbol, kraken_rest_symbol, and ccxt_symbol.
+        Each symbol produces one catalog row and up to three alias rows
+        (kraken ws, kraken rest, kraken ccxt).
 
         Args:
             symbols: List of symbol data dicts from Kraken.
         """
         assert self.repository is not None, "Repository not initialized"
-        updated_count = 0
         created_count = 0
+        updated_count = 0
         try:
             with self.repository.get_session() as session:
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
-                    stmt = select(SymbolMapping).where(SymbolMapping.native_symbol == native_symbol)
-                    existing = session.execute(stmt).scalar_one_or_none()
                     now = datetime.now(UTC)
-                    if existing:
-                        if self._apply_kraken_field_updates(
-                            existing, symbol_data, self._KRAKEN_UPDATE_FIELDS
-                        ):
-                            existing.updated_at = now
-                            updated_count += 1
-                    else:
-                        new_mapping = SymbolMapping(
-                            native_symbol=native_symbol,
-                            kraken_websocket_symbol=symbol_data["kraken_websocket_symbol"],
-                            kraken_rest_symbol=symbol_data["kraken_rest_symbol"],
-                            ccxt_symbol=symbol_data["ccxt_symbol"],
-                            base_currency=symbol_data["base_currency"],
-                            quote_currency=symbol_data["quote_currency"],
-                            created_at=now,
-                            updated_at=now,
+                    asset_type = (
+                        "equity"
+                        if symbol_data.get("asset_class") == "tokenized_asset"
+                        else "crypto"
+                    )
+                    self._upsert_catalog(
+                        session,
+                        native_symbol,
+                        symbol_data["base_currency"],
+                        symbol_data["quote_currency"],
+                        asset_type,
+                        now,
+                    )
+                    for exchange, channel, key in (
+                        ("kraken", "ws", "kraken_websocket_symbol"),
+                        ("kraken", "rest", "kraken_rest_symbol"),
+                        ("kraken", "ccxt", "ccxt_symbol"),
+                    ):
+                        exchange_symbol = symbol_data.get(key)
+                        if not exchange_symbol:
+                            continue
+                        result = self._upsert_alias(
+                            session,
+                            native_symbol,
+                            exchange,
+                            channel,
+                            exchange_symbol,
+                            now,
                         )
-                        session.add(new_mapping)
-                        created_count += 1
+                        if result == "created":
+                            created_count += 1
+                        elif result == "updated":
+                            updated_count += 1
                 session.commit()
                 logger.info(
                     f"Kraken update complete: {created_count} created, "

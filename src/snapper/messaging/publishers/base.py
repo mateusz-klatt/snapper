@@ -133,10 +133,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         raw_sub_socket = self.context.socket(zmq.SUB)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
-        self.subscriber.subscribe("system.symbol_mappings")
+        self.subscriber.subscribe("system.symbol_aliases")
         self.subscriber.subscribe("system.settings")
         logger.info(
-            f"{process_name}: Subscribed to system.symbol_mappings, system.settings from "
+            f"{process_name}: Subscribed to system.symbol_aliases, system.settings from "
             f"{self.settings.zmq_broker_xpub}"
         )
         self._exchange_client = self._create_exchange_client()
@@ -145,7 +145,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.running = True
         tasks: list[asyncio.Task[Any]] = []
         tasks.append(asyncio.create_task(self._heartbeat_loop()))
-        tasks.append(asyncio.create_task(self._symbol_mappings_loop()))
+        tasks.append(asyncio.create_task(self._symbol_aliases_loop()))
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
         timeframes = self.settings.timeframes
         tasks.extend(
@@ -363,6 +363,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 assert self.repository is not None, "Repository not initialized"
                 instrument_id = await self.repository.upsert_instrument(
                     symbol=native_symbol,
+                    exchange=self._get_exchange_name(),
                     base=base_currency,
                     quote=quote_currency,
                     tick_size=0.0,
@@ -393,7 +394,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         except Exception as e:
             logger.error(f"Error saving bar to DB: {e}")
 
-    async def _symbol_mappings_loop(self) -> None:
+    async def _symbol_aliases_loop(self) -> None:
         """Listen for system messages and handle cache invalidation."""
         if not self.subscriber:
             logger.error("MarketDataPublisherService: No subscriber for system messages listener")
@@ -405,9 +406,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 try:
                     async with asyncio.timeout(1.0):
                         topic, payload = await self.subscriber.recv_multipart()
-                    if topic == "system.symbol_mappings":
+                    if topic == "system.symbol_aliases":
                         logger.info(
-                            f"{exchange}_feed_publisher: Received symbol_mappings update, "
+                            f"{exchange}_feed_publisher: Received symbol_aliases update, "
                             "refreshing cache"
                         )
                         await self._invalidate_symbol_cache()

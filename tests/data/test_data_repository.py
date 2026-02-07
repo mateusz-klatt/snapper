@@ -19,6 +19,7 @@ from urllib3.util.retry import RequestHistory
 
 import snapper.data.repository
 from snapper.data.models import Base
+from snapper.data.models import SymbolCatalog
 from snapper.data.repository import MSSQLRepository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
@@ -374,6 +375,7 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
     class DummySession:
         def __init__(self) -> None:
             self._last_added: Any | None = None
+            self._execute_count = 0
 
         def __enter__(self) -> Any:
             return self
@@ -382,17 +384,19 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
             return None
 
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self._execute_count += 1
+            call_num = self._execute_count
+
             class Q:
-                def scalar_one_or_none(self) -> None:
+                def scalar_one_or_none(self: Any) -> Any:
+                    if call_num >= 2:
+                        scalar_one_called["value"] = True
+
+                        class One:
+                            id = 1
+
+                        return One()
                     return None
-
-                def scalar_one(self) -> Any:
-                    scalar_one_called["value"] = True
-
-                    class One:
-                        id = 1
-
-                    return One()
 
                 def all(self) -> list[Any]:
                     return []
@@ -439,7 +443,7 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
     assert isinstance(ms_repo.engine, DummySyncEngine)
     assert ms_repo.engine.connected is True
     inst_id = await ms_repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.1, lot_size=0.0001
+        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.0001
     )
     assert isinstance(inst_id, int)
     inserted_c = await ms_repo.upsert_candles(
@@ -512,6 +516,15 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
 
                     return Inst()
 
+                def scalars(self) -> "Q":
+                    return self
+
+                def first(self) -> Any:
+                    class Inst:
+                        id = 1
+
+                    return Inst()
+
                 def all(self) -> list[Any]:
                     class Row:
                         timestamp = datetime(2024, 1, 1, tzinfo=UTC)
@@ -579,6 +592,7 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
         timeframe="1m",
         start=datetime(2024, 1, 1, tzinfo=UTC),
         end=datetime(2024, 1, 2, tzinfo=UTC),
+        exchange="kraken",
     )
     assert len(candles) == 1
     assert candles[0]["timeframe"] == "1m"
@@ -610,7 +624,10 @@ async def test_mssql_get_candles_returns_empty_when_no_instrument(monkeypatch: A
 
         def execute(self, stmt: Any, *_args: Any, **_kwargs: Any) -> Any:
             class Q:
-                def scalar_one_or_none(self) -> None:
+                def scalars(self) -> "Q":
+                    return self
+
+                def first(self) -> None:
                     return None
 
             return Q()
@@ -636,6 +653,65 @@ async def test_mssql_get_candles_returns_empty_when_no_instrument(monkeypatch: A
         timeframe="1m",
         start=datetime(2024, 1, 1, tzinfo=UTC),
         end=datetime(2024, 1, 2, tzinfo=UTC),
+        exchange="kraken",
+    )
+    assert candles == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_mssql_get_candles_with_exchange_filter(monkeypatch: Any) -> None:
+    """Test MSSQLRepository get_candles filters by exchange when provided.
+
+    Given: Session returning None for instrument lookup,
+    When: get_candles is called with exchange parameter,
+    Then: Returns empty list (exchange filter applied).
+    """
+
+    def fake_create_sync_engine(url: str, future: bool = True) -> DummySyncEngine:
+        return DummySyncEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+
+    class NoInstrumentSession:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            return None
+
+        def execute(self, stmt: Any, *_args: Any, **_kwargs: Any) -> Any:
+            class Q:
+                def scalars(self) -> "Q":
+                    return self
+
+                def first(self) -> None:
+                    return None
+
+            return Q()
+
+    def fake_sync_sessionmaker(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Any:
+        def factory() -> NoInstrumentSession:
+            return NoInstrumentSession()
+
+        return factory
+
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", fake_sync_sessionmaker)
+
+    def fake_create_all(engine: Any) -> None:
+        """Intentionally empty mock implementation."""
+        pass
+
+    monkeypatch.setattr(Base.metadata, "create_all", fake_create_all)
+    ms_repo = MSSQLRepository("mssql+pyodbc://user:pass@server:1433/db")
+    candles = await ms_repo.get_candles(
+        instrument="UNKNOWN",
+        timeframe="1m",
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2024, 1, 2, tzinfo=UTC),
+        exchange="kraken",
     )
     assert candles == []
 
@@ -660,7 +736,10 @@ async def test_mssql_get_trades_returns_empty_for_missing_instrument(
 
         def execute(self, stmt: Any) -> Any:
             class _Result:
-                def scalar_one_or_none(self) -> None:
+                def scalars(self) -> "_Result":
+                    return self
+
+                def first(self) -> None:
                     return None
 
             return _Result()
@@ -678,6 +757,53 @@ async def test_mssql_get_trades_returns_empty_for_missing_instrument(
         instrument="UNKNOWN",
         start=datetime(2024, 1, 1, tzinfo=UTC),
         end=datetime(2024, 1, 2, tzinfo=UTC),
+        exchange="kraken",
+    )
+    assert trades == []
+
+
+@pytest.mark.asyncio
+async def test_mssql_get_trades_with_exchange_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test MSSQLRepository get_trades filters by exchange when provided.
+
+    Given: Session returning None for instrument with exchange filter,
+    When: get_trades is called with exchange parameter,
+    Then: Returns empty list.
+    """
+
+    class NoInstrumentSession:
+        def __enter__(self) -> "NoInstrumentSession":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, stmt: Any) -> Any:
+            class _Result:
+                def scalars(self) -> "_Result":
+                    return self
+
+                def first(self) -> None:
+                    return None
+
+            return _Result()
+
+    def fake_sync_sessionmaker(*_: object, **__: object) -> Callable[[], NoInstrumentSession]:
+        def factory() -> NoInstrumentSession:
+            return NoInstrumentSession()
+
+        return factory
+
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", fake_sync_sessionmaker)
+    monkeypatch.setattr(Base.metadata, "create_all", lambda _: None)
+    ms_repo = MSSQLRepository("mssql+pyodbc://user:pass@server:1433/db")
+    trades = await ms_repo.get_trades(
+        instrument="UNKNOWN",
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2024, 1, 2, tzinfo=UTC),
+        exchange="kraken",
     )
     assert trades == []
 
@@ -779,7 +905,10 @@ async def test_mssql_get_trades_returns_results(
             if call_count == 1:
 
                 class _InstrumentResult:
-                    def scalar_one_or_none(self) -> FakeInstrument:
+                    def scalars(self) -> "_InstrumentResult":
+                        return self
+
+                    def first(self) -> FakeInstrument:
                         return FakeInstrument()
 
                 return _InstrumentResult()
@@ -804,6 +933,7 @@ async def test_mssql_get_trades_returns_results(
         instrument="BTC/USD",
         start=datetime(2024, 1, 1, tzinfo=UTC),
         end=datetime(2024, 1, 2, tzinfo=UTC),
+        exchange="kraken",
     )
     assert len(trades) == 1
     assert trades[0]["price"] == pytest.approx(42000.0)
@@ -826,8 +956,20 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
+    async with repo.session() as s:
+        s.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
     inst_id = await repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.1, lot_size=0.0001
+        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.0001
     )
     assert inst_id > 0
     inserted = await repo.upsert_candles(
@@ -897,8 +1039,20 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
+    async with repo.session() as s:
+        s.add(
+            SymbolCatalog(
+                native_symbol="ETH-USD",
+                base="ETH",
+                quote="USD",
+                asset_type="crypto",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
     inst_id = await repo.upsert_instrument(
-        symbol="ETH-USD", base="ETH", quote="USD", tick_size=0.01, lot_size=0.001
+        symbol="ETH-USD", base="ETH", quote="USD", exchange="kraken", tick_size=0.01, lot_size=0.001
     )
     rows = [
         {

@@ -5,6 +5,7 @@ import type { BarEnvelope, TickEnvelope } from '../types/ws'
 describe('useMarketStore', () => {
   beforeEach(() => {
     useMarketStore.setState({
+      selectedExchange: null,
       selectedInstrument: null,
       selectedTimeframe: '1h',
       lastPrice: null,
@@ -17,11 +18,29 @@ describe('useMarketStore', () => {
     it('has correct default values', () => {
       const state = useMarketStore.getState()
 
+      expect(state.selectedExchange).toBeNull()
       expect(state.selectedInstrument).toBeNull()
       expect(state.selectedTimeframe).toBe('1h')
       expect(state.lastPrice).toBeNull()
       expect(state.candles).toEqual({})
       expect(state.ticks).toEqual({})
+    })
+  })
+  describe('setSelectedExchange', () => {
+    it('sets selected exchange', () => {
+      useMarketStore.getState().setSelectedExchange('kraken')
+      expect(useMarketStore.getState().selectedExchange).toBe('kraken')
+    })
+    it('resets selectedInstrument and lastPrice when changing exchange', () => {
+      useMarketStore.setState({ selectedInstrument: 'BTC-USD', lastPrice: 50000 })
+      useMarketStore.getState().setSelectedExchange('binance')
+      expect(useMarketStore.getState().selectedInstrument).toBeNull()
+      expect(useMarketStore.getState().lastPrice).toBeNull()
+    })
+    it('can set exchange to null', () => {
+      useMarketStore.getState().setSelectedExchange('kraken')
+      useMarketStore.getState().setSelectedExchange(null)
+      expect(useMarketStore.getState().selectedExchange).toBeNull()
     })
   })
   describe('setSelectedInstrument', () => {
@@ -88,6 +107,7 @@ describe('useMarketStore', () => {
       }
 
       useMarketStore.setState({
+        selectedExchange: 'kraken',
         selectedInstrument: 'BTC-USD',
         selectedTimeframe: '4h',
         lastPrice: 50000,
@@ -97,6 +117,7 @@ describe('useMarketStore', () => {
       useMarketStore.getState().clearMarketData()
       const state = useMarketStore.getState()
 
+      expect(state.selectedExchange).toBeNull()
       expect(state.selectedInstrument).toBeNull()
       expect(state.selectedTimeframe).toBe('1m')
       expect(state.lastPrice).toBeNull()

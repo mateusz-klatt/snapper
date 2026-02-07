@@ -84,7 +84,7 @@ class DummyExchangeClient(ExchangeClientBase):
         return ExchangeOrderSnapshot(
             id=order_id,
             client_order_id="",
-            symbol=symbol or "BTC/USD",
+            symbol=symbol or "BTC-USD",
             side=OrderSideEnum.BUY,
             type=OrderTypeEnum.LIMIT,
             amount=1.0,
@@ -100,7 +100,7 @@ class DummyExchangeClient(ExchangeClientBase):
         return ExchangeOrderSnapshot(
             id=order_id,
             client_order_id="",
-            symbol=symbol or "BTC/USD",
+            symbol=symbol or "BTC-USD",
             side=OrderSideEnum.BUY,
             type=OrderTypeEnum.LIMIT,
             amount=1.0,
@@ -177,7 +177,7 @@ class DummyExchangeClient(ExchangeClientBase):
         yield ExecutionUpdate(
             order_id="test_order",
             exec_type="trade",
-            symbol="BTC/USD",
+            symbol="BTC-USD",
             side=OrderSideEnum.BUY,
             order_type=OrderTypeEnum.LIMIT,
             order_status=OrderStatusEnum.FILLED,
@@ -186,7 +186,7 @@ class DummyExchangeClient(ExchangeClientBase):
 
     async def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument updates."""
-        yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
+        yield {"symbol": "BTC-USD", "base": "BTC", "quote": "USD"}
 
 
 @pytest.mark.asyncio()
@@ -218,7 +218,7 @@ async def test_log_order_to_db_returns_none_when_no_repository() -> None:
     client = DummyExchangeClient(repository=None)
     request = ExchangeOrderRequest(
         client_order_id="client_123",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         type=OrderTypeEnum.LIMIT,
         amount=1.0,
@@ -227,7 +227,7 @@ async def test_log_order_to_db_returns_none_when_no_repository() -> None:
     order = ExchangeOrderSnapshot(
         id="order_123",
         client_order_id="client_123",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         type=OrderTypeEnum.LIMIT,
         amount=1.0,
@@ -255,7 +255,7 @@ async def test_log_order_to_db_logs_successfully() -> None:
     client = DummyExchangeClient(repository=mock_repo)
     request = ExchangeOrderRequest(
         client_order_id="client_123",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         type=OrderTypeEnum.LIMIT,
         amount=1.0,
@@ -264,7 +264,7 @@ async def test_log_order_to_db_logs_successfully() -> None:
     order = ExchangeOrderSnapshot(
         id="order_123",
         client_order_id="client_123",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         type=OrderTypeEnum.LIMIT,
         amount=1.0,
@@ -276,8 +276,50 @@ async def test_log_order_to_db_logs_successfully() -> None:
     )
     result = await client._log_order_to_db(request, order)
     assert result == 123
-    mock_repo.upsert_instrument.assert_called_once_with(symbol="BTC/USD", exchange="dummy")
+    mock_repo.upsert_instrument.assert_called_once_with(
+        symbol="BTC-USD", exchange="dummy", base="BTC", quote="USD"
+    )
     mock_repo.insert_order.assert_called_once()
+
+
+@pytest.mark.asyncio()
+async def test_log_order_to_db_parses_symbol_without_delimiter() -> None:
+    """Log order parses base/quote from symbol without delimiter.
+
+    Given: Client with mock repository and symbol without dash,
+    When: _log_order_to_db is called,
+    Then: base equals the full symbol and quote defaults to USD.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.upsert_instrument = AsyncMock(return_value=42)
+    mock_repo.insert_order = AsyncMock(return_value=123)
+    client = DummyExchangeClient(repository=mock_repo)
+    request = ExchangeOrderRequest(
+        client_order_id="client_456",
+        symbol="BTCUSD",
+        side=OrderSideEnum.BUY,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_456",
+        client_order_id="client_456",
+        symbol="BTCUSD",
+        side=OrderSideEnum.BUY,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        filled=0.0,
+        remaining=0.0,
+        status=OrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result == 123
+    mock_repo.upsert_instrument.assert_called_once_with(
+        symbol="BTCUSD", exchange="dummy", base="BTCUSD", quote="USD"
+    )
 
 
 @pytest.mark.asyncio()
@@ -293,7 +335,7 @@ async def test_log_order_to_db_handles_exception() -> None:
     client = DummyExchangeClient(repository=mock_repo)
     request = ExchangeOrderRequest(
         client_order_id="client_123",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         type=OrderTypeEnum.LIMIT,
         amount=1.0,
@@ -302,7 +344,7 @@ async def test_log_order_to_db_handles_exception() -> None:
     order = ExchangeOrderSnapshot(
         id="order_123",
         client_order_id="client_123",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         type=OrderTypeEnum.LIMIT,
         amount=1.0,
@@ -386,7 +428,7 @@ async def test_log_execution_to_db_returns_early_when_no_repository() -> None:
     execution = ExecutionUpdate(
         order_id="order_123",
         exec_type="trade",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         order_type=OrderTypeEnum.LIMIT,
         order_status=OrderStatusEnum.FILLED,
@@ -411,11 +453,13 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     execution = ExecutionUpdate(
         order_id="order_123",
         exec_type="trade",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         order_type=OrderTypeEnum.LIMIT,
         order_status=OrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
+        exec_id="exec-123",
+        trade_id=987654321,
         last_price=50000.0,
         last_qty=1.0,
         fee_usd_equiv=10.0,
@@ -428,6 +472,8 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     assert call_args["size"] == pytest.approx(1.0)
     assert call_args["fee"] == pytest.approx(10.0)
     assert call_args["fee_asset"] == "USD"
+    assert call_args["exec_id"] == "exec-123"
+    assert call_args["trade_id"] == "987654321"
 
 
 @pytest.mark.asyncio()
@@ -444,7 +490,7 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
     execution = ExecutionUpdate(
         order_id="order_123",
         exec_type="trade",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         order_type=OrderTypeEnum.LIMIT,
         order_status=OrderStatusEnum.FILLED,
@@ -477,7 +523,7 @@ async def test_log_execution_to_db_handles_exception() -> None:
     execution = ExecutionUpdate(
         order_id="order_123",
         exec_type="trade",
-        symbol="BTC/USD",
+        symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         order_type=OrderTypeEnum.LIMIT,
         order_status=OrderStatusEnum.FILLED,

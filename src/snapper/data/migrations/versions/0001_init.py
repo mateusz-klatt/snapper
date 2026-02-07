@@ -2,7 +2,7 @@
 
 Creates all core tables for the Snapper trading system including
 instruments, candles, trades, orders, users, and market snapshots.
-Also seeds demo users and symbol mappings.
+Also seeds demo users and symbol catalog with aliases.
 """
 
 import hashlib
@@ -46,29 +46,61 @@ DEMO_USERS = [
         "role": "viewer",
     },
 ]
-SYMBOL_MAPPINGS = [
-    ("BTC-USD", "BTC/USD", "XXBTZUSD", "BTC/USD", "BTC-USD", "X:BTCUSD", None, None, "BTC", "USD"),
-    (
-        "EUR-USD",
-        "EUR/USD",
-        "ZEURZUSD",
-        "EUR/USD",
-        None,
-        "C:EURUSD",
-        "EUR_USD",
-        "EURUSD",
-        "EUR",
-        "USD",
-    ),
-    ("BTC-EUR", "BTC/EUR", "XXBTZEUR", "BTC/EUR", "BTC-EUR", "X:BTCEUR", None, None, "BTC", "EUR"),
-    ("ETH-USD", "ETH/USD", "XETHZUSD", "ETH/USD", "ETH-USD", "X:ETHUSD", None, None, "ETH", "USD"),
-    ("ETH-EUR", "ETH/EUR", "XETHZEUR", "ETH/EUR", "ETH-EUR", None, None, None, "ETH", "EUR"),
-    ("ETH-BTC", "ETH/BTC", "XETHXXBT", "ETH/BTC", "ETH-BTC", "X:ETHBTC", None, None, "ETH", "BTC"),
-    ("USD-PLN", None, None, None, None, "C:USDPLN", "USD_PLN", "USDPLN", "USD", "PLN"),
-    ("EUR-PLN", None, None, None, None, "C:EURPLN", "EUR_PLN", "EURPLN", "EUR", "PLN"),
-    ("GBP-PLN", None, None, None, None, "C:GBPPLN", "GBP_PLN", "GBPPLN", "GBP", "PLN"),
-    ("GBP-USD", None, None, None, None, "C:GBPUSD", None, None, "GBP", "USD"),
-    ("EUR-GBP", None, None, None, None, "C:EURGBP", None, None, "EUR", "GBP"),
+SYMBOL_CATALOG = [
+    ("BTC-USD", "BTC", "USD", "crypto"),
+    ("BTC-EUR", "BTC", "EUR", "crypto"),
+    ("ETH-USD", "ETH", "USD", "crypto"),
+    ("ETH-EUR", "ETH", "EUR", "crypto"),
+    ("ETH-BTC", "ETH", "BTC", "crypto"),
+    ("EUR-USD", "EUR", "USD", "forex"),
+    ("USD-PLN", "USD", "PLN", "forex"),
+    ("EUR-PLN", "EUR", "PLN", "forex"),
+    ("GBP-PLN", "GBP", "PLN", "forex"),
+    ("GBP-USD", "GBP", "USD", "forex"),
+    ("EUR-GBP", "EUR", "GBP", "forex"),
+]
+SYMBOL_ALIASES = [
+    ("BTC-USD", "kraken", "ws", "BTC/USD"),
+    ("BTC-USD", "kraken", "rest", "XXBTZUSD"),
+    ("BTC-USD", "kraken", "ccxt", "BTC/USD"),
+    ("BTC-USD", "zonda", "ws", "BTC-USD"),
+    ("BTC-USD", "polygon", "rest", "X:BTCUSD"),
+    ("BTC-EUR", "kraken", "ws", "BTC/EUR"),
+    ("BTC-EUR", "kraken", "rest", "XXBTZEUR"),
+    ("BTC-EUR", "kraken", "ccxt", "BTC/EUR"),
+    ("BTC-EUR", "zonda", "ws", "BTC-EUR"),
+    ("BTC-EUR", "polygon", "rest", "X:BTCEUR"),
+    ("ETH-USD", "kraken", "ws", "ETH/USD"),
+    ("ETH-USD", "kraken", "rest", "XETHZUSD"),
+    ("ETH-USD", "kraken", "ccxt", "ETH/USD"),
+    ("ETH-USD", "zonda", "ws", "ETH-USD"),
+    ("ETH-USD", "polygon", "rest", "X:ETHUSD"),
+    ("ETH-EUR", "kraken", "ws", "ETH/EUR"),
+    ("ETH-EUR", "kraken", "rest", "XETHZEUR"),
+    ("ETH-EUR", "kraken", "ccxt", "ETH/EUR"),
+    ("ETH-EUR", "zonda", "ws", "ETH-EUR"),
+    ("ETH-BTC", "kraken", "ws", "ETH/BTC"),
+    ("ETH-BTC", "kraken", "rest", "XETHXXBT"),
+    ("ETH-BTC", "kraken", "ccxt", "ETH/BTC"),
+    ("ETH-BTC", "zonda", "ws", "ETH-BTC"),
+    ("ETH-BTC", "polygon", "rest", "X:ETHBTC"),
+    ("EUR-USD", "kraken", "ws", "EUR/USD"),
+    ("EUR-USD", "kraken", "rest", "ZEURZUSD"),
+    ("EUR-USD", "kraken", "ccxt", "EUR/USD"),
+    ("EUR-USD", "polygon", "rest", "C:EURUSD"),
+    ("EUR-USD", "walutomat", "ws", "EUR_USD"),
+    ("EUR-USD", "walutomat", "rest", "EURUSD"),
+    ("USD-PLN", "polygon", "rest", "C:USDPLN"),
+    ("USD-PLN", "walutomat", "ws", "USD_PLN"),
+    ("USD-PLN", "walutomat", "rest", "USDPLN"),
+    ("EUR-PLN", "polygon", "rest", "C:EURPLN"),
+    ("EUR-PLN", "walutomat", "ws", "EUR_PLN"),
+    ("EUR-PLN", "walutomat", "rest", "EURPLN"),
+    ("GBP-PLN", "polygon", "rest", "C:GBPPLN"),
+    ("GBP-PLN", "walutomat", "ws", "GBP_PLN"),
+    ("GBP-PLN", "walutomat", "rest", "GBPPLN"),
+    ("GBP-USD", "polygon", "rest", "C:GBPUSD"),
+    ("EUR-GBP", "polygon", "rest", "C:EURGBP"),
 ]
 
 
@@ -80,21 +112,77 @@ def upgrade() -> None:
     """Create initial database schema and seed data.
 
     Creates all tables for instruments, candles, trades, orders, executions,
-    positions, strategy runs, signal events, users, settings, symbol mappings,
-    process runs, instrument specs, market snapshots, and polygon import log.
-    Seeds demo users and default symbol mappings.
+    positions, signal events, users, settings, symbol catalog, symbol aliases,
+    process runs, instrument specs, and market snapshots.
+    Seeds demo users, symbol catalog entries, and symbol aliases.
     """
+    op.create_table(
+        "symbol_catalog",
+        sa.Column("native_symbol", sa.String(32), nullable=False),
+        sa.Column("base", sa.String(16), nullable=False),
+        sa.Column("quote", sa.String(16), nullable=True),
+        sa.Column("asset_type", sa.String(16), server_default="crypto", nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("native_symbol"),
+        sa.CheckConstraint(
+            "asset_type IN ('crypto', 'forex', 'equity', 'index')",
+            name="ck_symbol_catalog_asset_type",
+        ),
+        sa.CheckConstraint(
+            "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
+            name="ck_symbol_catalog_quote_required_for_pairs",
+        ),
+    )
+    op.create_index("ix_sc_base_quote", "symbol_catalog", ["base", "quote"])
+    op.create_table(
+        "symbol_aliases",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("native_symbol", sa.String(32), nullable=False),
+        sa.Column("exchange", sa.String(20), nullable=False),
+        sa.Column("channel", sa.String(10), nullable=False),
+        sa.Column("exchange_symbol", sa.String(40), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["native_symbol"], ["symbol_catalog.native_symbol"]),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "exchange = LOWER(exchange)",
+            name="ck_symbol_alias_exchange_lower",
+        ),
+        sa.CheckConstraint(
+            "channel IN ('ws', 'rest', 'ccxt')",
+            name="ck_symbol_alias_channel",
+        ),
+        sa.UniqueConstraint(
+            "native_symbol",
+            "exchange",
+            "channel",
+            name="uq_alias_native_exchange_channel",
+        ),
+        sa.UniqueConstraint(
+            "exchange",
+            "channel",
+            "exchange_symbol",
+            name="uq_alias_exchange_channel_symbol",
+        ),
+    )
+    op.create_index("ix_symbol_aliases_native_symbol", "symbol_aliases", ["native_symbol"])
     op.create_table(
         "instruments",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("symbol", sa.String(32), nullable=False),
+        sa.Column("exchange", sa.String(20), nullable=False),
         sa.Column("base", sa.String(16), nullable=False),
         sa.Column("quote", sa.String(16), nullable=False),
-        sa.Column("tick_size", sa.Float(), nullable=False),
-        sa.Column("lot_size", sa.Float(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
+        sa.ForeignKeyConstraint(["symbol"], ["symbol_catalog.native_symbol"]),
+        sa.UniqueConstraint("symbol", "exchange", name="uq_instrument_symbol_exchange"),
+        sa.CheckConstraint("exchange = LOWER(exchange)", name="ck_instrument_exchange_lower"),
     )
-    op.create_index("ix_instruments_symbol", "instruments", ["symbol"], unique=True)
+    op.create_index("ix_instruments_symbol", "instruments", ["symbol"])
+    op.create_index("ix_instruments_exchange", "instruments", ["exchange"])
     op.create_table(
         "candles",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -134,7 +222,6 @@ def upgrade() -> None:
         "orders",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
-        sa.Column("exchange", sa.String(32), server_default="", nullable=False),
         sa.Column("client_order_id", sa.String(64), nullable=True),
         sa.Column("exchange_order_id", sa.String(64), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -145,18 +232,33 @@ def upgrade() -> None:
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("time_in_force", sa.String(16), nullable=True),
-        sa.Column("error", sa.String(256), nullable=True),
+        sa.Column("error", sa.String(512), nullable=True),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_orders_instrument_id", "orders", ["instrument_id"])
     op.create_index("ix_orders_client_order_id", "orders", ["client_order_id"])
     op.create_index("ix_orders_exchange_order_id", "orders", ["exchange_order_id"])
+    op.create_index(
+        "uq_orders_client_oid",
+        "orders",
+        ["instrument_id", "client_order_id"],
+        unique=True,
+        sqlite_where=text("client_order_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_orders_exchange_oid",
+        "orders",
+        ["instrument_id", "exchange_order_id"],
+        unique=True,
+        sqlite_where=text("exchange_order_id IS NOT NULL"),
+    )
     op.create_table(
         "executions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("order_id", sa.Integer(), nullable=False),
-        sa.Column("exchange", sa.String(32), server_default="", nullable=False),
+        sa.Column("exec_id", sa.String(64), nullable=True),
+        sa.Column("trade_id", sa.String(64), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("price", sa.Float(), nullable=False),
         sa.Column("size", sa.Float(), nullable=False),
@@ -166,11 +268,24 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_executions_order_id", "executions", ["order_id"])
+    op.create_index(
+        "uq_executions_order_exec",
+        "executions",
+        ["order_id", "exec_id"],
+        unique=True,
+        sqlite_where=text("exec_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_executions_order_trade",
+        "executions",
+        ["order_id", "trade_id"],
+        unique=True,
+        sqlite_where=text("trade_id IS NOT NULL"),
+    )
     op.create_table(
         "positions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
-        sa.Column("exchange", sa.String(32), server_default="", nullable=False),
         sa.Column("quantity", sa.Float(), nullable=False),
         sa.Column("average_price", sa.Float(), nullable=False),
         sa.Column("unrealized_pnl", sa.Float(), nullable=False),
@@ -178,24 +293,13 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("instrument_id", name="uq_positions_instrument_id"),
     )
     op.create_index("ix_positions_instrument_id", "positions", ["instrument_id"])
-    op.create_table(
-        "strategy_runs",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("name", sa.String(64), nullable=False),
-        sa.Column("params", sa.JSON(), nullable=False),
-        sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("metrics", sa.JSON(), nullable=True),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_strategy_runs_name", "strategy_runs", ["name"])
     op.create_table(
         "signal_events",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
-        sa.Column("exchange", sa.String(32), server_default="", nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
         sa.Column("strength", sa.Float(), nullable=False),
@@ -233,35 +337,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("key"),
     )
     op.create_table(
-        "symbol_mappings",
-        sa.Column("native_symbol", sa.String(20), nullable=False),
-        sa.Column("kraken_websocket_symbol", sa.String(20), nullable=True),
-        sa.Column("kraken_rest_symbol", sa.String(20), nullable=True),
-        sa.Column("ccxt_symbol", sa.String(30), nullable=True),
-        sa.Column("zonda_symbol", sa.String(20), nullable=True),
-        sa.Column("polygon_symbol", sa.String(30), nullable=True),
-        sa.Column("walutomat_symbol", sa.String(10), nullable=True),
-        sa.Column("walutomat_rest_symbol", sa.String(10), nullable=True),
-        sa.Column("base_currency", sa.String(10), nullable=False),
-        sa.Column("quote_currency", sa.String(10), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.PrimaryKeyConstraint("native_symbol"),
-    )
-    op.create_index(
-        "ix_symbol_mappings_kraken_websocket", "symbol_mappings", ["kraken_websocket_symbol"]
-    )
-    op.create_index("ix_symbol_mappings_kraken_rest", "symbol_mappings", ["kraken_rest_symbol"])
-    op.create_index(
-        "ix_symbol_mappings_base_quote", "symbol_mappings", ["base_currency", "quote_currency"]
-    )
-    op.create_index("ix_symbol_mappings_zonda", "symbol_mappings", ["zonda_symbol"])
-    op.create_index("ix_symbol_mappings_polygon", "symbol_mappings", ["polygon_symbol"])
-    op.create_index("ix_symbol_mappings_walutomat", "symbol_mappings", ["walutomat_symbol"])
-    op.create_index(
-        "ix_symbol_mappings_walutomat_rest", "symbol_mappings", ["walutomat_rest_symbol"]
-    )
-    op.create_table(
         "process_runs",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("run_id", sa.String(36), nullable=False),
@@ -284,7 +359,7 @@ def upgrade() -> None:
     op.create_table(
         "instrument_specs",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("symbol", sa.String(20), nullable=False),
+        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("tick_size", sa.Float(), nullable=True),
         sa.Column("lot_size", sa.Float(), nullable=True),
         sa.Column("min_order_size", sa.Float(), nullable=True),
@@ -296,9 +371,11 @@ def upgrade() -> None:
         sa.Column("position_limit_short", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(20), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("instrument_id", name="uq_instrument_spec_instrument"),
     )
-    op.create_index("ix_instrument_specs_symbol", "instrument_specs", ["symbol"], unique=True)
+    op.create_index("ix_instrument_specs_instrument_id", "instrument_specs", ["instrument_id"])
     op.create_table(
         "market_snapshots",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -329,19 +406,6 @@ def upgrade() -> None:
         "market_snapshots",
         ["exchange", "symbol", "updated_at"],
     )
-    op.create_table(
-        "polygon_import_log",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("s3_key", sa.String(255), nullable=False),
-        sa.Column("file_date", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("data_type", sa.String(50), nullable=False),
-        sa.Column("prefix", sa.String(50), nullable=False),
-        sa.Column("records_imported", sa.Integer(), nullable=False),
-        sa.Column("imported_at", sa.DateTime(timezone=True), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_polygon_import_log_s3_key", "polygon_import_log", ["s3_key"], unique=True)
-    op.create_index("ix_polygon_import_log_imported_at", "polygon_import_log", ["imported_at"])
     conn = op.get_bind()
     demo_created_at = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
     for user in DEMO_USERS:
@@ -362,30 +426,32 @@ def upgrade() -> None:
             },
         )
     now = datetime.now(tz=UTC)
-    for mapping in SYMBOL_MAPPINGS:
+    for entry in SYMBOL_CATALOG:
         conn.execute(
             text("""
-                INSERT INTO symbol_mappings (
-                    native_symbol, kraken_websocket_symbol, kraken_rest_symbol, ccxt_symbol,
-                    zonda_symbol, polygon_symbol, walutomat_symbol, walutomat_rest_symbol,
-                    base_currency, quote_currency, created_at, updated_at
-                ) VALUES (
-                    :native, :kraken_ws, :kraken_rest, :ccxt,
-                    :zonda, :polygon, :walutomat, :walutomat_rest,
-                    :base, :quote, :created_at, :updated_at
-                )
+                INSERT INTO symbol_catalog (native_symbol, base, quote, asset_type, created_at, updated_at)
+                VALUES (:native_symbol, :base, :quote, :asset_type, :created_at, :updated_at)
                 """),
             {
-                "native": mapping[0],
-                "kraken_ws": mapping[1],
-                "kraken_rest": mapping[2],
-                "ccxt": mapping[3],
-                "zonda": mapping[4],
-                "polygon": mapping[5],
-                "walutomat": mapping[6],
-                "walutomat_rest": mapping[7],
-                "base": mapping[8],
-                "quote": mapping[9],
+                "native_symbol": entry[0],
+                "base": entry[1],
+                "quote": entry[2],
+                "asset_type": entry[3],
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    for alias in SYMBOL_ALIASES:
+        conn.execute(
+            text("""
+                INSERT INTO symbol_aliases (native_symbol, exchange, channel, exchange_symbol, created_at, updated_at)
+                VALUES (:native_symbol, :exchange, :channel, :exchange_symbol, :created_at, :updated_at)
+                """),
+            {
+                "native_symbol": alias[0],
+                "exchange": alias[1],
+                "channel": alias[2],
+                "exchange_symbol": alias[3],
                 "created_at": now,
                 "updated_at": now,
             },
@@ -398,18 +464,17 @@ def downgrade() -> None:
     Removes all tables created by the upgrade function, respecting
     foreign key constraints by dropping in reverse dependency order.
     """
-    op.drop_table("polygon_import_log")
     op.drop_table("market_snapshots")
     op.drop_table("instrument_specs")
     op.drop_table("process_runs")
-    op.drop_table("symbol_mappings")
     op.drop_table("settings")
     op.drop_table("users")
     op.drop_table("signal_events")
-    op.drop_table("strategy_runs")
     op.drop_table("positions")
     op.drop_table("executions")
     op.drop_table("orders")
     op.drop_table("trades")
     op.drop_table("candles")
     op.drop_table("instruments")
+    op.drop_table("symbol_aliases")
+    op.drop_table("symbol_catalog")

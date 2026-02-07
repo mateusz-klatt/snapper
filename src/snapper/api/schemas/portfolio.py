@@ -17,7 +17,7 @@ class PositionSnapshot(StrictApiSchema):
     Attributes:
         id: Unique position identifier.
         instrument: Trading instrument symbol.
-        exchange: Exchange name (empty string if not specified).
+        exchange: Exchange name.
         quantity: Position size (positive for long, negative for short).
         average_price: Average entry price.
         unrealized_pnl: Unrealized profit/loss.
@@ -27,7 +27,7 @@ class PositionSnapshot(StrictApiSchema):
 
     id: int
     instrument: str
-    exchange: str = ""
+    exchange: str
     quantity: float
     average_price: float
     unrealized_pnl: float

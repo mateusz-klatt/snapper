@@ -44,7 +44,7 @@ from snapper.messaging.schemas.messages import OrderReplaceEnvelope
 from snapper.messaging.schemas.messages import OrderRequestEnvelope
 from snapper.messaging.schemas.messages import OrderStatusEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
-from snapper.messaging.schemas.messages import SymbolMappingUpdateEnvelope
+from snapper.messaging.schemas.messages import SymbolAliasUpdateEnvelope
 from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.utils.logging import set_log_context
@@ -126,11 +126,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
         commands_prefix = f"orders.commands.{exchange_name}."
         self.subscriber.subscribe(commands_prefix)
-        self.subscriber.subscribe("system.symbol_mappings")
+        self.subscriber.subscribe("system.symbol_aliases")
         self.subscriber.subscribe("system.settings")
         logger.info(
             f"ExchangeExecutorService[{exchange_name}]: Subscribed to {commands_prefix}, "
-            f"system.symbol_mappings, system.settings from {self.settings.zmq_broker_xpub}"
+            f"system.symbol_aliases, system.settings from {self.settings.zmq_broker_xpub}"
         )
         raw_pub_socket = self.context.socket(zmq.PUB)
         raw_pub_socket.connect(self.settings.zmq_broker_xsub)
@@ -226,8 +226,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._dispatch_command(
                 parsed.suffix, payload_str, exchange_name, parsed.instrument
             )
-        elif topic_str == "system.symbol_mappings":
-            await self._handle_symbol_mapping_update(payload_str)
+        elif topic_str == "system.symbol_aliases":
+            await self._handle_symbol_alias_update(payload_str)
         elif topic_str == "system.settings":
             await self._handle_settings_update(payload_str)
         else:
@@ -852,20 +852,20 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"Error publishing heartbeat: {e}")
 
-    async def _handle_symbol_mapping_update(self, payload: str) -> None:
-        """Handle symbol mapping cache invalidation message.
+    async def _handle_symbol_alias_update(self, payload: str) -> None:
+        """Handle symbol alias cache invalidation message.
 
         Args:
             payload: JSON payload string from ZMQ message.
         """
         exchange_name = self._get_exchange_name()
         try:
-            SymbolMappingUpdateEnvelope.from_json(payload)
-            logger.info(f"[{exchange_name}] Received symbol mapping cache invalidation")
+            SymbolAliasUpdateEnvelope.from_json(payload)
+            logger.info(f"[{exchange_name}] Received symbol alias cache invalidation")
             SymbolMapperService.get_instance().trigger_cache_invalidation(fail_fast=False)
-            logger.debug(f"[{exchange_name}] Symbol mapping cache invalidated successfully")
+            logger.debug(f"[{exchange_name}] Symbol alias cache invalidated successfully")
         except Exception as e:
-            logger.error(f"[{exchange_name}] Error handling symbol mapping update: {e}")
+            logger.error(f"[{exchange_name}] Error handling symbol alias update: {e}")
 
     async def _handle_settings_update(self, payload: str) -> None:
         """Handle settings update message and refresh cached settings.

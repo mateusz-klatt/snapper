@@ -54,7 +54,7 @@ class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
     Topics Subscribed:
         - orders.commands.paper.{instrument}.submit
         - orders.commands.paper.{instrument}.cancel
-        - system.symbol_mappings
+        - system.symbol_aliases
         - system.settings
 
     Topics Published:

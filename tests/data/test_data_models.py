@@ -14,7 +14,8 @@ from snapper.data.models import Instrument
 from snapper.data.models import OrderRecord
 from snapper.data.models import Position
 from snapper.data.models import SignalEvent
-from snapper.data.models import StrategyRun
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolCatalog
 from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
 
@@ -29,14 +30,11 @@ class TestInstrumentModel:
         When: Instrument is created,
         Then: All fields match provided values.
         """
-        instrument = Instrument(
-            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
-        )
-        assert instrument.symbol == "BTCUSD"
+        instrument = Instrument(symbol="BTC-USD", exchange="kraken", base="BTC", quote="USD")
+        assert instrument.symbol == "BTC-USD"
+        assert instrument.exchange == "kraken"
         assert instrument.base == "BTC"
         assert instrument.quote == "USD"
-        assert instrument.tick_size == pytest.approx(0.01)
-        assert instrument.lot_size == pytest.approx(0.001)
 
     def test_instrument_string_representation(self) -> None:
         """Test Instrument has string representation.
@@ -45,11 +43,19 @@ class TestInstrumentModel:
         When: Converted to string,
         Then: Returns string representation.
         """
-        instrument = Instrument(
-            symbol="ETHUSD", base="ETH", quote="USD", tick_size=0.01, lot_size=0.01
-        )
+        instrument = Instrument(symbol="ETH-USD", exchange="kraken", base="ETH", quote="USD")
         str_repr = str(instrument)
         assert isinstance(str_repr, str)
+
+    def test_instrument_default_exchange(self) -> None:
+        """Test Instrument accepts omitted exchange for backward compat.
+
+        Given: Instrument created without exchange,
+        When: Checking exchange field before flush,
+        Then: Attribute is None (INSERT default supplies empty string).
+        """
+        instrument = Instrument(symbol="BTC-USD", base="BTC", quote="USD")
+        assert instrument.exchange is None
 
 
 class TestCandleModel:
@@ -354,43 +360,93 @@ class TestPositionModel:
         assert total_pnl == pytest.approx(2500.0)
 
 
-class TestStrategyRunModel:
-    """Tests for StrategyRun SQLAlchemy ORM model."""
+class TestSymbolCatalogModel:
+    """Tests for SymbolCatalog SQLAlchemy ORM model."""
 
-    def test_strategy_run_creation(self) -> None:
-        """Test StrategyRun model with params and metrics.
+    def test_symbol_catalog_crypto_pair(self) -> None:
+        """Test SymbolCatalog for a crypto currency pair.
 
-        Given: Strategy parameters and metrics,
-        When: StrategyRun is created,
-        Then: JSON fields stored correctly.
+        Given: Crypto pair parameters with base, quote, and asset_type,
+        When: SymbolCatalog is created,
+        Then: All fields match and quote is set.
         """
-        params = {"period": 14, "threshold": 70.0}
-        metrics = {"total_return": 0.15, "sharpe_ratio": 1.2}
-        run = StrategyRun(
-            name="RSIReversion",
-            params=params,
-            started_at=datetime.now(UTC),
-            metrics=metrics,
+        now = datetime.now(UTC)
+        catalog = SymbolCatalog(
+            native_symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            created_at=now,
+            updated_at=now,
         )
-        assert run.name == "RSIReversion"
-        assert run.params == params
-        assert run.metrics == metrics
-        assert isinstance(run.started_at, datetime)
+        assert catalog.native_symbol == "BTC-USD"
+        assert catalog.base == "BTC"
+        assert catalog.quote == "USD"
+        assert catalog.asset_type == "crypto"
 
-    def test_strategy_run_without_metrics(self) -> None:
-        """Test StrategyRun with null metrics.
+    def test_symbol_catalog_equity_nullable_quote(self) -> None:
+        """Test SymbolCatalog allows nullable quote for equity.
 
-        Given: Strategy params but no metrics,
-        When: StrategyRun is created,
-        Then: Metrics field is None.
+        Given: Equity parameters without quote,
+        When: SymbolCatalog is created,
+        Then: Quote is None.
         """
-        run = StrategyRun(
-            name="MACDCrossover",
-            params={"fast": 12, "slow": 26},
-            started_at=datetime.now(UTC),
-            metrics=None,
+        now = datetime.now(UTC)
+        catalog = SymbolCatalog(
+            native_symbol="AAPL",
+            base="AAPL",
+            quote=None,
+            asset_type="equity",
+            created_at=now,
+            updated_at=now,
         )
-        assert run.metrics is None
+        assert catalog.quote is None
+        assert catalog.asset_type == "equity"
+
+
+class TestSymbolAliasModel:
+    """Tests for SymbolAlias SQLAlchemy ORM model."""
+
+    def test_symbol_alias_creation(self) -> None:
+        """Test SymbolAlias for a Kraken WebSocket alias.
+
+        Given: Alias parameters for kraken ws channel,
+        When: SymbolAlias is created,
+        Then: All fields match.
+        """
+        now = datetime.now(UTC)
+        alias = SymbolAlias(
+            native_symbol="BTC-USD",
+            exchange="kraken",
+            channel="ws",
+            exchange_symbol="BTC/USD",
+            created_at=now,
+            updated_at=now,
+        )
+        assert alias.native_symbol == "BTC-USD"
+        assert alias.exchange == "kraken"
+        assert alias.channel == "ws"
+        assert alias.exchange_symbol == "BTC/USD"
+
+    def test_symbol_alias_polygon_rest(self) -> None:
+        """Test SymbolAlias for a Polygon REST alias.
+
+        Given: Alias parameters for polygon rest channel,
+        When: SymbolAlias is created,
+        Then: Exchange symbol uses Polygon prefix format.
+        """
+        now = datetime.now(UTC)
+        alias = SymbolAlias(
+            native_symbol="BTC-USD",
+            exchange="polygon",
+            channel="rest",
+            exchange_symbol="X:BTCUSD",
+            created_at=now,
+            updated_at=now,
+        )
+        assert alias.exchange == "polygon"
+        assert alias.channel == "rest"
+        assert alias.exchange_symbol == "X:BTCUSD"
 
 
 class TestSignalEventModel:
@@ -464,9 +520,7 @@ class TestModelRelationships:
         When: Checking relationship attributes,
         Then: Has candles and trades attributes.
         """
-        instrument = Instrument(
-            symbol="BTCUSD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
-        )
+        instrument = Instrument(symbol="BTC-USD", exchange="kraken", base="BTC", quote="USD")
         assert hasattr(instrument, "candles")
         assert hasattr(instrument, "trades")
 

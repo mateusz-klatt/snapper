@@ -25,7 +25,7 @@ class ExecutionRecord(StrictApiSchema):
         fee_asset: Currency of the fee.
         instrument: Trading instrument symbol.
         side: Trade side (buy/sell).
-        exchange: Exchange name (empty string if not specified).
+        exchange: Exchange name.
     """
 
     id: int
@@ -37,4 +37,4 @@ class ExecutionRecord(StrictApiSchema):
     fee_asset: str
     instrument: str
     side: TradeSide
-    exchange: str = ""
+    exchange: str

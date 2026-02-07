@@ -29,6 +29,7 @@ from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import SignalEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
 from snapper.messaging.schemas.messages import TradeEnvelope
+from snapper.messaging.topics.builders import parse_market_topic
 from snapper.strategies.health import StrategyHealthMonitor
 from snapper.strategies.models import Signal
 from snapper.strategies.models import StrategyConfig
@@ -221,10 +222,10 @@ class BaseStrategy(ABC):
         for topic in self.inputs:
             if not topic.startswith("market."):
                 continue
-            parts = topic.split(".")
-            if len(parts) < 2:
+            parsed = parse_market_topic(topic)
+            if parsed is None:
                 continue
-            exchange = parts[1]
+            exchange = parsed.exchange
             if exchange in subscribed_exchanges:
                 continue
             heartbeat_topic = f"system.heartbeats.feed.{exchange}"
@@ -246,8 +247,8 @@ class BaseStrategy(ABC):
         for topic in self.inputs:
             logger.info(f"Strategy {self.name}: Subscribing to {topic}")
             self.subscriber.subscribe(topic)
-        logger.info(f"Strategy {self.name}: Subscribing to system.symbol_mappings")
-        self.subscriber.subscribe("system.symbol_mappings")
+        logger.info(f"Strategy {self.name}: Subscribing to system.symbol_aliases")
+        self.subscriber.subscribe("system.symbol_aliases")
         logger.info(f"Strategy {self.name}: Subscribing to system.settings")
         self.subscriber.subscribe("system.settings")
         self._subscribe_feed_heartbeats()
@@ -275,9 +276,9 @@ class BaseStrategy(ABC):
         """
         self._system_router.handle_system_heartbeat(topic_str, payload_str)
 
-    def _handle_symbol_mappings_update(self) -> None:
-        """Handle symbol_mappings system message by refreshing cache."""
-        self._system_router.handle_symbol_mappings_update()
+    def _handle_symbol_aliases_update(self) -> None:
+        """Handle symbol_aliases system message by refreshing cache."""
+        self._system_router.handle_symbol_aliases_update()
 
     async def _handle_replay_start(self, payload_str: str) -> None:
         """Handle replay start system message.
@@ -302,8 +303,8 @@ class BaseStrategy(ABC):
             topic_str: The ZMQ topic string.
             payload_str: The JSON payload string.
         """
-        if topic_str == "system.symbol_mappings":
-            self._handle_symbol_mappings_update()
+        if topic_str == "system.symbol_aliases":
+            self._handle_symbol_aliases_update()
         elif topic_str == "system.settings":
             envelope = SettingChangedEnvelope.from_json(payload_str)
             self._handle_settings_update(envelope)
@@ -329,8 +330,11 @@ class BaseStrategy(ABC):
                     await self._handle_system_message(topic_str, payload_str)
                     continue
                 if topic_str.startswith("market."):
-                    parts = topic_str.split(".")
-                    instrument = parts[2] if len(parts) > 2 else topic_str
+                    parsed = parse_market_topic(topic_str)
+                    if parsed is None:
+                        logger.warning(f"Strategy {self.name}: Malformed market topic: {topic_str}")
+                        continue
+                    instrument = parsed.instrument
                     signal = await self._dispatch_market_data(topic_str, instrument, payload_str)
                     if signal:
                         await self.emit_signal(signal)

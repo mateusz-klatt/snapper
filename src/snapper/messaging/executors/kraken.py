@@ -53,7 +53,7 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
     Topics Subscribed:
         - orders.commands.kraken.{instrument}.submit
         - orders.commands.kraken.{instrument}.cancel
-        - system.symbol_mappings
+        - system.symbol_aliases
         - system.settings
 
     Topics Published:

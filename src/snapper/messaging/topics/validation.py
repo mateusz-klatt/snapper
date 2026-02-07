@@ -155,8 +155,9 @@ def validate_subscription_pattern(pattern: str) -> tuple[bool, str]:
 
 
 _MARKET_TOPIC_FMT = (
-    "Market topic must have 4-5 segments: "
-    "market.{exchange}.{instrument}.{data_type}[.{timeframe}]"
+    "Market topic must have 4-6 segments: "
+    "market.{exchange}.{instrument}.{data_type}[.{timeframe}] "
+    "or market.paper.{source_exchange}.{instrument}.{data_type}[.{timeframe}]"
 )
 
 
@@ -199,30 +200,81 @@ def _validate_market_topic(topic: str) -> tuple[bool, str]:
         Tuple of (is_valid, error_message).
     """
     segments = topic.split(".")
-    if topic.endswith(".") or len(segments) not in (4, 5):
+    if topic.endswith(".") or len(segments) not in (4, 5, 6):
         return False, _MARKET_TOPIC_FMT
-    category, exchange, instrument, data_type = segments[0], segments[1], segments[2], segments[3]
+    category = segments[0]
     if category != "market":
         return False, f"Expected 'market' category, got '{category}'"
+
+    def _validate_market_data_type(
+        data_type: str,
+        segment_count: int,
+        timeframe: str | None,
+        exchange_name: str,
+        instrument_name: str,
+    ) -> tuple[bool, str]:
+        if data_type not in {"candles", "ticks", "trades"}:
+            return (
+                False,
+                f"Invalid market data type '{data_type}'. Must be: candles, ticks, trades",
+            )
+        if data_type == "candles":
+            if timeframe is None:
+                return (
+                    False,
+                    f"Candles topic must include timeframe: "
+                    f"market.{exchange_name}.{instrument_name}.candles.<timeframe>",
+                )
+            if not _is_valid_timeframe(timeframe):
+                return (
+                    False,
+                    f"Invalid timeframe '{timeframe}'. Must match pattern like: "
+                    "1m, 5m, 15m, 1h, 4h, 1d",
+                )
+            return True, ""
+        if segment_count > 0 and timeframe is not None:
+            return (
+                False,
+                f"Only candles topics support timeframe. Remove '.{timeframe}' from {data_type} topic",
+            )
+        return True, ""
+
+    if segments[1] != "paper":
+        if len(segments) not in (4, 5):
+            return False, _MARKET_TOPIC_FMT
+        exchange = segments[1]
+        instrument = segments[2]
+        data_type = segments[3]
+        timeframe = segments[4] if len(segments) == 5 else None
+        valid_inst, err_inst = _validate_instrument(instrument)
+        if not valid_inst:
+            return False, err_inst
+        valid_exch, err_exch = _validate_exchange(exchange)
+        if not valid_exch:
+            return False, err_exch
+        return _validate_market_data_type(data_type, len(segments), timeframe, exchange, instrument)
+
+    if len(segments) not in (5, 6):
+        return False, _MARKET_TOPIC_FMT
+    source_exchange = segments[2]
+    instrument = segments[3]
+    data_type = segments[4]
+    timeframe = segments[5] if len(segments) == 6 else None
     valid_inst, err_inst = _validate_instrument(instrument)
     if not valid_inst:
         return False, err_inst
-    valid_exch, err_exch = _validate_exchange(exchange)
+    valid_exch, err_exch = _validate_exchange(source_exchange)
     if not valid_exch:
         return False, err_exch
-    if data_type not in {"candles", "ticks", "trades"}:
-        return (
-            False,
-            f"Invalid market data type '{data_type}'. Must be: candles, ticks, trades",
-        )
-    if data_type == "candles":
-        return _validate_candle_timeframe(segments, exchange, instrument)
-    if len(segments) == 5:
-        return (
-            False,
-            f"Only candles topics support timeframe. Remove '.{segments[4]}' from {data_type} topic",
-        )
-    return True, ""
+    if source_exchange == "paper":
+        return False, "Paper market replay source exchange cannot be 'paper'"
+    return _validate_market_data_type(
+        data_type,
+        len(segments),
+        timeframe,
+        source_exchange,
+        instrument,
+    )
 
 
 def _validate_orders_topic_base(
@@ -398,7 +450,7 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
 
     Expected formats:
     - system.heartbeats[.{component_type}[.{component_name}]]
-    - system.symbol_mappings
+    - system.symbol_aliases
     - system.settings
 
     Args:
@@ -417,13 +469,13 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
         return False, f"Expected 'system' category, got '{category}'"
     if system_type == "heartbeats":
         return _validate_heartbeat_topic(segments)
-    if system_type in {"symbol_mappings", "settings"}:
+    if system_type in {"symbol_aliases", "settings"}:
         if len(segments) != 2:
             return False, f"system.{system_type} must have exactly 2 segments"
         return True, ""
     return (
         False,
-        f"Invalid system type '{system_type}'. Must be: heartbeats, settings, symbol_mappings",
+        f"Invalid system type '{system_type}'. Must be: heartbeats, settings, symbol_aliases",
     )
 
 
@@ -529,8 +581,24 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         return False, f"Unknown topic category: {category}"
     if category == "orders":
         return _validate_orders_prefix(segments)
-    if category == "market" and len(segments) >= 2:
-        return _validate_exchange_instrument_segments(segments, 1, _validate_exchange)
+    if category == "market":
+        if len(segments) == 1:
+            return True, ""
+        if len(segments) >= 2 and segments[1] != "paper":
+            return _validate_exchange_instrument_segments(segments, 1, _validate_exchange)
+        if len(segments) == 2:
+            return True, ""
+        source_exchange = segments[2]
+        valid_source, source_err = _validate_exchange(source_exchange)
+        if not valid_source:
+            return False, source_err
+        if source_exchange == "paper":
+            return False, "Paper market replay source exchange cannot be 'paper'"
+        if len(segments) >= 4:
+            valid_inst, inst_err = _validate_instrument(segments[3])
+            if not valid_inst:
+                return False, inst_err
+        return True, ""
     if category == "signals" and len(segments) >= 2:
         return _validate_exchange_instrument_segments(segments, 1, _validate_signal_exchange)
     return True, ""

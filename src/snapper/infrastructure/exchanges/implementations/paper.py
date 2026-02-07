@@ -35,6 +35,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from typing import cast
 
 from loguru import logger
 
@@ -444,7 +445,9 @@ class PaperExchangeClient(ExchangeClientBase):
             start_dt = end_dt - timedelta(minutes=lookback_minutes)
         else:
             start_dt = end_dt - timedelta(hours=24)
-        candles = await self.repository.get_candles(symbol, timeframe, start_dt, end_dt)
+        candles = await self.repository.get_candles(
+            symbol, timeframe, start_dt, end_dt, exchange=self.exchange_name
+        )
         ohlcv_list = [
             OhlcvSnapshot(
                 timestamp=c["timestamp"].timestamp(),
@@ -460,11 +463,12 @@ class PaperExchangeClient(ExchangeClientBase):
             return ohlcv_list[-limit:]
         return ohlcv_list
 
-    def subscribe_ticker(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+    def subscribe_ticker(self, symbols: list[str], **kwargs: Any) -> AsyncIterator[TickerUpdate]:
         """Replay historical ticker data for backtesting.
 
         Args:
             symbols: List of trading pairs to replay.
+            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding TickerUpdate from historical data in time order.
@@ -473,13 +477,17 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured or not connected.
             ValueError: If time range not specified.
         """
-        return self._subscribe_ticker_impl(symbols)
+        source_exchange = cast(str | None, kwargs.get("source_exchange"))
+        return self._subscribe_ticker_impl(symbols, source_exchange=source_exchange)
 
-    async def _subscribe_ticker_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+    async def _subscribe_ticker_impl(
+        self, symbols: list[str], *, source_exchange: str | None
+    ) -> AsyncIterator[TickerUpdate]:
         """Implement historical ticker streaming for paper trading.
 
         Args:
             symbols: List of trading pairs to replay.
+            source_exchange: Optional source exchange for replay data.
 
         Yields:
             TickerUpdate from historical data in time order.
@@ -496,8 +504,13 @@ class PaperExchangeClient(ExchangeClientBase):
             raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
-        logger.info(f"Replaying ticker for {symbols} from {start_dt} to {end_dt}")
-        snapshots = await self.repository.get_market_snapshots("paper", symbols, start_dt, end_dt)
+        exchange_name = source_exchange or self.exchange_name
+        logger.info(
+            f"Replaying ticker for {symbols} from {start_dt} to {end_dt} from {exchange_name}"
+        )
+        snapshots = await self.repository.get_market_snapshots(
+            exchange_name, symbols, start_dt, end_dt
+        )
         for snap in snapshots:
             ticker = TickerUpdate(
                 symbol=snap["symbol"],
@@ -516,13 +529,17 @@ class PaperExchangeClient(ExchangeClientBase):
             yield ticker
 
     def subscribe_candles(
-        self, symbols: list[str], timeframe: str = "1m"
+        self,
+        symbols: list[str],
+        timeframe: str = "1m",
+        **kwargs: Any,
     ) -> AsyncIterator[CandleUpdate]:
         """Replay historical candle data for backtesting.
 
         Args:
             symbols: List of trading pairs (uses first symbol).
             timeframe: Candle interval.
+            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding CandleUpdate from historical data.
@@ -531,16 +548,20 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured or not connected.
             ValueError: If time range not specified.
         """
-        return self._subscribe_candles_impl(symbols, timeframe=timeframe)
+        source_exchange = cast(str | None, kwargs.get("source_exchange"))
+        return self._subscribe_candles_impl(
+            symbols, timeframe=timeframe, source_exchange=source_exchange
+        )
 
     async def _subscribe_candles_impl(
-        self, symbols: list[str], *, timeframe: str
+        self, symbols: list[str], *, timeframe: str, source_exchange: str | None
     ) -> AsyncIterator[CandleUpdate]:
         """Implement historical candle replay for paper trading.
 
         Args:
             symbols: List of trading pairs (uses first symbol).
             timeframe: Candle interval.
+            source_exchange: Optional source exchange for replay data.
 
         Yields:
             CandleUpdate from historical data.
@@ -549,8 +570,7 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured or not connected.
             ValueError: If time range not specified.
         """
-        symbol = symbols[0] if symbols else None
-        if not symbol:
+        if not symbols:
             return
         interval = timeframe
         if not self.repository:
@@ -561,22 +581,32 @@ class PaperExchangeClient(ExchangeClientBase):
             raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
-        logger.info(f"Replaying candles for {symbol}/{interval} from {start_dt} to {end_dt}")
+        exchange_name = source_exchange or self.exchange_name
+        logger.info(f"Replaying candles for {symbols}/{interval} from {start_dt} to {end_dt}")
+        logger.info(f"Candle replay source exchange: {exchange_name}")
         interval_minutes = self._parse_interval_to_minutes(interval)
-        candles = await self.repository.get_candles(symbol, interval, start_dt, end_dt)
-        for candle_dict in candles:
-            candle = CandleUpdate(
-                symbol=symbol,
-                interval_begin=candle_dict["timestamp"],
-                interval=interval_minutes,
-                open=candle_dict["open"],
-                high=candle_dict["high"],
-                low=candle_dict["low"],
-                close=candle_dict["close"],
-                volume=candle_dict["volume"],
-                vwap=candle_dict.get("vwap", 0.0),
-                trades=candle_dict.get("trades", 0),
+        replay_candles: list[CandleUpdate] = []
+        for symbol in symbols:
+            candles = await self.repository.get_candles(
+                symbol, interval, start_dt, end_dt, exchange=exchange_name
             )
+            for candle_dict in candles:
+                replay_candles.append(
+                    CandleUpdate(
+                        symbol=symbol,
+                        interval_begin=candle_dict["timestamp"],
+                        interval=interval_minutes,
+                        open=candle_dict["open"],
+                        high=candle_dict["high"],
+                        low=candle_dict["low"],
+                        close=candle_dict["close"],
+                        volume=candle_dict["volume"],
+                        vwap=candle_dict.get("vwap", 0.0),
+                        trades=candle_dict.get("trades", 0),
+                    )
+                )
+        replay_candles.sort(key=lambda candle: candle.interval_begin)
+        for candle in replay_candles:
             yield candle
 
     @staticmethod
@@ -600,11 +630,12 @@ class PaperExchangeClient(ExchangeClientBase):
             return int(interval[:-1]) * 1440
         raise ValueError(f"Invalid interval format: {interval}")
 
-    def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+    def subscribe_trades(self, symbols: list[str], **kwargs: Any) -> AsyncIterator[TradeUpdate]:
         """Replay historical trade data for backtesting.
 
         Args:
             symbols: List of trading pairs.
+            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding TradeUpdate from historical data.
@@ -613,13 +644,17 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured or not connected.
             ValueError: If time range not specified.
         """
-        return self._subscribe_trades_impl(symbols)
+        source_exchange = cast(str | None, kwargs.get("source_exchange"))
+        return self._subscribe_trades_impl(symbols, source_exchange=source_exchange)
 
-    async def _subscribe_trades_impl(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+    async def _subscribe_trades_impl(
+        self, symbols: list[str], *, source_exchange: str | None
+    ) -> AsyncIterator[TradeUpdate]:
         """Implement historical trades replay for paper trading.
 
         Args:
             symbols: List of trading pairs.
+            source_exchange: Optional source exchange for replay data.
 
         Yields:
             TradeUpdate from historical data.
@@ -636,20 +671,30 @@ class PaperExchangeClient(ExchangeClientBase):
             raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
-        logger.info(f"Replaying trades for {symbols} from {start_dt} to {end_dt}")
+        exchange_name = source_exchange or self.exchange_name
+        logger.info(
+            f"Replaying trades for {symbols} from {start_dt} to {end_dt} from {exchange_name}"
+        )
+        replay_trades: list[TradeUpdate] = []
         for symbol in symbols:
-            trades = await self.repository.get_trades(symbol, start_dt, end_dt)
+            trades = await self.repository.get_trades(
+                symbol, start_dt, end_dt, exchange=exchange_name
+            )
             for trade_dict in trades:
-                trade = TradeUpdate(
-                    symbol=symbol,
-                    side=trade_dict["side"],
-                    quantity=trade_dict["size"],
-                    price=trade_dict["price"],
-                    ord_type="unknown",
-                    trade_id=trade_dict.get("trade_id", 0),
-                    timestamp=trade_dict["timestamp"],
+                replay_trades.append(
+                    TradeUpdate(
+                        symbol=symbol,
+                        side=trade_dict["side"],
+                        quantity=trade_dict["size"],
+                        price=trade_dict["price"],
+                        ord_type="unknown",
+                        trade_id=trade_dict.get("trade_id", 0),
+                        timestamp=trade_dict["timestamp"],
+                    )
                 )
-                yield trade
+        replay_trades.sort(key=lambda trade: trade.timestamp)
+        for trade in replay_trades:
+            yield trade
 
     def get_supported_pairs(self) -> list[str]:
         """Get list of supported trading pairs for paper trading.
@@ -665,16 +710,18 @@ class PaperExchangeClient(ExchangeClientBase):
             "USD/PLN",
         ]
 
-    def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+    def subscribe_ticks(self, symbols: list[str], **kwargs: Any) -> AsyncIterator[TickerUpdate]:
         """Subscribe to ticker updates (alias for subscribe_ticker).
 
         Args:
             symbols: List of trading pairs.
+            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding TickerUpdate from historical data.
         """
-        return self.subscribe_ticker(symbols)
+        source_exchange = cast(str | None, kwargs.get("source_exchange"))
+        return self.subscribe_ticker(symbols, source_exchange=source_exchange)
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument updates (not implemented for paper).

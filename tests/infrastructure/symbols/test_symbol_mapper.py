@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 import snapper.infrastructure.symbols.mapper as symbol_mapper_module
-from snapper.data.models import SymbolMapping
+from snapper.data.models import SymbolAlias
 from snapper.infrastructure.symbols.functions import ccxt_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_exchanges
@@ -105,7 +105,7 @@ class TestDatabaseSymbolMapper:
 
         Given: Mapper instance,
         When: load_mappings_from_db is called,
-        Then: Returns list of SymbolMapping objects.
+        Then: Returns list of SymbolAlias objects.
         """
         mapper = SymbolMapperService()
         mappings = mapper.load_mappings_from_db()
@@ -244,7 +244,7 @@ class TestSymbolMapperServiceIntegration:
         mock_repo = Mock()
         session_cm = Mock()
         session = Mock()
-        error = OperationalError("statement", "params", Exception("no such table: symbol_mappings"))
+        error = OperationalError("statement", "params", Exception("no such table: symbol_aliases"))
         session.execute.side_effect = error
         session_cm.__enter__ = Mock(return_value=session)
         session_cm.__exit__ = Mock(return_value=None)
@@ -327,16 +327,19 @@ def mock_repository() -> MagicMock:
 
 
 @pytest.fixture
-def sample_mapping() -> SymbolMapping:
-    """Provide a sample BTC-USD symbol mapping."""
-    return SymbolMapping(
-        native_symbol="BTC-USD",
-        kraken_websocket_symbol="BTC/USD",
-        kraken_rest_symbol="XXBTZUSD",
-        ccxt_symbol="BTC/USD",
-        base_currency="BTC",
-        quote_currency="USD",
-    )
+def sample_aliases() -> list[SymbolAlias]:
+    """Provide sample BTC-USD symbol aliases for kraken ws/rest/ccxt."""
+    return [
+        SymbolAlias(
+            native_symbol="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
+        ),
+        SymbolAlias(
+            native_symbol="BTC-USD", exchange="kraken", channel="rest", exchange_symbol="XXBTZUSD"
+        ),
+        SymbolAlias(
+            native_symbol="BTC-USD", exchange="kraken", channel="ccxt", exchange_symbol="BTC/USD"
+        ),
+    ]
 
 
 class TestSymbolMapperServiceErrorHandling:
@@ -370,9 +373,9 @@ class TestSymbolMapperServiceErrorHandling:
             mapper = SymbolMapperService()
             mock_session = MagicMock()
             mock_repository.get_session.return_value.__enter__.return_value = mock_session
-            error = Exception("no such table: symbol_mappings")
+            error = Exception("no such table: symbol_aliases")
             mock_session.execute.side_effect = OperationalError(
-                "no such table: symbol_mappings",
+                "no such table: symbol_aliases",
                 params=None,
                 orig=error,
             )
@@ -412,7 +415,10 @@ class TestSymbolMapperServiceErrorHandling:
                 mapper.load_mappings_from_db()
 
     def test_load_cache_if_needed_fail_fast_false_keeps_cache_on_error(
-        self, mock_settings: MagicMock, mock_repository: MagicMock, sample_mapping: SymbolMapping
+        self,
+        mock_settings: MagicMock,
+        mock_repository: MagicMock,
+        sample_aliases: list[SymbolAlias],
     ) -> None:
         """Preserve cache on error with fail_fast=False.
 
@@ -433,7 +439,7 @@ class TestSymbolMapperServiceErrorHandling:
             mock_session = MagicMock()
             mock_repository.get_session.return_value.__enter__.return_value = mock_session
             mock_result = MagicMock()
-            mock_result.scalars.return_value.all.return_value = [sample_mapping]
+            mock_result.scalars.return_value.all.return_value = sample_aliases
             mock_session.execute.return_value = mock_result
             mapper = SymbolMapperService()
             assert "BTC-USD" in mapper.native_to_ws
@@ -492,7 +498,7 @@ class TestSymbolMapperAdditionalBranches:
         load_call_count = 0
         original_load = SymbolMapperService.load_mappings_from_db
 
-        def counting_load(self: Any) -> list[SymbolMapping]:
+        def counting_load(self: Any) -> list[SymbolAlias]:
             nonlocal load_call_count
             load_call_count += 1
             return original_load(self)
@@ -529,6 +535,8 @@ def _make_mapper_with_empty_cache() -> SymbolMapperService:
     SymbolMapperService.clear_instance()
     mapper = SymbolMapperService.__new__(SymbolMapperService)
     mapper.repository = MagicMock()
+    mapper.forward = {}
+    mapper.reverse = {}
     mapper.native_to_ws = {}
     mapper.native_to_rest = {}
     mapper.native_to_ccxt = {}
@@ -571,24 +579,38 @@ class TestDatabaseSymbolMapperCore:
         return repository
 
     @pytest.fixture
-    def sample_mappings(self) -> list[SymbolMapping]:
-        """Create sample symbol mappings for testing."""
+    def sample_aliases(self) -> list[SymbolAlias]:
+        """Create sample symbol aliases for testing."""
         return [
-            SymbolMapping(
-                native_symbol="BTC-USD",
-                kraken_websocket_symbol="BTC-USD",
-                kraken_rest_symbol="XXBTZUSD",
-                ccxt_symbol="BTC-USD",
-                base_currency="BTC",
-                quote_currency="USD",
+            SymbolAlias(
+                native_symbol="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
             ),
-            SymbolMapping(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="kraken",
+                channel="rest",
+                exchange_symbol="XXBTZUSD",
+            ),
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="kraken",
+                channel="ccxt",
+                exchange_symbol="BTC/USD",
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD", exchange="kraken", channel="ws", exchange_symbol="ETH/USD"
+            ),
+            SymbolAlias(
                 native_symbol="ETH-USD",
-                kraken_websocket_symbol="ETH-USD",
-                kraken_rest_symbol="XETHZUSD",
-                ccxt_symbol="ETH-USD",
-                base_currency="ETH",
-                quote_currency="USD",
+                exchange="kraken",
+                channel="rest",
+                exchange_symbol="XETHZUSD",
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD",
+                exchange="kraken",
+                channel="ccxt",
+                exchange_symbol="ETH/USD",
             ),
         ]
 
@@ -622,13 +644,13 @@ class TestDatabaseSymbolMapperCore:
         self,
         mock_settings: MagicMock,
         mock_repository: MagicMock,
-        sample_mappings: list[SymbolMapping],
+        sample_aliases: list[SymbolAlias],
     ) -> None:
-        """Load mappings from database successfully.
+        """Load aliases from database successfully.
 
-        Given: Mock session returning sample mappings,
+        Given: Mock session returning sample aliases,
         When: load_mappings_from_db is called,
-        Then: Returns list of SymbolMapping objects.
+        Then: Returns list of SymbolAlias objects.
         """
         with (
             patch(
@@ -643,20 +665,20 @@ class TestDatabaseSymbolMapperCore:
             mock_session = MagicMock()
             mock_repository.get_session.return_value.__enter__.return_value = mock_session
             mock_result = MagicMock()
-            mock_result.scalars.return_value.all.return_value = sample_mappings
+            mock_result.scalars.return_value.all.return_value = sample_aliases
             mock_session.execute.return_value = mock_result
             with patch.object(SymbolMapperService, "trigger_cache_invalidation"):
                 mapper = SymbolMapperService()
-                mappings = mapper.load_mappings_from_db()
-                assert len(mappings) == 2
-                assert mappings[0].native_symbol == "BTC-USD"
-                assert mappings[1].native_symbol == "ETH-USD"
+                aliases = mapper.load_mappings_from_db()
+                assert len(aliases) == 6
+                assert aliases[0].native_symbol == "BTC-USD"
+                assert aliases[3].native_symbol == "ETH-USD"
 
     def test_cache_operations(
         self,
         mock_settings: MagicMock,
         mock_repository: MagicMock,
-        sample_mappings: list[SymbolMapping],
+        sample_aliases: list[SymbolAlias],
     ) -> None:
         """Cache operations work with mocked mapper.
 
@@ -676,7 +698,7 @@ class TestDatabaseSymbolMapperCore:
             patch.object(
                 SymbolMapperService,
                 "load_mappings_from_db",
-                return_value=sample_mappings,
+                return_value=sample_aliases,
             ),
             patch.object(SymbolMapperService, "trigger_cache_invalidation"),
         ):
@@ -689,36 +711,53 @@ class TestDatabaseSymbolMapperCore:
     def test_load_cache_if_needed_populates_mappings(self) -> None:
         """Cache loading populates all mapping dictionaries.
 
-        Given: Mapper with sample crypto and stock mappings,
+        Given: Mapper with sample crypto and stock aliases,
         When: load_cache_if_needed is called,
-        Then: All exchange format caches are populated.
+        Then: All exchange format caches are populated via forward/reverse.
         """
-        crypto_mapping = SymbolMapping(
-            native_symbol="IGNORED",
-            kraken_websocket_symbol="ETH/USD",
-            kraken_rest_symbol="XETHZUSD",
-            ccxt_symbol="ETH/USD",
-            zonda_symbol="ETH-USD",
-            walutomat_symbol="ETH_USD",
-            walutomat_rest_symbol="ETHUSD",
-            polygon_symbol="X:ETHUSD",
-            base_currency=" eth ",
-            quote_currency=" usd ",
-        )
-        stock_mapping = SymbolMapping(
-            native_symbol="AAPL",
-            kraken_websocket_symbol=None,
-            kraken_rest_symbol=None,
-            ccxt_symbol=None,
-            zonda_symbol=None,
-            walutomat_symbol=None,
-            walutomat_rest_symbol=None,
-            polygon_symbol="AAPL",
-            base_currency="AAPL",
-            quote_currency=None,
-        )
+        aliases = [
+            SymbolAlias(
+                native_symbol="ETH-USD", exchange="kraken", channel="ws", exchange_symbol="ETH/USD"
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD",
+                exchange="kraken",
+                channel="rest",
+                exchange_symbol="XETHZUSD",
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD",
+                exchange="kraken",
+                channel="ccxt",
+                exchange_symbol="ETH/USD",
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD", exchange="zonda", channel="ws", exchange_symbol="ETH-USD"
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD",
+                exchange="walutomat",
+                channel="ws",
+                exchange_symbol="ETH_USD",
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD",
+                exchange="walutomat",
+                channel="rest",
+                exchange_symbol="ETHUSD",
+            ),
+            SymbolAlias(
+                native_symbol="ETH-USD",
+                exchange="polygon",
+                channel="rest",
+                exchange_symbol="X:ETHUSD",
+            ),
+            SymbolAlias(
+                native_symbol="AAPL", exchange="polygon", channel="rest", exchange_symbol="AAPL"
+            ),
+        ]
         mapper = _make_mapper_with_empty_cache()
-        mock_loader = MagicMock(return_value=[crypto_mapping, stock_mapping])
+        mock_loader = MagicMock(return_value=aliases)
         cast(Any, mapper).load_mappings_from_db = mock_loader
         mapper._cache_loaded = False
         assert mapper._cache_loaded is False
@@ -733,6 +772,8 @@ class TestDatabaseSymbolMapperCore:
         assert mapper.native_to_polygon["AAPL"] == "AAPL"
         assert mapper.native_to_walutomat["ETH-USD"] == "ETH_USD"
         assert mapper.native_to_walutomat_rest["ETH-USD"] == "ETHUSD"
+        assert mapper.forward[("kraken", "ws")]["ETH-USD"] == "ETH/USD"
+        assert mapper.reverse[("polygon", "rest")]["AAPL"] == "AAPL"
         SymbolMapperService.clear_instance()
 
     def test_load_cache_if_needed_fail_fast(self) -> None:
@@ -751,6 +792,86 @@ class TestDatabaseSymbolMapperCore:
         mapper._cache_loaded = False
         with pytest.raises(RuntimeError, match="db down"):
             _call_original_load_cache_if_needed(mapper, fail_fast=True)
+        SymbolMapperService.clear_instance()
+
+
+class TestToExchangeToNative:
+    """Tests for SymbolMapperService.to_exchange and to_native methods."""
+
+    def test_to_exchange_success(self) -> None:
+        """Convert native symbol to exchange format via to_exchange.
+
+        Given: Mapper with populated forward dict,
+        When: to_exchange is called with valid args,
+        Then: Returns the exchange-specific symbol.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        mapper.forward = {("kraken", "ws"): {"BTC-USD": "XBT/USD"}}
+        assert mapper.to_exchange("BTC-USD", "kraken", "ws") == "XBT/USD"
+        SymbolMapperService.clear_instance()
+
+    def test_to_exchange_unknown_raises(self) -> None:
+        """Reject unknown native symbol in to_exchange.
+
+        Given: Mapper with populated forward dict,
+        When: to_exchange is called with unknown native symbol,
+        Then: Raises ValueError.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        mapper.forward = {("kraken", "ws"): {"BTC-USD": "XBT/USD"}}
+        with pytest.raises(ValueError, match="No alias for ETH-USD on kraken/ws"):
+            mapper.to_exchange("ETH-USD", "kraken", "ws")
+        SymbolMapperService.clear_instance()
+
+    def test_to_exchange_unknown_exchange_raises(self) -> None:
+        """Reject unknown exchange/channel in to_exchange.
+
+        Given: Mapper with populated forward dict,
+        When: to_exchange is called with unknown exchange,
+        Then: Raises ValueError.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        mapper.forward = {("kraken", "ws"): {"BTC-USD": "XBT/USD"}}
+        with pytest.raises(ValueError, match="No alias for BTC-USD on binance/ws"):
+            mapper.to_exchange("BTC-USD", "binance", "ws")
+        SymbolMapperService.clear_instance()
+
+    def test_to_native_success(self) -> None:
+        """Convert exchange symbol to native format via to_native.
+
+        Given: Mapper with populated reverse dict,
+        When: to_native is called with valid args,
+        Then: Returns the native symbol.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        mapper.reverse = {("kraken", "ws"): {"XBT/USD": "BTC-USD"}}
+        assert mapper.to_native("XBT/USD", "kraken", "ws") == "BTC-USD"
+        SymbolMapperService.clear_instance()
+
+    def test_to_native_unknown_raises(self) -> None:
+        """Reject unknown exchange symbol in to_native.
+
+        Given: Mapper with populated reverse dict,
+        When: to_native is called with unknown exchange symbol,
+        Then: Raises ValueError.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        mapper.reverse = {("kraken", "ws"): {"XBT/USD": "BTC-USD"}}
+        with pytest.raises(ValueError, match="No native symbol for ETH/USD on kraken/ws"):
+            mapper.to_native("ETH/USD", "kraken", "ws")
+        SymbolMapperService.clear_instance()
+
+    def test_to_native_unknown_exchange_raises(self) -> None:
+        """Reject unknown exchange/channel in to_native.
+
+        Given: Mapper with populated reverse dict,
+        When: to_native is called with unknown exchange,
+        Then: Raises ValueError.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        mapper.reverse = {("kraken", "ws"): {"XBT/USD": "BTC-USD"}}
+        with pytest.raises(ValueError, match="No native symbol for XBT/USD on binance/ws"):
+            mapper.to_native("XBT/USD", "binance", "ws")
         SymbolMapperService.clear_instance()
 
 

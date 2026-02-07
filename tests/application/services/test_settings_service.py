@@ -1043,8 +1043,8 @@ class TestCointegrationInstrument2Hedges:
             name="cointegration_test",
             strategy_class="CointegrationPairs",
             inputs=[
-                "market.paper.BTC-USD.candles.1h",
-                "market.paper.ETH-USD.candles.1h",
+                "market.paper.kraken.BTC-USD.candles.1h",
+                "market.paper.kraken.ETH-USD.candles.1h",
             ],
             outputs=["BTC-USD", "ETH-USD"],
             exchange="paper",

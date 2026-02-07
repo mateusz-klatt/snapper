@@ -187,12 +187,12 @@ export const SignalEnvelopeSchema = z
   })
   .strict()
 
-export const SymbolMappingUpdateEnvelopeSchema = z
+export const SymbolAliasUpdateEnvelopeSchema = z
   .object({
-    type: z.literal('symbol_mapping_update'),
+    type: z.literal('symbol_alias_update'),
     timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
-    event: z.literal('symbol_mappings_updated'),
+    event: z.literal('symbol_aliases_updated'),
     action: z.literal('clear_cache'),
   })
   .strict()

@@ -38,7 +38,7 @@ The messaging system uses dot-separated topic strings:
 
     system.heartbeats               # Component health checks
     system.heartbeats.feed.kraken   # Specific feed heartbeat
-    system.symbol_mappings          # Symbol cache invalidation
+    system.symbol_aliases          # Symbol cache invalidation
     system.settings                 # Settings change notifications
 
 **Admin** (admin.{resource})::

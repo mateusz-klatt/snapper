@@ -397,7 +397,7 @@ struct SignalEnvelope: Codable, Sendable {
     }
 }
 
-struct SymbolMappingUpdateEnvelope: Codable, Sendable {
+struct SymbolAliasUpdateEnvelope: Codable, Sendable {
     let type: String
     let timestamp: Date?
     let meta: [String: AnyCodable]?

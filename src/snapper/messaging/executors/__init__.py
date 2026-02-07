@@ -41,7 +41,7 @@ Topics Subscribed
 -----------------
 - orders.commands.{exchange}.{instrument}.submit
 - orders.commands.{exchange}.{instrument}.cancel
-- system.symbol_mappings
+- system.symbol_aliases
 - system.settings
 
 Topics Published

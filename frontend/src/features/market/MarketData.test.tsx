@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { MarketData } from './MarketData'
 
+const mockSetSelectedExchange = vi.fn()
 const mockSetSelectedInstrument = vi.fn()
 const mockSetSelectedTimeframe = vi.fn()
 
@@ -15,11 +16,23 @@ vi.mock('../../hooks/queries', () => ({
     error: null,
     isFetching: false,
   })),
+  useExchanges: vi.fn(() => ({
+    data: ['kraken', 'binance'],
+    isLoading: false,
+    error: null,
+  })),
+  useExchangeInstruments: vi.fn(() => ({
+    data: ['EUR-USD', 'GBP-USD', 'BTC-USD'],
+    isLoading: false,
+    error: null,
+  })),
 }))
 vi.mock('../../stores/market', () => ({
   useMarketStore: vi.fn(() => ({
+    selectedExchange: 'kraken',
     selectedInstrument: 'EUR-USD',
     selectedTimeframe: '1h',
+    setSelectedExchange: mockSetSelectedExchange,
     setSelectedInstrument: mockSetSelectedInstrument,
     setSelectedTimeframe: mockSetSelectedTimeframe,
   })),
@@ -76,7 +89,7 @@ describe('MarketData', () => {
   it('shows disconnected status when not connected', async () => {
     const { useAppStore } = await import('../../stores/app')
 
-    vi.mocked(useAppStore).mockReturnValue({ isConnected: false })
+    vi.mocked(useAppStore).mockReturnValueOnce({ isConnected: false })
     renderWithProviders(<MarketData />)
     expect(screen.getByText('disconnected')).toBeInTheDocument()
   })
@@ -97,11 +110,22 @@ describe('MarketData', () => {
     renderWithProviders(<MarketData />)
     expect(screen.queryByText(/Current Price/)).not.toBeInTheDocument()
   })
-  it('displays instrument dropdown with options', async () => {
+  it('displays exchange dropdown with options', async () => {
     const user = userEvent.setup()
 
     renderWithProviders(<MarketData />)
     const trigger = screen.getAllByRole('combobox')[0]
+
+    await user.click(trigger)
+    await waitFor(() => {
+      expect(screen.getAllByText('kraken').length).toBeGreaterThanOrEqual(2)
+    })
+  })
+  it('displays instrument dropdown with options', async () => {
+    const user = userEvent.setup()
+
+    renderWithProviders(<MarketData />)
+    const trigger = screen.getAllByRole('combobox')[1]
 
     await user.click(trigger)
     await waitFor(() => {
@@ -114,7 +138,7 @@ describe('MarketData', () => {
     renderWithProviders(<MarketData />)
     const triggers = screen.getAllByRole('combobox')
 
-    await user.click(triggers[1])
+    await user.click(triggers[2])
     await waitFor(() => {
       expect(screen.getAllByText('1 Hour').length).toBeGreaterThanOrEqual(2)
     })
@@ -139,18 +163,20 @@ describe('MarketData', () => {
     await user.click(screen.getByRole('button', { name: /Refresh/i }))
     expect(refetch).toHaveBeenCalled()
   })
-  it('falls back to default instrument when none selected', async () => {
+  it('passes empty strings when no exchange or instrument selected', async () => {
     const { useMarketStore } = await import('../../stores/market')
     const { useCandles } = await import('../../hooks/queries')
 
-    vi.mocked(useMarketStore).mockReturnValue({
-      selectedInstrument: '',
+    vi.mocked(useMarketStore).mockReturnValueOnce({
+      selectedExchange: null,
+      selectedInstrument: null,
       selectedTimeframe: '1h',
+      setSelectedExchange: mockSetSelectedExchange,
       setSelectedInstrument: mockSetSelectedInstrument,
       setSelectedTimeframe: mockSetSelectedTimeframe,
     })
     renderWithProviders(<MarketData />)
-    expect(useCandles).toHaveBeenCalledWith('EUR-USD', '1h')
+    expect(useCandles).toHaveBeenCalledWith('', '', '1h')
   })
   it('shows unknown error message when error has no message', async () => {
     const { useCandles } = await import('../../hooks/queries')
@@ -302,13 +328,26 @@ describe('MarketData', () => {
       expect(screen.getByText(/No data available for/i)).toBeInTheDocument()
     })
   })
-  it('calls setSelectedInstrument when instrument is changed', async () => {
+  it('calls setSelectedExchange when exchange is changed', async () => {
     const user = userEvent.setup()
 
     renderWithProviders(<MarketData />)
     const triggers = screen.getAllByRole('combobox')
 
     await user.click(triggers[0])
+    await waitFor(() => {
+      expect(screen.getByText('binance')).toBeInTheDocument()
+    })
+    await user.click(screen.getByText('binance'))
+    expect(mockSetSelectedExchange).toHaveBeenCalledWith('binance')
+  })
+  it('calls setSelectedInstrument when instrument is changed', async () => {
+    const user = userEvent.setup()
+
+    renderWithProviders(<MarketData />)
+    const triggers = screen.getAllByRole('combobox')
+
+    await user.click(triggers[1])
     await waitFor(() => {
       expect(screen.getByText('GBP-USD')).toBeInTheDocument()
     })
@@ -321,7 +360,7 @@ describe('MarketData', () => {
     renderWithProviders(<MarketData />)
     const triggers = screen.getAllByRole('combobox')
 
-    await user.click(triggers[1])
+    await user.click(triggers[2])
     await waitFor(() => {
       expect(screen.getByText('15 Minutes')).toBeInTheDocument()
     })
@@ -343,6 +382,28 @@ describe('MarketData', () => {
     } as never)
     renderWithProviders(<MarketData />)
     expect(screen.queryByText('Current Price')).not.toBeInTheDocument()
+  })
+  it('handles undefined exchanges data', async () => {
+    const { useExchanges } = await import('../../hooks/queries')
+
+    vi.mocked(useExchanges).mockReturnValueOnce({
+      data: undefined,
+      isLoading: false,
+      error: null,
+    } as never)
+    renderWithProviders(<MarketData />)
+    expect(screen.getByText(/Market Data/i)).toBeInTheDocument()
+  })
+  it('handles undefined instruments data', async () => {
+    const { useExchangeInstruments } = await import('../../hooks/queries')
+
+    vi.mocked(useExchangeInstruments).mockReturnValueOnce({
+      data: undefined,
+      isLoading: false,
+      error: null,
+    } as never)
+    renderWithProviders(<MarketData />)
+    expect(screen.getByText(/Market Data/i)).toBeInTheDocument()
   })
   it('calculates stats from single candle', async () => {
     const mockCandles = [

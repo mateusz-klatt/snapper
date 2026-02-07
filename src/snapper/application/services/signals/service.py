@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import Any
 
 from loguru import logger
+from sqlalchemy import and_
 from sqlalchemy import desc
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,6 +32,7 @@ class SignalReadService:
     async def store_signal(
         self,
         signal: Signal,
+        exchange: str,
         strategy_name: str | None = None,
         price: float | None = None,
     ) -> int:
@@ -38,6 +40,7 @@ class SignalReadService:
 
         Args:
             signal: Signal object with instrument, side, and strength.
+            exchange: Exchange where the signal was generated.
             strategy_name: Name of the strategy that generated the signal.
             price: Current price at signal generation time.
 
@@ -47,15 +50,27 @@ class SignalReadService:
         try:
             async with self.repo.session() as session:
                 inst_query = await session.execute(
-                    select(Instrument).where(Instrument.symbol == signal.instrument)
+                    select(Instrument).where(
+                        and_(
+                            Instrument.symbol == signal.instrument,
+                            Instrument.exchange == exchange,
+                        )
+                    )
                 )
-                inst = inst_query.scalar_one_or_none()
+                inst = inst_query.scalars().first()
                 if not inst:
-                    parts = signal.instrument.split("-")
+                    parts = (
+                        signal.instrument.split("-")
+                        if "-" in signal.instrument
+                        else [signal.instrument]
+                    )
+                    base = parts[0]
+                    quote = parts[1] if len(parts) > 1 else "USD"
                     inst_id = await self.repo.upsert_instrument(
                         symbol=signal.instrument,
-                        base=parts[0],
-                        quote=parts[1],
+                        exchange=exchange,
+                        base=base,
+                        quote=quote,
                         tick_size=0.01,
                         lot_size=0.0001,
                     )
@@ -82,6 +97,7 @@ class SignalReadService:
         self,
         instrument: str | None = None,
         strategy: str | None = None,
+        exchange: str | None = None,
         hours: int = 24,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -90,6 +106,7 @@ class SignalReadService:
         Args:
             instrument: Filter by instrument symbol.
             strategy: Filter by strategy name.
+            exchange: Filter by exchange name.
             hours: Look back period in hours.
             limit: Maximum number of signals to return.
 
@@ -105,6 +122,8 @@ class SignalReadService:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:
                     query = query.where(SignalEvent.strategy_name == strategy)
+                if exchange:
+                    query = query.where(Instrument.exchange == exchange)
                 query = query.order_by(desc(SignalEvent.timestamp)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
@@ -112,6 +131,7 @@ class SignalReadService:
                     {
                         "id": signal.id,
                         "instrument": inst.symbol,
+                        "exchange": inst.exchange,
                         "timestamp": signal.timestamp,
                         "side": signal.side,
                         "strength": signal.strength,

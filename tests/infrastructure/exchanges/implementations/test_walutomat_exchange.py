@@ -97,7 +97,7 @@ def _generate_private_key_pem() -> str:
 
 
 @pytest.fixture(autouse=True)
-def stub_symbol_mappings(monkeypatch: pytest.MonkeyPatch) -> None:
+def stub_symbol_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide stubbed symbol mapping functions for Walutomat tests."""
 
     def to_ws(symbol: str) -> str:

@@ -548,6 +548,7 @@ class _RepositoryStub:
         self,
         *,
         symbol: str,
+        exchange: str,
         base: str,
         quote: str,
         tick_size: float,
@@ -556,6 +557,7 @@ class _RepositoryStub:
         self.calls.append(
             {
                 "symbol": symbol,
+                "exchange": exchange,
                 "base": base,
                 "quote": quote,
                 "tick_size": tick_size,
@@ -808,12 +810,14 @@ async def test_ensure_instrument_handles_delimiters(monkeypatch: pytest.MonkeyPa
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     coord_any = cast(Any, coord)
-    await coord_any._ensure_instrument("BTC-USD")
-    await coord_any._ensure_instrument("ETH/EUR")
+    await coord_any._ensure_instrument("BTC-USD", exchange="kraken")
+    await coord_any._ensure_instrument("ETH/EUR", exchange="binance")
     repository_stub = cast(_RepositoryStub, coord.repository)
     symbols = {call["symbol"]: call for call in repository_stub.calls}
     assert symbols["BTC-USD"]["base"] == "BTC"
+    assert symbols["BTC-USD"]["exchange"] == "kraken"
     assert symbols["ETH/EUR"]["quote"] == "EUR"
+    assert symbols["ETH/EUR"]["exchange"] == "binance"
 
 
 @pytest.mark.asyncio
@@ -869,7 +873,7 @@ async def test_setup_signal_subscriber_subscribes_topics(monkeypatch: pytest.Mon
     assert subscriber.topics == [
         "signals.kraken.",
         "signals.paper.",
-        "system.symbol_mappings",
+        "system.symbol_aliases",
         "system.settings",
         "orders.events.",
     ]
@@ -988,12 +992,12 @@ async def test_listen_signals_processes_single_message(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_listen_signals_handles_symbol_mappings_invalidation(
+async def test_listen_signals_handles_symbol_aliases_invalidation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify symbol mappings update triggers cache invalidation.
+    """Verify symbol aliases update triggers cache invalidation.
 
-    Given a TraderCoordinator with a subscriber containing symbol mappings message,
+    Given a TraderCoordinator with a subscriber containing symbol aliases message,
     When _listen_signals processes the message,
     Then SymbolMapperService cache invalidation is triggered.
     """
@@ -1003,8 +1007,8 @@ async def test_listen_signals_handles_symbol_mappings_invalidation(
     subscriber = _SubscriberStub(subscriber_socket)
     subscriber.messages.append(
         (
-            "system.symbol_mappings",
-            json.dumps({"event": "symbol_mappings_updated"}).encode("utf-8"),
+            "system.symbol_aliases",
+            json.dumps({"event": "symbol_aliases_updated"}).encode("utf-8"),
         )
     )
     coord.signal_subscriber = cast(Any, subscriber)

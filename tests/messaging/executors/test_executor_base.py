@@ -375,15 +375,15 @@ async def test_stop_with_none_context(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_symbol_mapping_update_invalid_json() -> None:
-    """Test symbol mapping update handles invalid JSON.
+async def test_handle_symbol_alias_update_invalid_json() -> None:
+    """Test symbol alias update handles invalid JSON.
 
     Given: An executor instance,
-    When: _handle_symbol_mapping_update receives invalid JSON,
+    When: _handle_symbol_alias_update receives invalid JSON,
     Then: The method handles the error gracefully.
     """
     ex: Any = MergedDummyExecutor()
-    await ex._handle_symbol_mapping_update("{bad json")
+    await ex._handle_symbol_alias_update("{bad json")
 
 
 @pytest.mark.asyncio
@@ -1593,8 +1593,8 @@ class TestHeartbeat:
         await service_any._publish_heartbeat("system.heartbeats.test", hb)
 
 
-class TestSymbolMappingUpdate:
-    """Tests for symbol mapping update handling."""
+class TestSymbolAliasUpdate:
+    """Tests for symbol alias update handling."""
 
     def _create_mock_settings(self) -> MagicMock:
         mock_settings = MagicMock()
@@ -1605,25 +1605,25 @@ class TestSymbolMappingUpdate:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_handle_symbol_mapping_update_error(self, mock_get_settings: MagicMock) -> None:
-        """Verify symbol mapping update handles invalid JSON.
+    async def test_handle_symbol_alias_update_error(self, mock_get_settings: MagicMock) -> None:
+        """Verify symbol alias update handles invalid JSON.
 
         Given: Invalid JSON payload,
-        When: Symbol mapping update is handled,
+        When: Symbol alias update is handled,
         Then: Error is caught gracefully.
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        await service_any._handle_symbol_mapping_update("not valid json {{{")
+        await service_any._handle_symbol_alias_update("not valid json {{{")
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_handle_symbol_mapping_update_success(self, mock_get_settings: MagicMock) -> None:
-        """Verify symbol mapping update triggers cache invalidation.
+    async def test_handle_symbol_alias_update_success(self, mock_get_settings: MagicMock) -> None:
+        """Verify symbol alias update triggers cache invalidation.
 
-        Given: Valid symbol mapping update payload,
+        Given: Valid symbol alias update payload,
         When: Update is handled,
         Then: Cache invalidation is triggered on mapper service.
         """
@@ -1633,7 +1633,7 @@ class TestSymbolMappingUpdate:
         service_any = cast(Any, service)
         payload = json.dumps(
             {
-                "event": "symbol_mappings_updated",
+                "event": "symbol_aliases_updated",
                 "action": "clear_cache",
             }
         )
@@ -1642,7 +1642,7 @@ class TestSymbolMappingUpdate:
         ) as mock_mapper:
             mock_instance = MagicMock()
             mock_mapper.return_value = mock_instance
-            await service_any._handle_symbol_mapping_update(payload)
+            await service_any._handle_symbol_alias_update(payload)
             mock_instance.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
 
 
@@ -2892,14 +2892,14 @@ class TestExecutorCoverage:
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
     @patch("snapper.infrastructure.symbols.mapper.SymbolMapperService.get_instance")
-    async def test_handle_symbol_mapping_update(
+    async def test_handle_symbol_alias_update(
         self,
         mock_get_instance: MagicMock,
         mock_get_settings: MagicMock,
     ) -> None:
-        """Verify symbol mapping update triggers cache invalidation.
+        """Verify symbol alias update triggers cache invalidation.
 
-        Given: Symbol mapping update payload,
+        Given: Symbol alias update payload,
         When: Update is handled,
         Then: Cache invalidation is triggered.
         """
@@ -2909,8 +2909,8 @@ class TestExecutorCoverage:
         mock_get_instance.return_value = mock_db_mapper
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        payload = json.dumps({"event": "symbol_mappings_updated", "action": "clear_cache"})
-        await service_any._handle_symbol_mapping_update(payload)
+        payload = json.dumps({"event": "symbol_aliases_updated", "action": "clear_cache"})
+        await service_any._handle_symbol_alias_update(payload)
         mock_db_mapper.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
 
     @pytest.mark.asyncio
@@ -3042,15 +3042,15 @@ class TestExecutorCoverage:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_order_handler_handles_symbol_mapping_update(
+    async def test_order_handler_handles_symbol_alias_update(
         self,
         mock_get_settings: MagicMock,
     ) -> None:
-        """Verify order handler handles symbol mapping updates.
+        """Verify order handler handles symbol alias updates.
 
-        Given: Symbol mapping update message,
+        Given: Symbol alias update message,
         When: Order handler receives message,
-        Then: Symbol mapping update handler is called.
+        Then: Symbol alias update handler is called.
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -3058,18 +3058,18 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.subscriber = AsyncMock()
-        service_any._handle_symbol_mapping_update = AsyncMock()
+        service_any._handle_symbol_alias_update = AsyncMock()
         payload_bytes = json.dumps(
-            {"event": "symbol_mappings_updated", "action": "clear_cache"}
+            {"event": "symbol_aliases_updated", "action": "clear_cache"}
         ).encode("utf-8")
 
         async def fake_recv() -> tuple[str, bytes]:
             service_any.running = False
-            return ("system.symbol_mappings", payload_bytes)
+            return ("system.symbol_aliases", payload_bytes)
 
         service_any.subscriber.recv_multipart = AsyncMock(side_effect=fake_recv)
         await service_any._order_handler()
-        service_any._handle_symbol_mapping_update.assert_awaited_once_with(
+        service_any._handle_symbol_alias_update.assert_awaited_once_with(
             payload_bytes.decode("utf-8")
         )
 
@@ -3092,7 +3092,7 @@ class TestExecutorCoverage:
         service_any.running = True
         service_any.subscriber = AsyncMock()
         service_any._process_order = AsyncMock()
-        service_any._handle_symbol_mapping_update = AsyncMock()
+        service_any._handle_symbol_alias_update = AsyncMock()
 
         async def fake_recv() -> tuple[str, bytes]:
             service_any.running = False
@@ -3105,7 +3105,7 @@ class TestExecutorCoverage:
         ):
             await service_any._order_handler()
         service_any._process_order.assert_not_awaited()
-        service_any._handle_symbol_mapping_update.assert_not_awaited()
+        service_any._handle_symbol_alias_update.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3263,11 +3263,11 @@ class TestExecutorCoverage:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_handle_symbol_mapping_update_ignores_unexpected(
+    async def test_handle_symbol_alias_update_ignores_unexpected(
         self,
         mock_get_settings: MagicMock,
     ) -> None:
-        """Verify symbol mapping update ignores unexpected events.
+        """Verify symbol alias update ignores unexpected events.
 
         Given: Payload with unexpected event type,
         When: Update is handled,
@@ -3281,7 +3281,7 @@ class TestExecutorCoverage:
             "snapper.infrastructure.symbols.mapper.SymbolMapperService.get_instance",
             side_effect=AssertionError("should not fetch mapper"),
         ):
-            await service_any._handle_symbol_mapping_update(json.dumps({"event": "other"}))
+            await service_any._handle_symbol_alias_update(json.dumps({"event": "other"}))
 
 
 class TestExecutor:

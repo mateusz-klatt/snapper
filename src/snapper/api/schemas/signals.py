@@ -18,7 +18,7 @@ class TradingSignal(StrictApiSchema):
     Attributes:
         id: Unique signal identifier.
         instrument: Trading instrument symbol.
-        exchange: Exchange name (empty string if not specified).
+        exchange: Exchange name.
         timestamp: When the signal was generated.
         side: Trade direction (buy/sell).
         strength: Signal strength (0.0-1.0).
@@ -29,7 +29,7 @@ class TradingSignal(StrictApiSchema):
 
     id: int
     instrument: str
-    exchange: str = ""
+    exchange: str
     timestamp: datetime
     side: TradeSide
     strength: float

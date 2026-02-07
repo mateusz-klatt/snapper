@@ -58,7 +58,9 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import and_
 from sqlalchemy import desc
+from sqlalchemy import distinct
 from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
@@ -98,6 +100,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import OrderRecord
 from snapper.data.models import Position
 from snapper.data.models import SignalEvent
+from snapper.data.models import SymbolAlias
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
@@ -386,6 +389,7 @@ def _create_candles_signals_router() -> APIRouter:
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         instrument: str = Query(description="Instrument symbol"),
+        exchange: str = Query(description="Exchange name"),
         timeframe: str = Query(description="Timeframe"),
         limit: int = Query(default=100, le=1000, description="Number of candles to return"),
     ) -> list[CandleSnapshot] | Response:
@@ -394,9 +398,14 @@ def _create_candles_signals_router() -> APIRouter:
         try:
             async with repo.session() as session:
                 inst_query = await session.execute(
-                    select(Instrument).where(Instrument.symbol == instrument)
+                    select(Instrument).where(
+                        and_(
+                            Instrument.symbol == instrument,
+                            Instrument.exchange == exchange,
+                        )
+                    )
                 )
-                inst = inst_query.scalar_one_or_none()
+                inst = inst_query.scalars().first()
                 if not inst:
                     return Response(status_code=204)
                 candles_query = await session.execute(
@@ -433,6 +442,7 @@ def _create_candles_signals_router() -> APIRouter:
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         instrument: str | None = Query(default=None, description="Filter by instrument"),
         strategy: str | None = Query(default=None, description="Filter by strategy"),
+        exchange: str | None = Query(default=None, description="Filter by exchange"),
         hours: int = Query(default=24, le=168, description="Hours of history to return"),
         limit: int = Query(default=100, le=1000, description="Number of signals to return"),
         repo: Repository = Depends(get_repository_dependency),
@@ -446,6 +456,8 @@ def _create_candles_signals_router() -> APIRouter:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:
                     query = query.where(SignalEvent.strategy_name == strategy)
+                if exchange:
+                    query = query.where(Instrument.exchange == exchange)
                 query = query.order_by(desc(SignalEvent.timestamp)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
@@ -453,7 +465,7 @@ def _create_candles_signals_router() -> APIRouter:
                     TradingSignal(
                         id=signal.id,
                         instrument=inst.symbol,
-                        exchange=signal.exchange,
+                        exchange=inst.exchange,
                         timestamp=signal.timestamp,
                         side=signal.side,
                         strength=signal.strength,
@@ -466,6 +478,54 @@ def _create_candles_signals_router() -> APIRouter:
         except Exception as exc:
             logger.error(f"Failed to fetch signals: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch signals") from exc
+
+    return router
+
+
+def _create_exchange_router() -> APIRouter:
+    """Create router for exchange and instrument discovery endpoints.
+
+    Returns:
+        APIRouter with exchanges and instruments-per-exchange endpoints.
+    """
+    router = APIRouter()
+
+    @router.get("/exchanges", response_model=list[str])
+    async def get_exchanges(
+        _auth: Annotated[UserProfile, Depends(require_authentication)],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Repository = Depends(get_repository_dependency),
+    ) -> list[str]:
+        """Return distinct exchange names from symbol_aliases."""
+        try:
+            async with repo.session() as session:
+                result = await session.execute(
+                    select(distinct(SymbolAlias.exchange)).order_by(SymbolAlias.exchange)
+                )
+                return list(result.scalars().all())
+        except Exception as exc:
+            logger.error(f"Failed to fetch exchanges: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to fetch exchanges") from exc
+
+    @router.get("/exchanges/{exchange}/instruments", response_model=list[str])
+    async def get_exchange_instruments(
+        exchange: str,
+        _auth: Annotated[UserProfile, Depends(require_authentication)],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Repository = Depends(get_repository_dependency),
+    ) -> list[str]:
+        """Return distinct native symbols available on a given exchange."""
+        try:
+            async with repo.session() as session:
+                result = await session.execute(
+                    select(distinct(SymbolAlias.native_symbol))
+                    .where(SymbolAlias.exchange == exchange)
+                    .order_by(SymbolAlias.native_symbol)
+                )
+                return list(result.scalars().all())
+        except Exception as exc:
+            logger.error(f"Failed to fetch instruments for {exchange}: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to fetch instruments") from exc
 
     return router
 
@@ -483,6 +543,7 @@ def _create_orders_executions_router() -> APIRouter:
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         symbol: str | None = Query(default=None, description="Symbol to filter by"),
+        exchange: str | None = Query(default=None, description="Filter by exchange"),
         limit: int = Query(default=100, ge=1, le=1000, description="Number of orders to return"),
         offset: int = Query(default=0, ge=0, description="Number of orders to skip"),
         repo: Repository = Depends(get_repository_dependency),
@@ -492,6 +553,8 @@ def _create_orders_executions_router() -> APIRouter:
                 query = select(OrderRecord, Instrument).join(Instrument)
                 if symbol:
                     query = query.where(Instrument.symbol == symbol)
+                if exchange:
+                    query = query.where(Instrument.exchange == exchange)
                 query = query.order_by(desc(OrderRecord.created_at)).offset(offset).limit(limit)
                 result = await session.execute(query)
                 orders_with_instruments = result.all()
@@ -499,7 +562,7 @@ def _create_orders_executions_router() -> APIRouter:
                     OrderStatus(
                         id=order.id,
                         instrument=inst.symbol,
-                        exchange=order.exchange,
+                        exchange=inst.exchange,
                         client_order_id=order.client_order_id,
                         exchange_order_id=order.exchange_order_id,
                         created_at=order.created_at,
@@ -547,7 +610,7 @@ def _create_orders_executions_router() -> APIRouter:
                         fee_asset=execution.fee_asset,
                         instrument=instrument.symbol,
                         side=order.side,
-                        exchange=execution.exchange,
+                        exchange=instrument.exchange,
                     )
                     for execution, order, instrument in rows
                 ]
@@ -570,7 +633,7 @@ def _create_orders_executions_router() -> APIRouter:
                     PositionSnapshot(
                         id=position.id,
                         instrument=inst.symbol,
-                        exchange=position.exchange,
+                        exchange=inst.exchange,
                         quantity=position.quantity,
                         average_price=position.average_price,
                         unrealized_pnl=position.unrealized_pnl,
@@ -714,6 +777,7 @@ def create_api_router(
     """
     router = APIRouter()
     router.include_router(_create_candles_signals_router())
+    router.include_router(_create_exchange_router())
     router.include_router(_create_orders_executions_router())
     router.include_router(_create_monitoring_endpoints_router(manager))
     return router

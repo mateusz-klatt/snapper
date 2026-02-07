@@ -3,6 +3,7 @@
 import pytest
 
 from snapper.messaging.topics.builders import ParsedOrderTopic
+from snapper.messaging.topics.builders import ParsedSignalTopic
 from snapper.messaging.topics.builders import admin_topic
 from snapper.messaging.topics.builders import heartbeat_topic
 from snapper.messaging.topics.builders import is_order_topic
@@ -11,8 +12,10 @@ from snapper.messaging.topics.builders import order_command_topic
 from snapper.messaging.topics.builders import order_commands_prefix
 from snapper.messaging.topics.builders import order_event_topic
 from snapper.messaging.topics.builders import order_events_prefix
+from snapper.messaging.topics.builders import parse_market_topic
 from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.messaging.topics.builders import parse_order_event_topic
+from snapper.messaging.topics.builders import parse_signal_topic
 from snapper.messaging.topics.builders import signal_topic
 from snapper.messaging.topics.builders import system_topic
 
@@ -38,7 +41,10 @@ class TestMarketTopic:
         Then: Returns correctly formatted topics.
         """
         assert market_topic("kraken", "ETH-USD", "tick") == "market.kraken.ETH-USD.tick"
-        assert market_topic("paper", "BTC-USD", "tick") == "market.paper.BTC-USD.tick"
+        assert (
+            market_topic("paper", "BTC-USD", "tick", source_exchange="kraken")
+            == "market.paper.kraken.BTC-USD.tick"
+        )
         assert market_topic("zonda", "BTC-PLN", "tick") == "market.zonda.BTC-PLN.tick"
 
     def test_trades_topic(self) -> None:
@@ -97,6 +103,47 @@ class TestMarketTopic:
         """
         with pytest.raises(ValueError, match="timeframe is required"):
             market_topic("kraken", "BTC-USD", "candles")
+
+    def test_paper_topic_with_source_exchange(self) -> None:
+        """Verify paper market topic includes source exchange segment.
+
+        Given: Paper exchange and source exchange,
+        When: Building market topic,
+        Then: Topic includes source exchange in third segment.
+        """
+        result = market_topic("paper", "BTC-USD", "ticks", source_exchange="kraken")
+        assert result == "market.paper.kraken.BTC-USD.ticks"
+
+    def test_paper_candles_topic_with_source_exchange(self) -> None:
+        """Verify paper candles topic includes source exchange and timeframe."""
+        result = market_topic(
+            "paper",
+            "BTC-USD",
+            "candles",
+            timeframe="1m",
+            source_exchange="polygon",
+        )
+        assert result == "market.paper.polygon.BTC-USD.candles.1m"
+
+    def test_paper_candles_topic_with_source_requires_timeframe(self) -> None:
+        """Verify paper candles topic with source raises without timeframe.
+
+        Given: Paper exchange candles with source exchange but no timeframe,
+        When: Building market topic,
+        Then: Raises ValueError.
+        """
+        with pytest.raises(ValueError, match="timeframe is required"):
+            market_topic("paper", "BTC-USD", "candles", source_exchange="kraken")
+
+    def test_paper_market_topic_requires_source_exchange(self) -> None:
+        """Verify paper market topic requires source exchange.
+
+        Given: Paper exchange topic without source exchange,
+        When: Building market topic,
+        Then: Raises ValueError.
+        """
+        with pytest.raises(ValueError, match="source_exchange is required"):
+            market_topic("paper", "BTC-USD", "ticks")
 
 
 class TestOrderCommandTopic:
@@ -288,15 +335,15 @@ class TestHeartbeatTopic:
 class TestSystemTopic:
     """Tests for system_topic builder function."""
 
-    def test_symbol_mappings_topic(self) -> None:
-        """Verify symbol mappings topic builds correctly.
+    def test_symbol_aliases_topic(self) -> None:
+        """Verify symbol aliases topic builds correctly.
 
-        Given: Symbol mappings type,
+        Given: Symbol aliases type,
         When: Building system topic,
         Then: Returns correctly formatted topic.
         """
-        result = system_topic("symbol_mappings")
-        assert result == "system.symbol_mappings"
+        result = system_topic("symbol_aliases")
+        assert result == "system.symbol_aliases"
 
     def test_settings_topic(self) -> None:
         """Verify settings topic builds correctly.
@@ -461,6 +508,53 @@ class TestParseOrderCommandTopic:
         assert result is None
 
 
+class TestParseMarketTopic:
+    """Tests for parse_market_topic parser function."""
+
+    def test_parse_live_market_topic(self) -> None:
+        """Verify live market topic parsing."""
+        parsed = parse_market_topic("market.kraken.BTC-USD.candles.1m")
+        assert parsed is not None
+        assert parsed.exchange == "kraken"
+        assert parsed.source_exchange is None
+        assert parsed.instrument == "BTC-USD"
+        assert parsed.data_type == "candles"
+        assert parsed.timeframe == "1m"
+
+    def test_parse_paper_market_topic_with_source_exchange(self) -> None:
+        """Verify paper market topic with source exchange parsing."""
+        parsed = parse_market_topic("market.paper.kraken.BTC-USD.trades")
+        assert parsed is not None
+        assert parsed.exchange == "paper"
+        assert parsed.source_exchange == "kraken"
+        assert parsed.instrument == "BTC-USD"
+        assert parsed.data_type == "trades"
+        assert parsed.timeframe is None
+
+    def test_parse_legacy_paper_market_topic_returns_none(self) -> None:
+        """Verify legacy paper market topic without source exchange is rejected."""
+        parsed = parse_market_topic("market.paper.BTC-USD.ticks")
+        assert parsed is None
+
+    def test_parse_invalid_market_topic_returns_none(self) -> None:
+        """Verify malformed market topic returns None."""
+        assert parse_market_topic("market.paper.kraken.BTC-USD.candles") is None
+        assert parse_market_topic("market.kraken.BTC-USD.ticks.1m") is None
+        assert parse_market_topic("market.kraken.BTC-USD.unknown") is None
+        assert parse_market_topic("signals.kraken.BTC-USD.live") is None
+        assert parse_market_topic("market..BTC-USD.ticks") is None
+        assert parse_market_topic("market.kraken.BTC-USD.ticks.extra.part") is None
+
+    def test_parse_paper_market_topic_with_source_timeframe(self) -> None:
+        """Verify paper market topic with source exchange and timeframe is parsed."""
+        parsed = parse_market_topic("market.paper.kraken.BTC-USD.candles.1m")
+        assert parsed is not None
+        assert parsed.source_exchange == "kraken"
+        assert parsed.instrument == "BTC-USD"
+        assert parsed.data_type == "candles"
+        assert parsed.timeframe == "1m"
+
+
 class TestParseOrderEventTopic:
     """Tests for parse_order_event_topic parser function."""
 
@@ -555,7 +649,7 @@ class TestIsOrderTopic:
         Then: Returns False.
         """
         assert is_order_topic("market.kraken.BTC-USD.tick") is False
-        assert is_order_topic("market.paper.ETH-USD.candles.1m") is False
+        assert is_order_topic("market.paper.kraken.ETH-USD.candles.1m") is False
 
     def test_signal_topic_returns_false(self) -> None:
         """Verify signal topic is not identified as order topic.
@@ -610,3 +704,22 @@ class TestParsedOrderTopicDataclass:
         """
         parsed = ParsedOrderTopic(exchange="kraken", instrument="BTC-USD", suffix="fill")
         assert hasattr(parsed, "__slots__")
+
+
+class TestParseSignalTopic:
+    """Tests for parse_signal_topic parser function."""
+
+    def test_parse_signal_topic(self) -> None:
+        """Verify valid signal topic is parsed."""
+        parsed = parse_signal_topic("signals.kraken.BTC-USD.live")
+        assert parsed is not None
+        assert isinstance(parsed, ParsedSignalTopic)
+        assert parsed.exchange == "kraken"
+        assert parsed.instrument == "BTC-USD"
+        assert parsed.signal_type == "live"
+
+    def test_parse_signal_topic_invalid_returns_none(self) -> None:
+        """Verify malformed signal topic returns None."""
+        assert parse_signal_topic("signals.kraken.BTC-USD") is None
+        assert parse_signal_topic("market.kraken.BTC-USD.ticks") is None
+        assert parse_signal_topic("signals..BTC-USD.live") is None

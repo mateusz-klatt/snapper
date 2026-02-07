@@ -1,4 +1,4 @@
-"""Tests for Polygon symbol mapping updater service."""
+"""Tests for Polygon symbol updater service."""
 
 import asyncio
 import time
@@ -15,9 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from urllib3.util.retry import RequestHistory
 
-from snapper.application.updaters.symbols.polygon import PolygonSymbolMappingUpdaterService
+from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.config.settings import AppSettings
-from snapper.data.models import SymbolMapping
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolCatalog
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
@@ -679,7 +680,7 @@ async def test_poll_tickers_recovers_after_outer_exception(
     assert sleep_calls == ["outer-error", "exit"]
 
 
-class ExposedPolygonSymbolMappingUpdater(PolygonSymbolMappingUpdaterService):
+class ExposedPolygonSymbolUpdater(PolygonSymbolUpdaterService):
     """Exposed updater for testing protected methods."""
 
     async def update_database_public(self, symbols: list[dict[str, Any]]) -> None:
@@ -690,16 +691,20 @@ class ExposedPolygonSymbolMappingUpdater(PolygonSymbolMappingUpdaterService):
         """Expose _match_polygon_to_native for testing."""
         return super()._match_polygon_to_native(ticker, symbol_data)
 
+    def determine_asset_type_public(self, ticker: str) -> str:
+        """Expose _determine_polygon_asset_type for testing."""
+        return super()._determine_polygon_asset_type(ticker)
+
 
 @pytest.fixture()
 def polygon_updater(
     tmp_path: Path,
-) -> Iterator[tuple[ExposedPolygonSymbolMappingUpdater, DatabaseRepository]]:
+) -> Iterator[tuple[ExposedPolygonSymbolUpdater, DatabaseRepository]]:
     """Provide Polygon updater instance with test database."""
     db_path = tmp_path / "polygon_symbols.sqlite"
     repository = DatabaseRepository(f"sqlite:///{db_path}")
     repository.create_all()
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     updater.repository = repository
     yield updater, repository
     repository.engine.dispose()
@@ -707,24 +712,24 @@ def polygon_updater(
 
 @pytest.mark.asyncio()
 async def test_update_existing_symbols_when_insert_disabled(
-    polygon_updater: tuple[ExposedPolygonSymbolMappingUpdater, DatabaseRepository],
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
     """Verify updater updates existing symbols only when insert disabled.
 
-    Given: Existing BTC-USD mapping and insert_new=False,
+    Given: Existing BTC-USD catalog entry and insert_new=False,
     When: Update database called with BTC and EUR symbols,
-    Then: BTC mapping updated, EUR not inserted.
+    Then: BTC alias created, EUR not inserted (no catalog row).
     """
     updater, repository = polygon_updater
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
-            SymbolMapping(
+            SymbolCatalog(
                 native_symbol="BTC-USD",
-                base_currency="BTC",
-                quote_currency="USD",
-                polygon_symbol=None,
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
                 created_at=original_timestamp,
                 updated_at=original_timestamp,
             )
@@ -745,15 +750,131 @@ async def test_update_existing_symbols_when_insert_disabled(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        btc_mapping = session.execute(
-            select(SymbolMapping).where(SymbolMapping.native_symbol == "BTC-USD")
+        btc_alias = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "polygon",
+                SymbolAlias.channel == "rest",
+            )
         ).scalar_one()
-        eur_mapping = session.execute(
-            select(SymbolMapping).where(SymbolMapping.native_symbol == "EUR-USD")
+        eur_catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "EUR-USD")
         ).scalar_one_or_none()
-    assert btc_mapping.polygon_symbol == "X:BTCUSD"
-    assert btc_mapping.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
-    assert eur_mapping is None
+    assert btc_alias.exchange_symbol == "X:BTCUSD"
+    assert btc_alias.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert eur_catalog is None
+
+
+@pytest.mark.asyncio()
+async def test_update_existing_alias_exchange_symbol(
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
+) -> None:
+    """Verify updater updates existing alias when exchange_symbol changes.
+
+    Given: Existing BTC-USD catalog and alias with old exchange_symbol,
+    When: Update database called with new exchange_symbol for same pair,
+    Then: Alias exchange_symbol updated and stats reflect update.
+    """
+    updater, repository = polygon_updater
+    original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="polygon",
+                channel="rest",
+                exchange_symbol="X:BTCOLD",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.commit()
+    symbols: list[dict[str, Any]] = [
+        {
+            "ticker": "X:BTCUSD",
+            "base_currency_symbol": "BTC",
+            "currency_symbol": "USD",
+        },
+    ]
+    await updater.update_database_public(symbols)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        btc_alias = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "polygon",
+                SymbolAlias.channel == "rest",
+            )
+        ).scalar_one()
+    assert btc_alias.exchange_symbol == "X:BTCUSD"
+    assert btc_alias.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+
+
+@pytest.mark.asyncio()
+async def test_existing_alias_unchanged_when_same_symbol(
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
+) -> None:
+    """Verify updater leaves alias unchanged when exchange_symbol matches.
+
+    Given: Existing BTC-USD catalog and alias with same exchange_symbol,
+    When: Update database called with identical ticker,
+    Then: Alias unchanged and updated_at not modified.
+    """
+    updater, repository = polygon_updater
+    original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        session.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                native_symbol="BTC-USD",
+                exchange="polygon",
+                channel="rest",
+                exchange_symbol="X:BTCUSD",
+                created_at=original_timestamp,
+                updated_at=original_timestamp,
+            )
+        )
+        session.commit()
+    symbols: list[dict[str, Any]] = [
+        {
+            "ticker": "X:BTCUSD",
+            "base_currency_symbol": "BTC",
+            "currency_symbol": "USD",
+        },
+    ]
+    await updater.update_database_public(symbols)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        btc_alias = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.exchange == "polygon",
+                SymbolAlias.channel == "rest",
+            )
+        ).scalar_one()
+    assert btc_alias.exchange_symbol == "X:BTCUSD"
+    assert btc_alias.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio()
@@ -762,12 +883,12 @@ async def test_insert_new_symbols_when_enabled(tmp_path: Path) -> None:
 
     Given: Empty database and insert_new=True,
     When: Update database called with stock and index symbols,
-    Then: Both symbols inserted with correct attributes.
+    Then: Both catalog and alias rows inserted with correct attributes.
     """
     db_path = tmp_path / "polygon_insert.sqlite"
     repository = DatabaseRepository(f"sqlite:///{db_path}")
     repository.create_all()
-    updater = ExposedPolygonSymbolMappingUpdater(
+    updater = ExposedPolygonSymbolUpdater(
         update_threshold_hours=1,
         force=True,
         insert_new=True,
@@ -785,16 +906,32 @@ async def test_insert_new_symbols_when_enabled(tmp_path: Path) -> None:
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        stock_mapping = session.execute(
-            select(SymbolMapping).where(SymbolMapping.native_symbol == "AAPL")
+        stock_catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "AAPL")
         ).scalar_one()
-        index_mapping = session.execute(
-            select(SymbolMapping).where(SymbolMapping.native_symbol == "SPX")
+        stock_alias = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "AAPL",
+                SymbolAlias.exchange == "polygon",
+                SymbolAlias.channel == "rest",
+            )
         ).scalar_one()
-    assert stock_mapping.polygon_symbol == "AAPL"
-    assert stock_mapping.quote_currency == "USD"
-    assert index_mapping.polygon_symbol == "I:SPX"
-    assert index_mapping.quote_currency is None
+        index_catalog = session.execute(
+            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "SPX")
+        ).scalar_one()
+        index_alias = session.execute(
+            select(SymbolAlias).where(
+                SymbolAlias.native_symbol == "SPX",
+                SymbolAlias.exchange == "polygon",
+                SymbolAlias.channel == "rest",
+            )
+        ).scalar_one()
+    assert stock_alias.exchange_symbol == "AAPL"
+    assert stock_catalog.quote == "USD"
+    assert stock_catalog.asset_type == "equity"
+    assert index_alias.exchange_symbol == "I:SPX"
+    assert index_catalog.quote is None
+    assert index_catalog.asset_type == "index"
     repository.engine.dispose()
 
 
@@ -817,7 +954,7 @@ def test_match_polygon_to_native(
     When: Match symbol called,
     Then: Expected native symbol returned or None for invalid.
     """
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     assert updater.match_symbol_public(ticker, symbol_data) == expected
 
 
@@ -829,7 +966,7 @@ def test_get_default_kwargs() -> None:
     Then: Weekly threshold and insert_new=False returned.
     """
     mock_settings = MagicMock(spec=AppSettings)
-    kwargs = PolygonSymbolMappingUpdaterService.get_default_kwargs(mock_settings)
+    kwargs = PolygonSymbolUpdaterService.get_default_kwargs(mock_settings)
     assert kwargs["update_threshold_hours"] == 168
     assert kwargs["force"] is False
     assert kwargs["insert_new"] is False
@@ -838,23 +975,23 @@ def test_get_default_kwargs() -> None:
 def test_get_setting_key() -> None:
     """Verify setting key returns correct identifier.
 
-    Given: Polygon symbol mapping updater instance,
+    Given: Polygon symbol updater instance,
     When: _get_setting_key called,
     Then: Expected setting key returned.
     """
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
-    assert updater._get_setting_key() == "polygon_symbol_mappings_last_update"
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
+    assert updater._get_setting_key() == "polygon_symbols_last_update"
 
 
 @pytest.mark.asyncio()
 async def test_update_database_skips_entries_without_ticker(
-    polygon_updater: tuple[ExposedPolygonSymbolMappingUpdater, DatabaseRepository],
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
     """Verify update_database skips entries without valid ticker.
 
     Given: Symbols list with None, empty, and missing tickers,
     When: Update database called,
-    Then: No mappings created in database.
+    Then: No catalog or alias rows created in database.
     """
     updater, repository = polygon_updater
     symbols: list[dict[str, Any]] = [
@@ -865,19 +1002,21 @@ async def test_update_database_skips_entries_without_ticker(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        count = session.execute(select(SymbolMapping)).scalars().all()
-    assert len(count) == 0
+        catalog_count = session.execute(select(SymbolCatalog)).scalars().all()
+        alias_count = session.execute(select(SymbolAlias)).scalars().all()
+    assert len(catalog_count) == 0
+    assert len(alias_count) == 0
 
 
 @pytest.mark.asyncio()
 async def test_update_database_skips_unmatchable_symbols(
-    polygon_updater: tuple[ExposedPolygonSymbolMappingUpdater, DatabaseRepository],
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
     """Verify update_database skips symbols that cannot be matched.
 
     Given: Symbol with ticker but no currency info,
     When: Update database called,
-    Then: No mapping created for unmatchable symbol.
+    Then: No catalog or alias rows created for unmatchable symbol.
     """
     updater, repository = polygon_updater
     symbols: list[dict[str, Any]] = [
@@ -886,8 +1025,10 @@ async def test_update_database_skips_unmatchable_symbols(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        count = session.execute(select(SymbolMapping)).scalars().all()
-    assert len(count) == 0
+        catalog_count = session.execute(select(SymbolCatalog)).scalars().all()
+        alias_count = session.execute(select(SymbolAlias)).scalars().all()
+    assert len(catalog_count) == 0
+    assert len(alias_count) == 0
 
 
 @pytest.mark.xdist_group(name="database")
@@ -898,14 +1039,12 @@ async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
 
     Given: 1100 symbols with insert_new=True,
     When: Update database called,
-    Then: All symbols inserted via batch commits.
+    Then: All catalog and alias rows inserted via batch commits.
     """
     db_path = tmp_path / "polygon_batch.sqlite"
     repository = DatabaseRepository(f"sqlite:///{db_path}")
     repository.create_all()
-    updater = ExposedPolygonSymbolMappingUpdater(
-        update_threshold_hours=1, force=True, insert_new=True
-    )
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True, insert_new=True)
     updater.repository = repository
     symbols: list[dict[str, Any]] = [
         {"ticker": f"SYM{i:04d}", "currency_symbol": "USD"} for i in range(1100)
@@ -913,14 +1052,16 @@ async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        count = len(session.execute(select(SymbolMapping)).scalars().all())
-    assert count == 1100
+        catalog_count = len(session.execute(select(SymbolCatalog)).scalars().all())
+        alias_count = len(session.execute(select(SymbolAlias)).scalars().all())
+    assert catalog_count == 1100
+    assert alias_count == 1100
     repository.engine.dispose()
 
 
 @pytest.mark.asyncio()
 async def test_update_database_handles_exception(
-    polygon_updater: tuple[ExposedPolygonSymbolMappingUpdater, DatabaseRepository],
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
     """Verify update_database raises when repository is None.
 
@@ -945,7 +1086,7 @@ async def test_update_database_logs_and_reraises(monkeypatch: pytest.MonkeyPatch
     When: Update database called,
     Then: Error logged and RuntimeError re-raised.
     """
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     repository = MagicMock()
     repository.get_session.side_effect = RuntimeError("db failure")
     updater.repository = repository
@@ -964,7 +1105,7 @@ def test_match_polygon_crypto_fallback_parsing() -> None:
     When: Match symbol called,
     Then: Symbol parsed from ticker format or None for short.
     """
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     result = updater.match_symbol_public("X:BTCUSD", {})
     assert result == "BTC-USD"
     result = updater.match_symbol_public("X:SHORT", {})
@@ -978,7 +1119,7 @@ def test_match_polygon_forex_fallback_parsing() -> None:
     When: Match symbol called,
     Then: 6-char pair parsed, others return None.
     """
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     result = updater.match_symbol_public("C:EURUSD", {})
     assert result == "EUR-USD"
     result = updater.match_symbol_public("C:EURUS", {})
@@ -994,7 +1135,7 @@ def test_create_exchange_client_reuses_cached_instance() -> None:
     When: _create_exchange_client called twice,
     Then: Same client instance returned.
     """
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     mock_settings = MagicMock()
     mock_settings.polygon_api_key = "test_key_123"
     updater.settings = mock_settings
@@ -1011,9 +1152,33 @@ def test_create_exchange_client_raises_when_no_api_key() -> None:
     When: _create_exchange_client called,
     Then: ValueError raised with configuration message.
     """
-    updater = ExposedPolygonSymbolMappingUpdater(update_threshold_hours=1, force=True)
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
     mock_settings = MagicMock()
     mock_settings.polygon_api_key = None
     updater.settings = mock_settings
     with pytest.raises(ValueError, match="Polygon API key not configured"):
         updater._create_exchange_client()
+
+
+@pytest.mark.parametrize(
+    "ticker,expected_asset_type",
+    [
+        ("X:BTCUSD", "crypto"),
+        ("X:ETHUSD", "crypto"),
+        ("C:EURUSD", "forex"),
+        ("C:GBPJPY", "forex"),
+        ("I:SPX", "index"),
+        ("I:NDX", "index"),
+        ("AAPL", "equity"),
+        ("TSLA", "equity"),
+    ],
+)
+def test_determine_polygon_asset_type(ticker: str, expected_asset_type: str) -> None:
+    """Verify asset type determination from Polygon ticker prefix.
+
+    Given: Various ticker formats with different prefixes,
+    When: _determine_polygon_asset_type called,
+    Then: Correct asset type returned based on prefix.
+    """
+    updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True)
+    assert updater.determine_asset_type_public(ticker) == expected_asset_type

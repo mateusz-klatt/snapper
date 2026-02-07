@@ -1,4 +1,4 @@
-"""Walutomat symbol mapping updater service.
+"""Walutomat symbol updater service.
 
 Fetches and persists FX pair symbols from Walutomat REST API.
 """
@@ -8,21 +8,19 @@ from datetime import datetime
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
-from snapper.application.updaters.symbols.base import SymbolMappingUpdaterService
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
-from snapper.data.models import SymbolMapping
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 
 
 @register_process(
-    "walutomat_symbol_mapping_updater",
+    "walutomat_symbol_updater",
     method="start",
-    description="Walutomat symbol mapping updater (REST API -> symbol_mappings)",
+    description="Walutomat symbol updater (REST API -> symbol_aliases)",
     priority=16,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
@@ -31,7 +29,7 @@ from snapper.infrastructure.exchanges.implementations.walutomat import Walutomat
     mode="thread",
     args=[],
 )
-class WalutomatSymbolMappingUpdaterService(SymbolMappingUpdaterService[WalutomatExchangeClient]):
+class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient]):
     """Service for updating Walutomat symbol mappings from REST API."""
 
     @staticmethod
@@ -61,61 +59,58 @@ class WalutomatSymbolMappingUpdaterService(SymbolMappingUpdaterService[Walutomat
         """Get the settings key for tracking last update timestamp.
 
         Returns:
-            Settings key string for Walutomat symbol mapping updates.
+            Settings key string for Walutomat symbol updates.
         """
-        return "walutomat_symbol_mapping_last_update"
+        return "walutomat_symbols_last_update"
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
-        """Update database with fetched Walutomat symbol mappings.
+        """Persist symbol catalog and alias rows to the database.
 
         Args:
             symbols: List of symbol dictionaries containing symbol, walutomat_rest_symbol,
                 native_symbol, base, and quote keys.
         """
         assert self.repository is not None, "Repository not initialized"
+        created_count = 0
         updated_count = 0
         with self.repository.get_session() as session:
             for instrument in symbols:
-                walutomat_symbol = instrument["symbol"]
-                walutomat_rest_symbol = instrument["walutomat_rest_symbol"]
                 native_symbol = instrument["native_symbol"]
-                stmt = select(SymbolMapping).where(
-                    (SymbolMapping.walutomat_rest_symbol == walutomat_rest_symbol)
-                    | (SymbolMapping.native_symbol == native_symbol)
-                )
-                mapping = session.execute(stmt).scalar_one_or_none()
                 now = datetime.now(UTC)
-                if not mapping:
-                    mapping = SymbolMapping(
-                        walutomat_rest_symbol=walutomat_rest_symbol,
-                        native_symbol=native_symbol,
-                        walutomat_symbol=walutomat_symbol,
-                        kraken_websocket_symbol=None,
-                        kraken_rest_symbol=None,
-                        ccxt_symbol=None,
-                        base_currency=instrument["base"],
-                        quote_currency=instrument["quote"],
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    session.add(mapping)
-                    logger.debug(
-                        f"Created new mapping: {walutomat_rest_symbol} -> {walutomat_symbol}"
-                    )
+                self._upsert_catalog(
+                    session,
+                    native_symbol,
+                    instrument["base"],
+                    instrument["quote"],
+                    "forex",
+                    now,
+                )
+                ws_result = self._upsert_alias(
+                    session,
+                    native_symbol,
+                    "walutomat",
+                    "ws",
+                    instrument["symbol"],
+                    now,
+                )
+                if ws_result == "created":
+                    created_count += 1
+                elif ws_result == "updated":
                     updated_count += 1
-                else:
-                    updated = False
-                    if mapping.walutomat_symbol != walutomat_symbol:
-                        mapping.walutomat_symbol = walutomat_symbol
-                        updated = True
-                    if mapping.walutomat_rest_symbol != walutomat_rest_symbol:
-                        mapping.walutomat_rest_symbol = walutomat_rest_symbol
-                        updated = True
-                    if updated:
-                        mapping.updated_at = now
-                        logger.debug(
-                            f"Updated mapping: {walutomat_rest_symbol} -> {walutomat_symbol}"
-                        )
-                        updated_count += 1
+                rest_result = self._upsert_alias(
+                    session,
+                    native_symbol,
+                    "walutomat",
+                    "rest",
+                    instrument["walutomat_rest_symbol"],
+                    now,
+                )
+                if rest_result == "created":
+                    created_count += 1
+                elif rest_result == "updated":
+                    updated_count += 1
             session.commit()
-        logger.info(f"Updated {updated_count}/{len(symbols)} Walutomat symbol mappings")
+        logger.info(
+            f"Walutomat update complete: {created_count} created, "
+            f"{updated_count} updated (total: {len(symbols)})"
+        )

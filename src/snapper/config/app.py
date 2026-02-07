@@ -268,6 +268,20 @@ class AppSettings:
         )
 
     @property
+    def paper_instruments(self) -> dict[str, list[str]]:
+        """Return configured market data sources for paper replay.
+
+        Returns:
+            Dictionary mapping source exchanges to lists of instrument symbols.
+        """
+        return self._get_db_setting(
+            "paper_instruments",
+            {
+                "kraken": ["BTC-USD", "ETH-USD"],
+            },
+        )
+
+    @property
     def timeframes(self) -> list[str]:
         """Return configured trading timeframes.
 

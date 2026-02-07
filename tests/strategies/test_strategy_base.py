@@ -231,7 +231,7 @@ class TestStrategyConfig:
             StrategyConfig(
                 name="test_strategy",
                 strategy_class="TestStrategy",
-                inputs=["market.paper.BTC-USD.candles"],
+                inputs=["market.paper.kraken.BTC-USD.candles"],
                 outputs=["BTC-USD"],
                 exchange="kraken",
             )
@@ -610,7 +610,7 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
     )
     bar = make_bar_envelope("BTC-USD", 101.0, ts=123.0, exchange="kraken")
     messages = [
-        ("system.symbol_mappings", b"{}"),
+        ("system.symbol_aliases", b"{}"),
         (
             "system.heartbeats.feed.kraken",
             heartbeat.to_json().encode(),
@@ -623,7 +623,7 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
         ),
     ]
     strategy = FakeStrategy(
-        _strategy_config(exchange="paper", inputs=["market.paper.BTC-USD.candles.1h"])
+        _strategy_config(exchange="paper", inputs=["market.paper.kraken.BTC-USD.candles.1h"])
     )
     strategy._running = True
     publisher = DummyPublisher()
@@ -814,6 +814,19 @@ async def test_listen_loop_handles_trade_data() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_market_data_unknown_topic_returns_none() -> None:
+    """Verify dispatcher returns None for unsupported market topic type.
+
+    Given: Strategy instance and unsupported market topic suffix,
+    When: _dispatch_market_data is called,
+    Then: Method returns None without raising.
+    """
+    strategy = FakeStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]))
+    result = await strategy._dispatch_market_data("market.kraken.BTC-USD.book", "BTC-USD", "{}")
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_emit_signal_auto_timestamp_and_setup_publisher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -926,7 +939,7 @@ async def test_subscribe_inputs_deduplicates_feed_heartbeats(
     await strategy._subscribe_inputs()
     assert strategy.subscriber is not None
     assert context.sub_socket.subscribed.count("system.heartbeats.feed.kraken") == 1
-    assert "system.symbol_mappings" in context.sub_socket.subscribed
+    assert "system.symbol_aliases" in context.sub_socket.subscribed
     assert "system.settings" in context.sub_socket.subscribed
 
 
@@ -1161,7 +1174,7 @@ class TestSubscribeInputs:
         config = StrategyConfig(
             name="paper_subscriber",
             strategy_class="SimpleTestStrategy",
-            inputs=["market.paper.BTC-USD.candles.1m"],
+            inputs=["market.paper.kraken.BTC-USD.candles.1m"],
             outputs=["BTC-USD"],
             params={},
         )
@@ -1581,7 +1594,7 @@ class TestListenLoop:
         When: _listen_loop processes message,
         Then: Strategy reset called and timestamp updated.
         """
-        strategy_config.inputs = ["market.paper.BTC-USD.candles"]
+        strategy_config.inputs = ["market.paper.kraken.BTC-USD.candles"]
         strategy = ReplayAwareStrategy(strategy_config)
         strategy._running = True
         replay_payload = json.dumps({"started_at": "2024-01-01T00:02:03.450000+00:00"}).encode()
@@ -1603,7 +1616,7 @@ class TestListenLoop:
         When: _listen_loop processes message,
         Then: _last_data_ts reset to None.
         """
-        strategy_config.inputs = ["market.paper.BTC-USD.candles"]
+        strategy_config.inputs = ["market.paper.kraken.BTC-USD.candles"]
         strategy = ReplayAwareStrategy(strategy_config)
         strategy._running = True
         strategy._last_data_ts = 55.5
@@ -1697,12 +1710,12 @@ class TestListenLoop:
         assert strategy._last_data_ts == pytest.approx(100.0)
 
     @pytest.mark.asyncio
-    async def test_listen_loop_triggers_symbol_mapping_refresh(
+    async def test_listen_loop_triggers_symbol_alias_refresh(
         self, strategy_config: StrategyConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Verify listen_loop triggers cache invalidation on symbol_mappings.
+        """Verify listen_loop triggers cache invalidation on symbol_aliases.
 
-        Given: Strategy receiving symbol_mappings message,
+        Given: Strategy receiving symbol_aliases message,
         When: _listen_loop processes message,
         Then: DB mapper cache invalidation triggered.
         """
@@ -1712,7 +1725,7 @@ class TestListenLoop:
         monkeypatch.setattr("snapper.strategies.system_events._get_db_mapper", lambda: mapper)
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
-            side_effect=[("system.symbol_mappings", b"{}"), asyncio.CancelledError()]
+            side_effect=[("system.symbol_aliases", b"{}"), asyncio.CancelledError()]
         )
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
@@ -2001,7 +2014,7 @@ class TestEmitSignal:
         config = StrategyConfig(
             name="test_strategy",
             strategy_class="SimpleTestStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
@@ -2031,7 +2044,7 @@ class TestEmitSignal:
         config = StrategyConfig(
             name="test_strategy",
             strategy_class="SimpleTestStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
@@ -2293,7 +2306,7 @@ class TestReplayHandling:
         config = StrategyConfig(
             name="replay_strategy",
             strategy_class="ReplayAwareStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = ReplayAwareStrategy(config)
@@ -2323,7 +2336,7 @@ class TestReplayHandling:
         config = StrategyConfig(
             name="replay_strategy",
             strategy_class="ReplayAwareStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = ReplayAwareStrategy(config)
@@ -2355,7 +2368,7 @@ class TestReplayHandling:
         config = StrategyConfig(
             name="replay_branch",
             strategy_class="ReplayAwareStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = ReplayAwareStrategy(config)
@@ -2377,7 +2390,7 @@ class TestReplayHandling:
                     return "system.replay.end", replay_end
                 strategy._running = False
                 await asyncio.sleep(0)
-                return "market.paper.BTC-USD.candles", b"{}"
+                return "market.paper.kraken.BTC-USD.candles", b"{}"
 
         strategy.subscriber = cast(Any, StubSubscriber())
         await strategy._listen_loop()
@@ -2394,7 +2407,7 @@ class TestReplayHandling:
         config = StrategyConfig(
             name="replay_end_only",
             strategy_class="ReplayAwareStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = ReplayAwareStrategy(config)
@@ -2434,7 +2447,7 @@ class TestReplayHandling:
         config = StrategyConfig(
             name="replay_unknown",
             strategy_class="ReplayAwareStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = ReplayAwareStrategy(config)
@@ -2455,7 +2468,7 @@ class TestReplayHandling:
                 if self.calls == 1:
                     return "system.replay.unknown", unknown_payload
                 strategy._running = False
-                return "market.paper.BTC-USD.candles", b"{}"
+                return "market.paper.kraken.BTC-USD.candles", b"{}"
 
         strategy.subscriber = cast(Any, UnknownSystemSubscriber())
         await strategy._listen_loop()
@@ -2469,7 +2482,7 @@ class TestHeartbeatLoop:
         config = StrategyConfig(
             name="replay_strategy",
             strategy_class="ReplayAwareStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         return ReplayAwareStrategy(config)
@@ -2693,7 +2706,7 @@ class TestSubscribeInputsBranches:
         with patch("snapper.strategies.base.ValidatedSubscriber", MockValidatedSubscriber):
             await strategy._subscribe_inputs()
         assert "signals.paper.BTC-USD.macd" in subscribed_topics
-        assert "system.symbol_mappings" in subscribed_topics
+        assert "system.symbol_aliases" in subscribed_topics
         assert "system.settings" in subscribed_topics
         assert not any("system.heartbeats.feed" in t for t in subscribed_topics)
 
@@ -2851,10 +2864,10 @@ class TestListenLoopSystemMessages:
     """Test suite for system message handling in listen loop."""
 
     @pytest.mark.asyncio
-    async def test_listen_loop_symbol_mappings_refresh(self) -> None:
-        """Verify symbol_mappings triggers cache invalidation.
+    async def test_listen_loop_symbol_aliases_refresh(self) -> None:
+        """Verify symbol_aliases triggers cache invalidation.
 
-        Given: Strategy receiving symbol_mappings message,
+        Given: Strategy receiving symbol_aliases message,
         When: _listen_loop processes message,
         Then: DB mapper cache invalidation triggered.
         """
@@ -2869,7 +2882,7 @@ class TestListenLoopSystemMessages:
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[
-                ("system.symbol_mappings", json.dumps({"updated": True}).encode()),
+                ("system.symbol_aliases", json.dumps({"updated": True}).encode()),
                 asyncio.CancelledError(),
             ]
         )
@@ -3146,7 +3159,7 @@ class TestEmitSignalTimestamp:
         config = StrategyConfig(
             name="test",
             strategy_class="SimpleTestStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
@@ -3220,7 +3233,7 @@ class TestCompositeReset:
         sub_config = StrategyConfig(
             name="macd",
             strategy_class="SimpleTestStrategy",
-            inputs=["market.paper.BTC-USD.candles"],
+            inputs=["market.paper.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
         )
         sub = SimpleTestStrategy(sub_config)
@@ -3253,14 +3266,14 @@ class TestTopicValidationPhase4:
         valid, err = _validate_system_topic("system.unknown.")
         assert not valid
 
-    def test_validate_system_symbol_mappings_extra_segments(self) -> None:
-        """Verify symbol_mappings with extra segments fails.
+    def test_validate_system_symbol_aliases_extra_segments(self) -> None:
+        """Verify symbol_aliases with extra segments fails.
 
-        Given: system.symbol_mappings.extra topic,
+        Given: system.symbol_aliases.extra topic,
         When: _validate_system_topic called,
         Then: Error mentions 'must have exactly 2 segments'.
         """
-        valid, err = _validate_system_topic("system.symbol_mappings.extra")
+        valid, err = _validate_system_topic("system.symbol_aliases.extra")
         assert not valid
         assert "must have exactly 2 segments" in err
 
@@ -3554,7 +3567,7 @@ class TestBaseStrategyValidation:
         config = object.__new__(StrategyConfig)
         config.name = "test"
         config.strategy_class = "Test"
-        config.inputs = ["market.paper.BTC-USD.candles.1h"]
+        config.inputs = ["market.paper.kraken.BTC-USD.candles.1h"]
         config.outputs = ["BTC-USD"]
         config.exchange = "unknown_exchange"
         config.params = {}
@@ -3710,8 +3723,8 @@ def coint_strategy_config() -> StrategyConfig:
         name="cointegration_btc_eth",
         strategy_class="CointegrationPairs",
         inputs=[
-            "market.paper.BTC-USD.candles.1h",
-            "market.paper.ETH-USD.candles.1h",
+            "market.paper.kraken.BTC-USD.candles.1h",
+            "market.paper.kraken.ETH-USD.candles.1h",
         ],
         outputs=["BTC-USD", "ETH-USD"],
         exchange="paper",
@@ -3761,7 +3774,7 @@ class TestCointegrationInitialization:
         When: CointegrationPairs instantiated,
         Then: ValueError with 'requires exactly 2 inputs'.
         """
-        strategy_config.inputs = ["market.paper.BTC-USD.candles.1h"]
+        strategy_config.inputs = ["market.paper.kraken.BTC-USD.candles.1h"]
         with pytest.raises(ValueError, match="requires exactly 2 inputs"):
             CointegrationPairs(config=strategy_config)
 
@@ -3775,9 +3788,9 @@ class TestCointegrationInitialization:
         Then: ValueError with 'requires exactly 2 inputs'.
         """
         strategy_config.inputs = [
-            "market.paper.BTC-USD.candles.1h",
-            "market.paper.ETH-USD.candles.1h",
-            "market.paper.SOL-USD.candles.1h",
+            "market.paper.kraken.BTC-USD.candles.1h",
+            "market.paper.kraken.ETH-USD.candles.1h",
+            "market.paper.kraken.SOL-USD.candles.1h",
         ]
         with pytest.raises(ValueError, match="requires exactly 2 inputs"):
             CointegrationPairs(config=strategy_config)
@@ -3790,7 +3803,8 @@ class TestCointegrationInitialization:
         Then: Instrument symbol extracted.
         """
         assert (
-            CointegrationPairs._extract_instrument("market.paper.BTC-USD.candles.1h") == "BTC-USD"
+            CointegrationPairs._extract_instrument("market.paper.kraken.BTC-USD.candles.1h")
+            == "BTC-USD"
         )
         assert (
             CointegrationPairs._extract_instrument("market.kraken.ETH-USD.candles.5m") == "ETH-USD"
@@ -4736,7 +4750,7 @@ def test_paper_exchange_validates_instruments() -> None:
     config = StrategyConfig(
         name="test_paper",
         strategy_class="TestStrategy",
-        inputs=["market.paper.BTC-USD.candles"],
+        inputs=["market.paper.kraken.BTC-USD.candles"],
         outputs=["BTC-USD", "ETH-USD", "EUR-PLN"],
         exchange="paper",
     )
@@ -4745,7 +4759,7 @@ def test_paper_exchange_validates_instruments() -> None:
         StrategyConfig(
             name="test_paper_invalid",
             strategy_class="TestStrategy",
-            inputs=["market.paper.INVALID-SYMBOL.candles"],
+            inputs=["market.paper.kraken.INVALID-SYMBOL.candles"],
             outputs=["INVALID-SYMBOL"],
             exchange="paper",
         )
@@ -5109,7 +5123,7 @@ def test_strategy_config_allows_paper_flow() -> None:
     Then: Config accepted.
     """
     kwargs = _valid_config_kwargs()
-    kwargs["inputs"] = ["market.paper.BTC-USD.candles"]
+    kwargs["inputs"] = ["market.paper.kraken.BTC-USD.candles"]
     kwargs["exchange"] = "paper"
     StrategyConfig(**kwargs)
 
@@ -5122,7 +5136,7 @@ def test_strategy_config_rejects_paper_output_mismatch() -> None:
     Then: ValueError raised.
     """
     kwargs = _valid_config_kwargs()
-    kwargs["inputs"] = ["market.paper.BTC-USD.candles"]
+    kwargs["inputs"] = ["market.paper.kraken.BTC-USD.candles"]
     kwargs["exchange"] = "kraken"
     with pytest.raises(ValueError, match="Paper/replay input data MUST use exchange='paper'"):
         StrategyConfig(**kwargs)
@@ -5137,7 +5151,7 @@ def test_strategy_config_rejects_mixed_inputs() -> None:
     """
     kwargs = _valid_config_kwargs()
     kwargs["inputs"] = [
-        "market.paper.BTC-USD.candles",
+        "market.paper.kraken.BTC-USD.candles",
         "market.kraken.BTC-USD.candles",
     ]
     kwargs["exchange"] = "paper"

@@ -1,4 +1,4 @@
-"""Zonda exchange symbol mapping updater service.
+"""Zonda exchange symbol updater service.
 
 Fetches and persists trading pair symbols from Zonda (BitBay) API.
 """
@@ -8,22 +8,20 @@ from datetime import datetime
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
-from snapper.application.updaters.symbols.base import SymbolMappingUpdaterService
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
-from snapper.data.models import SymbolMapping
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
 
 @register_process(
-    "zonda_symbol_mapping_updater",
+    "zonda_symbol_updater",
     method="start",
-    description="Zonda symbol mapping updater (REST API -> symbol_mappings)",
+    description="Zonda symbol updater (REST API -> symbol_aliases)",
     priority=17,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
@@ -32,7 +30,7 @@ from snapper.infrastructure.symbols.mapper import make_native_symbol
     mode="thread",
     args=[],
 )
-class ZondaSymbolMappingUpdaterService(SymbolMappingUpdaterService[ZondaExchangeClient]):
+class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
     """Service for updating Zonda symbol mappings from CCXT."""
 
     @staticmethod
@@ -62,9 +60,9 @@ class ZondaSymbolMappingUpdaterService(SymbolMappingUpdaterService[ZondaExchange
         """Get the settings key for last update timestamp.
 
         Returns:
-            Settings key string for storing Zonda symbol mapping update time.
+            Settings key string for storing Zonda symbol update time.
         """
-        return "zonda_symbol_mapping_last_update"
+        return "zonda_symbols_last_update"
 
     async def load_zonda_markets(self, client: ZondaExchangeClient) -> list[dict[str, Any]]:
         """Load trading markets from Zonda via CCXT load_markets.
@@ -125,51 +123,50 @@ class ZondaSymbolMappingUpdaterService(SymbolMappingUpdaterService[ZondaExchange
         return await self.load_zonda_markets(client)
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
-        """Persist symbol mappings to the database.
+        """Persist symbol catalog and alias rows to the database.
 
         Args:
-            symbols: List of symbol mapping dictionaries to save or update.
+            symbols: List of symbol dictionaries with native_symbol, zonda_symbol,
+                ccxt_symbol, base, and quote keys.
         """
         assert self.repository is not None, "Repository not initialized"
-        updated_count = 0
         created_count = 0
+        updated_count = 0
         try:
             with self.repository.get_session() as session:
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
-                    zonda_symbol = symbol_data["zonda_symbol"]
-                    stmt = select(SymbolMapping).where(SymbolMapping.native_symbol == native_symbol)
-                    existing = session.execute(stmt).scalar_one_or_none()
                     now = datetime.now(UTC)
-                    if existing:
-                        updated = False
-                        if existing.zonda_symbol != zonda_symbol:
-                            existing.zonda_symbol = zonda_symbol
-                            updated = True
-                        ccxt_symbol = symbol_data.get("ccxt_symbol")
-                        if existing.ccxt_symbol != ccxt_symbol:
-                            existing.ccxt_symbol = ccxt_symbol
-                            updated = True
-                        if updated:
-                            existing.updated_at = now
-                            updated_count += 1
-                    else:
-                        new_mapping = SymbolMapping(
-                            native_symbol=native_symbol,
-                            zonda_symbol=zonda_symbol,
-                            base_currency=symbol_data["base"],
-                            quote_currency=symbol_data["quote"],
-                            kraken_websocket_symbol=None,
-                            kraken_rest_symbol=None,
-                            ccxt_symbol=symbol_data.get("ccxt_symbol"),
-                            walutomat_symbol=None,
-                            walutomat_rest_symbol=None,
-                            polygon_symbol=None,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                        session.add(new_mapping)
+                    self._upsert_catalog(
+                        session,
+                        native_symbol,
+                        symbol_data["base"],
+                        symbol_data["quote"],
+                        "crypto",
+                        now,
+                    )
+                    ws_result = self._upsert_alias(
+                        session,
+                        native_symbol,
+                        "zonda",
+                        "ws",
+                        symbol_data["zonda_symbol"],
+                        now,
+                    )
+                    if ws_result == "created":
                         created_count += 1
+                    elif ws_result == "updated":
+                        updated_count += 1
+                    ccxt_symbol = symbol_data.get("ccxt_symbol")
+                    if ccxt_symbol:
+                        self._upsert_alias(
+                            session,
+                            native_symbol,
+                            "zonda",
+                            "ccxt",
+                            ccxt_symbol,
+                            now,
+                        )
                 session.commit()
                 logger.info(
                     f"Zonda update complete: {created_count} created, "

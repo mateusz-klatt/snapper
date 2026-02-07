@@ -2,7 +2,6 @@
 
 from collections.abc import Awaitable
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC
 from datetime import date
 from datetime import datetime
@@ -28,16 +27,6 @@ from snapper.application.updaters.historical.aggregates import _timeframe_label
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Repository
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
-
-
-@dataclass(slots=True)
-class _StubMapping:
-    """Test stub for symbol mapping."""
-
-    native_symbol: str
-    polygon_symbol: str
-    base_currency: str
-    quote_currency: str | None
 
 
 class _StubScalarsResult:
@@ -102,24 +91,8 @@ class _StubAsyncRepo:
         self.calls: list[dict[str, Any]] = []
         self.return_value = 42
 
-    async def upsert_instrument(
-        self,
-        *,
-        symbol: str,
-        base: str,
-        quote: str,
-        tick_size: float,
-        lot_size: float,
-    ) -> int:
-        self.calls.append(
-            {
-                "symbol": symbol,
-                "base": base,
-                "quote": quote,
-                "tick_size": tick_size,
-                "lot_size": lot_size,
-            }
-        )
+    async def upsert_instrument(self, **kwargs: Any) -> int:
+        self.calls.append(kwargs)
         return self.return_value
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
@@ -215,20 +188,16 @@ def test_resolve_symbol_context_polygon_symbol(service: PolygonAggregatesBackfil
     When: _resolve_symbol_context called,
     Then: SymbolContext with correct native symbol returned.
     """
-    mapping = _StubMapping(
-        native_symbol="BTC-USD",
-        polygon_symbol="X:BTCUSD",
-        base_currency="BTC",
-        quote_currency="USD",
-    )
-    cast(Any, service)._db_sync = _StubSyncRepo([[mapping]])
+    catalog = SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD")
+    alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
+    cast(Any, service)._db_sync = _StubSyncRepo([[catalog], [alias]])
     mapper = cast(_StubSymbolMapper, cast(Any, service)._symbol_mapper)
-    mapper.polygon_to_native[mapping.polygon_symbol] = mapping.native_symbol
+    mapper.polygon_to_native["X:BTCUSD"] = "BTC-USD"
     resolve_context = cast(Callable[[str], Any], cast(Any, service)._resolve_symbol_context)
     context = resolve_context("X:BTCUSD")
     assert context is not None
-    assert context.native_symbol == mapping.native_symbol
-    assert context.quote_currency == mapping.quote_currency
+    assert context.native_symbol == "BTC-USD"
+    assert context.quote_currency == "USD"
 
 
 def test_resolve_symbol_context_native_symbol(service: PolygonAggregatesBackfillService) -> None:
@@ -238,20 +207,16 @@ def test_resolve_symbol_context_native_symbol(service: PolygonAggregatesBackfill
     When: _resolve_symbol_context called,
     Then: SymbolContext with correct polygon symbol returned.
     """
-    mapping = _StubMapping(
-        native_symbol="AAPL",
-        polygon_symbol="AAPL",
-        base_currency="AAPL",
-        quote_currency=None,
-    )
-    cast(Any, service)._db_sync = _StubSyncRepo([[mapping]])
+    alias = SimpleNamespace(native_symbol="AAPL", exchange_symbol="AAPL")
+    catalog = SimpleNamespace(native_symbol="AAPL", base="AAPL", quote=None)
+    cast(Any, service)._db_sync = _StubSyncRepo([[alias], [catalog]])
     mapper = cast(_StubSymbolMapper, cast(Any, service)._symbol_mapper)
-    mapper.native_to_polygon[mapping.native_symbol] = mapping.polygon_symbol
+    mapper.native_to_polygon["AAPL"] = "AAPL"
     resolve_context = cast(Callable[[str], Any], cast(Any, service)._resolve_symbol_context)
     context = resolve_context("AAPL")
     assert context is not None
-    assert context.native_symbol == mapping.native_symbol
-    assert context.quote_currency == mapping.base_currency
+    assert context.native_symbol == "AAPL"
+    assert context.quote_currency == "AAPL"
 
 
 def test_resolve_symbol_context_missing(service: PolygonAggregatesBackfillService) -> None:
@@ -791,26 +756,23 @@ def test_resolve_symbol_context_with_polygon_cache(monkeypatch: pytest.MonkeyPat
     Then: Context with mapped native symbol returned.
     """
     svc = PolygonAggregatesBackfillService()
-
-    class Mapping:
-        native_symbol = "BTC-USD"
-        polygon_symbol = "X:BTCUSD"
-        base_currency = "BTC"
-        quote_currency = "USD"
-
-    class Result:
-        def scalar_one_or_none(self) -> Mapping:
-            return Mapping()
+    responses: list[Any] = [
+        SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD"),
+        SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD"),
+    ]
 
     class Session:
+        """Session stub returning catalog then alias."""
+
         def __enter__(self) -> "Session":
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
             return None
 
-        def execute(self, _stmt: Any) -> Result:
-            return Result()
+        def execute(self, _stmt: Any) -> Any:
+            obj = responses.pop(0)
+            return SimpleNamespace(scalar_one_or_none=lambda: obj)
 
     svc._db_sync = cast(Any, SimpleNamespace(get_session=lambda: Session()))
     svc._symbol_mapper = cast(
@@ -834,26 +796,14 @@ def test_resolve_symbol_context_with_native_cache(monkeypatch: pytest.MonkeyPatc
     Then: Context with mapped polygon symbol returned.
     """
     svc = PolygonAggregatesBackfillService()
-
-    class Mapping:
-        native_symbol = "BTC-USD"
-        polygon_symbol = "X:BTCUSD"
-        base_currency = "BTC"
-        quote_currency = "USD"
-
-    class Result:
-        def __init__(self, mapping: Mapping | None) -> None:
-            self._mapping = mapping
-
-        def scalar_one_or_none(self) -> Mapping | None:
-            return self._mapping
+    responses: list[Any] = [
+        None,
+        SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD"),
+        SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD"),
+    ]
 
     class Session:
-        def __init__(self) -> None:
-            self.calls = [
-                Result(None),
-                Result(Mapping()),
-            ]
+        """Session stub returning None then alias then catalog."""
 
         def __enter__(self) -> "Session":
             return self
@@ -861,8 +811,9 @@ def test_resolve_symbol_context_with_native_cache(monkeypatch: pytest.MonkeyPatc
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
             return None
 
-        def execute(self, _stmt: Any) -> Result:
-            return self.calls.pop(0)
+        def execute(self, _stmt: Any) -> Any:
+            obj = responses.pop(0)
+            return SimpleNamespace(scalar_one_or_none=lambda: obj)
 
     shared_session = Session()
     svc._db_sync = cast(Any, SimpleNamespace(get_session=lambda: shared_session))
@@ -1073,10 +1024,8 @@ class _StubBackfillAsyncRepo:
         self.calls: list[dict[str, Any]] = []
         self.upsert_candles_called = 0
 
-    async def upsert_instrument(
-        self, *, symbol: str, base: str, quote: str, tick_size: float, lot_size: float
-    ) -> int:
-        self.calls.append({"upsert_instrument": {"symbol": symbol, "base": base, "quote": quote}})
+    async def upsert_instrument(self, **kwargs: Any) -> int:
+        self.calls.append({"upsert_instrument": kwargs})
         return 1
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
@@ -1306,12 +1255,9 @@ async def test_730_day_limit_enforced() -> None:
     Then: from_ts date is at most 730 days ago.
     """
     service = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"], days_back=900)
-    stub_mapping = MagicMock()
-    stub_mapping.native_symbol = "BTC/USD"
-    stub_mapping.polygon_symbol = "X:BTCUSD"
-    stub_mapping.base_currency = "BTC"
-    stub_mapping.quote_currency = "USD"
-    service._db_sync = _StubBackfillSyncRepo([[stub_mapping]])
+    stub_catalog = SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD")
+    stub_alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
+    service._db_sync = _StubBackfillSyncRepo([[stub_catalog], [stub_alias]])
     stub_async_repo = _StubBackfillAsyncRepo()
     service._db_async = stub_async_repo
     stub_loader = _StubLoader(candles=[])
@@ -1604,9 +1550,7 @@ class _DummyRepo:
 class _DummyAsyncRepo:
     """Test dummy for async repository."""
 
-    async def upsert_instrument(
-        self, *, symbol: str, base: str, quote: str, tick_size: float, lot_size: float
-    ) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> int:
         return 1
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
@@ -1789,7 +1733,6 @@ def test_resolve_symbol_context_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
     Then the context is retrieved using the cached mapper data.
     """
     service = PolygonAggregatesBackfillService()
-    service._db_sync = cast(Any, _DummyRepo())
 
     class _Mapper:
         def __init__(self) -> None:
@@ -1800,16 +1743,15 @@ def test_resolve_symbol_context_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
             return None
 
     service._symbol_mapper = cast(Any, _Mapper())
-    mapping = SimpleNamespace(
-        native_symbol="ETH-USD",
-        polygon_symbol="X:ETHUSD",
-        base_currency="ETH",
-        quote_currency="USD",
-    )
+    responses: list[Any] = [
+        SimpleNamespace(native_symbol="ETH-USD", base="ETH", quote="USD"),
+        SimpleNamespace(native_symbol="ETH-USD", exchange_symbol="X:ETHUSD"),
+    ]
 
     class _Session(_DummyRepo):
         def execute(self, *_: object, **__: object) -> Any:
-            return SimpleNamespace(scalar_one_or_none=lambda: mapping)
+            obj = responses.pop(0)
+            return SimpleNamespace(scalar_one_or_none=lambda: obj)
 
     service._db_sync = cast(Any, SimpleNamespace(get_session=lambda: _Session()))
     context = service._resolve_symbol_context("X:ETHUSD")
@@ -1866,14 +1808,14 @@ def test_resolve_symbol_context_stock_direct_lookup(monkeypatch: pytest.MonkeyPa
             return None
 
     service._symbol_mapper = cast(Any, _Mapper())
-    mapping = SimpleNamespace(
-        native_symbol="AAPL",
-        polygon_symbol="AAPL",
-        base_currency="USD",
-        quote_currency=None,
-    )
+    responses: list[Any] = [
+        SimpleNamespace(native_symbol="AAPL", exchange_symbol="AAPL"),
+        SimpleNamespace(native_symbol="AAPL", base="USD", quote=None),
+    ]
 
     class _Session:
+        """Session stub returning alias then catalog for stock symbol."""
+
         def __enter__(self) -> "_Session":
             return self
 
@@ -1881,7 +1823,8 @@ def test_resolve_symbol_context_stock_direct_lookup(monkeypatch: pytest.MonkeyPa
             return None
 
         def execute(self, *_: object, **__: object) -> Any:
-            return SimpleNamespace(scalar_one_or_none=lambda: mapping)
+            obj = responses.pop(0)
+            return SimpleNamespace(scalar_one_or_none=lambda: obj)
 
     service._db_sync = cast(Any, SimpleNamespace(get_session=lambda: _Session()))
     context = service._resolve_symbol_context("AAPL")
@@ -1907,18 +1850,14 @@ def test_resolve_symbol_context_native_to_polygon_cache(monkeypatch: pytest.Monk
             return None
 
     service._symbol_mapper = cast(Any, _Mapper())
-    mapping = SimpleNamespace(
-        native_symbol="AAPL",
-        polygon_symbol="NAS:AAPL",
-        base_currency="USD",
-        quote_currency=None,
-    )
+    responses: list[Any] = [
+        None,
+        SimpleNamespace(native_symbol="AAPL", exchange_symbol="NAS:AAPL"),
+        SimpleNamespace(native_symbol="AAPL", base="USD", quote=None),
+    ]
 
     class _Session:
-        """Local session stub for resolve_symbol_context test."""
-
-        def __init__(self) -> None:
-            self.calls = 0
+        """Session stub returning None then alias then catalog."""
 
         def __enter__(self) -> "_Session":
             return self
@@ -1927,10 +1866,8 @@ def test_resolve_symbol_context_native_to_polygon_cache(monkeypatch: pytest.Monk
             return None
 
         def execute(self, *_: object, **__: object) -> Any:
-            self.calls += 1
-            if self.calls == 1:
-                return SimpleNamespace(scalar_one_or_none=lambda: None)
-            return SimpleNamespace(scalar_one_or_none=lambda: mapping)
+            obj = responses.pop(0)
+            return SimpleNamespace(scalar_one_or_none=lambda: obj)
 
     session = _Session()
     service._db_sync = cast(Any, SimpleNamespace(get_session=lambda: session))
@@ -2085,16 +2022,14 @@ def test_resolve_symbol_context_polygon_path(
     """
     service, mapper = service_and_mapper
     mapper.polygon_to_native["X:BTCUSD"] = "BTC-USD"
-    mapping = SimpleNamespace(
-        native_symbol="BTC-USD",
-        polygon_symbol="X:BTCUSD",
-        base_currency="BTC",
-        quote_currency="USD",
-    )
-    execute_result = MagicMock()
-    execute_result.scalar_one_or_none.return_value = mapping
+    catalog = SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD")
+    alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
+    catalog_result = MagicMock()
+    catalog_result.scalar_one_or_none.return_value = catalog
+    alias_result = MagicMock()
+    alias_result.scalar_one_or_none.return_value = alias
     session = MagicMock()
-    session.execute.return_value = execute_result
+    session.execute.side_effect = [catalog_result, alias_result]
     session_ctx = MagicMock()
     session_ctx.__enter__.return_value = session
     session_ctx.__exit__.return_value = None
@@ -2122,16 +2057,16 @@ def test_resolve_symbol_context_native_fallback(
     """
     service, mapper = service_and_mapper
     mapper.native_to_polygon["ETH-USD"] = "X:ETHUSD"
-    mapping = SimpleNamespace(
-        native_symbol="ETH-USD",
-        polygon_symbol="X:ETHUSD",
-        base_currency="ETH",
-        quote_currency=None,
-    )
-    execute_result = MagicMock()
-    execute_result.scalar_one_or_none.return_value = mapping
+    none_result = MagicMock()
+    none_result.scalar_one_or_none.return_value = None
+    alias = SimpleNamespace(native_symbol="ETH-USD", exchange_symbol="X:ETHUSD")
+    alias_result = MagicMock()
+    alias_result.scalar_one_or_none.return_value = alias
+    catalog = SimpleNamespace(native_symbol="ETH-USD", base="ETH", quote=None)
+    catalog_result = MagicMock()
+    catalog_result.scalar_one_or_none.return_value = catalog
     session = MagicMock()
-    session.execute.return_value = execute_result
+    session.execute.side_effect = [none_result, alias_result, catalog_result]
     session_ctx = MagicMock()
     session_ctx.__enter__.return_value = session
     session_ctx.__exit__.return_value = None
@@ -2339,18 +2274,27 @@ async def test_process_symbol_persists_fetched_rows(
     assert loader_stub.fetch_calls, "fetch_aggregates should have been invoked"
 
 
-def test_mapping_to_context_returns_none_for_empty_polygon_symbol() -> None:
-    """Return None when polygon_symbol is empty.
+def test_lookup_context_by_polygon_symbol_alias_found_catalog_missing() -> None:
+    """Return None when alias exists but catalog row is missing.
 
-    Given a SymbolMapping with an empty polygon_symbol,
-    When _mapping_to_context is called,
+    Given a polygon alias found in the database but no matching catalog,
+    When _lookup_context_by_polygon_symbol is called,
     Then None is returned.
     """
     service = PolygonAggregatesBackfillService()
-    mapping = SimpleNamespace(
-        native_symbol="BTC-USD",
-        polygon_symbol="",
-        base_currency="BTC",
-        quote_currency="USD",
-    )
-    assert service._mapping_to_context(mapping) is None
+    alias_stub = SimpleNamespace(native_symbol="ORPHAN", exchange_symbol="X:ORPHAN")
+    responses: list[Any] = [alias_stub, None]
+
+    class _Session:
+        def __enter__(self) -> "_Session":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, *_: object, **__: object) -> Any:
+            val = responses.pop(0)
+            return SimpleNamespace(scalar_one_or_none=lambda: val)
+
+    service._db_sync = cast(Any, SimpleNamespace(get_session=lambda: _Session()))
+    assert service._lookup_context_by_polygon_symbol("X:ORPHAN") is None

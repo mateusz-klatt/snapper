@@ -31,6 +31,7 @@ import snapper.data.repository as repo
 import snapper.data.repository as repository
 from snapper.data import repository as repo_module
 from snapper.data.models import MarketSnapshot
+from snapper.data.models import SymbolCatalog
 from snapper.data.repository import CloudRepository
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import MSSQLRepository
@@ -261,10 +262,23 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     db_path = tmp_path / "repo.db"
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await repo.create_all()
+    async with repo.session() as s:
+        s.add(
+            SymbolCatalog(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
     instrument_payload = {
         "symbol": "BTC-USD",
         "base": "BTC",
         "quote": "USD",
+        "exchange": "kraken",
         "tick_size": 0.01,
         "lot_size": 0.001,
     }
@@ -325,12 +339,14 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         "1m",
         base_ts - timedelta(minutes=1),
         base_ts + timedelta(minutes=2),
+        exchange="kraken",
     )
     assert len(candle_results) == 2
     trade_results = await repo.get_trades(
         "BTC-USD",
         base_ts - timedelta(minutes=1),
         base_ts + timedelta(minutes=2),
+        exchange="kraken",
     )
     assert len(trade_results) == 2
     order_id = await repo.insert_order(
@@ -615,18 +631,29 @@ class DummyRepository(Repository):
         size: float,
         fee: float,
         fee_asset: str,
+        exec_id: str | None = None,
+        trade_id: str | None = None,
     ) -> int:
         """Insert execution - no-op returning 0."""
         return 0
 
     async def get_candles(
-        self, instrument: str, timeframe: str, start: datetime, end: datetime
+        self,
+        instrument: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        exchange: str,
     ) -> list[dict[str, Any]]:
         """Get candles - returns empty list."""
         return []
 
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: str,
     ) -> list[dict[str, Any]]:
         """Get trades - returns empty list."""
         return []
@@ -659,6 +686,7 @@ def test_sqlite_and_cloud_repository_initialization(monkeypatch: pytest.MonkeyPa
         def __init__(self, url: str) -> None:
             self.url = self._URL()
             self._db_url = url
+            self.sync_engine = None
 
     def fake_create_async_engine(
         db_url: str,
@@ -770,7 +798,7 @@ async def test_mssql_upsert_instrument_integrity_path(monkeypatch: pytest.Monkey
                 return FirstResult()
 
             class SecondResult:
-                def scalar_one(self) -> ExistingInstrument:
+                def scalar_one_or_none(self) -> ExistingInstrument:
                     return ExistingInstrument()
 
             return SecondResult()
@@ -812,9 +840,91 @@ async def test_mssql_upsert_instrument_integrity_path(monkeypatch: pytest.Monkey
     monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
     repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
     result = await repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.1, lot_size=0.001
+        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.001
     )
     assert result == 99
+    assert created_sessions[0].rollback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_instrument_integrity_reraise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_instrument re-raises when retry finds nothing."""
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class IntegrityReraisSession:
+        def __init__(self) -> None:
+            self.rollback_calls = 0
+            self._commit_failed = False
+
+        def __enter__(self) -> "IntegrityReraisSession":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            class NoneResult:
+                def scalar_one_or_none(self) -> None:
+                    return None
+
+            return NoneResult()
+
+        def add(self, _obj: Any) -> None:
+            return None
+
+        def commit(self) -> None:
+            if not self._commit_failed:
+                self._commit_failed = True
+                raise IntegrityError("duplicate", {}, Exception())
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+
+        def refresh(self, _obj: Any) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    created_sessions: list[IntegrityReraisSession] = []
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], IntegrityReraisSession]:
+        def factory() -> IntegrityReraisSession:
+            session = IntegrityReraisSession()
+            created_sessions.append(session)
+            return session
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    with pytest.raises(IntegrityError):
+        await repo.upsert_instrument(
+            symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            exchange="kraken",
+            tick_size=0.1,
+            lot_size=0.001,
+        )
     assert created_sessions[0].rollback_calls == 1
 
 
@@ -871,7 +981,7 @@ async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
     repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
     result = await repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.1, lot_size=0.001
+        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.001
     )
     assert result == 42
 
@@ -1511,18 +1621,56 @@ class TestSQLAlchemyRepositoryDialects:
         mock_session.add = Mock()
         mock_session.commit.side_effect = [IntegrityError("duplicate", "params", Exception()), None]
         mock_result2 = Mock()
-        mock_result2.scalar_one.return_value = mock_instrument
+        mock_result2.scalar_one_or_none.return_value = mock_instrument
         mock_session.execute.side_effect = [mock_result, mock_result2]
         mock_session.refresh = AsyncMock()
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
             result = await mock_postgres_repo.upsert_instrument(
-                symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+                symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                exchange="kraken",
+                tick_size=0.01,
+                lot_size=0.001,
             )
             assert result == 123
             mock_session.rollback.assert_called_once()
             mock_session.refresh.assert_called_once_with(mock_instrument)
+
+    @pytest.mark.asyncio
+    async def test_upsert_instrument_integrity_error_reraise(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_instrument re-raises when retry also finds nothing.
+
+        Given: Instrument not found before or after IntegrityError,
+        When: upsert_instrument is called,
+        Then: IntegrityError is re-raised.
+        """
+        mock_session = AsyncMock()
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_result2 = Mock()
+        mock_result2.scalar_one_or_none.return_value = None
+        mock_session.execute.side_effect = [mock_result, mock_result2]
+        mock_session.add = Mock()
+        mock_session.commit.side_effect = IntegrityError("duplicate", "params", Exception())
+        mock_session.refresh = AsyncMock()
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            with pytest.raises(IntegrityError):
+                await mock_postgres_repo.upsert_instrument(
+                    symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    exchange="kraken",
+                    tick_size=0.01,
+                    lot_size=0.001,
+                )
+            mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_upsert_instrument_existing(
@@ -1544,7 +1692,12 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
             result = await mock_postgres_repo.upsert_instrument(
-                symbol="ETH-USD", base="ETH", quote="USD", tick_size=0.01, lot_size=0.001
+                symbol="ETH-USD",
+                base="ETH",
+                quote="USD",
+                exchange="kraken",
+                tick_size=0.01,
+                lot_size=0.001,
             )
             assert result == 456
             mock_session.add.assert_not_called()
@@ -1561,14 +1714,18 @@ class TestSQLAlchemyRepositoryDialects:
         """
         mock_session = AsyncMock()
         mock_result = Mock()
-        mock_result.scalar_one_or_none.return_value = None
+        mock_scalars = Mock()
+        mock_scalars.first.return_value = None
+        mock_result.scalars.return_value = mock_scalars
         mock_session.execute.return_value = mock_result
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
             start = datetime(2024, 1, 1, tzinfo=UTC)
             end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
-            result = await mock_postgres_repo.get_candles("NONEXISTENT", "1m", start, end)
+            result = await mock_postgres_repo.get_candles(
+                "NONEXISTENT", "1m", start, end, exchange="kraken"
+            )
             assert result == []
 
     @pytest.mark.asyncio
@@ -1583,7 +1740,9 @@ class TestSQLAlchemyRepositoryDialects:
         mock_inst_result = Mock()
         mock_instrument = Mock()
         mock_instrument.id = 1
-        mock_inst_result.scalar_one_or_none.return_value = mock_instrument
+        mock_inst_scalars = Mock()
+        mock_inst_scalars.first.return_value = mock_instrument
+        mock_inst_result.scalars.return_value = mock_inst_scalars
         mock_candles_result = Mock()
         mock_row = Mock()
         mock_row.timestamp = datetime(2024, 1, 1, tzinfo=UTC)
@@ -1602,7 +1761,9 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             start = datetime(2024, 1, 1, tzinfo=UTC)
             end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
-            result = await mock_postgres_repo.get_candles("BTC-USD", "1m", start, end)
+            result = await mock_postgres_repo.get_candles(
+                "BTC-USD", "1m", start, end, exchange="kraken"
+            )
             expected: list[dict[str, Any]] = [
                 {
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
@@ -1617,6 +1778,32 @@ class TestSQLAlchemyRepositoryDialects:
                 }
             ]
             assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_get_candles_with_exchange_filter(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify get_candles filters by exchange when provided.
+
+        Given: Instrument with exchange,
+        When: get_candles is called with exchange parameter,
+        Then: Filters by both symbol and exchange.
+        """
+        mock_session = AsyncMock()
+        mock_inst_result = Mock()
+        mock_inst_scalars = Mock()
+        mock_inst_scalars.first.return_value = None
+        mock_inst_result.scalars.return_value = mock_inst_scalars
+        mock_session.execute.return_value = mock_inst_result
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            start = datetime(2024, 1, 1, tzinfo=UTC)
+            end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
+            result = await mock_postgres_repo.get_candles(
+                "BTC-USD", "1m", start, end, exchange="kraken"
+            )
+            assert result == []
 
     def test_dialect_name_property(self, mock_postgres_repo: SQLAlchemyRepository) -> None:
         """Verify dialect_name returns correct database dialect.
@@ -1731,7 +1918,12 @@ class TestMSSQLRepository:
             mock_to_thread.return_value = 123
             repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
             result = await repo.upsert_instrument(
-                symbol="BTC-USD", base="BTC", quote="USD", tick_size=0.01, lot_size=0.001
+                symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                exchange="kraken",
+                tick_size=0.01,
+                lot_size=0.001,
             )
             assert result == 123
             mock_to_thread.assert_called_once()
@@ -1816,7 +2008,7 @@ class TestMSSQLRepository:
             repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
             start = datetime(2024, 1, 1, tzinfo=UTC)
             end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
-            result = await repo.get_candles("BTC-USD", "1m", start, end)
+            result = await repo.get_candles("BTC-USD", "1m", start, end, exchange="kraken")
             assert result == expected_candles
             mock_to_thread.assert_called_once()
 
@@ -1879,7 +2071,7 @@ async def test_get_trades_returns_empty_when_instrument_missing(
     """Verify get_trades returns empty list when instrument is not found."""
     with patch("snapper.data.repository.create_async_engine"):
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///tmp.db")
-    mock_execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    mock_execute_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:
         return mock_execute_result
@@ -1899,6 +2091,39 @@ async def test_get_trades_returns_empty_when_instrument_missing(
         "MISSING",
         datetime.now(UTC),
         datetime.now(UTC),
+        exchange="kraken",
+    )
+    assert result == []
+
+
+@pytest.mark.asyncio()
+async def test_get_trades_with_exchange_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_trades filters by exchange when provided."""
+    with patch("snapper.data.repository.create_async_engine"):
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///tmp.db")
+    mock_execute_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    async def _execute(*_: object, **__: object) -> SimpleNamespace:
+        return mock_execute_result
+
+    mock_session = AsyncMock()
+    mock_session.execute.side_effect = _execute
+
+    class _Ctx:
+        async def __aenter__(self) -> Any:
+            return mock_session
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(repo, "session", lambda: _Ctx())
+    result = await repo.get_trades(
+        "MISSING",
+        datetime.now(UTC),
+        datetime.now(UTC),
+        exchange="kraken",
     )
     assert result == []
 
@@ -2010,6 +2235,8 @@ class _MinimalRepository(Repository):
         size: float,
         fee: float,
         fee_asset: str,
+        exec_id: str | None = None,
+        trade_id: str | None = None,
     ) -> int:
         return 0
 
@@ -2019,6 +2246,7 @@ class _MinimalRepository(Repository):
         timeframe: str,
         start: datetime,
         end: datetime,
+        exchange: str,
     ) -> list[dict[str, Any]]:
         return []
 
@@ -2027,6 +2255,7 @@ class _MinimalRepository(Repository):
         instrument: str,
         start: datetime,
         end: datetime,
+        exchange: str,
     ) -> list[dict[str, Any]]:
         return []
 

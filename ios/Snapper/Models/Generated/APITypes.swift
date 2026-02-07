@@ -237,7 +237,7 @@ struct ExecutionRecord: Codable, Sendable {
     let feeAsset: String
     let instrument: String
     let side: String
-    let exchange: String?
+    let exchange: String
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -308,7 +308,7 @@ struct MessageResponse: Codable, Sendable {
 struct OrderStatus: Codable, Sendable {
     let id: Int
     let instrument: String
-    let exchange: String?
+    let exchange: String
     let clientOrderId: String?
     let exchangeOrderId: String?
     let createdAt: Date
@@ -342,7 +342,7 @@ struct OrderStatus: Codable, Sendable {
 struct PositionSnapshot: Codable, Sendable {
     let id: Int
     let instrument: String
-    let exchange: String?
+    let exchange: String
     let quantity: Double
     let averagePrice: Double
     let unrealizedPnl: Double
@@ -601,7 +601,7 @@ struct SystemStatus: Codable, Sendable {
 struct TradingSignal: Codable, Sendable {
     let id: Int
     let instrument: String
-    let exchange: String?
+    let exchange: String
     let timestamp: Date
     let side: String
     let strength: Double

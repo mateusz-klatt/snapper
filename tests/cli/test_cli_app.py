@@ -502,7 +502,7 @@ def test_update_zonda_symbols_reports_error(
 ) -> None:
     """Test update-zonda-symbols handles updater errors gracefully.
 
-    Given a ZondaSymbolMappingUpdaterService that raises an error,
+    Given a ZondaSymbolUpdaterService that raises an error,
     When the update-zonda-symbols command is invoked,
     Then it returns exit code 1 with an error message.
     """
@@ -515,7 +515,7 @@ def test_update_zonda_symbols_reports_error(
         async def start(self) -> None:
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(app_module, "ZondaSymbolMappingUpdaterService", DummyUpdater)
+    monkeypatch.setattr(app_module, "ZondaSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-zonda-symbols", "--force"])
     assert result.exit_code == 1
     assert "Error updating Zonda symbol mappings" in result.stdout
@@ -599,7 +599,7 @@ def test_update_kraken_symbols_success(
 ) -> None:
     """Test update-kraken-symbols succeeds with --force flag.
 
-    Given a functioning KrakenSymbolMappingUpdaterService,
+    Given a functioning KrakenSymbolUpdaterService,
     When the update-kraken-symbols command is invoked with --force,
     Then it completes successfully with exit code 0.
     """
@@ -612,7 +612,7 @@ def test_update_kraken_symbols_success(
         async def start(self) -> None:
             started.append(self.force)
 
-    monkeypatch.setattr(app_module, "KrakenSymbolMappingUpdaterService", DummyUpdater)
+    monkeypatch.setattr(app_module, "KrakenSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-kraken-symbols", "--force"])
     assert result.exit_code == 0
     assert started == [True]
@@ -623,7 +623,7 @@ def test_update_kraken_symbols_error(
 ) -> None:
     """Test update-kraken-symbols handles updater errors gracefully.
 
-    Given a KrakenSymbolMappingUpdaterService that raises an error,
+    Given a KrakenSymbolUpdaterService that raises an error,
     When the update-kraken-symbols command is invoked,
     Then it returns exit code 1 with an error message.
     """
@@ -635,7 +635,7 @@ def test_update_kraken_symbols_error(
         async def start(self) -> None:
             raise RuntimeError("ksym")
 
-    monkeypatch.setattr(app_module, "KrakenSymbolMappingUpdaterService", DummyUpdater)
+    monkeypatch.setattr(app_module, "KrakenSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-kraken-symbols"])
     assert result.exit_code == 1
     assert "Error updating symbol mappings" in result.stdout
@@ -646,7 +646,7 @@ def test_update_polygon_symbols_success(
 ) -> None:
     """Test update-polygon-symbols succeeds with --force and --insert-new flags.
 
-    Given a functioning PolygonSymbolMappingUpdaterService,
+    Given a functioning PolygonSymbolUpdaterService,
     When the update-polygon-symbols command is invoked with --force --insert-new,
     Then it completes successfully with exit code 0.
     """
@@ -661,7 +661,7 @@ def test_update_polygon_symbols_success(
         async def start(self) -> None:
             started.append((self.force, self.insert_new))
 
-    monkeypatch.setattr(app_module, "PolygonSymbolMappingUpdaterService", DummyUpdater)
+    monkeypatch.setattr(app_module, "PolygonSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-polygon-symbols", "--force", "--insert-new"])
     assert result.exit_code == 0
     assert started == [(True, True)]
@@ -672,7 +672,7 @@ def test_update_polygon_symbols_error(
 ) -> None:
     """Test update-polygon-symbols handles updater errors gracefully.
 
-    Given a PolygonSymbolMappingUpdaterService that raises an error,
+    Given a PolygonSymbolUpdaterService that raises an error,
     When the update-polygon-symbols command is invoked,
     Then it returns exit code 1 with an error message.
     """
@@ -685,7 +685,7 @@ def test_update_polygon_symbols_error(
         async def start(self) -> None:
             raise RuntimeError("psym")
 
-    monkeypatch.setattr(app_module, "PolygonSymbolMappingUpdaterService", DummyUpdater)
+    monkeypatch.setattr(app_module, "PolygonSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-polygon-symbols"])
     assert result.exit_code == 1
     assert "Error updating Polygon symbol mappings" in result.stdout
@@ -696,7 +696,7 @@ def test_update_walutomat_symbols_success(
 ) -> None:
     """Test update-walutomat-symbols succeeds with --force flag.
 
-    Given a functioning WalutomatSymbolMappingUpdaterService,
+    Given a functioning WalutomatSymbolUpdaterService,
     When the update-walutomat-symbols command is invoked with --force,
     Then it completes successfully with exit code 0.
     """
@@ -709,7 +709,7 @@ def test_update_walutomat_symbols_success(
         async def start(self) -> None:
             started.append(self.force)
 
-    monkeypatch.setattr(app_module, "WalutomatSymbolMappingUpdaterService", DummyUpdater)
+    monkeypatch.setattr(app_module, "WalutomatSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-walutomat-symbols", "--force"])
     assert result.exit_code == 0
     assert started == [True]
@@ -720,7 +720,7 @@ def test_update_walutomat_symbols_error(
 ) -> None:
     """Test update-walutomat-symbols handles updater errors gracefully.
 
-    Given a WalutomatSymbolMappingUpdaterService that raises an error,
+    Given a WalutomatSymbolUpdaterService that raises an error,
     When the update-walutomat-symbols command is invoked,
     Then it returns exit code 1 with an error message.
     """
@@ -732,7 +732,7 @@ def test_update_walutomat_symbols_error(
         async def start(self) -> None:
             raise RuntimeError("wfail")
 
-    monkeypatch.setattr(app_module, "WalutomatSymbolMappingUpdaterService", DummyUpdater)
+    monkeypatch.setattr(app_module, "WalutomatSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-walutomat-symbols"])
     assert result.exit_code == 1
     assert "Error updating Walutomat symbol mappings" in result.stdout
@@ -2634,7 +2634,7 @@ def test_update_kraken_symbols_runs_updater(
 ) -> None:
     """Test update-kraken-symbols runs symbol updater.
 
-    Given: Mocked KrakenSymbolMappingUpdaterService,
+    Given: Mocked KrakenSymbolUpdaterService,
     When: update-kraken-symbols is invoked,
     Then: Service starts and completes.
     """
@@ -2647,7 +2647,7 @@ def test_update_kraken_symbols_runs_updater(
         async def start(self) -> None:
             captured["started"] = True
 
-    monkeypatch.setattr(app_module, "KrakenSymbolMappingUpdaterService", MockUpdater)
+    monkeypatch.setattr(app_module, "KrakenSymbolUpdaterService", MockUpdater)
     result = cli_runner.invoke(app, ["update-kraken-symbols"])
     assert result.exit_code == 0
     assert "Starting Kraken symbol mapping update" in result.stdout
@@ -2661,7 +2661,7 @@ def test_update_kraken_symbols_with_force_flag(
 ) -> None:
     """Test update-kraken-symbols accepts force flag.
 
-    Given: Mocked KrakenSymbolMappingUpdaterService,
+    Given: Mocked KrakenSymbolUpdaterService,
     When: update-kraken-symbols --force is invoked,
     Then: Force flag is passed to service.
     """
@@ -2674,7 +2674,7 @@ def test_update_kraken_symbols_with_force_flag(
         async def start(self) -> None:
             captured["started"] = True
 
-    monkeypatch.setattr(app_module, "KrakenSymbolMappingUpdaterService", MockUpdater)
+    monkeypatch.setattr(app_module, "KrakenSymbolUpdaterService", MockUpdater)
     result = cli_runner.invoke(app, ["update-kraken-symbols", "--force"])
     assert result.exit_code == 0
     assert captured["force"] is True
@@ -2698,7 +2698,7 @@ def test_update_kraken_symbols_handles_exception(
         async def start(self) -> None:
             raise RuntimeError("API connection failed")
 
-    monkeypatch.setattr(app_module, "KrakenSymbolMappingUpdaterService", MockUpdater)
+    monkeypatch.setattr(app_module, "KrakenSymbolUpdaterService", MockUpdater)
     result = cli_runner.invoke(app, ["update-kraken-symbols"])
     assert result.exit_code == 1
     assert "Error updating symbol mappings: API connection failed" in result.stdout
@@ -2750,7 +2750,7 @@ def test_update_zonda_symbols_runs_updater(
 ) -> None:
     """Test update-zonda-symbols runs symbol updater.
 
-    Given: Mocked ZondaSymbolMappingUpdaterService,
+    Given: Mocked ZondaSymbolUpdaterService,
     When: update-zonda-symbols is invoked,
     Then: Service starts with default threshold.
     """
@@ -2764,7 +2764,7 @@ def test_update_zonda_symbols_runs_updater(
         async def start(self) -> None:
             captured["started"] = True
 
-    monkeypatch.setattr(app_module, "ZondaSymbolMappingUpdaterService", MockUpdater)
+    monkeypatch.setattr(app_module, "ZondaSymbolUpdaterService", MockUpdater)
     result = cli_runner.invoke(app, ["update-zonda-symbols"])
     assert result.exit_code == 0
     assert "Starting Zonda symbol mapping update" in result.stdout
@@ -2800,7 +2800,7 @@ def test_update_walutomat_symbols_runs_updater(
 ) -> None:
     """Test update-walutomat-symbols runs symbol updater.
 
-    Given: Mocked WalutomatSymbolMappingUpdaterService,
+    Given: Mocked WalutomatSymbolUpdaterService,
     When: update-walutomat-symbols is invoked,
     Then: Service starts with default threshold.
     """
@@ -2814,7 +2814,7 @@ def test_update_walutomat_symbols_runs_updater(
         async def start(self) -> None:
             captured["started"] = True
 
-    monkeypatch.setattr(app_module, "WalutomatSymbolMappingUpdaterService", MockUpdater)
+    monkeypatch.setattr(app_module, "WalutomatSymbolUpdaterService", MockUpdater)
     result = cli_runner.invoke(app, ["update-walutomat-symbols"])
     assert result.exit_code == 0
     assert "Starting Walutomat symbol mapping update" in result.stdout
@@ -2851,7 +2851,7 @@ def test_update_polygon_symbols_runs_updater(
 ) -> None:
     """Test update-polygon-symbols runs symbol updater.
 
-    Given: Mocked PolygonSymbolMappingUpdaterService,
+    Given: Mocked PolygonSymbolUpdaterService,
     When: update-polygon-symbols --insert-new is invoked,
     Then: Service starts with insert_new flag.
     """
@@ -2868,7 +2868,7 @@ def test_update_polygon_symbols_runs_updater(
         async def start(self) -> None:
             captured["started"] = True
 
-    monkeypatch.setattr(app_module, "PolygonSymbolMappingUpdaterService", MockUpdater)
+    monkeypatch.setattr(app_module, "PolygonSymbolUpdaterService", MockUpdater)
     result = cli_runner.invoke(app, ["update-polygon-symbols", "--insert-new"])
     assert result.exit_code == 0
     assert "Starting Polygon symbol mapping update" in result.stdout

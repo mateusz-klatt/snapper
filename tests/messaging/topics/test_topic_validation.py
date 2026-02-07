@@ -15,6 +15,7 @@ from snapper.messaging.topics import validation
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
 from snapper.messaging.topics.validation import _validate_admin_topic
+from snapper.messaging.topics.validation import _validate_candle_timeframe
 from snapper.messaging.topics.validation import _validate_exchange
 from snapper.messaging.topics.validation import _validate_instrument
 from snapper.messaging.topics.validation import _validate_market_topic
@@ -398,7 +399,7 @@ def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Patch symbol data functions for topic validation tests."""
     monkeypatch.setattr(
         "snapper.infrastructure.symbols.functions.get_available_exchanges",
-        lambda: ["kraken", "paper", "zonda", "walutomat"],
+        lambda: ["kraken", "paper", "zonda", "walutomat", "polygon"],
     )
     monkeypatch.setattr(
         "snapper.infrastructure.symbols.functions.get_available_symbols",
@@ -417,6 +418,160 @@ def test_validate_topic_market_success() -> None:
     ok, msg = validate_topic("market.kraken.BTC-USD.candles.1m")
     assert ok is True
     assert msg == ""
+
+
+def test_validate_topic_market_paper_source_success() -> None:
+    """Test valid paper market topic with explicit source exchange.
+
+    Given: A paper market topic with source exchange in third segment,
+    When: Validated,
+    Then: Validation succeeds.
+    """
+    ok, msg = validate_topic("market.paper.kraken.BTC-USD.candles.1m")
+    assert ok is True
+    assert msg == ""
+
+
+def test_validate_topic_market_paper_source_rejects_paper() -> None:
+    """Test paper replay topic rejects paper as source exchange.
+
+    Given: A paper market topic using paper as source exchange,
+    When: Validated,
+    Then: Validation fails with source exchange error.
+    """
+    ok, msg = validate_topic("market.paper.paper.BTC-USD.candles.1m")
+    assert ok is False
+    assert "source exchange cannot be 'paper'" in msg
+
+
+def test_validate_candle_timeframe_requires_five_segments() -> None:
+    """Test candle timeframe validator requires timeframe segment.
+
+    Given: Candle segments list without timeframe part,
+    When: Validating candle timeframe,
+    Then: Validation fails with missing timeframe error.
+    """
+    ok, msg = _validate_candle_timeframe(
+        ["market", "kraken", "BTC-USD", "candles"], "kraken", "BTC-USD"
+    )
+    assert ok is False
+    assert "include timeframe" in msg
+
+
+def test_validate_candle_timeframe_rejects_invalid_timeframe() -> None:
+    """Test candle timeframe validator rejects malformed values.
+
+    Given: Candle topic segments with invalid timeframe token,
+    When: Validating candle timeframe,
+    Then: Validation fails with invalid timeframe message.
+    """
+    ok, msg = _validate_candle_timeframe(
+        ["market", "kraken", "BTC-USD", "candles", "invalid"], "kraken", "BTC-USD"
+    )
+    assert ok is False
+    assert "Invalid timeframe" in msg
+
+
+def test_validate_candle_timeframe_accepts_valid_timeframe() -> None:
+    """Test candle timeframe validator accepts valid values.
+
+    Given: Candle topic segments with valid timeframe token,
+    When: Validating candle timeframe,
+    Then: Validation succeeds.
+    """
+    ok, msg = _validate_candle_timeframe(
+        ["market", "kraken", "BTC-USD", "candles", "1m"], "kraken", "BTC-USD"
+    )
+    assert ok is True
+    assert msg == ""
+
+
+def test_validate_topic_market_non_paper_with_six_segments_rejected() -> None:
+    """Test non-paper market topic with six segments is rejected.
+
+    Given: A non-paper market topic with an extra segment,
+    When: Validated,
+    Then: Validation fails with market format error.
+    """
+    ok, msg = validate_topic("market.kraken.BTC-USD.candles.1m.extra")
+    assert ok is False
+    assert "Market topic must have" in msg
+
+
+def test_validate_topic_legacy_paper_without_source_rejected() -> None:
+    """Test legacy paper market topic without source exchange is rejected.
+
+    Given: Legacy paper topic format without source exchange segment,
+    When: Validated,
+    Then: Validation fails with market format error.
+    """
+    ok, msg = validate_topic("market.paper.BTC-USD.ticks")
+    assert ok is False
+    assert "Market topic must have" in msg
+
+
+def test_validate_topic_paper_source_invalid_data_type() -> None:
+    """Test paper source topic with invalid data type is rejected.
+
+    Given: Paper market topic with source exchange and unknown data type,
+    When: Validated,
+    Then: Validation fails with invalid market data type message.
+    """
+    ok, msg = validate_topic("market.paper.kraken.BTC-USD.unknown")
+    assert ok is False
+    assert "Invalid market data type" in msg
+
+
+def test_validate_topic_paper_source_invalid_instrument() -> None:
+    """Test paper source topic with unknown instrument is rejected.
+
+    Given: Paper market topic with valid source exchange and unknown instrument,
+    When: Validated,
+    Then: Validation fails with unknown instrument error.
+    """
+    ok, msg = validate_topic("market.paper.kraken.INVALID.ticks")
+    assert ok is False
+    assert "Unknown instrument" in msg
+
+
+def test_validate_topic_paper_source_invalid_exchange() -> None:
+    """Test paper source topic with unknown source exchange is rejected.
+
+    Given: Paper market topic with unknown source exchange,
+    When: Validated,
+    Then: Validation fails with unknown exchange error.
+    """
+    ok, msg = validate_topic("market.paper.invalid.BTC-USD.ticks")
+    assert ok is False
+    assert "Unknown exchange" in msg
+
+
+def test_validate_subscription_pattern_paper_source_edge_cases() -> None:
+    """Test paper market prefix validation for source edge cases.
+
+    Given: Several paper market prefix patterns for valid and invalid sources,
+    When: Validated as subscription patterns,
+    Then: Invalid sources are rejected and valid source pattern is accepted.
+    """
+    ok_source_paper, msg_source_paper = validate_subscription_pattern("market.paper.paper.")
+    assert ok_source_paper is False
+    assert "source exchange cannot be 'paper'" in msg_source_paper
+    ok_bad_instrument, msg_bad_instrument = validate_subscription_pattern(
+        "market.paper.kraken.INVALID."
+    )
+    assert ok_bad_instrument is False
+    assert "Unknown instrument" in msg_bad_instrument
+    ok_source_pattern, msg_source_pattern = validate_subscription_pattern(
+        "market.paper.kraken.BTC-USD."
+    )
+    assert ok_source_pattern is True
+    assert msg_source_pattern == ""
+    ok_legacy, msg_legacy = validate_subscription_pattern("market.paper.BTC-USD.")
+    assert ok_legacy is False
+    assert "Unknown exchange" in msg_legacy
+    ok_unknown, msg_unknown = validate_subscription_pattern("market.paper.kraken.UNKNOWN.")
+    assert ok_unknown is False
+    assert "Unknown exchange" in msg_unknown or "Unknown instrument" in msg_unknown
 
 
 def test_validate_topic_market_invalid_timeframe_and_exchange() -> None:
@@ -632,7 +787,7 @@ class TestMarketTopicValidation:
         """
         valid, _err = validate_topic("market.kraken.candles")
         assert not valid
-        assert "4-5 segments" in _err
+        assert "segments" in _err
 
     def test_invalid_market_topic_unknown_data_type(self) -> None:
         """Test market topic with unknown data type.
@@ -665,7 +820,7 @@ class TestMarketTopicValidation:
         """
         valid, _err = validate_topic("market.kraken.BTC-USD.")
         assert not valid
-        assert "4-5 segments" in _err
+        assert "segments" in _err
 
     def test_subscription_pattern_accepts_prefixes(self) -> None:
         """Test subscription pattern accepts prefixes.
@@ -678,6 +833,9 @@ class TestMarketTopicValidation:
             "market.",
             "market.kraken.",
             "market.kraken.BTC-USD.",
+            "market.paper.",
+            "market.paper.kraken.",
+            "market.paper.kraken.BTC-USD.",
             "market.kraken.BTC-USD.candles.",
         ]:
             valid, _err = validate_subscription_pattern(prefix)
@@ -781,7 +939,7 @@ class TestSubscriptionPatternValidation:
         """
         valid, _err = validate_subscription_pattern("market.kraken.BTC-")
         assert not valid
-        assert "4-5 segments" in _err or "Prefix must end" in _err.lower()
+        assert "segments" in _err or "Prefix must end" in _err.lower()
 
     def test_reject_empty_pattern(self) -> None:
         """Test empty pattern rejected.
@@ -815,7 +973,7 @@ class TestSystemTopicValidation:
         When: Validated,
         Then: All are accepted.
         """
-        for sys_type in ["heartbeats", "symbol_mappings"]:
+        for sys_type in ["heartbeats", "symbol_aliases"]:
             valid, _err = validate_topic(f"system.{sys_type}")
             assert valid, f"Failed for system.{sys_type}: {_err}"
             assert _err == ""
@@ -1889,7 +2047,7 @@ class TestMarketTopicPrefixRejection:
         """
         valid, _err = _validate_market_topic("market.kraken.BTC-USD.")
         assert not valid
-        assert "4-5 segments" in _err.lower() or "4 segments" in _err.lower()
+        assert "segments" in _err.lower()
 
     def test_market_topic_wrong_segment_count(self) -> None:
         """Verify market topic with wrong segment count is rejected.

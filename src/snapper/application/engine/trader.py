@@ -46,6 +46,7 @@ from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import SignalEnvelope
 from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import parse_order_event_topic
+from snapper.messaging.topics.builders import parse_signal_topic
 
 _bootstrap_settings = get_bootstrap_settings()
 
@@ -326,19 +327,25 @@ class TraderCoordinator(RegisterableProcess):
             )
         logger.info("ZMQTrader: Engines will be created dynamically from incoming signals")
 
-    async def _ensure_instrument(self, instrument: str) -> None:
+    async def _ensure_instrument(self, instrument: str, exchange: str) -> None:
         """Ensure instrument exists in database.
 
         Creates or updates the instrument record with base/quote currencies.
 
         Args:
             instrument: Symbol string (e.g., "BTC-USD" or "BTC/USD").
+            exchange: Exchange name (lowercase).
         """
         parts = instrument.split("-") if "-" in instrument else instrument.split("/")
         base = parts[0] if len(parts) > 0 else instrument
         quote = parts[1] if len(parts) > 1 else "USD"
         await self.repository.upsert_instrument(
-            symbol=instrument, base=base, quote=quote, tick_size=0.01, lot_size=0.0001
+            symbol=instrument,
+            exchange=exchange,
+            base=base,
+            quote=quote,
+            tick_size=0.01,
+            lot_size=0.0001,
         )
 
     async def _setup_external_execution(self) -> None:
@@ -359,7 +366,7 @@ class TraderCoordinator(RegisterableProcess):
 
         Subscribes to:
         - Signal topics (configurable)
-        - system.symbol_mappings (cache invalidation)
+        - system.symbol_aliases (cache invalidation)
         - system.settings (settings updates)
         - orders.events.* (fill notifications and order status updates)
         """
@@ -372,8 +379,8 @@ class TraderCoordinator(RegisterableProcess):
         for topic in self.signal_topics:
             logger.info(f"ZMQTrader: Subscribing to {topic}")
             self.signal_subscriber.subscribe(topic)
-        logger.info("ZMQTrader: Subscribing to system.symbol_mappings")
-        self.signal_subscriber.subscribe("system.symbol_mappings")
+        logger.info("ZMQTrader: Subscribing to system.symbol_aliases")
+        self.signal_subscriber.subscribe("system.symbol_aliases")
         logger.info("ZMQTrader: Subscribing to system.settings")
         self.signal_subscriber.subscribe("system.settings")
         logger.info("ZMQTrader: Subscribing to orders.events. (fills and status updates)")
@@ -417,8 +424,8 @@ class TraderCoordinator(RegisterableProcess):
         try:
             while True:
                 topic_str, msg_bytes = await self.signal_subscriber.recv_multipart()
-                if topic_str == "system.symbol_mappings":
-                    logger.info("ZMQTrader: Received symbol_mappings update, refreshing cache")
+                if topic_str == "system.symbol_aliases":
+                    logger.info("ZMQTrader: Received symbol_aliases update, refreshing cache")
                     SymbolMapperService.get_instance().trigger_cache_invalidation(fail_fast=False)
                     continue
                 if topic_str == "system.settings":
@@ -447,12 +454,12 @@ class TraderCoordinator(RegisterableProcess):
             signal: Validated signal envelope with instrument, side,
                 strength, and price information.
         """
-        parts = self._current_topic.split(".")
-        if len(parts) < 4:
+        parsed = parse_signal_topic(self._current_topic)
+        if parsed is None:
             logger.warning(f"ZMQTrader: Invalid signal topic format: {self._current_topic}")
             return
-        exchange_str = parts[1]
-        mode = parts[3]
+        exchange_str = parsed.exchange
+        mode = parsed.signal_type
         valid_exchanges = get_args(TradingExchange)
         if exchange_str not in valid_exchanges:
             logger.warning(f"ZMQTrader: Unknown exchange '{exchange_str}' in topic")
@@ -472,7 +479,7 @@ class TraderCoordinator(RegisterableProcess):
         ), "execution_publisher not initialized - _setup_external_execution must be called first"
         if engine_key not in self.engines:
             logger.info(f"ZMQTrader: Creating new engine for {engine_key}")
-            await self._ensure_instrument(instrument)
+            await self._ensure_instrument(instrument, exchange=exchange)
             risk = RiskEvaluator(
                 RiskConfigModel(
                     r_per_trade=self.settings.risk_r_per_trade,

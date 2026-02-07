@@ -72,11 +72,11 @@ Persistence layer with SQLAlchemy:
     - `OrderRecord` — Order history
     - `Execution` — Order executions
     - `Position` — Portfolio positions
-    - `StrategyRun` — Strategy runs
     - `SignalEvent` — Signal events
     - `User` — System users
     - `Setting` — Settings (encrypted)
-    - `SymbolMapping` — Symbol mappings between exchanges
+    - `SymbolCatalog` — Native symbol registry (base, quote, asset_type)
+    - `SymbolAlias` — Exchange-specific symbol aliases (one row per native/exchange/channel)
 
 - **Repository** (`repository.py`) — Async CRUD operations
 
@@ -228,13 +228,13 @@ executions      -- Executions
 positions       -- Positions
 
 -- Strategies
-strategy_runs   -- Strategy runs
 signal_events   -- Signals
 
 -- System
 users           -- Users
 settings        -- Settings (encrypted)
-symbol_mappings -- Symbol mappings
+symbol_catalog  -- Symbol catalog (native symbols, base/quote, asset type)
+symbol_aliases  -- Symbol aliases (exchange-specific symbol mappings)
 process_runs    -- Process history
 ```
 

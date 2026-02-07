@@ -627,11 +627,15 @@ describe('domain API methods', () => {
         },
       ],
     })
-    const result = await apiClient.getCandles('BTC/USD', '1h', 50)
+    const result = await apiClient.getCandles('BTC/USD', 'kraken', '1h', 50)
 
     expect(result).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('instrument=BTC%2FUSD'),
+      expect.any(Object)
+    )
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('exchange=kraken'),
       expect.any(Object)
     )
   })
@@ -640,7 +644,7 @@ describe('domain API methods', () => {
       ok: true,
       status: 204,
     })
-    const result = await apiClient.getCandles('BTC/USD')
+    const result = await apiClient.getCandles('BTC/USD', 'kraken')
 
     expect(result).toEqual([])
   })
@@ -650,7 +654,9 @@ describe('domain API methods', () => {
       status: 500,
       statusText: 'Server Error',
     })
-    await expect(apiClient.getCandles('BTC/USD')).rejects.toThrow('HTTP 500: Server Error')
+    await expect(apiClient.getCandles('BTC/USD', 'kraken')).rejects.toThrow(
+      'HTTP 500: Server Error'
+    )
   })
   it('getOrders returns orders with optional symbol filter', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -801,6 +807,56 @@ describe('domain API methods', () => {
     expect(url).toContain('hours=24')
     expect(url).not.toContain('strategy=')
     expect(url).not.toContain('instrument=')
+  })
+  it('getSignals passes exchange filter', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    await apiClient.getSignals('momentum', 50, 'BTC/USD', 48, 'kraken')
+    const url = mockFetch.mock.calls[0][0] as string
+
+    expect(url).toContain('exchange=kraken')
+  })
+  it('getOrders passes exchange filter', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    await apiClient.getOrders('BTC/USD', 50, 10, 'kraken')
+    const url = mockFetch.mock.calls[0][0] as string
+
+    expect(url).toContain('exchange=kraken')
+  })
+  it('getExchanges returns exchange list', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ['kraken', 'binance'],
+    })
+    const result = await apiClient.getExchanges()
+
+    expect(result).toEqual(['kraken', 'binance'])
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/exchanges'),
+      expect.any(Object)
+    )
+  })
+  it('getExchangeInstruments returns instruments for exchange', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ['BTC/USD', 'ETH/USD'],
+    })
+    const result = await apiClient.getExchangeInstruments('kraken')
+
+    expect(result).toEqual(['BTC/USD', 'ETH/USD'])
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/exchanges/kraken/instruments'),
+      expect.any(Object)
+    )
   })
   it('getSettings returns settings with optional category', async () => {
     mockFetch.mockResolvedValueOnce({

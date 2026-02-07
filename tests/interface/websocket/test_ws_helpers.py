@@ -8,6 +8,7 @@ import pytest
 from snapper.auth.tokens import TokenManager
 from snapper.auth.user_service import UserService
 from snapper.interface.websocket.helpers import build_allowed_origins
+from snapper.interface.websocket.helpers import determine_topic_category
 from snapper.interface.websocket.helpers import role_allowed_categories
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 from snapper.utils.logging import _get_context_bg_color
@@ -98,6 +99,27 @@ class TestWebSocketHelpersRuntimeError:
         mock_role.name = "UNKNOWN"
         result = role_allowed_categories(mock_role)
         assert result == {"market", "system"}
+
+    def test_determine_topic_category_covers_direct_prefixes(self) -> None:
+        """Determine topic category handles direct category-only names.
+
+        Given: Direct category topic names without dot separators,
+        When: Determining category,
+        Then: Matching category names are returned.
+        """
+        assert determine_topic_category("market") == "market"
+        assert determine_topic_category("signals") == "strategy"
+        assert determine_topic_category("system") == "system"
+        assert determine_topic_category("admin") == "admin"
+
+    def test_determine_topic_category_handles_partial_market_prefix(self) -> None:
+        """Determine topic category maps partial market prefixes.
+
+        Given: A market prefix-like topic that is not a full market message,
+        When: Determining category,
+        Then: Category resolves to market via prefix fallback.
+        """
+        assert determine_topic_category("market.kraken.") == "market"
 
 
 class TestLoggingColorConversion:
