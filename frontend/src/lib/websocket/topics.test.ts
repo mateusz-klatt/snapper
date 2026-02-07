@@ -47,6 +47,26 @@ describe('topics', () => {
         'market.kraken.BTC-USD.candles.1m'
       )
     })
+    it('builds paper candles topic with source exchange', () => {
+      expect(buildMarketTopic('candles', 'BTC-USD', 'paper', '1m', 'kraken')).toBe(
+        'market.paper.kraken.BTC-USD.candles.1m'
+      )
+    })
+    it('builds paper ticks topic with source exchange', () => {
+      expect(buildMarketTopic('ticks', 'AAPL', 'paper', '1m', 'polygon')).toBe(
+        'market.paper.polygon.AAPL.ticks'
+      )
+    })
+    it('ignores sourceExchange when exchange is not paper', () => {
+      expect(buildMarketTopic('candles', 'BTC-USD', 'kraken', '1m', 'polygon')).toBe(
+        'market.kraken.BTC-USD.candles.1m'
+      )
+    })
+    it('uses live format for paper without sourceExchange', () => {
+      expect(buildMarketTopic('candles', 'BTC-USD', 'paper', '1m')).toBe(
+        'market.paper.BTC-USD.candles.1m'
+      )
+    })
   })
   describe('getMessageTopic', () => {
     it('builds topic from candle message data', () => {

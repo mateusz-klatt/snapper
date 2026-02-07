@@ -135,11 +135,12 @@ export class WSDispatcher {
     }
 
     const instrument = message.instrument
+    const exchange = message.exchange
     const timeframe = message.timeframe
 
-    if (instrument && timeframe) {
+    if (instrument && exchange && timeframe) {
       this.queryClient.invalidateQueries({
-        queryKey: ['candles', instrument, timeframe],
+        queryKey: ['candles', instrument, exchange, timeframe],
       })
     } else {
       this.queryClient.invalidateQueries({

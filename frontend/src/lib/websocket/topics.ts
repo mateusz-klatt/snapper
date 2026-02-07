@@ -8,15 +8,18 @@ export function buildMarketTopic(
   type: 'candles' | 'ticks',
   instrument: string,
   exchange: string = 'kraken',
-  timeframe: string = '1m'
+  timeframe: string = '1m',
+  sourceExchange?: string
 ): string {
   const internalSymbol = normalizeInstrument(instrument)
+  const prefix =
+    exchange === 'paper' && sourceExchange ? `market.paper.${sourceExchange}` : `market.${exchange}`
 
   if (type === 'candles') {
-    return `market.${exchange}.${internalSymbol}.candles.${timeframe}`
+    return `${prefix}.${internalSymbol}.candles.${timeframe}`
   }
 
-  return `market.${exchange}.${internalSymbol}.ticks`
+  return `${prefix}.${internalSymbol}.ticks`
 }
 
 export function getMessageTopic(message: WebSocketMessages): string | null {

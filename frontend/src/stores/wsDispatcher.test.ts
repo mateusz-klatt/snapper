@@ -363,7 +363,7 @@ describe('WSDispatcher', () => {
 
       candleHandler?.(candleMessage)
       expect(invalidateQueriesSpy).toHaveBeenCalledWith({
-        queryKey: ['candles', 'BTC-USD', '1m'],
+        queryKey: ['candles', 'BTC-USD', 'test', '1m'],
       })
     })
     it('order invalidation predicate correctly filters queries', () => {
@@ -512,7 +512,7 @@ describe('WSDispatcher', () => {
 
       candleHandler?.(candleMessage)
       expect(capturedQueryKey).toBeDefined()
-      expect(capturedQueryKey).toEqual(['candles', 'BTC-USD', '1m'])
+      expect(capturedQueryKey).toEqual(['candles', 'BTC-USD', 'test', '1m'])
       invalidateQueriesSpy.mockRestore()
     })
     it('candle message without instrument/timeframe invalidates via predicate', () => {
