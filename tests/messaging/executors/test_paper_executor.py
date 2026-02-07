@@ -440,7 +440,7 @@ class TestPaperMarketDataMethods:
         Then: Ticker with bid, ask, last prices is returned.
         """
         mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
-        client = PaperExchangeClient(repository=mock_repo)
+        client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
         await client.connect()
         ticker = await client.get_ticker("BTC-USD")
         assert ticker.symbol == "BTC-USD"
@@ -472,7 +472,7 @@ class TestPaperMarketDataMethods:
         Then: Candle data with OHLCV values is returned.
         """
         mock_repo = SimpleNamespace(get_candles=fake_get_candles)
-        client = PaperExchangeClient(repository=mock_repo)
+        client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
         await client.connect()
         candles = await client.get_ohlcv("BTC-USD", "1m", limit=10)
         assert len(candles) == 1
@@ -498,7 +498,7 @@ class TestPaperMarketDataMethods:
     async def test_subscribe_ticker_replay(self) -> None:
         """Test subscribing to ticker replay.
 
-        Given: A connected paper client with time range,
+        Given: A connected paper client with time range and source exchange,
         When: subscribe_ticker is called,
         Then: Ticker updates are yielded from repository.
         """
@@ -509,6 +509,7 @@ class TestPaperMarketDataMethods:
             repository=mock_repo,
             start_time=start_ts,
             end_time=end_ts,
+            source_exchange="kraken",
         )
         await client.connect()
         async for ticker in client.subscribe_ticker(["BTC-USD"]):
@@ -526,9 +527,29 @@ class TestPaperMarketDataMethods:
         Then: ValueError is raised.
         """
         mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
-        client = PaperExchangeClient(repository=mock_repo)
+        client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
         await client.connect()
         with pytest.raises(ValueError, match="Time range"):
+            async for _ in client.subscribe_ticker(["BTC-USD"]):
+                break
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticker_no_source_exchange(self) -> None:
+        """Test subscribing to ticker without source exchange.
+
+        Given: A connected paper client without source_exchange,
+        When: subscribe_ticker is called,
+        Then: ValueError is raised.
+        """
+        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        client = PaperExchangeClient(
+            repository=mock_repo,
+            start_time=time.time() - 3600,
+            end_time=time.time(),
+        )
+        await client.connect()
+        with pytest.raises(ValueError, match="source_exchange required"):
             async for _ in client.subscribe_ticker(["BTC-USD"]):
                 break
         await client.disconnect()
@@ -537,7 +558,7 @@ class TestPaperMarketDataMethods:
     async def test_subscribe_candles_replay(self) -> None:
         """Test subscribing to candles replay.
 
-        Given: A connected paper client with time range,
+        Given: A connected paper client with time range and source exchange,
         When: subscribe_candles is called,
         Then: Candle updates are yielded from repository.
         """
@@ -548,6 +569,7 @@ class TestPaperMarketDataMethods:
             repository=mock_repo,
             start_time=start_ts,
             end_time=end_ts,
+            source_exchange="kraken",
         )
         await client.connect()
         async for candle in client.subscribe_candles(["BTC-USD"], "1m"):
@@ -560,7 +582,7 @@ class TestPaperMarketDataMethods:
     async def test_subscribe_trades_replay(self) -> None:
         """Test subscribing to trades replay.
 
-        Given: A connected paper client with time range,
+        Given: A connected paper client with time range and source exchange,
         When: subscribe_trades is called,
         Then: Trade updates are yielded from repository.
         """
@@ -571,6 +593,7 @@ class TestPaperMarketDataMethods:
             repository=mock_repo,
             start_time=start_ts,
             end_time=end_ts,
+            source_exchange="kraken",
         )
         await client.connect()
         async for trade in client.subscribe_trades(["BTC-USD"]):
@@ -636,6 +659,7 @@ class TestPaperMarketDataMethods:
             repository=MultiSymbolRepo(),
             start_time=start_ts,
             end_time=end_ts,
+            source_exchange="kraken",
         )
         await client.connect()
         candles: list[tuple[str, datetime]] = []
@@ -692,6 +716,7 @@ class TestPaperMarketDataMethods:
             repository=MultiSymbolRepo(),
             start_time=start_ts,
             end_time=end_ts,
+            source_exchange="kraken",
         )
         await client.connect()
         trades: list[tuple[str, datetime]] = []

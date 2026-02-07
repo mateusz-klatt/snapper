@@ -441,7 +441,15 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     if component_type == "feed":
         if len(segments) == 4:
             return True, ""
-        return False, "system.heartbeats.feed requires exactly exchange (4 segments)"
+        if len(segments) == 5 and segments[3] == "paper":
+            source_exchange = segments[4]
+            if source_exchange == "paper":
+                return False, "system.heartbeats.feed.paper.{source}: source cannot be 'paper'"
+            return True, ""
+        return (
+            False,
+            "system.heartbeats.feed requires exchange (4 seg) or feed.paper.{source} (5 seg)",
+        )
     return False, f"Invalid heartbeat component type '{component_type}'"
 
 

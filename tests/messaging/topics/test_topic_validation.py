@@ -1034,15 +1034,25 @@ class TestSystemTopicValidation:
         assert _err == ""
 
     def test_hierarchical_heartbeat_feed_with_symbol_rejected(self) -> None:
-        """Test feed heartbeat with symbol rejected.
+        """Test non-paper feed heartbeat with extra segment is rejected.
 
-        Given: A feed heartbeat with extra symbol segment,
+        Given: A feed heartbeat with extra non-paper segment,
         When: Validated,
         Then: Validation fails.
         """
         valid, _err = validate_topic("system.heartbeats.feed.kraken.BTC-USD")
         assert not valid
-        assert "exactly exchange" in _err
+        assert "feed.paper.{source}" in _err
+
+    def test_hierarchical_heartbeat_feed_paper_source_accepted(self) -> None:
+        """Test paper feed heartbeat with source_exchange is accepted.
+
+        Given: A feed heartbeat for paper with source exchange,
+        When: Validated,
+        Then: Validation succeeds.
+        """
+        valid, _err = validate_topic("system.heartbeats.feed.paper.kraken")
+        assert valid, f"Paper feed heartbeat should be valid: {_err}"
 
     def test_hierarchical_heartbeat_missing_name(self) -> None:
         """Test heartbeat topic requires component name.
@@ -1059,7 +1069,7 @@ class TestSystemTopicValidation:
         assert "requires component name" in _err
         valid, _err = validate_topic("system.heartbeats.feed")
         assert not valid
-        assert "exactly exchange" in _err
+        assert "4 seg" in _err
 
     def test_hierarchical_heartbeat_invalid_component(self) -> None:
         """Test heartbeat with invalid component.
@@ -1773,7 +1783,7 @@ class TestSystemTopicHeartbeatPaths:
         """
         valid, _err = validate_topic("system.heartbeats.feed")
         assert not valid
-        assert "4 segments" in _err.lower()
+        assert "4 seg" in _err.lower()
 
     def test_system_heartbeats_invalid_component(self) -> None:
         """Verify heartbeat with invalid component type is rejected.
@@ -3090,15 +3100,49 @@ def test_system_heartbeats_invalid_component_type() -> None:
 
 
 def test_system_heartbeats_feed_with_extra_segment() -> None:
-    """Verify feed heartbeat rejects extra segments.
+    """Verify non-paper feed heartbeat with extra segment is rejected.
 
-    Given a feed heartbeat topic with extra segments,
+    Given a feed heartbeat topic with extra non-paper segment,
     When validate_topic is called,
     Then it returns False indicating exact segment count required.
     """
     valid, message = validate_topic("system.heartbeats.feed.kraken.extra")
     assert valid is False
-    assert "requires exactly exchange" in message
+    assert "feed.paper.{source}" in message
+
+
+def test_system_heartbeats_feed_paper_source_accepted() -> None:
+    """Verify paper feed heartbeat with source_exchange is accepted.
+
+    Given a feed heartbeat topic for paper with source exchange,
+    When validate_topic is called,
+    Then it returns True.
+    """
+    valid, message = validate_topic("system.heartbeats.feed.paper.kraken")
+    assert valid, f"Paper feed heartbeat should be valid: {message}"
+
+
+def test_system_heartbeats_feed_paper_source_paper_rejected() -> None:
+    """Verify paper feed heartbeat rejects 'paper' as source_exchange.
+
+    Given a feed heartbeat for paper with source_exchange='paper',
+    When validate_topic is called,
+    Then it returns False with clear error.
+    """
+    valid, message = validate_topic("system.heartbeats.feed.paper.paper")
+    assert valid is False
+    assert "source cannot be 'paper'" in message
+
+
+def test_system_heartbeats_feed_paper_with_extra_segment_rejected() -> None:
+    """Verify paper feed heartbeat with 6 segments is rejected.
+
+    Given a feed heartbeat for paper with extra segment,
+    When validate_topic is called,
+    Then it returns False.
+    """
+    valid, message = validate_topic("system.heartbeats.feed.paper.kraken.extra")
+    assert valid is False
 
 
 def test_system_settings_disallow_extra_segments() -> None:

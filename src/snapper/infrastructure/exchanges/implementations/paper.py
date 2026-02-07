@@ -35,7 +35,6 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
-from typing import cast
 
 from loguru import logger
 
@@ -58,6 +57,7 @@ _NOT_CONNECTED_MSG = "PaperExchangeClient not connected"
 _REPO_REQUIRED_MSG = "Repository required for paper market data"
 _CALL_CONNECT_MSG = "Not connected - call connect() first"
 _TIME_RANGE_REQUIRED_MSG = "Time range (start_time, end_time) required for paper market data replay"
+_SOURCE_EXCHANGE_REQUIRED_MSG = "source_exchange required for paper market data replay"
 
 
 class _EmptyInstrumentsAsyncIterator(AsyncIterator[dict[str, Any]]):
@@ -94,6 +94,7 @@ class PaperExchangeClient(ExchangeClientBase):
         initial_balance: float = 10000.0,
         start_time: float | None = None,
         end_time: float | None = None,
+        source_exchange: str | None = None,
     ) -> None:
         """Initialize paper trading client.
 
@@ -103,12 +104,16 @@ class PaperExchangeClient(ExchangeClientBase):
             initial_balance: Starting balance for each currency.
             start_time: Start timestamp for backtesting (Unix seconds).
             end_time: End timestamp for backtesting (Unix seconds).
+            source_exchange: Source exchange for replay data queries.
+                When set, subscribe methods query this exchange instead
+                of "paper". Used by per-source paper publishers.
         """
         super().__init__(repository=repository, exchange_name="paper")
         self.fill_delay = fill_delay
         self.initial_balance = initial_balance
         self.start_time = start_time
         self.end_time = end_time
+        self.source_exchange = source_exchange
         self._running = False
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue()
         self._orders: dict[str, ExchangeOrderSnapshot] = {}
@@ -401,9 +406,13 @@ class PaperExchangeClient(ExchangeClientBase):
         """
         if not self.repository:
             raise RuntimeError(_REPO_REQUIRED_MSG)
+        if not self.source_exchange:
+            raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
         end_dt = datetime.now(tz=UTC)
         start_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        snapshots = await self.repository.get_market_snapshots("paper", [symbol], start_dt, end_dt)
+        snapshots = await self.repository.get_market_snapshots(
+            self.source_exchange, [symbol], start_dt, end_dt
+        )
         if not snapshots:
             raise ValueError(f"No ticker data found for {symbol}")
         latest = snapshots[-1]
@@ -438,6 +447,8 @@ class PaperExchangeClient(ExchangeClientBase):
         """
         if not self.repository:
             raise RuntimeError(_REPO_REQUIRED_MSG)
+        if not self.source_exchange:
+            raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
         end_dt = datetime.now(tz=UTC)
         if limit:
             interval_minutes = self._parse_interval_to_minutes(timeframe)
@@ -446,7 +457,7 @@ class PaperExchangeClient(ExchangeClientBase):
         else:
             start_dt = end_dt - timedelta(hours=24)
         candles = await self.repository.get_candles(
-            symbol, timeframe, start_dt, end_dt, exchange=self.exchange_name
+            symbol, timeframe, start_dt, end_dt, exchange=self.source_exchange
         )
         ohlcv_list = [
             OhlcvSnapshot(
@@ -463,12 +474,13 @@ class PaperExchangeClient(ExchangeClientBase):
             return ohlcv_list[-limit:]
         return ohlcv_list
 
-    def subscribe_ticker(self, symbols: list[str], **kwargs: Any) -> AsyncIterator[TickerUpdate]:
+    def subscribe_ticker(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Replay historical ticker data for backtesting.
+
+        Uses self.source_exchange (if set) to query the correct exchange data.
 
         Args:
             symbols: List of trading pairs to replay.
-            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding TickerUpdate from historical data in time order.
@@ -477,17 +489,13 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured or not connected.
             ValueError: If time range not specified.
         """
-        source_exchange = cast(str | None, kwargs.get("source_exchange"))
-        return self._subscribe_ticker_impl(symbols, source_exchange=source_exchange)
+        return self._subscribe_ticker_impl(symbols)
 
-    async def _subscribe_ticker_impl(
-        self, symbols: list[str], *, source_exchange: str | None
-    ) -> AsyncIterator[TickerUpdate]:
+    async def _subscribe_ticker_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Implement historical ticker streaming for paper trading.
 
         Args:
             symbols: List of trading pairs to replay.
-            source_exchange: Optional source exchange for replay data.
 
         Yields:
             TickerUpdate from historical data in time order.
@@ -504,7 +512,9 @@ class PaperExchangeClient(ExchangeClientBase):
             raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
-        exchange_name = source_exchange or self.exchange_name
+        if not self.source_exchange:
+            raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
+        exchange_name = self.source_exchange
         logger.info(
             f"Replaying ticker for {symbols} from {start_dt} to {end_dt} from {exchange_name}"
         )
@@ -532,14 +542,14 @@ class PaperExchangeClient(ExchangeClientBase):
         self,
         symbols: list[str],
         timeframe: str = "1m",
-        **kwargs: Any,
     ) -> AsyncIterator[CandleUpdate]:
         """Replay historical candle data for backtesting.
+
+        Uses self.source_exchange (if set) to query the correct exchange data.
 
         Args:
             symbols: List of trading pairs (uses first symbol).
             timeframe: Candle interval.
-            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding CandleUpdate from historical data.
@@ -548,20 +558,16 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured or not connected.
             ValueError: If time range not specified.
         """
-        source_exchange = cast(str | None, kwargs.get("source_exchange"))
-        return self._subscribe_candles_impl(
-            symbols, timeframe=timeframe, source_exchange=source_exchange
-        )
+        return self._subscribe_candles_impl(symbols, timeframe=timeframe)
 
     async def _subscribe_candles_impl(
-        self, symbols: list[str], *, timeframe: str, source_exchange: str | None
+        self, symbols: list[str], *, timeframe: str
     ) -> AsyncIterator[CandleUpdate]:
         """Implement historical candle replay for paper trading.
 
         Args:
             symbols: List of trading pairs (uses first symbol).
             timeframe: Candle interval.
-            source_exchange: Optional source exchange for replay data.
 
         Yields:
             CandleUpdate from historical data.
@@ -581,7 +587,9 @@ class PaperExchangeClient(ExchangeClientBase):
             raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
-        exchange_name = source_exchange or self.exchange_name
+        if not self.source_exchange:
+            raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
+        exchange_name = self.source_exchange
         logger.info(f"Replaying candles for {symbols}/{interval} from {start_dt} to {end_dt}")
         logger.info(f"Candle replay source exchange: {exchange_name}")
         interval_minutes = self._parse_interval_to_minutes(interval)
@@ -630,12 +638,13 @@ class PaperExchangeClient(ExchangeClientBase):
             return int(interval[:-1]) * 1440
         raise ValueError(f"Invalid interval format: {interval}")
 
-    def subscribe_trades(self, symbols: list[str], **kwargs: Any) -> AsyncIterator[TradeUpdate]:
+    def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Replay historical trade data for backtesting.
+
+        Uses self.source_exchange (if set) to query the correct exchange data.
 
         Args:
             symbols: List of trading pairs.
-            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding TradeUpdate from historical data.
@@ -644,17 +653,13 @@ class PaperExchangeClient(ExchangeClientBase):
             RuntimeError: If repository not configured or not connected.
             ValueError: If time range not specified.
         """
-        source_exchange = cast(str | None, kwargs.get("source_exchange"))
-        return self._subscribe_trades_impl(symbols, source_exchange=source_exchange)
+        return self._subscribe_trades_impl(symbols)
 
-    async def _subscribe_trades_impl(
-        self, symbols: list[str], *, source_exchange: str | None
-    ) -> AsyncIterator[TradeUpdate]:
+    async def _subscribe_trades_impl(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Implement historical trades replay for paper trading.
 
         Args:
             symbols: List of trading pairs.
-            source_exchange: Optional source exchange for replay data.
 
         Yields:
             TradeUpdate from historical data.
@@ -671,7 +676,9 @@ class PaperExchangeClient(ExchangeClientBase):
             raise ValueError(_TIME_RANGE_REQUIRED_MSG)
         start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
         end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
-        exchange_name = source_exchange or self.exchange_name
+        if not self.source_exchange:
+            raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
+        exchange_name = self.source_exchange
         logger.info(
             f"Replaying trades for {symbols} from {start_dt} to {end_dt} from {exchange_name}"
         )
@@ -710,18 +717,18 @@ class PaperExchangeClient(ExchangeClientBase):
             "USD/PLN",
         ]
 
-    def subscribe_ticks(self, symbols: list[str], **kwargs: Any) -> AsyncIterator[TickerUpdate]:
+    def subscribe_ticks(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Subscribe to ticker updates (alias for subscribe_ticker).
+
+        Uses self.source_exchange (if set) to query the correct exchange data.
 
         Args:
             symbols: List of trading pairs.
-            **kwargs: Optional parameters. Supports source_exchange.
 
         Returns:
             AsyncIterator yielding TickerUpdate from historical data.
         """
-        source_exchange = cast(str | None, kwargs.get("source_exchange"))
-        return self.subscribe_ticker(symbols, source_exchange=source_exchange)
+        return self.subscribe_ticker(symbols)
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument updates (not implemented for paper).

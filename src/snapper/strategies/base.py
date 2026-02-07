@@ -218,22 +218,24 @@ class BaseStrategy(ABC):
     def _subscribe_feed_heartbeats(self) -> None:
         """Subscribe to heartbeat topics for exchanges in input market topics."""
         assert self.subscriber is not None
-        subscribed_exchanges: set[str] = set()
+        subscribed_heartbeats: set[str] = set()
         for topic in self.inputs:
             if not topic.startswith("market."):
                 continue
             parsed = parse_market_topic(topic)
             if parsed is None:
                 continue
-            exchange = parsed.exchange
-            if exchange in subscribed_exchanges:
+            if parsed.exchange == "paper" and parsed.source_exchange:
+                heartbeat_topic = f"system.heartbeats.feed.paper.{parsed.source_exchange}"
+            else:
+                heartbeat_topic = f"system.heartbeats.feed.{parsed.exchange}"
+            if heartbeat_topic in subscribed_heartbeats:
                 continue
-            heartbeat_topic = f"system.heartbeats.feed.{exchange}"
             logger.info(
                 f"Strategy {self.name}: Subscribing to {heartbeat_topic} for feed health monitoring"
             )
             self.subscriber.subscribe(heartbeat_topic)
-            subscribed_exchanges.add(exchange)
+            subscribed_heartbeats.add(heartbeat_topic)
 
     async def _subscribe_inputs(self) -> None:
         """Subscribe to input topics via ZMQ."""

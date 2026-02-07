@@ -32,6 +32,7 @@ from snapper.messaging.schemas.messages import MarketDataEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
 from snapper.messaging.schemas.messages import TradeEnvelope
+from snapper.messaging.topics.builders import MarketDataType
 from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
@@ -100,10 +101,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """Trigger cache invalidation for symbol mapper."""
         SymbolMapperService.get_instance().trigger_cache_invalidation(fail_fast=False)
 
+    def _get_process_name(self) -> str:
+        """Return the process name for log context.
+
+        Override for multi-instance publishers (e.g. paper per-source).
+
+        Returns:
+            Process name string used in logging and heartbeats.
+        """
+        return f"pub:{self._get_exchange_name()}"
+
     async def start(self) -> None:
         """Start the publisher service and connect to exchange."""
         exchange_name = self._get_exchange_name()
-        process_name = f"pub:{exchange_name}"
+        process_name = self._get_process_name()
         set_log_context(process_name)
         if self.running:
             logger.warning(f"{process_name}: Already running")
@@ -187,6 +198,47 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return 0
 
+    def _get_heartbeat_component(self) -> str:
+        """Return component name for heartbeat messages.
+
+        Override for compound identities (e.g. paper.kraken).
+
+        Returns:
+            Component name string for heartbeat topic and envelope.
+        """
+        return f"feed.{self._get_exchange_name()}"
+
+    def _build_data_topic(
+        self, symbol: str, data_type: MarketDataType, *, timeframe: str | None = None
+    ) -> str:
+        """Build market data topic string.
+
+        Override for non-standard topic formats (e.g. paper with source_exchange).
+
+        Args:
+            symbol: Native symbol identifier.
+            data_type: Market data type (candles, ticks, trades).
+            timeframe: Optional candle timeframe.
+
+        Returns:
+            Fully-qualified ZMQ topic string.
+        """
+        exchange = self._get_exchange_name()
+        if timeframe:
+            return f"market.{exchange}.{symbol}.{data_type}.{timeframe}"
+        return f"market.{exchange}.{symbol}.{data_type}"
+
+    def _get_data_exchange(self) -> str:
+        """Return exchange name for market data envelopes.
+
+        Override when envelope exchange differs from topic exchange
+        (e.g. paper publisher reports source exchange in payloads).
+
+        Returns:
+            Exchange name string for BarEnvelope/TickEnvelope/TradeEnvelope.
+        """
+        return self._get_exchange_name()
+
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
         """Subscribe to candle data and publish to ZMQ.
 
@@ -197,7 +249,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if not self._exchange_client:
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
-        exchange = self._get_exchange_name()
+        exchange = self._get_data_exchange()
         try:
             async for candle in self._exchange_client.subscribe_candles(symbols, timeframe):
                 if not self.running:
@@ -215,7 +267,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     vwap=candle.vwap,
                     trades=candle.trades,
                 )
-                topic = f"market.{exchange}.{native_symbol}.candles.{timeframe}"
+                topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
                 await self._publish_message(topic, bar_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
                 await self._save_to_db(native_symbol, bar_msg)
@@ -231,7 +283,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if not self._exchange_client:
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
-        exchange = self._get_exchange_name()
+        exchange = self._get_data_exchange()
         try:
             async for message in self._exchange_client.subscribe_ticks(symbols):
                 if not self.running:
@@ -245,7 +297,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     ask=message.ask if not math.isclose(message.ask, 0.0) else None,
                     last=message.last,
                 )
-                topic = f"market.{exchange}.{native_symbol}.ticks"
+                topic = self._build_data_topic(native_symbol, "ticks")
                 await self._publish_message(topic, tick_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
         except Exception as e:
@@ -260,7 +312,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if not self._exchange_client:
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
-        exchange = self._get_exchange_name()
+        exchange = self._get_data_exchange()
         try:
             async for trade in self._exchange_client.subscribe_trades(symbols):
                 if not self.running:
@@ -273,7 +325,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     volume=trade.quantity,
                     side=trade.side if trade.side in ["buy", "sell"] else None,
                 )
-                topic = f"market.{exchange}.{native_symbol}.trades"
+                topic = self._build_data_topic(native_symbol, "trades")
                 await self._publish_message(topic, trade_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
         except Exception as e:
@@ -296,8 +348,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat messages with status."""
-        exchange = self._get_exchange_name()
-        component_name = f"feed.{exchange}"
+        component_name = self._get_heartbeat_component()
         while self.running:
             try:
                 await asyncio.sleep(self.settings.zmq_heartbeat_interval_ms / 1000.0)

@@ -944,6 +944,29 @@ async def test_subscribe_inputs_deduplicates_feed_heartbeats(
 
 
 @pytest.mark.asyncio
+async def test_subscribe_inputs_paper_heartbeat_includes_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify paper market inputs subscribe to source-specific heartbeat.
+
+    Given: Strategy with paper market input including source_exchange,
+    When: _subscribe_inputs called,
+    Then: Subscribes to system.heartbeats.feed.paper.{source}.
+    """
+    config = _strategy_config(
+        inputs=["market.paper.kraken.BTC-USD.candles.1h"],
+        exchange="paper",
+    )
+    strategy = FakeStrategy(config)
+    context = DummyZMQContext()
+    strategy.zmq_context = cast(Any, context)
+    monkeypatch.setattr("snapper.strategies.base.zmq", type("_Z", (), {"PUB": 1, "SUB": 2}))
+    await strategy._subscribe_inputs()
+    assert "system.heartbeats.feed.paper.kraken" in context.sub_socket.subscribed
+    assert "system.heartbeats.feed.paper" not in context.sub_socket.subscribed
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_loop_emits_and_evaluates_health(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify heartbeat loop emits status and evaluates feed health.
 
@@ -3357,11 +3380,11 @@ class TestTopicValidationPhase4:
 
         Given: system.heartbeats.feed topic,
         When: _validate_system_topic called,
-        Then: Error mentions 'requires exactly exchange'.
+        Then: Error mentions segment requirements.
         """
         valid, err = _validate_system_topic("system.heartbeats.feed")
         assert not valid
-        assert "requires exactly exchange" in err
+        assert "4 seg" in err
 
 
 class TestExecutorBasePhase4:

@@ -837,13 +837,43 @@ async def test_get_ticker_success_and_empty() -> None:
     Then: Returns snapshot or raises ValueError.
     """
     repo = _ReplayRepo()
-    client = PaperExchangeClient(repository=cast(Repository, repo))
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
     await client.connect()
     snapshot = await client.get_ticker("BTC/USD")
     assert snapshot.bid == pytest.approx(10.0)
     repo.snapshots = []
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="No ticker data"):
         await client.get_ticker("BTC/USD")
+
+
+@pytest.mark.asyncio
+async def test_get_ticker_no_source_exchange_raises() -> None:
+    """Verify get_ticker raises without source_exchange.
+
+    Given: A connected client without source_exchange,
+    When: get_ticker() is called,
+    Then: ValueError is raised.
+    """
+    repo = _ReplayRepo()
+    client = PaperExchangeClient(repository=cast(Repository, repo))
+    await client.connect()
+    with pytest.raises(ValueError, match="source_exchange required"):
+        await client.get_ticker("BTC/USD")
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_no_source_exchange_raises() -> None:
+    """Verify get_ohlcv raises without source_exchange.
+
+    Given: A connected client without source_exchange,
+    When: get_ohlcv() is called,
+    Then: ValueError is raised.
+    """
+    repo = _ReplayRepo()
+    client = PaperExchangeClient(repository=cast(Repository, repo))
+    await client.connect()
+    with pytest.raises(ValueError, match="source_exchange required"):
+        await client.get_ohlcv("BTC/USD", timeframe="1m")
 
 
 @pytest.mark.asyncio
@@ -861,7 +891,7 @@ async def test_get_ohlcv_limits_results() -> None:
         {"timestamp": now, "open": 2, "high": 3, "low": 1.5, "close": 2.5, "volume": 200},
         {"timestamp": now, "open": 3, "high": 4, "low": 2.5, "close": 3.5, "volume": 300},
     ]
-    client = PaperExchangeClient(repository=cast(Repository, repo))
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
     await client.connect()
     candles = await client.get_ohlcv("BTC/USD", timeframe="1m", limit=2)
     assert len(candles) == 2
@@ -876,7 +906,9 @@ async def test_subscribe_ticker_replays_snapshots() -> None:
     When: subscribe_ticker() is iterated,
     Then: TickerUpdate from repository is yielded.
     """
-    client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()))
+    client = PaperExchangeClient(
+        repository=cast(Repository, _ReplayRepo()), source_exchange="kraken"
+    )
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -896,7 +928,7 @@ async def test_subscribe_candles_and_trades_replay() -> None:
     Then: CandleUpdate and TradeUpdate are yielded.
     """
     repo = _ReplayRepo()
-    client = PaperExchangeClient(repository=cast(Repository, repo))
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -920,7 +952,9 @@ async def test_subscribe_candles_returns_on_empty_symbols() -> None:
     When: subscribe_candles() is called,
     Then: Empty list is returned.
     """
-    client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()))
+    client = PaperExchangeClient(
+        repository=cast(Repository, _ReplayRepo()), source_exchange="kraken"
+    )
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -928,6 +962,40 @@ async def test_subscribe_candles_returns_on_empty_symbols() -> None:
     async for c in client.subscribe_candles([]):
         candles.append(c)
     assert candles == []
+
+
+@pytest.mark.asyncio
+async def test_subscribe_candles_no_source_exchange_raises() -> None:
+    """Verify subscribe_candles raises without source_exchange.
+
+    Given: A running client without source_exchange set,
+    When: subscribe_candles() is called,
+    Then: ValueError is raised requiring source_exchange.
+    """
+    client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()))
+    client._running = True
+    client.start_time = 0
+    client.end_time = 1
+    with pytest.raises(ValueError, match="source_exchange required"):
+        async for _ in client.subscribe_candles(["BTC/USD"]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_subscribe_trades_no_source_exchange_raises() -> None:
+    """Verify subscribe_trades raises without source_exchange.
+
+    Given: A running client without source_exchange set,
+    When: subscribe_trades() is called,
+    Then: ValueError is raised requiring source_exchange.
+    """
+    client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()))
+    client._running = True
+    client.start_time = 0
+    client.end_time = 1
+    with pytest.raises(ValueError, match="source_exchange required"):
+        async for _ in client.subscribe_trades(["BTC/USD"]):
+            pass
 
 
 @pytest.mark.asyncio
@@ -949,7 +1017,7 @@ async def test_get_ohlcv_default_range_uses_last_24h() -> None:
             return []
 
     repo = _RangeRepo()
-    client = PaperExchangeClient(repository=cast(Repository, repo))
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
     await client.connect()
     candles = await client.get_ohlcv("BTC/USD", timeframe="1m")
     assert candles == []
@@ -968,7 +1036,7 @@ async def test_subscribe_ticker_empty_snapshots() -> None:
     """
     repo = _ReplayRepo()
     repo.snapshots = []
-    client = PaperExchangeClient(repository=cast(Repository, repo))
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -988,7 +1056,7 @@ async def test_subscribe_candles_empty_repo() -> None:
     """
     repo = _ReplayRepo()
     repo.candles = []
-    client = PaperExchangeClient(repository=cast(Repository, repo))
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -1006,7 +1074,9 @@ async def test_subscribe_trades_empty_symbols() -> None:
     When: subscribe_trades() is iterated,
     Then: Empty list is returned.
     """
-    client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()))
+    client = PaperExchangeClient(
+        repository=cast(Repository, _ReplayRepo()), source_exchange="kraken"
+    )
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -1039,7 +1109,9 @@ async def test_subscribe_trades_with_empty_result_for_symbol() -> None:
                 ]
             return []
 
-    client = PaperExchangeClient(repository=cast(Repository, _EmptyTradesRepo()))
+    client = PaperExchangeClient(
+        repository=cast(Repository, _EmptyTradesRepo()), source_exchange="kraken"
+    )
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -1058,7 +1130,9 @@ async def test_subscribe_ticks_alias_replays_snapshots() -> None:
     When: subscribe_ticks() is called,
     Then: TickerUpdate is yielded (same as subscribe_ticker).
     """
-    client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()))
+    client = PaperExchangeClient(
+        repository=cast(Repository, _ReplayRepo()), source_exchange="kraken"
+    )
     client._running = True
     client.start_time = 0
     client.end_time = 1
