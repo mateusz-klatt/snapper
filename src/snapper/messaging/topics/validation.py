@@ -420,6 +420,33 @@ def _validate_signal_exchange(exchange: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_feed_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate feed heartbeat topic structure.
+
+    Expected formats:
+        system.heartbeats.feed.{exchange} — live feed (4 segments)
+        system.heartbeats.feed.paper.{source} — paper replay (5 segments)
+
+    Args:
+        segments: Split topic segments starting with system.heartbeats.feed.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if len(segments) == 4:
+        if segments[3] == "paper":
+            return False, "system.heartbeats.feed.paper requires source_exchange (5 segments)"
+        return True, ""
+    if len(segments) == 5 and segments[3] == "paper":
+        if segments[4] == "paper":
+            return False, "system.heartbeats.feed.paper.{source}: source cannot be 'paper'"
+        return True, ""
+    return (
+        False,
+        "system.heartbeats.feed requires exchange (4 seg) or feed.paper.{source} (5 seg)",
+    )
+
+
 def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     """Validate heartbeat topic structure.
 
@@ -439,17 +466,7 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
             return True, ""
         return False, f"system.heartbeats.{component_type} requires component name"
     if component_type == "feed":
-        if len(segments) == 4:
-            return True, ""
-        if len(segments) == 5 and segments[3] == "paper":
-            source_exchange = segments[4]
-            if source_exchange == "paper":
-                return False, "system.heartbeats.feed.paper.{source}: source cannot be 'paper'"
-            return True, ""
-        return (
-            False,
-            "system.heartbeats.feed requires exchange (4 seg) or feed.paper.{source} (5 seg)",
-        )
+        return _validate_feed_heartbeat(segments)
     return False, f"Invalid heartbeat component type '{component_type}'"
 
 

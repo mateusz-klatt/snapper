@@ -22,7 +22,6 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
-from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.schemas.messages import BarEnvelope
@@ -59,10 +58,12 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
         super().__init__(symbols)
 
     def _create_exchange_client(self) -> PaperExchangeClient:
-        """Create paper client bound to this source exchange."""
-        repository = get_repository(self.settings.db_url)
+        """Create paper client bound to this source exchange.
+
+        Uses self.repository from base class (created in start() before this call).
+        """
         return PaperExchangeClient(
-            repository=repository,
+            repository=self.repository,
             start_time=self.start_time,
             end_time=self.end_time,
             source_exchange=self._source_exchange,
@@ -134,19 +135,13 @@ class PaperMarketDataPublisher(RegisterableProcess):
         Args:
             paper_instruments: Mapping of source exchange to symbol lists.
                 Example: {"kraken": ["BTC-USD", "ETH-USD"]}.
-                Required — ValueError raised if None or empty.
+                None or empty enters idle mode (no replay).
             start_time: Start timestamp for backtesting (Unix seconds).
             end_time: End timestamp for backtesting (Unix seconds).
-
-        Raises:
-            ValueError: If paper_instruments is None or empty after validation.
         """
-        if paper_instruments is None:
-            raise ValueError(
-                "paper_instruments required: configure PAPER_INSTRUMENTS in settings "
-                "(e.g. {'kraken': ['BTC-USD', 'ETH-USD']})"
-            )
-        self.paper_instruments = self._validate_paper_instruments(paper_instruments)
+        self.paper_instruments = (
+            self._validate_paper_instruments(paper_instruments) if paper_instruments else {}
+        )
         self.start_time = start_time
         self.end_time = end_time
         self._publishers: list[PerSourcePaperPublisher] = []
@@ -160,15 +155,10 @@ class PaperMarketDataPublisher(RegisterableProcess):
 
         Returns:
             Dictionary with paper_instruments and time range configuration.
-
-        Raises:
-            ValueError: If paper_instruments not configured in settings.
+            Empty paper_instruments results in idle mode (no replay).
         """
-        paper_instruments = settings.paper_instruments
-        if not paper_instruments:
-            raise ValueError("paper_instruments must be configured in settings for paper trading")
         return {
-            "paper_instruments": paper_instruments,
+            "paper_instruments": settings.paper_instruments or {},
             "start_time": None,
             "end_time": None,
         }
@@ -218,14 +208,14 @@ class PaperMarketDataPublisher(RegisterableProcess):
     ) -> dict[str, list[str]]:
         """Validate and normalize paper instruments configuration.
 
+        Filters out empty exchange names and empty symbol lists.
+        If all entries are filtered, returns empty dict (idle mode).
+
         Args:
             paper_instruments: Raw mapping of exchange names to symbol lists.
 
         Returns:
             Validated mapping with normalized exchange names and deduplicated symbols.
-
-        Raises:
-            ValueError: If no valid instruments remain after validation.
         """
         validated: dict[str, list[str]] = {}
         for source_exchange, symbols in paper_instruments.items():
@@ -235,8 +225,4 @@ class PaperMarketDataPublisher(RegisterableProcess):
             validated_symbols = list(dict.fromkeys(symbols))
             if validated_symbols:
                 validated[normalized_exchange] = validated_symbols
-        if not validated:
-            raise ValueError(
-                "paper_instruments must contain at least one source exchange with symbols"
-            )
         return validated

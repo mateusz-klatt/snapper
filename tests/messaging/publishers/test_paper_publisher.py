@@ -152,32 +152,30 @@ class TestPerSourcePaperPublisher:
         )
         assert pub.symbols == ["BTC-USD", "ETH-USD"]
 
-    @patch("snapper.messaging.publishers.paper.get_repository")
     @patch("snapper.config.settings.get_settings")
-    def test_create_exchange_client(
-        self, mock_get_settings: MagicMock, mock_get_repo: MagicMock
-    ) -> None:
+    def test_create_exchange_client(self, mock_get_settings: MagicMock) -> None:
         """Verify exchange client is created with source_exchange.
 
-        Given a per-source publisher for kraken,
+        Given a per-source publisher for kraken with repository set,
         When _create_exchange_client is called,
-        Then PaperExchangeClient has source_exchange='kraken'.
+        Then PaperExchangeClient has source_exchange='kraken' and uses base repository.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
-        mock_settings.db_url = "sqlite:///:memory:"
         mock_get_settings.return_value = mock_settings
-        mock_get_repo.return_value = MagicMock()
         pub = PerSourcePaperPublisher(
             source_exchange="kraken",
             symbols=["BTC-USD"],
             start_time=1000.0,
             end_time=2000.0,
         )
+        mock_repo = MagicMock()
+        pub.repository = mock_repo
         client = pub._create_exchange_client()
         assert client.source_exchange == "kraken"
-        assert client.start_time == 1000.0
-        assert client.end_time == 2000.0
+        assert client.start_time == pytest.approx(1000.0)
+        assert client.end_time == pytest.approx(2000.0)
+        assert client.repository is mock_repo
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -217,25 +215,25 @@ class TestPerSourcePaperPublisher:
 class TestPaperMarketDataPublisher:
     """Tests for PaperMarketDataPublisher — orchestrator wrapper."""
 
-    def test_initialization_none_paper_instruments_raises(self) -> None:
-        """Verify initialization fails when paper_instruments is None.
+    def test_initialization_none_enters_idle_mode(self) -> None:
+        """Verify None paper_instruments enters idle mode.
 
         Given no paper_instruments argument,
         When PaperMarketDataPublisher is created,
-        Then ValueError with config guidance is raised.
+        Then paper_instruments is empty dict (idle).
         """
-        with pytest.raises(ValueError, match="paper_instruments required.*PAPER_INSTRUMENTS"):
-            PaperMarketDataPublisher()
+        pub = PaperMarketDataPublisher()
+        assert pub.paper_instruments == {}
 
-    def test_initialization_empty_paper_instruments_raises(self) -> None:
-        """Verify initialization fails with empty paper_instruments.
+    def test_initialization_empty_enters_idle_mode(self) -> None:
+        """Verify empty paper_instruments enters idle mode.
 
         Given empty paper_instruments dict,
         When PaperMarketDataPublisher is created,
-        Then ValueError is raised.
+        Then paper_instruments is empty dict (idle).
         """
-        with pytest.raises(ValueError, match="at least one source exchange"):
-            PaperMarketDataPublisher(paper_instruments={})
+        pub = PaperMarketDataPublisher(paper_instruments={})
+        assert pub.paper_instruments == {}
 
     def test_initialization_with_instruments(self) -> None:
         """Verify custom paper_instruments are stored.
@@ -280,17 +278,21 @@ class TestPaperMarketDataPublisher:
             "end_time": None,
         }
 
-    def test_get_default_kwargs_raises_without_config(self) -> None:
-        """Verify default kwargs raises when settings have no paper_instruments.
+    def test_get_default_kwargs_empty_settings_returns_idle(self) -> None:
+        """Verify default kwargs returns idle config when no paper_instruments.
 
         Given settings with empty paper_instruments,
         When get_default_kwargs is called,
-        Then ValueError is raised.
+        Then returns dict with empty paper_instruments (idle mode).
         """
         mock_settings = MagicMock()
         mock_settings.paper_instruments = {}
-        with pytest.raises(ValueError, match="paper_instruments must be configured"):
-            PaperMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = PaperMarketDataPublisher.get_default_kwargs(mock_settings)
+        assert kwargs == {
+            "paper_instruments": {},
+            "start_time": None,
+            "end_time": None,
+        }
 
     def test_validate_paper_instruments_normalizes(self) -> None:
         """Verify exchange names are lowercased and symbols deduplicated.
@@ -316,15 +318,15 @@ class TestPaperMarketDataPublisher:
         )
         assert result == {"kraken": ["ETH-USD"]}
 
-    def test_validate_paper_instruments_all_empty_raises(self) -> None:
-        """Verify validation raises when all entries are empty.
+    def test_validate_paper_instruments_all_empty_returns_idle(self) -> None:
+        """Verify validation returns empty when all entries filtered out.
 
         Given mapping with only empty exchange key,
         When _validate_paper_instruments is called,
-        Then ValueError is raised.
+        Then returns empty dict (idle mode).
         """
-        with pytest.raises(ValueError, match="at least one source exchange"):
-            PaperMarketDataPublisher._validate_paper_instruments({"": ["BTC-USD"]})
+        result = PaperMarketDataPublisher._validate_paper_instruments({"": ["BTC-USD"]})
+        assert result == {}
 
     def test_validate_paper_instruments_filters_empty_symbols(self) -> None:
         """Verify exchanges with empty symbol lists are filtered out.
@@ -338,15 +340,15 @@ class TestPaperMarketDataPublisher:
         )
         assert result == {"polygon": ["AAPL"]}
 
-    def test_validate_paper_instruments_all_empty_symbols_raises(self) -> None:
-        """Verify validation raises when all exchanges have empty symbols.
+    def test_validate_paper_instruments_all_empty_symbols_returns_idle(self) -> None:
+        """Verify validation returns empty when all symbol lists empty.
 
         Given mapping with only empty symbol lists,
         When _validate_paper_instruments is called,
-        Then ValueError is raised.
+        Then returns empty dict (idle mode).
         """
-        with pytest.raises(ValueError, match="at least one source exchange"):
-            PaperMarketDataPublisher._validate_paper_instruments({"kraken": []})
+        result = PaperMarketDataPublisher._validate_paper_instruments({"kraken": []})
+        assert result == {}
 
     @pytest.mark.asyncio
     async def test_start_creates_publishers(self) -> None:
@@ -368,6 +370,18 @@ class TestPaperMarketDataPublisher:
             await pub.start()
         assert len(pub._publishers) == 2
         assert set(started) == {"kraken", "polygon"}
+
+    @pytest.mark.asyncio
+    async def test_start_idle_mode_no_publishers(self) -> None:
+        """Verify start in idle mode creates no publishers.
+
+        Given PaperMarketDataPublisher with no instruments (idle),
+        When start is called,
+        Then no publishers are created.
+        """
+        pub = PaperMarketDataPublisher()
+        await pub.start()
+        assert pub._publishers == []
 
     @pytest.mark.asyncio
     async def test_start_returns_early_when_instruments_cleared(self) -> None:

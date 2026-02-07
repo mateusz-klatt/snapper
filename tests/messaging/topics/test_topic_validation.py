@@ -1054,6 +1054,17 @@ class TestSystemTopicValidation:
         valid, _err = validate_topic("system.heartbeats.feed.paper.kraken")
         assert valid, f"Paper feed heartbeat should be valid: {_err}"
 
+    def test_hierarchical_heartbeat_feed_paper_without_source_rejected(self) -> None:
+        """Test feed.paper without source_exchange is rejected.
+
+        Given: A 4-segment feed heartbeat with exchange='paper',
+        When: Validated,
+        Then: Validation fails requiring source_exchange.
+        """
+        valid, _err = validate_topic("system.heartbeats.feed.paper")
+        assert not valid
+        assert "source_exchange" in _err
+
     def test_hierarchical_heartbeat_missing_name(self) -> None:
         """Test heartbeat topic requires component name.
 
