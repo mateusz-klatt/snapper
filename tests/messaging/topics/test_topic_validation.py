@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from snapper.infrastructure.symbols import functions
 from snapper.messaging.schemas.messages import FillEnvelope
 from snapper.messaging.topics import validation
 from snapper.messaging.topics.validation import TopicValidationError
@@ -18,10 +17,12 @@ from snapper.messaging.topics.validation import _validate_admin_topic
 from snapper.messaging.topics.validation import _validate_candle_timeframe
 from snapper.messaging.topics.validation import _validate_exchange
 from snapper.messaging.topics.validation import _validate_instrument
+from snapper.messaging.topics.validation import _validate_market_source
 from snapper.messaging.topics.validation import _validate_market_topic
 from snapper.messaging.topics.validation import _validate_orders_commands_topic
 from snapper.messaging.topics.validation import _validate_orders_events_topic
 from snapper.messaging.topics.validation import _validate_prefix_pattern
+from snapper.messaging.topics.validation import _validate_replay_source
 from snapper.messaging.topics.validation import _validate_signal_topic
 from snapper.messaging.topics.validation import _validate_system_topic
 from snapper.messaging.topics.validation import validate_subscription_pattern
@@ -30,6 +31,8 @@ from snapper.messaging.topics.validation import validate_topic
 
 def _patch_env(monkeypatch: pytest.MonkeyPatch, exchanges: set[str], symbols: set[str]) -> None:
     monkeypatch.setattr(validation, "get_available_exchanges", lambda: exchanges)
+    monkeypatch.setattr(validation, "get_market_subscribe_exchanges", lambda: exchanges)
+    monkeypatch.setattr(validation, "get_replay_source_exchanges", lambda: exchanges)
     monkeypatch.setattr(validation, "get_available_symbols", lambda: symbols)
 
 
@@ -93,7 +96,7 @@ def test_prefix_market_invalid_exchange(monkeypatch: pytest.MonkeyPatch) -> None
     _patch_env(monkeypatch, {"kraken"}, {"BTC-USD"})
     is_valid, message = validation.validate_subscription_pattern("market.badex.")
     assert not is_valid
-    assert "Unknown exchange 'badex'" in message
+    assert "Unknown market feed exchange 'badex'" in message
 
 
 def test_prefix_orders_invalid_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,14 +399,38 @@ class TestOrderStatusPayloadContract:
 
 @pytest.fixture(autouse=True)
 def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Patch symbol data functions for topic validation tests."""
+    """Patch symbol data functions at validation module level.
+
+    Patches the already-imported references in validation.py, not the
+    functions module. Using string-path patches on the functions module
+    would be a no-op because validation.py uses ``from ... import``
+    which creates local references that are unaffected by module-level
+    attribute replacement.
+    """
     monkeypatch.setattr(
-        "snapper.infrastructure.symbols.functions.get_available_exchanges",
-        lambda: ["kraken", "paper", "zonda", "walutomat", "polygon"],
+        validation, "get_available_exchanges", lambda: ["kraken", "paper", "zonda", "walutomat"]
     )
     monkeypatch.setattr(
-        "snapper.infrastructure.symbols.functions.get_available_symbols",
-        lambda: ["BTC-USD", "ETH-USD", "AAPL"],
+        validation, "get_market_subscribe_exchanges", lambda: ["kraken", "zonda", "walutomat"]
+    )
+    monkeypatch.setattr(
+        validation,
+        "get_replay_source_exchanges",
+        lambda: ["kraken", "polygon", "zonda", "walutomat"],
+    )
+    monkeypatch.setattr(
+        validation,
+        "get_available_symbols",
+        lambda: [
+            "AAPL",
+            "BTC-EUR",
+            "BTC-PLN",
+            "BTC-USD",
+            "ETH-USD",
+            "EUR-PLN",
+            "EUR-USD",
+            "USD-PLN",
+        ],
     )
     yield
 
@@ -441,7 +468,7 @@ def test_validate_topic_market_paper_source_rejects_paper() -> None:
     """
     ok, msg = validate_topic("market.paper.paper.BTC-USD.candles.1m")
     assert ok is False
-    assert "source exchange cannot be 'paper'" in msg
+    assert "Unknown replay source 'paper'" in msg
 
 
 def test_validate_candle_timeframe_requires_five_segments() -> None:
@@ -543,7 +570,7 @@ def test_validate_topic_paper_source_invalid_exchange() -> None:
     """
     ok, msg = validate_topic("market.paper.invalid.BTC-USD.ticks")
     assert ok is False
-    assert "Unknown exchange" in msg
+    assert "Unknown replay source" in msg
 
 
 def test_validate_subscription_pattern_paper_source_edge_cases() -> None:
@@ -555,7 +582,7 @@ def test_validate_subscription_pattern_paper_source_edge_cases() -> None:
     """
     ok_source_paper, msg_source_paper = validate_subscription_pattern("market.paper.paper.")
     assert ok_source_paper is False
-    assert "source exchange cannot be 'paper'" in msg_source_paper
+    assert "Unknown replay source 'paper'" in msg_source_paper
     ok_bad_instrument, msg_bad_instrument = validate_subscription_pattern(
         "market.paper.kraken.INVALID."
     )
@@ -568,10 +595,10 @@ def test_validate_subscription_pattern_paper_source_edge_cases() -> None:
     assert msg_source_pattern == ""
     ok_legacy, msg_legacy = validate_subscription_pattern("market.paper.BTC-USD.")
     assert ok_legacy is False
-    assert "Unknown exchange" in msg_legacy
+    assert "Unknown replay source" in msg_legacy
     ok_unknown, msg_unknown = validate_subscription_pattern("market.paper.kraken.UNKNOWN.")
     assert ok_unknown is False
-    assert "Unknown exchange" in msg_unknown or "Unknown instrument" in msg_unknown
+    assert "Unknown instrument" in msg_unknown
 
 
 def test_validate_topic_market_invalid_timeframe_and_exchange() -> None:
@@ -583,7 +610,7 @@ def test_validate_topic_market_invalid_timeframe_and_exchange() -> None:
     """
     ok, msg = validate_topic("market.binance.BTC-USD.candles.99x")
     assert ok is False
-    assert "Unknown exchange" in msg or "Invalid timeframe" in msg
+    assert "Unknown market feed exchange" in msg
 
 
 def test_validate_topic_market_missing_timeframe() -> None:
@@ -720,7 +747,7 @@ def test_validate_subscription_pattern_prefix_invalid_exchange() -> None:
     """
     ok, msg = validate_subscription_pattern("market.invalid.BTC-USD.")
     assert ok is False
-    assert "Unknown exchange" in msg
+    assert "Unknown market feed exchange" in msg
 
 
 def test_validate_subscription_pattern_full_topic_delegates_to_validate_topic() -> None:
@@ -809,7 +836,7 @@ class TestMarketTopicValidation:
         """
         valid, _err = validate_topic("market.unknown_exchange.BTC-USD.candles.1m")
         assert not valid
-        assert "Unknown exchange" in _err
+        assert "Unknown market feed exchange" in _err
 
     def test_market_prefix_rejected(self) -> None:
         """Test market prefix rejected as full topic.
@@ -2688,7 +2715,7 @@ class TestInvalidExchange:
         """
         valid, _err = validate_topic("market.unknown_exchange.BTC-USD.ticks")
         assert not valid
-        assert "Unknown exchange" in _err
+        assert "Unknown market feed exchange" in _err
 
     def test_typo_in_exchange(self) -> None:
         """Verify typo in exchange is rejected.
@@ -3043,7 +3070,7 @@ class TestSystemFieldValidators:
 @pytest.mark.parametrize(
     "pattern,expected_message",
     [
-        ("market.binance.", "Unknown exchange 'binance'"),
+        ("market.binance.", "Unknown market feed exchange 'binance'"),
         ("market.kraken.INVALID.", "Unknown instrument 'INVALID'"),
         ("orders.commands.binance.", "Unknown exchange 'binance'"),
         ("orders.commands.kraken.INVALID.", "Unknown instrument 'INVALID'"),
@@ -3061,14 +3088,10 @@ def test_prefix_patterns_reject_invalid_exchange(
     When validate_subscription_pattern is called,
     Then it returns False with an appropriate error message.
     """
-    monkeypatch.setattr(
-        "snapper.infrastructure.symbols.functions.get_available_exchanges",
-        lambda: ["kraken", "paper"],
-    )
-    monkeypatch.setattr(
-        "snapper.infrastructure.symbols.functions.get_available_symbols",
-        lambda: {"BTC-USD"},
-    )
+    monkeypatch.setattr(validation, "get_available_exchanges", lambda: ["kraken", "paper"])
+    monkeypatch.setattr(validation, "get_market_subscribe_exchanges", lambda: ["kraken"])
+    monkeypatch.setattr(validation, "get_replay_source_exchanges", lambda: ["kraken"])
+    monkeypatch.setattr(validation, "get_available_symbols", lambda: {"BTC-USD"})
     valid, message = validate_subscription_pattern(pattern)
     assert valid is False
     assert expected_message in message
@@ -3156,6 +3179,148 @@ def test_system_heartbeats_feed_paper_with_extra_segment_rejected() -> None:
     assert valid is False
 
 
+def test_system_heartbeats_feed_unknown_exchange_rejected() -> None:
+    """Verify feed heartbeat with unknown exchange is rejected.
+
+    Given a feed heartbeat topic with unknown exchange,
+    When validate_topic is called,
+    Then it returns False with market feed exchange error.
+    """
+    valid, message = validate_topic("system.heartbeats.feed.foo")
+    assert valid is False
+    assert "Unknown market feed exchange 'foo'" in message
+
+
+def test_system_heartbeats_feed_polygon_rejected() -> None:
+    """Verify live feed heartbeat for polygon is rejected.
+
+    Given a feed heartbeat for polygon (data-only, not a live feed),
+    When validate_topic is called,
+    Then it returns False because polygon is not a live market feed.
+    """
+    valid, message = validate_topic("system.heartbeats.feed.polygon")
+    assert valid is False
+    assert "Unknown market feed exchange 'polygon'" in message
+
+
+def test_system_heartbeats_feed_paper_polygon_accepted() -> None:
+    """Verify paper feed heartbeat with polygon source is accepted.
+
+    Given a paper feed heartbeat with polygon as replay source,
+    When validate_topic is called,
+    Then it returns True because polygon is a valid replay source.
+    """
+    valid, message = validate_topic("system.heartbeats.feed.paper.polygon")
+    assert valid, f"Paper feed heartbeat with polygon source should be valid: {message}"
+
+
+def test_system_heartbeats_feed_paper_unknown_source_rejected() -> None:
+    """Verify paper feed heartbeat with unknown source is rejected.
+
+    Given a paper feed heartbeat with unknown replay source,
+    When validate_topic is called,
+    Then it returns False with replay source error.
+    """
+    valid, message = validate_topic("system.heartbeats.feed.paper.binance")
+    assert valid is False
+    assert "Unknown replay source 'binance'" in message
+
+
+def test_validate_market_source_rejects_polygon() -> None:
+    """Verify live market source validator rejects polygon.
+
+    Given polygon as exchange for live market topic,
+    When _validate_market_source is called,
+    Then it returns False because polygon has no live feed.
+    """
+    valid, msg = _validate_market_source("polygon")
+    assert valid is False
+    assert "Unknown market feed exchange 'polygon'" in msg
+
+
+def test_validate_market_source_accepts_kraken() -> None:
+    """Verify live market source validator accepts kraken.
+
+    Given kraken as exchange for live market topic,
+    When _validate_market_source is called,
+    Then it returns True.
+    """
+    valid, msg = _validate_market_source("kraken")
+    assert valid
+    assert msg == ""
+
+
+def test_validate_market_source_rejects_empty() -> None:
+    """Verify live market source validator rejects empty string.
+
+    Given empty string as exchange,
+    When _validate_market_source is called,
+    Then it returns False with empty error.
+    """
+    valid, msg = _validate_market_source("")
+    assert valid is False
+    assert "Exchange cannot be empty" in msg
+
+
+def test_validate_replay_source_rejects_empty() -> None:
+    """Verify replay source validator rejects empty string.
+
+    Given empty string as source exchange,
+    When _validate_replay_source is called,
+    Then it returns False with empty error.
+    """
+    valid, msg = _validate_replay_source("")
+    assert valid is False
+    assert "Source exchange cannot be empty" in msg
+
+
+def test_validate_replay_source_accepts_polygon() -> None:
+    """Verify replay source validator accepts polygon.
+
+    Given polygon as source for paper replay,
+    When _validate_replay_source is called,
+    Then it returns True because polygon is a valid replay source.
+    """
+    valid, msg = _validate_replay_source("polygon")
+    assert valid
+    assert msg == ""
+
+
+def test_validate_replay_source_rejects_paper() -> None:
+    """Verify replay source validator rejects paper.
+
+    Given paper as source for paper replay,
+    When _validate_replay_source is called,
+    Then it returns False because paper is consumer, not source.
+    """
+    valid, msg = _validate_replay_source("paper")
+    assert valid is False
+    assert "Unknown replay source 'paper'" in msg
+
+
+def test_validate_market_paper_polygon_topic_accepted() -> None:
+    """Verify paper replay market topic with polygon source is accepted.
+
+    Given a paper market topic using polygon as replay source,
+    When validate_topic is called,
+    Then it returns True.
+    """
+    valid, msg = validate_topic("market.paper.polygon.AAPL.candles.1m")
+    assert valid, f"Paper replay from polygon should be valid: {msg}"
+
+
+def test_validate_market_polygon_live_topic_rejected() -> None:
+    """Verify live market topic with polygon exchange is rejected.
+
+    Given a live market topic using polygon (no live feed),
+    When validate_topic is called,
+    Then it returns False because polygon has no live market publisher.
+    """
+    valid, msg = validate_topic("market.polygon.AAPL.candles.1m")
+    assert valid is False
+    assert "Unknown market feed exchange 'polygon'" in msg
+
+
 def test_system_settings_disallow_extra_segments() -> None:
     """Verify system.settings rejects extra segments.
 
@@ -3231,28 +3396,13 @@ def test_valid_prefix_patterns_are_accepted(monkeypatch: pytest.MonkeyPatch, pat
     When validate_subscription_pattern is called,
     Then it returns True with an empty message.
     """
-    monkeypatch.setattr(
-        "snapper.infrastructure.symbols.functions.get_available_exchanges",
-        lambda: ["kraken", "paper"],
-    )
-    monkeypatch.setattr(
-        "snapper.infrastructure.symbols.functions.get_available_symbols",
-        lambda: {"BTC-USD"},
-    )
+    monkeypatch.setattr(validation, "get_available_exchanges", lambda: ["kraken", "paper"])
+    monkeypatch.setattr(validation, "get_market_subscribe_exchanges", lambda: ["kraken"])
+    monkeypatch.setattr(validation, "get_replay_source_exchanges", lambda: ["kraken"])
+    monkeypatch.setattr(validation, "get_available_symbols", lambda: {"BTC-USD"})
     valid, message = validate_subscription_pattern(pattern)
     assert valid is True
     assert message == ""
-
-
-@pytest.fixture(autouse=True)
-def _patch_available_symbols(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(functions, "get_available_symbols", lambda: ["BTC-USD", "ETH-EUR"])
-    monkeypatch.setattr(
-        functions,
-        "get_available_exchanges",
-        lambda: ["kraken", "zonda", "walutomat", "paper"],
-    )
-    yield
 
 
 def test_validate_market_topic_requires_timeframe() -> None:

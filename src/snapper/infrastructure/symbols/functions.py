@@ -26,6 +26,8 @@ Example:
     "BTC-USD"
 """
 
+from snapper.core.types import MarketSubscribeExchange
+from snapper.core.types import ReplaySourceExchange
 from snapper.core.types import TradingExchange
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 
@@ -56,6 +58,8 @@ __all__ = [
     "get_available_kraken_rest_symbols",
     "validate_symbol",
     "get_available_exchanges",
+    "get_market_subscribe_exchanges",
+    "get_replay_source_exchanges",
     "get_available_polygon_rest_symbols",
     "get_available_walutomat_rest_symbols",
     "_get_db_mapper",
@@ -487,9 +491,28 @@ def get_available_symbols() -> list[str]:
 
 
 def get_available_exchanges() -> list[TradingExchange]:
-    """Get list of supported trading exchanges.
+    """Get list of order-capable trading exchanges.
 
     Returns:
-        List of exchange identifiers for live trading support.
+        List of exchange identifiers for order execution (paper + live venues).
     """
     return ["kraken", "paper", "walutomat", "zonda"]
+
+
+def get_market_subscribe_exchanges() -> list[MarketSubscribeExchange]:
+    """Get exchanges that provide live market data feeds.
+
+    Returns:
+        List of live feed exchange identifiers (no paper, no polygon).
+    """
+    return ["kraken", "walutomat", "zonda"]
+
+
+def get_replay_source_exchanges() -> list[ReplaySourceExchange]:
+    """Get exchanges valid as paper replay data sources.
+
+    Returns:
+        List of exchange identifiers that can be replayed in paper mode.
+        Excludes 'paper' — paper is the consumer, not a source.
+    """
+    return ["kraken", "polygon", "walutomat", "zonda"]

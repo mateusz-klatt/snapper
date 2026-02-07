@@ -59,6 +59,8 @@ from collections.abc import Callable
 
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols
+from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
+from snapper.infrastructure.symbols.functions import get_replay_source_exchanges
 
 __all__ = ["validate_topic", "validate_subscription_pattern", "TopicValidationError"]
 logger = logging.getLogger(__name__)
@@ -249,7 +251,7 @@ def _validate_market_topic(topic: str) -> tuple[bool, str]:
         valid_inst, err_inst = _validate_instrument(instrument)
         if not valid_inst:
             return False, err_inst
-        valid_exch, err_exch = _validate_exchange(exchange)
+        valid_exch, err_exch = _validate_market_source(exchange)
         if not valid_exch:
             return False, err_exch
         return _validate_market_data_type(data_type, len(segments), timeframe, exchange, instrument)
@@ -263,11 +265,9 @@ def _validate_market_topic(topic: str) -> tuple[bool, str]:
     valid_inst, err_inst = _validate_instrument(instrument)
     if not valid_inst:
         return False, err_inst
-    valid_exch, err_exch = _validate_exchange(source_exchange)
+    valid_exch, err_exch = _validate_replay_source(source_exchange)
     if not valid_exch:
         return False, err_exch
-    if source_exchange == "paper":
-        return False, "Paper market replay source exchange cannot be 'paper'"
     return _validate_market_data_type(
         data_type,
         len(segments),
@@ -427,6 +427,9 @@ def _validate_feed_heartbeat(segments: list[str]) -> tuple[bool, str]:
         system.heartbeats.feed.{exchange} — live feed (4 segments)
         system.heartbeats.feed.paper.{source} — paper replay (5 segments)
 
+    Live feed exchange must be in MarketSubscribeExchange (kraken/zonda/walutomat).
+    Paper source must be in ReplaySourceExchange (kraken/zonda/walutomat/polygon).
+
     Args:
         segments: Split topic segments starting with system.heartbeats.feed.
 
@@ -436,11 +439,11 @@ def _validate_feed_heartbeat(segments: list[str]) -> tuple[bool, str]:
     if len(segments) == 4:
         if segments[3] == "paper":
             return False, "system.heartbeats.feed.paper requires source_exchange (5 segments)"
-        return True, ""
+        return _validate_market_source(segments[3])
     if len(segments) == 5 and segments[3] == "paper":
         if segments[4] == "paper":
             return False, "system.heartbeats.feed.paper.{source}: source cannot be 'paper'"
-        return True, ""
+        return _validate_replay_source(segments[4])
     return (
         False,
         "system.heartbeats.feed requires exchange (4 seg) or feed.paper.{source} (5 seg)",
@@ -610,15 +613,13 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         if len(segments) == 1:
             return True, ""
         if len(segments) >= 2 and segments[1] != "paper":
-            return _validate_exchange_instrument_segments(segments, 1, _validate_exchange)
+            return _validate_exchange_instrument_segments(segments, 1, _validate_market_source)
         if len(segments) == 2:
             return True, ""
         source_exchange = segments[2]
-        valid_source, source_err = _validate_exchange(source_exchange)
+        valid_source, source_err = _validate_replay_source(source_exchange)
         if not valid_source:
             return False, source_err
-        if source_exchange == "paper":
-            return False, "Paper market replay source exchange cannot be 'paper'"
         if len(segments) >= 4:
             valid_inst, inst_err = _validate_instrument(segments[3])
             if not valid_inst:
@@ -650,7 +651,7 @@ def _validate_instrument(instrument: str) -> tuple[bool, str]:
 
 
 def _validate_exchange(exchange: str) -> tuple[bool, str]:
-    """Validate exchange name exists in supported exchanges.
+    """Validate exchange for order-capable domain (paper + live venues).
 
     Args:
         exchange: Exchange name (e.g., "kraken").
@@ -665,6 +666,50 @@ def _validate_exchange(exchange: str) -> tuple[bool, str]:
         return (
             False,
             f"Unknown exchange '{exchange}'. Must be one of: {', '.join(sorted(supported_exchanges))}",
+        )
+    return True, ""
+
+
+def _validate_market_source(exchange: str) -> tuple[bool, str]:
+    """Validate exchange for live market data topics (kraken/zonda/walutomat).
+
+    Args:
+        exchange: Exchange name from market topic segment.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if not exchange:
+        return False, "Exchange cannot be empty"
+    valid = set(get_market_subscribe_exchanges())
+    if exchange not in valid:
+        return (
+            False,
+            f"Unknown market feed exchange '{exchange}'. "
+            f"Must be one of: {', '.join(sorted(valid))}",
+        )
+    return True, ""
+
+
+def _validate_replay_source(exchange: str) -> tuple[bool, str]:
+    """Validate source exchange for paper replay topics.
+
+    Valid sources: kraken, zonda, walutomat, polygon.
+    Paper is excluded — it is the consumer, not a data source.
+
+    Args:
+        exchange: Source exchange name from paper market topic.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if not exchange:
+        return False, "Source exchange cannot be empty"
+    valid = set(get_replay_source_exchanges())
+    if exchange not in valid:
+        return (
+            False,
+            f"Unknown replay source '{exchange}'. Must be one of: {', '.join(sorted(valid))}",
         )
     return True, ""
 

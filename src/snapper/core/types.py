@@ -10,7 +10,11 @@ Type Aliases:
     OrderStatus: Current state of an order in its lifecycle.
     FillStatus: Result of an order fill attempt.
     ExecutionMode: Trading mode (live/paper).
-    TradingExchange: Supported trading venues.
+    OrderExchange: Order-capable exchanges.
+    TradingExchange: Alias for OrderExchange (backward compat).
+    MarketSubscribeExchange: Live market feed exchanges.
+    ReplaySourceExchange: Valid paper replay source exchanges.
+    AllExchange: All known exchange identifiers.
     HealthStatus: Component health state.
     ProcessLifecycleType: Process duration type.
     ProcessRoleType: Process role in the system.
@@ -69,8 +73,20 @@ Events:
 ExecutionMode = Literal["live", "paper"]
 """Trading mode: 'live' for real money, 'paper' for simulation."""
 
-TradingExchange = Literal["paper", "kraken", "zonda", "walutomat"]
-"""Supported trading venues including paper trading simulator."""
+OrderExchange = Literal["paper", "kraken", "zonda", "walutomat"]
+"""Exchanges capable of order execution (paper simulator + live venues)."""
+
+TradingExchange = OrderExchange
+"""Alias for OrderExchange — backward compatibility during type split."""
+
+MarketSubscribeExchange = Literal["kraken", "zonda", "walutomat"]
+"""Live market feed exchanges (no paper — paper replays from these)."""
+
+ReplaySourceExchange = Literal["kraken", "zonda", "walutomat", "polygon"]
+"""Valid source exchanges for paper replay (paper excluded — it is the consumer, not source)."""
+
+AllExchange = Literal["paper", "kraken", "zonda", "walutomat", "polygon"]
+"""All known exchange identifiers across all domains."""
 
 HealthStatus = Literal["healthy", "warning", "error"]
 """Component health state for monitoring and alerting."""
@@ -84,12 +100,16 @@ ProcessRoleType = Literal["core", "task", "strategy", "backtest"]
 ProcessRunStatusType = Literal["running", "succeeded", "failed", "cancelled"]
 """Current execution state of a managed process."""
 __all__ = [
+    "AllExchange",
     "TradeSide",
     "OrderType",
     "OrderStatus",
     "OrderEventType",
+    "OrderExchange",
     "FillStatus",
     "ExecutionMode",
+    "MarketSubscribeExchange",
+    "ReplaySourceExchange",
     "TradingExchange",
     "HealthStatus",
     "ProcessLifecycleType",
