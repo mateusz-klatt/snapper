@@ -17,7 +17,6 @@ import uuid
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from typing import Any
 
 import jwt
 from loguru import logger
@@ -28,6 +27,8 @@ from snapper.api.auth.errors.ws_token import WsTokenError
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.schemas.ws_token import WsTokenResult
 from snapper.api.auth.services.ws_token_store import WsTokenStore
+from snapper.application.services.settings import SettingsService
+from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 
@@ -86,10 +87,10 @@ class WsTokenService:
         if self._initialized:
             return
         self._initialized = True
-        self._settings: Any = None
+        self._settings: AppSettings | None = None
         self._store = WsTokenStore()
 
-    def set_settings_service(self, settings_service: Any) -> None:
+    def set_settings_service(self, settings_service: SettingsService) -> None:
         """Inject settings service for configuration.
 
         Args:
@@ -98,7 +99,7 @@ class WsTokenService:
         self._settings = get_settings_with_service(settings_service)
 
     @property
-    def settings(self) -> Any:
+    def settings(self) -> AppSettings:
         """Get settings, lazily loading defaults if not injected.
 
         Returns:

@@ -9,17 +9,18 @@ import uuid
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from typing import Any
 from typing import Final
 
 import jwt
 from loguru import logger
 from pydantic import ValidationError
 
+from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
+from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 
@@ -62,11 +63,11 @@ class TokenManager:
         if self._initialized:
             return
         self._initialized = True
-        self._settings: Any = None
+        self._settings: AppSettings | None = None
         self._blacklisted_tokens: dict[str, float] = {}
         self._blacklist_grace_period = BLACKLIST_GRACE_PERIOD_SECONDS
 
-    def set_settings_service(self, settings_service: Any) -> None:
+    def set_settings_service(self, settings_service: SettingsService) -> None:
         """Set settings service for configuration.
 
         Args:
@@ -75,7 +76,7 @@ class TokenManager:
         self._settings = get_settings_with_service(settings_service)
 
     @property
-    def settings(self) -> Any:
+    def settings(self) -> AppSettings:
         """Get application settings, lazy-loading if needed.
 
         Returns:

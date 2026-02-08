@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
+from typing import Final
 from typing import Literal
 from typing import cast
 
@@ -77,6 +78,28 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
 _WS_ORDER_TIMEOUT_SECONDS = 10.0
+
+_CCXT_STATUS_MAP: Final[dict[str, OrderStatusEnum]] = {
+    "open": OrderStatusEnum.OPEN,
+    "closed": OrderStatusEnum.CLOSED,
+    "canceled": OrderStatusEnum.CANCELED,
+    "cancelled": OrderStatusEnum.CANCELED,
+    "expired": OrderStatusEnum.EXPIRED,
+    "pending": OrderStatusEnum.PENDING,
+}
+
+_CCXT_SIDE_MAP: Final[dict[str, OrderSideEnum]] = {
+    "buy": OrderSideEnum.BUY,
+    "sell": OrderSideEnum.SELL,
+}
+
+_CCXT_TYPE_MAP: Final[dict[str, OrderTypeEnum]] = {
+    "market": OrderTypeEnum.MARKET,
+    "limit": OrderTypeEnum.LIMIT,
+    "stop": OrderTypeEnum.STOP_LOSS,
+    "stop-loss": OrderTypeEnum.STOP_LOSS,
+    "take-profit": OrderTypeEnum.TAKE_PROFIT,
+}
 
 
 class KrakenExchangeClient(ExchangeClientBase):
@@ -1417,35 +1440,21 @@ class KrakenExchangeClient(ExchangeClientBase):
         raise
 
     def _convert_ccxt_order(self, ccxt_order: dict[str, Any]) -> ExchangeOrderSnapshot:
-        status_map = {
-            "open": OrderStatusEnum.OPEN,
-            "closed": OrderStatusEnum.CLOSED,
-            "canceled": OrderStatusEnum.CANCELED,
-            "cancelled": OrderStatusEnum.CANCELED,
-            "expired": OrderStatusEnum.EXPIRED,
-            "pending": OrderStatusEnum.PENDING,
-        }
-        side_map = {
-            "buy": OrderSideEnum.BUY,
-            "sell": OrderSideEnum.SELL,
-        }
-        type_map = {
-            "market": OrderTypeEnum.MARKET,
-            "limit": OrderTypeEnum.LIMIT,
-            "stop": OrderTypeEnum.STOP_LOSS,
-            "stop-loss": OrderTypeEnum.STOP_LOSS,
-            "take-profit": OrderTypeEnum.TAKE_PROFIT,
-        }
+        """Convert a CCXT order dict to an ExchangeOrderSnapshot.
+
+        Uses module-level _CCXT_STATUS_MAP, _CCXT_SIDE_MAP, and _CCXT_TYPE_MAP
+        to translate CCXT string values to internal enum types.
+        """
         native_symbol = ccxt_to_native(ccxt_order["symbol"])
         return ExchangeOrderSnapshot(
             id=ccxt_order["id"],
             client_order_id=ccxt_order.get("clientOrderId"),
             symbol=native_symbol,
-            side=side_map[ccxt_order["side"]],
-            type=type_map[ccxt_order["type"]],
+            side=_CCXT_SIDE_MAP[ccxt_order["side"]],
+            type=_CCXT_TYPE_MAP[ccxt_order["type"]],
             amount=float(ccxt_order["amount"]),
             price=float(ccxt_order["price"]) if ccxt_order["price"] else None,
-            status=status_map[ccxt_order["status"]],
+            status=_CCXT_STATUS_MAP[ccxt_order["status"]],
             filled=float(ccxt_order.get("filled", 0)),
             remaining=float(ccxt_order.get("remaining", 0)),
             timestamp=ccxt_order["timestamp"] / 1000.0 if ccxt_order["timestamp"] else time.time(),

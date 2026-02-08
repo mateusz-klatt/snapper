@@ -22,6 +22,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import MarketDataType
+from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -63,7 +64,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.heartbeat_seq = 0
         self._last_data_timestamps: dict[str, float] = {}
         self._unknown_symbols_logged: set[str] = set()
-        self.repository: Any = None
+        self.repository: Repository | None = None
         self._instrument_cache: dict[str, int] = {}
         self._exchange_client: T | None = None
 

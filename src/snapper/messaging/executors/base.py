@@ -23,6 +23,7 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.types import CancelEventType
 from snapper.core.types import OrderEventType
 from snapper.core.types import ReplaceEventType
+from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -77,7 +78,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.running = False
         self.heartbeat_seq = 0
         self.exchange_client: T | None = None
-        self.repository: Any = None
+        self.repository: Repository | None = None
         self.pending_orders: dict[str, OrderRequestEnvelope] = {}
         self.client_by_exchange: dict[str, str] = {}
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}

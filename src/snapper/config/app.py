@@ -32,6 +32,7 @@ Example:
 
 from typing import Any
 
+from snapper.application.services.settings import SettingsService
 from snapper.config.bootstrap import BootstrapSettingsLoader
 
 __all__ = ["AppSettings"]
@@ -50,7 +51,9 @@ class AppSettings:
     """
 
     def __init__(
-        self, bootstrap_settings: BootstrapSettingsLoader, settings_service: Any | None = None
+        self,
+        bootstrap_settings: BootstrapSettingsLoader,
+        settings_service: SettingsService | None = None,
     ) -> None:
         """Initialize AppSettings with bootstrap and optional database access.
 

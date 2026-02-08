@@ -49,6 +49,7 @@ from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.settings import AppSettings
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
+from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 
 
@@ -786,7 +787,7 @@ class ProcessLauncherService:
 
     async def _persist_config_after_start(
         self,
-        repository: Any,
+        repository: Repository,
         config_key: str,
         config_dict: dict[str, Any],
         config: ProcessConfigModel,

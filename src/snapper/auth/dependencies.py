@@ -17,12 +17,14 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 
+from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
+from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 
@@ -156,9 +158,9 @@ class CSRFManager:
         if self._initialized:
             return
         self._initialized = True
-        self._settings: Any = None
+        self._settings: AppSettings | None = None
 
-    def set_settings_service(self, settings_service: Any) -> None:
+    def set_settings_service(self, settings_service: SettingsService) -> None:
         """Set settings service.
 
         Args:
@@ -167,7 +169,7 @@ class CSRFManager:
         self._settings = get_settings_with_service(settings_service)
 
     @property
-    def settings(self) -> Any:
+    def settings(self) -> AppSettings:
         """Get application settings, lazy-loading if needed.
 
         Returns:

@@ -66,6 +66,16 @@ export const ConfiguredProcessSchema = z
   })
   .strict()
 
+export const ConnectionStatsSchemaSchema = z
+  .object({
+    active_connections: z.number().int(),
+    zmq_subscribers: z.number().int(),
+    subscriber_tasks: z.number().int(),
+    active_topics: z.number().int(),
+    active_clients: z.number().int(),
+  })
+  .strict()
+
 export const ExecutionRecordSchema = z
   .object({
     id: z.number().int(),
@@ -275,6 +285,21 @@ export const SubscriptionsStatsSchema = z
   })
   .strict()
 
+export const TopicMetricSnapshotSchemaSchema = z
+  .object({
+    active_subscribers: z.number().int(),
+    received: z.number().int(),
+    forwarded: z.number().int(),
+    throttled: z.number().int(),
+    dropped: z.number().int(),
+    timeout: z.number().int(),
+    errors: z.number().int(),
+    last_message_ts: z.number(),
+    throttle_ms: z.number().int().nullable().optional(),
+    pattern: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const TradingSignalSchema = z
   .object({
     id: z.number().int(),
@@ -357,7 +382,7 @@ export const HealthCheckResponseSchema = z
     status: z.enum(['healthy', 'unhealthy', 'warning', 'error']),
     timestamp: z.iso.datetime(),
     version: z.string(),
-    connections: z.record(z.string(), z.unknown()),
+    connections: ConnectionStatsSchemaSchema,
     topics: HealthTopicsSchema,
   })
   .strict()
@@ -424,8 +449,8 @@ export const WsStatsResponseSchema = z
   .object({
     websocket: WebSocketStatsSchema,
     zmq_bridge: ZmqBridgeStatsSchema,
-    connections: z.record(z.string(), z.unknown()),
-    topics: z.record(z.string(), z.unknown()),
+    connections: ConnectionStatsSchemaSchema,
+    topics: z.record(z.string(), TopicMetricSnapshotSchemaSchema),
     subscriptions: SubscriptionsStatsSchema,
     config: WsStatsConfigSchema,
   })
@@ -437,8 +462,8 @@ export const ZmqHealthResponseSchema = z
     timestamp: z.iso.datetime(),
     components: ZmqComponentsSchema,
     config: ZmqConfigSchema,
-    connections: z.record(z.string(), z.unknown()),
-    message_stats: z.record(z.string(), z.unknown()),
+    connections: ConnectionStatsSchemaSchema,
+    message_stats: z.record(z.string(), TopicMetricSnapshotSchemaSchema),
     errors: z.array(z.string()).optional(),
   })
   .strict()
@@ -474,6 +499,7 @@ export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
 export type CandleSnapshot = z.infer<typeof CandleSnapshotSchema>
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
+export type ConnectionStatsSchema = z.infer<typeof ConnectionStatsSchemaSchema>
 export type ExecutionRecord = z.infer<typeof ExecutionRecordSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>
@@ -493,6 +519,7 @@ export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type StrategyStatusPayload = z.infer<typeof StrategyStatusPayloadSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
+export type TopicMetricSnapshotSchema = z.infer<typeof TopicMetricSnapshotSchemaSchema>
 export type TradingSignal = z.infer<typeof TradingSignalSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>
 export type ValidationError = z.infer<typeof ValidationErrorSchema>

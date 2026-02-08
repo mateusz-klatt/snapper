@@ -26,7 +26,6 @@ Example:
 """
 
 from functools import lru_cache
-from typing import Any
 
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
@@ -71,7 +70,7 @@ def get_settings() -> AppSettings:
     return AppSettings(bootstrap)
 
 
-def get_settings_with_service(settings_service: Any) -> AppSettings:
+def get_settings_with_service(settings_service: SettingsService) -> AppSettings:
     """Create AppSettings with database access.
 
     Unlike ``get_settings()``, this function creates a new instance each time

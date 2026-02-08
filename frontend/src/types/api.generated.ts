@@ -991,6 +991,49 @@ export type Components = {
             count: number;
         };
         /**
+         * ConnectionStatsSchema
+         * @description Connection-level statistics from the ZMQ-WebSocket bridge.
+         *
+         *     Attributes:
+         *         active_connections: Number of active WebSocket connections.
+         *         zmq_subscribers: Number of active ZMQ subscriber sockets.
+         *         subscriber_tasks: Number of running subscriber asyncio tasks.
+         *         active_topics: Number of topics with at least one subscriber.
+         *         active_clients: Number of unique connected clients.
+         */
+        ConnectionStatsSchema: {
+            /**
+             * Active Connections
+             * @description Active WebSocket connections
+             * @default 0
+             */
+            active_connections: number;
+            /**
+             * Zmq Subscribers
+             * @description Active ZMQ subscriber sockets
+             * @default 0
+             */
+            zmq_subscribers: number;
+            /**
+             * Subscriber Tasks
+             * @description Running subscriber tasks
+             * @default 0
+             */
+            subscriber_tasks: number;
+            /**
+             * Active Topics
+             * @description Topics with subscribers
+             * @default 0
+             */
+            active_topics: number;
+            /**
+             * Active Clients
+             * @description Unique connected clients
+             * @default 0
+             */
+            active_clients: number;
+        };
+        /**
          * CreateUserRequest
          * @description Create user request schema.
          *
@@ -1077,7 +1120,7 @@ export type Components = {
          *         status: Overall service health status (healthy/unhealthy).
          *         timestamp: Timestamp of the health check.
          *         version: Application version string.
-         *         connections: Connection statistics dictionary.
+         *         connections: Connection statistics.
          *         topics: Topic availability information.
          */
         HealthCheckResponse: {
@@ -1098,13 +1141,8 @@ export type Components = {
              * @description Application version
              */
             version: string;
-            /**
-             * Connections
-             * @description Connection statistics
-             */
-            connections: {
-                [key: string]: unknown;
-            };
+            /** @description Connection statistics */
+            connections: Components["schemas"]["ConnectionStatsSchema"];
             /** @description Topics availability */
             topics: Components["schemas"]["HealthTopics"];
         };
@@ -1909,6 +1947,82 @@ export type Components = {
             strategies?: Components["schemas"]["StrategyStatusPayload"][];
         };
         /**
+         * TopicMetricSnapshotSchema
+         * @description Point-in-time snapshot of metrics for a single topic.
+         *
+         *     Attributes:
+         *         active_subscribers: Current subscriber count for this topic.
+         *         received: Total messages received from ZMQ.
+         *         forwarded: Messages successfully forwarded to clients.
+         *         throttled: Messages dropped due to throttling.
+         *         dropped: Messages dropped due to backpressure.
+         *         timeout: Messages that timed out during send.
+         *         errors: Number of errors encountered.
+         *         last_message_ts: Timestamp of last received message.
+         *         throttle_ms: Configured throttle interval (None if unconfigured).
+         *         pattern: ZMQ subscription pattern (None if unconfigured).
+         */
+        TopicMetricSnapshotSchema: {
+            /**
+             * Active Subscribers
+             * @description Current subscriber count
+             * @default 0
+             */
+            active_subscribers: number;
+            /**
+             * Received
+             * @description Total messages received
+             * @default 0
+             */
+            received: number;
+            /**
+             * Forwarded
+             * @description Messages forwarded to clients
+             * @default 0
+             */
+            forwarded: number;
+            /**
+             * Throttled
+             * @description Messages dropped by throttling
+             * @default 0
+             */
+            throttled: number;
+            /**
+             * Dropped
+             * @description Messages dropped by backpressure
+             * @default 0
+             */
+            dropped: number;
+            /**
+             * Timeout
+             * @description Messages timed out during send
+             * @default 0
+             */
+            timeout: number;
+            /**
+             * Errors
+             * @description Errors encountered
+             * @default 0
+             */
+            errors: number;
+            /**
+             * Last Message Ts
+             * @description Last message timestamp
+             * @default 0
+             */
+            last_message_ts: number;
+            /**
+             * Throttle Ms
+             * @description Throttle interval ms
+             */
+            throttle_ms?: number | null;
+            /**
+             * Pattern
+             * @description ZMQ subscription pattern
+             */
+            pattern?: string | null;
+        };
+        /**
          * TradingSignal
          * @description Trading signal response schema.
          *
@@ -2115,19 +2229,14 @@ export type Components = {
             websocket: Components["schemas"]["WebSocketStats"];
             /** @description ZMQ bridge statistics */
             zmq_bridge: Components["schemas"]["ZmqBridgeStats"];
-            /**
-             * Connections
-             * @description Connection statistics
-             */
-            connections: {
-                [key: string]: unknown;
-            };
+            /** @description Connection statistics */
+            connections: Components["schemas"]["ConnectionStatsSchema"];
             /**
              * Topics
              * @description Topic message statistics
              */
             topics: {
-                [key: string]: unknown;
+                [key: string]: Components["schemas"]["TopicMetricSnapshotSchema"];
             };
             /** @description Subscription details */
             subscriptions: Components["schemas"]["SubscriptionsStats"];
@@ -2235,19 +2344,14 @@ export type Components = {
             components: Components["schemas"]["ZmqComponents"];
             /** @description ZMQ configuration */
             config: Components["schemas"]["ZmqConfig"];
-            /**
-             * Connections
-             * @description Connection statistics
-             */
-            connections: {
-                [key: string]: unknown;
-            };
+            /** @description Connection statistics */
+            connections: Components["schemas"]["ConnectionStatsSchema"];
             /**
              * Message Stats
              * @description Message statistics per topic
              */
             message_stats: {
-                [key: string]: unknown;
+                [key: string]: Components["schemas"]["TopicMetricSnapshotSchema"];
             };
             /**
              * Errors

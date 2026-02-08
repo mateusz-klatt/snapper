@@ -132,7 +132,7 @@ class ZmqMessageLogger(RegisterableProcess):
             self.audit_path = Path("data/zmq_audit.jsonl")
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
         self.context: zmq.asyncio.Context | None = None
-        self.subscriber: Any = None
+        self.subscriber: zmq.asyncio.Socket | None = None
         self.running = False
         self.message_count = 0
         self.bytes_received = 0
@@ -224,6 +224,7 @@ class ZmqMessageLogger(RegisterableProcess):
         Handles ZMQ errors gracefully.
         """
         logger.info("ZMQ Message Logger running - press Ctrl+C to stop")
+        assert self.subscriber is not None
         while self.running:
             try:
                 topic_bytes, payload_bytes = await self.subscriber.recv_multipart()

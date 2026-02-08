@@ -24,6 +24,7 @@ from snapper.application.process_manager.registry import get_registered_processe
 from snapper.config.settings import AppSettings
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
+from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 
 
@@ -235,8 +236,8 @@ class ProcessRegistrySyncer:
         self,
         name: str,
         entry: ProcessRegistryEntry,
-        existing: Any,
-        repository: Any,
+        existing: Setting,
+        repository: Repository,
     ) -> None:
         """Update database config for an existing registered process.
 

@@ -5,7 +5,6 @@ insight into system status, ZMQ bridge health, and WebSocket statistics.
 """
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import Field
 
@@ -14,6 +13,52 @@ from snapper.core.types import ComponentStatus
 from snapper.core.types import HealthStatus
 
 _CONN_STATS_DESC = "Connection statistics"
+
+
+class ConnectionStatsSchema(StrictApiSchema):
+    """Connection-level statistics from the ZMQ-WebSocket bridge.
+
+    Attributes:
+        active_connections: Number of active WebSocket connections.
+        zmq_subscribers: Number of active ZMQ subscriber sockets.
+        subscriber_tasks: Number of running subscriber asyncio tasks.
+        active_topics: Number of topics with at least one subscriber.
+        active_clients: Number of unique connected clients.
+    """
+
+    active_connections: int = Field(default=0, description="Active WebSocket connections")
+    zmq_subscribers: int = Field(default=0, description="Active ZMQ subscriber sockets")
+    subscriber_tasks: int = Field(default=0, description="Running subscriber tasks")
+    active_topics: int = Field(default=0, description="Topics with subscribers")
+    active_clients: int = Field(default=0, description="Unique connected clients")
+
+
+class TopicMetricSnapshotSchema(StrictApiSchema):
+    """Point-in-time snapshot of metrics for a single topic.
+
+    Attributes:
+        active_subscribers: Current subscriber count for this topic.
+        received: Total messages received from ZMQ.
+        forwarded: Messages successfully forwarded to clients.
+        throttled: Messages dropped due to throttling.
+        dropped: Messages dropped due to backpressure.
+        timeout: Messages that timed out during send.
+        errors: Number of errors encountered.
+        last_message_ts: Timestamp of last received message.
+        throttle_ms: Configured throttle interval (None if unconfigured).
+        pattern: ZMQ subscription pattern (None if unconfigured).
+    """
+
+    active_subscribers: int = Field(default=0, description="Current subscriber count")
+    received: int = Field(default=0, description="Total messages received")
+    forwarded: int = Field(default=0, description="Messages forwarded to clients")
+    throttled: int = Field(default=0, description="Messages dropped by throttling")
+    dropped: int = Field(default=0, description="Messages dropped by backpressure")
+    timeout: int = Field(default=0, description="Messages timed out during send")
+    errors: int = Field(default=0, description="Errors encountered")
+    last_message_ts: float = Field(default=0.0, description="Last message timestamp")
+    throttle_ms: int | None = Field(default=None, description="Throttle interval ms")
+    pattern: str | None = Field(default=None, description="ZMQ subscription pattern")
 
 
 class HealthTopics(StrictApiSchema):
@@ -38,14 +83,14 @@ class HealthCheckResponse(StrictApiSchema):
         status: Overall service health status (healthy/unhealthy).
         timestamp: Timestamp of the health check.
         version: Application version string.
-        connections: Connection statistics dictionary.
+        connections: Connection statistics.
         topics: Topic availability information.
     """
 
     status: HealthStatus = Field(description="Overall service health status")
     timestamp: datetime = Field(description="Timestamp of the health check")
     version: str = Field(description="Application version")
-    connections: dict[str, Any] = Field(description=_CONN_STATS_DESC)
+    connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
     topics: HealthTopics = Field(description="Topics availability")
 
 
@@ -93,8 +138,10 @@ class ZmqHealthResponse(StrictApiSchema):
     timestamp: datetime = Field(description="Timestamp of the health check")
     components: ZmqComponents = Field(description="Component status details")
     config: ZmqConfig = Field(description="ZMQ configuration")
-    connections: dict[str, Any] = Field(description=_CONN_STATS_DESC)
-    message_stats: dict[str, Any] = Field(description="Message statistics per topic")
+    connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
+    message_stats: dict[str, TopicMetricSnapshotSchema] = Field(
+        description="Message statistics per topic"
+    )
     errors: list[str] = Field(default_factory=list, description="Error messages if unhealthy")
 
 
@@ -167,8 +214,8 @@ class WsStatsResponse(StrictApiSchema):
 
     websocket: WebSocketStats = Field(description="WebSocket statistics")
     zmq_bridge: ZmqBridgeStats = Field(description="ZMQ bridge statistics")
-    connections: dict[str, Any] = Field(description=_CONN_STATS_DESC)
-    topics: dict[str, Any] = Field(description="Topic message statistics")
+    connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
+    topics: dict[str, TopicMetricSnapshotSchema] = Field(description="Topic message statistics")
     subscriptions: SubscriptionsStats = Field(description="Subscription details")
     config: WsStatsConfig = Field(description="Configuration details")
 
@@ -184,15 +231,17 @@ class SettingCategoriesResponse(StrictApiSchema):
 
 
 __all__ = [
+    "ConnectionStatsSchema",
     "HealthCheckResponse",
     "HealthTopics",
-    "WsStatsResponse",
-    "WsStatsConfig",
-    "WebSocketStats",
-    "ZmqBridgeStats",
+    "SettingCategoriesResponse",
     "SubscriptionsStats",
-    "ZmqHealthResponse",
+    "TopicMetricSnapshotSchema",
+    "WebSocketStats",
+    "WsStatsConfig",
+    "WsStatsResponse",
+    "ZmqBridgeStats",
     "ZmqComponents",
     "ZmqConfig",
-    "SettingCategoriesResponse",
+    "ZmqHealthResponse",
 ]

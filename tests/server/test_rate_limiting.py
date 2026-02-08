@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 from fastapi import HTTPException
 from slowapi import Limiter
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from snapper.server.app import handle_rate_limit_exceeded
 from snapper.server.rate_limiting import LOGIN_RATE_LIMIT
@@ -83,6 +84,20 @@ class TestHandleRateLimitExceeded:
         response = handle_rate_limit_exceeded(mock_request, exc)
         assert response.status_code == 429
         assert response.headers["Retry-After"] == "900"
+
+    def test_returns_429_with_starlette_http_exception(self) -> None:
+        """Handler extracts detail from Starlette HTTPException subclasses.
+
+        Given: A Starlette HTTPException (same base as RateLimitExceeded),
+        When: handle_rate_limit_exceeded is called,
+        Then: Response uses .detail attribute, not str(exc).
+        """
+        mock_request = MagicMock()
+        mock_request.state = SimpleNamespace()
+        exc = StarletteHTTPException(status_code=429, detail="5 per 15 minutes")
+        response = handle_rate_limit_exceeded(mock_request, exc)
+        assert response.status_code == 429
+        assert b"Rate limit exceeded: 5 per 15 minutes" in response.body
 
     def test_no_retry_after_when_not_set(self) -> None:
         """Handler omits Retry-After header when view_rate_limit is absent.

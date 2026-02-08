@@ -44,6 +44,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -91,7 +92,7 @@ class ZondaExchangeClient(ExchangeClientBase):
         max_reconnect_attempts: int = 10,
         reconnect_delay: float = 2.0,
         enable_rate_limit: bool = True,
-        repository: Any | None = None,
+        repository: Repository | None = None,
     ) -> None:
         """Initialize Zonda exchange client.
 

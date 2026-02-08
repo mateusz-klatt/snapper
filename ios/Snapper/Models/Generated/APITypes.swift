@@ -265,6 +265,27 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
     let count: Int
 }
 
+struct ConnectionStatsSchema: Codable, Sendable {
+    /// Active WebSocket connections
+    let activeConnections: Int?
+    /// Active ZMQ subscriber sockets
+    let zmqSubscribers: Int?
+    /// Running subscriber tasks
+    let subscriberTasks: Int?
+    /// Topics with subscribers
+    let activeTopics: Int?
+    /// Unique connected clients
+    let activeClients: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case activeConnections = "active_connections"
+        case zmqSubscribers = "zmq_subscribers"
+        case subscriberTasks = "subscriber_tasks"
+        case activeTopics = "active_topics"
+        case activeClients = "active_clients"
+    }
+}
+
 struct CreateUserRequest: Codable, Sendable {
     let username: String
     let email: String?
@@ -319,7 +340,7 @@ struct HealthCheckResponse: Codable, Sendable {
     /// Application version
     let version: String
     /// Connection statistics
-    let connections: [String: AnyCodable]
+    let connections: ConnectionStatsSchema
     /// Topics availability
     let topics: HealthTopics
 }
@@ -688,6 +709,42 @@ struct SystemStatus: Codable, Sendable {
     let strategies: [StrategyStatusPayload]?
 }
 
+struct TopicMetricSnapshotSchema: Codable, Sendable {
+    /// Current subscriber count
+    let activeSubscribers: Int?
+    /// Total messages received
+    let received: Int?
+    /// Messages forwarded to clients
+    let forwarded: Int?
+    /// Messages dropped by throttling
+    let throttled: Int?
+    /// Messages dropped by backpressure
+    let dropped: Int?
+    /// Messages timed out during send
+    let timeout: Int?
+    /// Errors encountered
+    let errors: Int?
+    /// Last message timestamp
+    let lastMessageTs: Double?
+    /// Throttle interval ms
+    let throttleMs: Int?
+    /// ZMQ subscription pattern
+    let pattern: String?
+
+    enum CodingKeys: String, CodingKey {
+        case activeSubscribers = "active_subscribers"
+        case received
+        case forwarded
+        case throttled
+        case dropped
+        case timeout
+        case errors
+        case lastMessageTs = "last_message_ts"
+        case throttleMs = "throttle_ms"
+        case pattern
+    }
+}
+
 struct TradingSignal: Codable, Sendable {
     let id: Int
     let instrument: String
@@ -795,9 +852,9 @@ struct WsStatsResponse: Codable, Sendable {
     /// ZMQ bridge statistics
     let zmqBridge: ZmqBridgeStats
     /// Connection statistics
-    let connections: [String: AnyCodable]
+    let connections: ConnectionStatsSchema
     /// Topic message statistics
-    let topics: [String: AnyCodable]
+    let topics: [String: TopicMetricSnapshotSchema]
     /// Subscription details
     let subscriptions: SubscriptionsStats
     /// Configuration details
@@ -862,9 +919,9 @@ struct ZmqHealthResponse: Codable, Sendable {
     /// ZMQ configuration
     let config: ZmqConfig
     /// Connection statistics
-    let connections: [String: AnyCodable]
+    let connections: ConnectionStatsSchema
     /// Message statistics per topic
-    let messageStats: [String: AnyCodable]
+    let messageStats: [String: TopicMetricSnapshotSchema]
     /// Error messages if unhealthy
     let errors: [String]?
 

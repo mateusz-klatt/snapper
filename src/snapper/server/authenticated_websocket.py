@@ -28,14 +28,14 @@ Example:
         };
 """
 
-from typing import Any
-
 from fastapi import APIRouter
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from loguru import logger
 
+from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
+from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.settings import get_settings
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
@@ -89,8 +89,8 @@ def _ensure_zmq_bridge(manager: WebSocketConnectionManager) -> None:
 async def _authenticate_and_dispatch(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    ws_auth_manager: Any,
-    ws_token_service: Any,
+    ws_auth_manager: WebSocketAuthManager,
+    ws_token_service: WsTokenService,
     state: list[bool],
 ) -> None:
     """Authenticate, connect, and run the WebSocket dispatch loop.

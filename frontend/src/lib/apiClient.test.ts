@@ -587,7 +587,13 @@ describe('domain API methods', () => {
         status: 'healthy',
         timestamp: '2024-01-01T00:00:00Z',
         version: '1.0.0',
-        connections: { websocket: 5, zmq: 2 },
+        connections: {
+          active_connections: 5,
+          zmq_subscribers: 2,
+          subscriber_tasks: 1,
+          active_topics: 3,
+          active_clients: 4,
+        },
         topics: { available: 10, active: 3 },
       }),
     })

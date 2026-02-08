@@ -66,9 +66,11 @@ from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.executions import ExecutionRecord
+from snapper.api.schemas.health import ConnectionStatsSchema
 from snapper.api.schemas.health import HealthCheckResponse
 from snapper.api.schemas.health import HealthTopics
 from snapper.api.schemas.health import SubscriptionsStats
+from snapper.api.schemas.health import TopicMetricSnapshotSchema
 from snapper.api.schemas.health import WebSocketStats
 from snapper.api.schemas.health import WsStatsConfig
 from snapper.api.schemas.health import WsStatsResponse
@@ -85,6 +87,7 @@ from snapper.api.schemas.process import SystemStatus
 from snapper.api.schemas.signals import TradingSignal
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
+from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
 from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_authentication
@@ -128,7 +131,7 @@ def handle_rate_limit_exceeded(request: Request, exc: Exception) -> Response:
     Returns:
         JSON response with 429 status code and retry-after header.
     """
-    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+    detail = getattr(exc, "detail", str(exc))
     resp = Response(f"Rate limit exceeded: {detail}", status_code=429)
     retry_after = getattr(request.state, "view_rate_limit", None)
     if retry_after:
@@ -155,7 +158,7 @@ def get_repository_dependency() -> Repository:
     return get_repository(settings.db_url)
 
 
-async def _initialize_settings_service(settings: AppSettings) -> Any:
+async def _initialize_settings_service(settings: AppSettings) -> SettingsService:
     """Initialize and configure SettingsService with ZMQ synchronization.
 
     Args:
@@ -174,7 +177,7 @@ async def _initialize_settings_service(settings: AppSettings) -> Any:
     return settings_service
 
 
-def _configure_auth_services(settings_service: Any) -> None:
+def _configure_auth_services(settings_service: SettingsService) -> None:
     """Configure authentication services with SettingsService.
 
     Args:
@@ -683,7 +686,7 @@ def _create_monitoring_endpoints_router(
             status="healthy",
             timestamp=dt.datetime.now(dt.UTC),
             version="0.1.0",
-            connections=asdict(stats.connections),
+            connections=ConnectionStatsSchema(**asdict(stats.connections)),
             topics=HealthTopics(
                 available=len(get_all_topic_names()),
                 active=stats.connections.active_topics,
@@ -711,8 +714,8 @@ def _create_monitoring_endpoints_router(
         return WsStatsResponse(
             websocket=websocket_section,
             zmq_bridge=bridge_section,
-            connections=asdict(stats.connections),
-            topics={k: asdict(v) for k, v in stats.topics.items()},
+            connections=ConnectionStatsSchema(**asdict(stats.connections)),
+            topics={k: TopicMetricSnapshotSchema(**asdict(v)) for k, v in stats.topics.items()},
             subscriptions=SubscriptionsStats(
                 per_topic={topic: len(subs) for topic, subs in manager.topic_subscribers.items()},
                 per_client={
@@ -751,8 +754,10 @@ def _create_monitoring_endpoints_router(
                 active_connections=stats.connections.active_connections,
             ),
             config=ZmqConfig(available_topics=available_topics),
-            connections=asdict(stats.connections),
-            message_stats={k: asdict(v) for k, v in stats.topics.items()},
+            connections=ConnectionStatsSchema(**asdict(stats.connections)),
+            message_stats={
+                k: TopicMetricSnapshotSchema(**asdict(v)) for k, v in stats.topics.items()
+            },
             errors=error_messages,
         )
 

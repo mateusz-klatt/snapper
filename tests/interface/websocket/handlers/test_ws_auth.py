@@ -49,6 +49,7 @@ from snapper.auth.schemas.websocket import WebSocketAuthMessage
 from snapper.auth.schemas.websocket import WebSocketAuthResponse
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
+from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
@@ -4205,11 +4206,11 @@ class TestWebSocketAuthManager:
         ws_auth_manager.authenticated_connections[ws2] = user2
         ws_auth_manager.authenticated_connections[ws3] = user3
         stats = ws_auth_manager.get_connection_stats()
-        assert stats["total_authenticated"] == 3
-        assert "role_breakdown" in stats
-        assert stats["role_breakdown"]["viewer"] == 1
-        assert stats["role_breakdown"]["operator"] == 1
-        assert stats["role_breakdown"]["admin"] == 1
+        assert isinstance(stats, AuthConnectionStats)
+        assert stats.total_authenticated == 3
+        assert stats.role_breakdown["viewer"] == 1
+        assert stats.role_breakdown["operator"] == 1
+        assert stats.role_breakdown["admin"] == 1
 
 
 class TestSecureWebSocketUtilities:

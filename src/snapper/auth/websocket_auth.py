@@ -6,9 +6,9 @@ connections including session tracking and role-based access control.
 
 import asyncio
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import datetime
-from typing import Any
 
 from fastapi import WebSocket
 from loguru import logger
@@ -18,6 +18,34 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
+
+
+@dataclass(slots=True)
+class AuthUserEntry:
+    """Authenticated user summary for connection stats.
+
+    Attributes:
+        username: User's display name.
+        role: User's role value string.
+    """
+
+    username: str
+    role: str
+
+
+@dataclass(slots=True)
+class AuthConnectionStats:
+    """Statistics about authenticated WebSocket connections.
+
+    Attributes:
+        total_authenticated: Total number of authenticated connections.
+        role_breakdown: Mapping of role values to connection counts.
+        authenticated_users: List of authenticated user summaries.
+    """
+
+    total_authenticated: int = 0
+    role_breakdown: dict[str, int] = field(default_factory=dict)
+    authenticated_users: list[AuthUserEntry] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -230,26 +258,23 @@ class WebSocketAuthManager:
         }
         return role_hierarchy[user.role] >= role_hierarchy[required_role]
 
-    def get_connection_stats(self) -> dict[str, Any]:
+    def get_connection_stats(self) -> AuthConnectionStats:
         """Get statistics about authenticated connections.
 
         Returns:
-            Dict with total count, role breakdown, and user list.
+            AuthConnectionStats with total count, role breakdown, and user list.
         """
         role_counts: dict[str, int] = {}
         for user in self.authenticated_connections.values():
             role_counts[user.role.value] = role_counts.get(user.role.value, 0) + 1
-        return {
-            "total_authenticated": len(self.authenticated_connections),
-            "role_breakdown": role_counts,
-            "authenticated_users": [
-                {
-                    "username": user.username,
-                    "role": user.role.value,
-                }
+        return AuthConnectionStats(
+            total_authenticated=len(self.authenticated_connections),
+            role_breakdown=role_counts,
+            authenticated_users=[
+                AuthUserEntry(username=user.username, role=user.role.value)
                 for user in self.authenticated_connections.values()
             ],
-        }
+        )
 
     def get_connection_expiration(self, websocket: WebSocket) -> datetime | None:
         """Get session expiration for connection.

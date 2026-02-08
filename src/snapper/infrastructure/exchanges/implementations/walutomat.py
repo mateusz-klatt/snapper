@@ -39,6 +39,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from loguru import logger
 
+from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -100,7 +101,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         timeout: float = 5.0,
         api_key: str | None = None,
         private_key_data: str | None = None,
-        repository: Any | None = None,
+        repository: Repository | None = None,
     ) -> None:
         """Initialize Walutomat exchange client.
 

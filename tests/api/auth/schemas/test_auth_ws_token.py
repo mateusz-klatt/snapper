@@ -11,6 +11,7 @@ from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.user import UserProfile
+from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import ConnectionState
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
@@ -202,9 +203,10 @@ def test_connection_stats() -> None:
         id="2", username="admin", role=UserRole.ADMIN
     )
     stats = manager.get_connection_stats()
-    assert stats["total_authenticated"] == 2
-    assert stats["role_breakdown"][UserRole.VIEWER.value] == 1
-    assert stats["role_breakdown"][UserRole.ADMIN.value] == 1
+    assert isinstance(stats, AuthConnectionStats)
+    assert stats.total_authenticated == 2
+    assert stats.role_breakdown[UserRole.VIEWER.value] == 1
+    assert stats.role_breakdown[UserRole.ADMIN.value] == 1
 
 
 class DummyWebSocketV2:
