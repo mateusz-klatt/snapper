@@ -268,7 +268,7 @@ export const Strategies: React.FC = () => {
                 name={strategy.name}
                 running={strategy.running}
                 autoStartEnabled={strategy.enabled}
-                mode={strategy.mode as 'thread' | 'process'}
+                mode={strategy.mode}
                 health={healthStatuses[strategy.name]}
                 onStart={() => handleStartStrategy(strategy.name, strategy.mode)}
                 onStop={() => handleStopStrategy(strategy.name)}

@@ -18,6 +18,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
+from snapper.core.types import AssetType
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
@@ -716,7 +717,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
                     now = datetime.now(UTC)
-                    asset_type = (
+                    asset_type: AssetType = (
                         "equity"
                         if symbol_data.get("asset_class") == "tokenized_asset"
                         else "crypto"

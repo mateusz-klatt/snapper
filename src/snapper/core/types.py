@@ -24,6 +24,11 @@ Type Aliases:
     ProcessRoleType: Process role in the system.
     ProcessRunStatusType: Current process execution state.
     IndicatorBackend: Technical indicator computation backend.
+    UpsertResult: Outcome of an upsert operation.
+    AssetType: Financial asset class category.
+    MarketDataType: Type of market data in ZMQ topics.
+    SubscriptionAction: WebSocket subscription action.
+    SubscriptionStatus: WebSocket subscription result status.
 """
 
 from typing import Literal
@@ -120,8 +125,24 @@ ProcessRunStatusType = Literal["running", "succeeded", "failed", "cancelled"]
 IndicatorBackend = Literal["talib", "python"]
 """Technical indicator computation backend: 'talib' for TA-Lib C library, 'python' for pure Python."""
 
+UpsertResult = Literal["created", "updated", "unchanged"]
+"""Outcome of an upsert operation: row was created, updated, or left unchanged."""
+
+AssetType = Literal["crypto", "forex", "equity", "index"]
+"""Financial asset class category for symbol catalog entries."""
+
+MarketDataType = Literal["tick", "ticks", "trades", "book", "candles"]
+"""Type of market data for ZMQ market.* topics."""
+
+SubscriptionAction = Literal["subscribe", "unsubscribe"]
+"""WebSocket subscription action: subscribe to or unsubscribe from topics."""
+
+SubscriptionStatus = Literal["subscribed", "unsubscribed", "partial", "denied", "no_topics"]
+"""WebSocket subscription result status indicating the outcome of a subscription request."""
+
 __all__ = [
     "AllExchange",
+    "AssetType",
     "ComponentStatus",
     "TradeSide",
     "OrderType",
@@ -130,9 +151,12 @@ __all__ = [
     "OrderExchange",
     "FillStatus",
     "ExecutionMode",
+    "MarketDataType",
     "MarketSubscribeExchange",
     "ProcessMode",
     "ReplaySourceExchange",
+    "SubscriptionAction",
+    "SubscriptionStatus",
     "TradingExchange",
     "HealthStatus",
     "IndicatorBackend",
@@ -141,4 +165,5 @@ __all__ = [
     "ProcessRunStatusType",
     "StartProcessStatus",
     "StopProcessStatus",
+    "UpsertResult",
 ]

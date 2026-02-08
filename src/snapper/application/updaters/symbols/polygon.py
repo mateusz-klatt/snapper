@@ -15,6 +15,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
+from snapper.core.types import AssetType
 from snapper.data.models import SymbolCatalog
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
@@ -118,7 +119,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         quote_value: str | None = currency.upper() if currency else None
         return native_symbol, quote_value
 
-    def _determine_polygon_asset_type(self, ticker: str) -> str:
+    def _determine_polygon_asset_type(self, ticker: str) -> AssetType:
         """Determine asset type from Polygon ticker prefix.
 
         Args:

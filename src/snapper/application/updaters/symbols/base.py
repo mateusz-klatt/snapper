@@ -22,6 +22,8 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import AssetType
+from snapper.core.types import UpsertResult
 from snapper.data.models import Setting
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
@@ -116,7 +118,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         native_symbol: str,
         base: str,
         quote: str | None,
-        asset_type: str,
+        asset_type: AssetType,
         now: datetime,
     ) -> bool:
         """Upsert a SymbolCatalog row.
@@ -169,7 +171,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         channel: str,
         exchange_symbol: str,
         now: datetime,
-    ) -> str:
+    ) -> UpsertResult:
         """Upsert a SymbolAlias row.
 
         Args:
@@ -218,7 +220,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         source: str | None,
         reason: str | None,
         now: datetime,
-    ) -> str:
+    ) -> UpsertResult:
         """Upsert a SymbolExchangeCapability row.
 
         Args:

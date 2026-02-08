@@ -22,6 +22,8 @@ from snapper.core.types import FillStatus
 from snapper.core.types import HealthStatus
 from snapper.core.types import OrderStatus
 from snapper.core.types import OrderType
+from snapper.core.types import SubscriptionAction
+from snapper.core.types import SubscriptionStatus
 from snapper.core.types import TradeSide
 
 _TYPE_DESC = "Message type discriminator"
@@ -195,10 +197,8 @@ class WSSubscriptionSuccessResponse(WsMessageSchema):
     """
 
     type: Literal["subscription_success"] = Field("subscription_success", description=_TYPE_DESC)
-    action: Literal["subscribe", "unsubscribe"] = Field(
-        ..., description="The subscription action performed"
-    )
-    status: Literal["subscribed", "unsubscribed", "partial", "denied", "no_topics"] = Field(
+    action: SubscriptionAction = Field(..., description="The subscription action performed")
+    status: SubscriptionStatus = Field(
         ..., description="Result status of the subscription operation"
     )
     topics: list[str] = Field(..., description="Topics that were successfully processed")

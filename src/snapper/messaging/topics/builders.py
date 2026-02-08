@@ -33,6 +33,8 @@ Parser Functions:
 from dataclasses import dataclass
 from typing import Literal
 
+from snapper.core.types import MarketDataType
+
 OrderCommand = Literal["submit", "cancel", "replace"]
 """Valid order command types for orders.commands.* topics."""
 
@@ -40,9 +42,6 @@ OrderEvent = Literal[
     "submitted", "accepted", "rejected", "fill", "cancelled", "expired", "replaced"
 ]
 """Valid order event types for orders.events.* topics."""
-
-MarketDataType = Literal["tick", "ticks", "trades", "book", "candles"]
-"""Valid market data types for market.* topics."""
 
 
 def market_topic(

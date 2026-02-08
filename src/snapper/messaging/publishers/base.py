@@ -21,6 +21,7 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import MarketDataType
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -32,7 +33,6 @@ from snapper.messaging.schemas.messages import MarketDataEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
 from snapper.messaging.schemas.messages import TradeEnvelope
-from snapper.messaging.topics.builders import MarketDataType
 from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"

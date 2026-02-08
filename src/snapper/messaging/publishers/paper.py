@@ -22,10 +22,10 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import MarketDataType
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.schemas.messages import BarEnvelope
-from snapper.messaging.topics.builders import MarketDataType
 from snapper.messaging.topics.builders import market_topic
 
 
