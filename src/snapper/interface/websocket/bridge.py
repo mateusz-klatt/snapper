@@ -17,6 +17,8 @@ from fastapi import WebSocket
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.interface.websocket.models import ConnectionStats
+from snapper.interface.websocket.models import SubscriptionStatsSnapshot
+from snapper.interface.websocket.models import SubscriptionTopicDetail
 from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
@@ -676,26 +678,27 @@ class ZmqWebSocketBridgeService:
             logger.info(f"WebSocket unsubscribed from {count} topics: {topics_to_unsubscribe}")
         return len(topics_to_unsubscribe)
 
-    def get_subscription_stats(self) -> dict[str, Any]:
+    def get_subscription_stats(self) -> SubscriptionStatsSnapshot:
         """Get detailed subscription statistics.
 
         Returns:
-            Dictionary with topic counts, subscriber counts, and per-topic details.
+            Snapshot with topic counts, subscriber counts, and per-topic details.
         """
-        stats: dict[str, Any] = {
-            "total_topics": len(self.available_topics),
-            "active_topics": len(self.topic_subscriptions),
-            "total_subscribers": sum(len(subs) for subs in self.topic_subscriptions.values()),
-            "topics": {},
-        }
+        topics: dict[str, SubscriptionTopicDetail] = {}
         for topic, subscriptions in self.topic_subscriptions.items():
-            stats["topics"][topic] = {
-                "subscribers": len(subscriptions),
-                "endpoint": self.available_topics[topic].endpoint,
-                "pattern": self.available_topics[topic].pattern,
-                "throttle_ms": self.available_topics[topic].throttle_ms,
-            }
-        return stats
+            config = self.available_topics[topic]
+            topics[topic] = SubscriptionTopicDetail(
+                subscribers=len(subscriptions),
+                endpoint=config.endpoint,
+                pattern=config.pattern,
+                throttle_ms=config.throttle_ms,
+            )
+        return SubscriptionStatsSnapshot(
+            total_topics=len(self.available_topics),
+            active_topics=len(self.topic_subscriptions),
+            total_subscribers=sum(len(subs) for subs in self.topic_subscriptions.values()),
+            topics=topics,
+        )
 
     def get_available_topics(self) -> list[str]:
         """Get list of all available topic names.

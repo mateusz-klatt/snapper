@@ -42,14 +42,14 @@ class TestZmqMessageLogger:
 
         Given: Fresh ZmqMessageLogger instance,
         When: Calling get_statistics,
-        Then: Returns dict with zero counters and running=False.
+        Then: Returns LoggerStatistics with zero counters and running=False.
         """
         logger = ZmqMessageLogger(log_to_file=False)
         stats = logger.get_statistics()
-        assert stats["running"] is False
-        assert stats["message_count"] == 0
-        assert stats["bytes_received"] == 0
-        assert stats["topics_seen"] == 0
+        assert stats.running is False
+        assert stats.message_count == 0
+        assert stats.bytes_received == 0
+        assert stats.topics_seen == 0
 
     @pytest.mark.asyncio
     async def test_subscribe_all_constant(self) -> None:
@@ -175,11 +175,10 @@ class TestZmqMessageLogger:
             "orders.update": 20,
         }
         stats = logger.get_statistics()
-        assert stats["message_count"] == 100
-        assert stats["bytes_received"] == 5000
-        assert stats["topics_seen"] == 3
-        assert "top_topics" in stats
-        assert len(stats["top_topics"]) == 3
+        assert stats.message_count == 100
+        assert stats.bytes_received == 5000
+        assert stats.topics_seen == 3
+        assert len(stats.top_topics) == 3
 
     @pytest.mark.asyncio
     async def test_stop_logs_final_statistics(self) -> None:

@@ -41,12 +41,13 @@ Enable message logging for debugging::
 
     # Check statistics
     stats = logger.get_statistics()
-    print(f"Messages: {stats['message_count']}")
-    print(f"Top topics: {stats['top_topics']}")
+    print(f"Messages: {stats.message_count}")
+    print(f"Top topics: {stats.top_topics}")
 """
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +64,25 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
 
 SUBSCRIBE_ALL = b""
+
+
+@dataclass
+class LoggerStatistics:
+    """ZMQ message logger statistics snapshot.
+
+    Attributes:
+        running: Whether the logger is actively subscribing.
+        message_count: Total messages received since start.
+        bytes_received: Total bytes received since start.
+        topics_seen: Number of unique topics encountered.
+        top_topics: Top topics by message count (up to 10).
+    """
+
+    running: bool
+    message_count: int
+    bytes_received: int
+    topics_seen: int
+    top_topics: dict[str, int]
 
 
 @register_process(
@@ -305,23 +325,18 @@ class ZmqMessageLogger(RegisterableProcess):
         with self.audit_path.open("a") as f:
             f.write(json.dumps(audit_entry) + "\n")
 
-    def get_statistics(self) -> dict[str, Any]:
+    def get_statistics(self) -> LoggerStatistics:
         """Get current logger statistics.
 
         Returns:
-            Dictionary containing:
-            - running: Whether logger is active
-            - message_count: Total messages received
-            - bytes_received: Total bytes received
-            - topics_seen: Number of unique topics
-            - top_topics: Top 10 topics by message count
+            LoggerStatistics snapshot with counters and top topics.
         """
-        return {
-            "running": self.running,
-            "message_count": self.message_count,
-            "bytes_received": self.bytes_received,
-            "topics_seen": len(self.topic_counts),
-            "top_topics": dict(
+        return LoggerStatistics(
+            running=self.running,
+            message_count=self.message_count,
+            bytes_received=self.bytes_received,
+            topics_seen=len(self.topic_counts),
+            top_topics=dict(
                 sorted(self.topic_counts.items(), key=lambda x: x[1], reverse=True)[:10]
             ),
-        }
+        )

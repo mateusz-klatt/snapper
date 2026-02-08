@@ -14,6 +14,8 @@ from snapper.core.types import SubscriptionAction
 __all__ = [
     "ConnectionStats",
     "SubscriptionRequestModel",
+    "SubscriptionStatsSnapshot",
+    "SubscriptionTopicDetail",
     "TopicConfigurationModel",
     "TopicMetricSnapshot",
     "TopicMetricsModel",
@@ -181,3 +183,37 @@ class WsStatsSnapshot:
 
     connections: ConnectionStats
     topics: dict[str, TopicMetricSnapshot]
+
+
+@dataclass
+class SubscriptionTopicDetail:
+    """Per-topic subscription detail.
+
+    Attributes:
+        subscribers: Number of active subscribers for this topic.
+        endpoint: ZMQ endpoint address for the topic.
+        pattern: ZMQ subscription pattern.
+        throttle_ms: Configured throttle interval in milliseconds.
+    """
+
+    subscribers: int
+    endpoint: str
+    pattern: str
+    throttle_ms: int
+
+
+@dataclass
+class SubscriptionStatsSnapshot:
+    """Subscription statistics snapshot from the bridge.
+
+    Attributes:
+        total_topics: Total number of available topics.
+        active_topics: Number of topics with active subscribers.
+        total_subscribers: Total subscriber count across all topics.
+        topics: Per-topic subscription details.
+    """
+
+    total_topics: int
+    active_topics: int
+    total_subscribers: int
+    topics: dict[str, SubscriptionTopicDetail]

@@ -26,11 +26,11 @@ class AuthUserEntry:
 
     Attributes:
         username: User's display name.
-        role: User's role value string.
+        role: User's role for the authenticated connection.
     """
 
     username: str
-    role: str
+    role: UserRole
 
 
 @dataclass(slots=True)
@@ -271,7 +271,7 @@ class WebSocketAuthManager:
             total_authenticated=len(self.authenticated_connections),
             role_breakdown=role_counts,
             authenticated_users=[
-                AuthUserEntry(username=user.username, role=user.role.value)
+                AuthUserEntry(username=user.username, role=user.role)
                 for user in self.authenticated_connections.values()
             ],
         )

@@ -157,19 +157,19 @@ class TestZMQBrokerSync:
 
         Given: A ZmqBrokerThread,
         When: get_status is called,
-        Then: Returns dict with running state and endpoints.
+        Then: Returns BrokerStatus with running state and endpoints.
         """
         broker = ZmqBrokerThread(
             xsub_endpoint="tcp://127.0.0.1:7810", xpub_endpoint="tcp://127.0.0.1:7811"
         )
         status = broker.get_status()
-        assert status["running"] is False
-        assert status["xsub_endpoint"] == "tcp://127.0.0.1:7810"
-        assert status["xpub_endpoint"] == "tcp://127.0.0.1:7811"
+        assert status.running is False
+        assert status.xsub_endpoint == "tcp://127.0.0.1:7810"
+        assert status.xpub_endpoint == "tcp://127.0.0.1:7811"
         try:
             broker.start()
             status = broker.get_status()
-            assert status["running"] is True
+            assert status.running is True
         finally:
             broker.stop()
 
@@ -292,8 +292,8 @@ class TestZMQBrokerAdditionalCoverage:
         )
         status = broker.get_status()
         assert status["running"] is False
-        assert "xsub_endpoint" in status
-        assert "xpub_endpoint" in status
+        assert status["xsub_endpoint"] == "tcp://127.0.0.1:7828"
+        assert status["xpub_endpoint"] == "tcp://127.0.0.1:7829"
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
             status = broker.get_status()

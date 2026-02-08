@@ -1307,10 +1307,10 @@ class TestGetSubscriptionStats:
         Then: Returns stats with zero active topics and subscribers.
         """
         stats = bridge.get_subscription_stats()
-        assert stats["total_topics"] == 2
-        assert stats["active_topics"] == 0
-        assert stats["total_subscribers"] == 0
-        assert stats["topics"] == {}
+        assert stats.total_topics == 2
+        assert stats.active_topics == 0
+        assert stats.total_subscribers == 0
+        assert stats.topics == {}
 
     @pytest.mark.asyncio
     async def test_get_subscription_stats_with_subscriptions(
@@ -1329,13 +1329,13 @@ class TestGetSubscriptionStats:
             await bridge.subscribe_websocket(ws1, topic)
             await bridge.subscribe_websocket(ws2, topic)
         stats = bridge.get_subscription_stats()
-        assert stats["total_topics"] == 2
-        assert stats["active_topics"] == 1
-        assert stats["total_subscribers"] == 2
-        assert topic in stats["topics"]
-        assert stats["topics"][topic]["subscribers"] == 2
-        assert stats["topics"][topic]["endpoint"] == "tcp://localhost:5555"
-        assert stats["topics"][topic]["throttle_ms"] == 100
+        assert stats.total_topics == 2
+        assert stats.active_topics == 1
+        assert stats.total_subscribers == 2
+        assert topic in stats.topics
+        assert stats.topics[topic].subscribers == 2
+        assert stats.topics[topic].endpoint == "tcp://localhost:5555"
+        assert stats.topics[topic].throttle_ms == 100
 
 
 class TestGetAvailableTopics:

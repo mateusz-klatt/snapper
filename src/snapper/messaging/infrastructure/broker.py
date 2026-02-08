@@ -51,6 +51,7 @@ Using threaded broker::
 import asyncio
 import contextlib
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 import zmq
@@ -63,6 +64,21 @@ from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.utils.logging import set_log_context
+
+
+@dataclass
+class BrokerStatus:
+    """ZMQ broker status snapshot.
+
+    Attributes:
+        running: Whether the broker proxy loop is active.
+        xsub_endpoint: Endpoint where publishers connect.
+        xpub_endpoint: Endpoint where subscribers connect.
+    """
+
+    running: bool
+    xsub_endpoint: str
+    xpub_endpoint: str
 
 
 @register_process(
@@ -365,14 +381,14 @@ class ZmqBrokerThread:
         except Exception as e:
             logger.error(f"Broker proxy error: {e}")
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self) -> BrokerStatus:
         """Get current broker status for monitoring.
 
         Returns:
-            Dictionary containing running state and endpoint addresses.
+            BrokerStatus with running state and endpoint addresses.
         """
-        return {
-            "running": self.running,
-            "xsub_endpoint": self.xsub_endpoint,
-            "xpub_endpoint": self.xpub_endpoint,
-        }
+        return BrokerStatus(
+            running=self.running,
+            xsub_endpoint=self.xsub_endpoint,
+            xpub_endpoint=self.xpub_endpoint,
+        )

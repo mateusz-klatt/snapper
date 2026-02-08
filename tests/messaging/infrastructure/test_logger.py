@@ -142,7 +142,7 @@ async def test_logging_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -
     logger.context = type("Ctx", (), {"term": lambda self: None})()
     await logger._logging_loop()
     stats = logger.get_statistics()
-    assert stats["message_count"] >= 1
+    assert stats.message_count >= 1
 
 
 @pytest.mark.asyncio
