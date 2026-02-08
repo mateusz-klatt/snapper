@@ -29,6 +29,10 @@ Type Aliases:
     MarketDataType: Type of market data in ZMQ topics.
     SubscriptionAction: WebSocket subscription action.
     SubscriptionStatus: WebSocket subscription result status.
+    SpawnerProcessStatus: Subprocess-level process status.
+    AliasChannel: Symbol alias channel type.
+    OrderCommand: Order command types for ZMQ topics.
+    OrderEvent: Order event types for ZMQ topics.
 """
 
 from typing import Literal
@@ -140,30 +144,48 @@ SubscriptionAction = Literal["subscribe", "unsubscribe"]
 SubscriptionStatus = Literal["subscribed", "unsubscribed", "partial", "denied", "no_topics"]
 """WebSocket subscription result status indicating the outcome of a subscription request."""
 
+SpawnerProcessStatus = Literal["not_running", "running", "stopped", "completed", "error"]
+"""Subprocess-level process status for spawner-managed processes."""
+
+AliasChannel = Literal["ws", "rest", "ccxt"]
+"""Symbol alias channel type: ws for WebSocket, rest for REST API, ccxt for CCXT library."""
+
+OrderCommand = Literal["submit", "cancel", "replace"]
+"""Order command types for orders.commands.* ZMQ topics."""
+
+OrderEvent = Literal[
+    "submitted", "accepted", "rejected", "fill", "cancelled", "expired", "replaced"
+]
+"""Order event types for orders.events.* ZMQ topics."""
+
 __all__ = [
+    "AliasChannel",
     "AllExchange",
     "AssetType",
     "ComponentStatus",
-    "TradeSide",
-    "OrderType",
-    "OrderStatus",
-    "OrderEventType",
-    "OrderExchange",
-    "FillStatus",
     "ExecutionMode",
-    "MarketDataType",
-    "MarketSubscribeExchange",
-    "ProcessMode",
-    "ReplaySourceExchange",
-    "SubscriptionAction",
-    "SubscriptionStatus",
-    "TradingExchange",
+    "FillStatus",
     "HealthStatus",
     "IndicatorBackend",
+    "MarketDataType",
+    "MarketSubscribeExchange",
+    "OrderCommand",
+    "OrderEvent",
+    "OrderEventType",
+    "OrderExchange",
+    "OrderStatus",
+    "OrderType",
     "ProcessLifecycleType",
+    "ProcessMode",
     "ProcessRoleType",
     "ProcessRunStatusType",
+    "ReplaySourceExchange",
+    "SpawnerProcessStatus",
     "StartProcessStatus",
     "StopProcessStatus",
+    "SubscriptionAction",
+    "SubscriptionStatus",
+    "TradeSide",
+    "TradingExchange",
     "UpsertResult",
 ]

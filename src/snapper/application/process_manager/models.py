@@ -21,7 +21,9 @@ from typing import Any
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.config.settings import AppSettings
+from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
+from snapper.core.types import ProcessRoleType
 from snapper.core.types import StartProcessStatus
 from snapper.core.types import StopProcessStatus
 
@@ -216,7 +218,7 @@ class ProcessStatusResult:
 
     name: str
     running: bool
-    role: str
-    lifecycle: str
+    role: ProcessRoleType
+    lifecycle: ProcessLifecycleType
     active_run_id: str | None = None
     details: dict[str, Any] | None = None

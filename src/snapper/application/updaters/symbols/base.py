@@ -22,6 +22,7 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import AliasChannel
 from snapper.core.types import AssetType
 from snapper.core.types import UpsertResult
 from snapper.data.models import Setting
@@ -168,7 +169,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         session: Any,
         native_symbol: str,
         exchange: str,
-        channel: str,
+        channel: AliasChannel,
         exchange_symbol: str,
         now: datetime,
     ) -> UpsertResult:

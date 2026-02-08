@@ -1634,8 +1634,9 @@ export type Components = {
             /**
              * Status
              * @description Process status: not_running, running, stopped, completed, error
+             * @enum {string}
              */
-            status: string;
+            status: "not_running" | "running" | "stopped" | "completed" | "error";
             /**
              * Pid
              * @description Process ID if running

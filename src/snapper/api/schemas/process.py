@@ -14,6 +14,7 @@ from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleType
 from snapper.core.types import ProcessRunStatusType
+from snapper.core.types import SpawnerProcessStatus
 from snapper.core.types import StartProcessStatus
 from snapper.core.types import StopProcessStatus
 
@@ -177,7 +178,7 @@ class ProcessStatus(StrictApiSchema):
         error: Error message if failed.
     """
 
-    status: str = Field(
+    status: SpawnerProcessStatus = Field(
         description="Process status: not_running, running, stopped, completed, error"
     )
     pid: int | None = Field(default=None, description="Process ID if running")
@@ -220,7 +221,7 @@ class BacktestStatus(StrictApiSchema):
         error: Error message if failed.
     """
 
-    status: str
+    status: SpawnerProcessStatus
     backtest_id: str | None = None
     pid: int | None = None
     strategy: str | None = None
@@ -242,7 +243,7 @@ class BacktestOutput(StrictApiSchema):
 
     backtest_id: str
     output_lines: list[str]
-    status: str
+    status: SpawnerProcessStatus
 
 
 class AvailableProcess(StrictApiSchema):

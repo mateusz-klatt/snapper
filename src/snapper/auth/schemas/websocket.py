@@ -4,6 +4,8 @@ This module defines Pydantic schemas for WebSocket authentication
 messages and responses.
 """
 
+from typing import Literal
+
 from snapper.api.schemas.base import StrictApiSchema
 from snapper.auth.domain.roles import UserRole
 
@@ -18,7 +20,7 @@ class WebSocketAuthMessage(StrictApiSchema):
         token: JWT access token.
     """
 
-    type: str = "auth"
+    type: Literal["auth"] = "auth"
     token: str
 
 
@@ -35,7 +37,7 @@ class WebSocketAuthResponse(StrictApiSchema):
         error: Error message if failed.
     """
 
-    type: str = "auth_response"
+    type: Literal["auth_response"] = "auth_response"
     success: bool
     user_id: str | None = None
     role: UserRole | None = None

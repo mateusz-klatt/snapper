@@ -31,17 +31,12 @@ Parser Functions:
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import cast
+from typing import get_args
 
 from snapper.core.types import MarketDataType
-
-OrderCommand = Literal["submit", "cancel", "replace"]
-"""Valid order command types for orders.commands.* topics."""
-
-OrderEvent = Literal[
-    "submitted", "accepted", "rejected", "fill", "cancelled", "expired", "replaced"
-]
-"""Valid order event types for orders.events.* topics."""
+from snapper.core.types import OrderCommand
+from snapper.core.types import OrderEvent
 
 
 def market_topic(
@@ -292,7 +287,7 @@ class ParsedMarketTopic:
 
     exchange: str
     instrument: str
-    data_type: str
+    data_type: MarketDataType
     timeframe: str | None
     source_exchange: str | None = None
 
@@ -306,7 +301,7 @@ class ParsedSignalTopic:
     signal_type: str
 
 
-_MARKET_DATA_TYPES: set[str] = {"tick", "ticks", "trades", "book", "candles"}
+_MARKET_DATA_TYPES: set[str] = set(get_args(MarketDataType))
 
 
 def _build_market_topic_result(
@@ -328,7 +323,7 @@ def _build_market_topic_result(
     return ParsedMarketTopic(
         exchange=exchange,
         instrument=instrument,
-        data_type=data_type,
+        data_type=cast(MarketDataType, data_type),
         timeframe=timeframe,
         source_exchange=source_exchange,
     )

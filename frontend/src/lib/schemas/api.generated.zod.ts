@@ -211,7 +211,7 @@ export const ProcessStartResponseSchema = z
 
 export const ProcessStatusSchema = z
   .object({
-    status: z.string(),
+    status: z.enum(['not_running', 'running', 'stopped', 'completed', 'error']),
     pid: z.number().int().nullable().optional(),
     started_at: z.string().nullable().optional(),
     command: z.string().nullable().optional(),

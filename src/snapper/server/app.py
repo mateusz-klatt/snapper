@@ -126,7 +126,7 @@ def handle_rate_limit_exceeded(request: Request, exc: Exception) -> Response:
     Returns:
         JSON response with 429 status code and retry-after header.
     """
-    detail = getattr(exc, "detail", str(exc))
+    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
     resp = Response(f"Rate limit exceeded: {detail}", status_code=429)
     retry_after = getattr(request.state, "view_rate_limit", None)
     if retry_after:

@@ -107,6 +107,14 @@ enum ProcessStartResponseStatus: String, Codable, Sendable {
     case error
 }
 
+enum ProcessStatusStatus: String, Codable, Sendable {
+    case notRunning = "not_running"
+    case running
+    case stopped
+    case completed
+    case error
+}
+
 enum ProcessStopResponseStatus: String, Codable, Sendable {
     case success
     case notRunning = "not_running"

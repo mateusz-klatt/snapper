@@ -18,6 +18,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
+from snapper.core.types import AliasChannel
 from snapper.core.types import AssetType
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
@@ -662,11 +663,12 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         native_symbol = symbol_data["native_symbol"]
         created = 0
         updated = 0
-        for exchange, channel, key in (
+        alias_mappings: tuple[tuple[str, AliasChannel, str], ...] = (
             ("kraken", "ws", "kraken_websocket_symbol"),
             ("kraken", "rest", "kraken_rest_symbol"),
             ("kraken", "ccxt", "ccxt_symbol"),
-        ):
+        )
+        for exchange, channel, key in alias_mappings:
             exchange_symbol = symbol_data.get(key)
             if not exchange_symbol:
                 continue

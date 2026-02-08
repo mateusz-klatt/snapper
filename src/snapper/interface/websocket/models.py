@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from fastapi import WebSocket
 
+from snapper.core.types import SubscriptionAction
+
 __all__ = [
     "UITopicModel",
     "SubscriptionRequestModel",
@@ -47,7 +49,7 @@ class SubscriptionRequestModel:
         client_id: Optional client identifier.
     """
 
-    action: str
+    action: SubscriptionAction
     topics: list[str]
     client_id: str | None = None
 

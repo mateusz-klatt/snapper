@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from fastapi import HTTPException
 from slowapi import Limiter
 
 from snapper.server.app import handle_rate_limit_exceeded
@@ -58,14 +59,13 @@ class TestHandleRateLimitExceeded:
     def test_returns_429_with_detail(self) -> None:
         """Handler returns 429 response with exception detail.
 
-        Given: A request and rate limit exception with detail attribute,
+        Given: A request and a RateLimitExceeded exception,
         When: handle_rate_limit_exceeded is called,
         Then: Response has 429 status and includes the detail message.
         """
         mock_request = MagicMock()
         mock_request.state = SimpleNamespace()
-        exc = MagicMock()
-        exc.detail = "Rate Limit Exceeded: 5 per 15 minutes"
+        exc = HTTPException(status_code=429, detail="Rate Limit Exceeded: 5 per 15 minutes")
         response = handle_rate_limit_exceeded(mock_request, exc)
         assert response.status_code == 429
         assert b"Rate limit exceeded: Rate Limit Exceeded: 5 per 15 minutes" in response.body
@@ -73,14 +73,13 @@ class TestHandleRateLimitExceeded:
     def test_includes_retry_after_header(self) -> None:
         """Handler includes Retry-After header when view_rate_limit is set.
 
-        Given: A request with view_rate_limit state,
+        Given: A request with view_rate_limit state and a RateLimitExceeded exception,
         When: handle_rate_limit_exceeded is called,
         Then: Response includes Retry-After header.
         """
         mock_request = MagicMock()
         mock_request.state = SimpleNamespace(view_rate_limit="900")
-        exc = MagicMock()
-        exc.detail = "Too many requests"
+        exc = HTTPException(status_code=429, detail="Too many requests")
         response = handle_rate_limit_exceeded(mock_request, exc)
         assert response.status_code == 429
         assert response.headers["Retry-After"] == "900"

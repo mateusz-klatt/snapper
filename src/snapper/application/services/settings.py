@@ -157,9 +157,7 @@ class SettingsService:
             settings = result.scalars().all()
             self._cache = {}
             for setting in settings:
-                raw_value = decrypt_if_encrypted(
-                    setting.value, getattr(setting, "is_encrypted", False)
-                )
+                raw_value = decrypt_if_encrypted(setting.value, setting.is_encrypted)
                 self._cache[setting.key] = self._parse_value(raw_value)
             self._loaded = True
             logger.info(f"Loaded {len(settings)} settings from database")
@@ -345,9 +343,7 @@ class SettingsService:
             settings = result.scalars().all()
             decrypted_settings = {}
             for setting in settings:
-                raw_value = decrypt_if_encrypted(
-                    setting.value, getattr(setting, "is_encrypted", False)
-                )
+                raw_value = decrypt_if_encrypted(setting.value, setting.is_encrypted)
                 decrypted_settings[setting.key] = self._parse_value(raw_value)
             return decrypted_settings
 
