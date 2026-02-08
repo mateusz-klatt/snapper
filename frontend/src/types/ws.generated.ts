@@ -107,6 +107,10 @@ export type Type15 = "auth_complete";
  */
 export type AvailableTopics = string[];
 /**
+ * Authenticated user role
+ */
+export type UserRole = "viewer" | "operator" | "admin";
+/**
  * Session expiration (ISO 8601)
  */
 export type SessionExpiresAt = string | null;
@@ -669,10 +673,7 @@ export interface WSAuthCompleteResponse {
   type: Type15;
   timestamp?: string;
   available_topics: AvailableTopics;
-  /**
-   * Authenticated user role
-   */
-  user_role: string;
+  user_role: UserRole;
   session_expires_at?: SessionExpiresAt;
   /**
    * WS token expiration (ISO 8601)

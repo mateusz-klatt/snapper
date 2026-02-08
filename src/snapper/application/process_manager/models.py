@@ -4,9 +4,11 @@ This module defines the core data structures for process management:
 - RegisterableProcess: Abstract base class for manageable processes
 - ProcessInstanceInfo: Runtime information for spawned subprocesses
 - ProcessConfigModel: Configuration model for process definitions
+- ProcessRegistryEntry: Typed metadata for registered processes
 - ProcessStartResult: Typed result for start operations
 - ProcessStopResult: Typed result for stop operations
 - ProcessStatusResult: Typed runtime status snapshot
+- SpawnerStatusSnapshot: Point-in-time status from spawner
 """
 
 import asyncio
@@ -222,3 +224,68 @@ class ProcessStatusResult:
     lifecycle: ProcessLifecycleType
     active_run_id: str | None = None
     details: dict[str, Any] | None = None
+
+
+@dataclass
+class ProcessRegistryEntry:
+    """Metadata for a registered process in the global registry.
+
+    Populated by the @register_process decorator and used by
+    launcher, syncer, and process routes for process discovery.
+
+    Attributes:
+        class_ref: Reference to the process class.
+        class_path: Fully qualified class path string.
+        method: Entry point method name.
+        description: Human-readable description.
+        priority: Startup priority (lower starts first).
+        lifecycle: Process lifecycle type enum.
+        role: Process role category enum.
+        tags: Categorization tags tuple.
+        parameters_schema: Optional JSON schema for constructor params.
+        enabled: Default enabled state.
+        mode: Default execution mode.
+        args: Default positional arguments.
+    """
+
+    class_ref: type[RegisterableProcess]
+    class_path: str
+    method: str
+    description: str
+    priority: int
+    lifecycle: ProcessLifecycleEnum
+    role: ProcessRoleEnum
+    tags: tuple[str, ...]
+    parameters_schema: dict[str, Any] | None
+    enabled: bool
+    mode: ProcessMode
+    args: list[Any]
+
+
+@dataclass
+class SpawnerStatusSnapshot:
+    """Point-in-time status snapshot for a spawned process.
+
+    Attributes:
+        name: Process name.
+        running: Whether the process is currently alive.
+        pid: OS process ID (None if not found).
+        started_at: Start timestamp in ISO format (None if not found).
+        uptime_seconds: Seconds since process started (None if not found).
+        exit_code: Exit code if process has terminated.
+        stopped_at: Stop timestamp in ISO format (None if still running).
+        last_heartbeat: Last heartbeat ISO timestamp (None if no heartbeats).
+        heartbeat_age_seconds: Seconds since last heartbeat (None if no heartbeats).
+        error: Error message (e.g., 'Process not found').
+    """
+
+    name: str
+    running: bool
+    pid: int | None = None
+    started_at: str | None = None
+    uptime_seconds: float | None = None
+    exit_code: int | None = None
+    stopped_at: str | None = None
+    last_heartbeat: str | None = None
+    heartbeat_age_seconds: float | None = None
+    error: str | None = None

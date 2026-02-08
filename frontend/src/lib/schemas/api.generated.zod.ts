@@ -253,6 +253,21 @@ export const SettingUpdateSchema = z
   })
   .strict()
 
+export const StrategyStatusPayloadSchema = z
+  .object({
+    strategy_name: z.string(),
+    status: z.string(),
+    details: z.record(z.string(), z.unknown()).optional(),
+    signals_generated: z.number().int().nullable().optional(),
+    trades_executed: z.number().int().nullable().optional(),
+    last_signal: z.string().nullable().optional(),
+    last_signal_time: z.string().nullable().optional(),
+    pnl: z.number().nullable().optional(),
+    pid: z.number().int().nullable().optional(),
+    uptime: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const SubscriptionsStatsSchema = z
   .object({
     per_topic: z.record(z.string(), z.number().int()),
@@ -365,7 +380,7 @@ export const SystemStatusSchema = z
   .object({
     trader: ProcessStatusSchema,
     backtests: z.record(z.string(), ProcessStatusSchema),
-    strategies: z.array(z.record(z.string(), z.unknown())).optional(),
+    strategies: z.array(StrategyStatusPayloadSchema).optional(),
   })
   .strict()
 
@@ -476,6 +491,7 @@ export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
+export type StrategyStatusPayload = z.infer<typeof StrategyStatusPayloadSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TradingSignal = z.infer<typeof TradingSignalSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>

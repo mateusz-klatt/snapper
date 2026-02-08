@@ -23,8 +23,10 @@ from snapper.config.app import AppSettings
 from snapper.interface.websocket.bridge import MAX_PENDING_MESSAGES_MARKET
 from snapper.interface.websocket.bridge import MAX_PENDING_MESSAGES_TRADE
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
+from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
+from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.messaging.schemas.messages import FillEnvelope
 from snapper.messaging.schemas.messages import OrderStatusEnvelope
@@ -1424,13 +1426,14 @@ class TestGetTopicStats:
         bridge.topic_metrics[topic].error_count = 0
         stats = bridge.get_topic_stats()
         assert topic in stats
-        assert stats[topic]["received"] == 100
-        assert stats[topic]["forwarded"] == 95
-        assert stats[topic]["throttled"] == 5
-        assert stats[topic]["dropped"] == 2
-        assert stats[topic]["timeout"] == 1
-        assert stats[topic]["errors"] == 0
-        assert stats[topic]["active_subscribers"] == 1
+        assert isinstance(stats[topic], TopicMetricSnapshot)
+        assert stats[topic].received == 100
+        assert stats[topic].forwarded == 95
+        assert stats[topic].throttled == 5
+        assert stats[topic].dropped == 2
+        assert stats[topic].timeout == 1
+        assert stats[topic].errors == 0
+        assert stats[topic].active_subscribers == 1
 
     def test_get_topic_stats_empty(self, bridge: ZmqWebSocketBridgeService) -> None:
         """Verify topic stats returns empty dict when no metrics.
@@ -1479,8 +1482,9 @@ class TestGetConnectionStats:
             await bridge.subscribe_websocket(ws1, topic)
             await bridge.subscribe_websocket(ws2, topic)
         stats = bridge.get_connection_stats()
-        assert stats["active_clients"] == 2
-        assert stats["active_topics"] == 1
+        assert isinstance(stats, ConnectionStats)
+        assert stats.active_clients == 2
+        assert stats.active_topics == 1
 
 
 class TestZMQSubscriptionLoop:

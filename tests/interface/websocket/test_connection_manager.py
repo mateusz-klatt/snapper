@@ -9,6 +9,8 @@ from fastapi import WebSocket
 from pydantic import BaseModel
 
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
+from snapper.interface.websocket.models import ConnectionStats
+from snapper.interface.websocket.models import WsStatsSnapshot
 
 
 class MockMessage(BaseModel):
@@ -501,12 +503,12 @@ class TestStats:
 
         Given: A connection manager,
         When: Getting stats,
-        Then: Connection counts are returned.
+        Then: Connection counts are returned as WsStatsSnapshot with ConnectionStats.
         """
         stats = connection_manager.get_stats()
-        assert "connections" in stats
-        assert "active_connections" in stats["connections"]
-        assert stats["connections"]["active_connections"] == 0
+        assert isinstance(stats, WsStatsSnapshot)
+        assert isinstance(stats.connections, ConnectionStats)
+        assert stats.connections.active_connections == 0
 
     @pytest.mark.asyncio
     async def test_get_stats_with_active_connections(
@@ -520,7 +522,7 @@ class TestStats:
         """
         await connection_manager.connect(mock_websocket)
         stats = connection_manager.get_stats()
-        assert stats["connections"]["active_connections"] == 1
+        assert stats.connections.active_connections == 1
 
 
 class TestZmqBridgeNone:
@@ -558,6 +560,21 @@ class TestZmqBridgeNone:
         assert len(manager.active_connections) == 0
         assert len(manager.client_subscriptions) == 0
         assert len(manager.topic_subscribers) == 0
+
+    def test_get_stats_without_zmq_bridge(self) -> None:
+        """Get stats returns defaults without ZMQ bridge.
+
+        Given: A connection manager with zmq_bridge=None,
+        When: Getting stats,
+        Then: WsStatsSnapshot has zero connections and empty topics.
+        """
+        manager = WebSocketConnectionManager()
+        manager.zmq_bridge = None
+        stats = manager.get_stats()
+        assert isinstance(stats, WsStatsSnapshot)
+        assert isinstance(stats.connections, ConnectionStats)
+        assert stats.connections.active_connections == 0
+        assert stats.topics == {}
 
 
 class TestSendErrorHandling:

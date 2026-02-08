@@ -23,7 +23,9 @@ from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 
@@ -54,7 +56,22 @@ async def test_import_class_prefers_registry(monkeypatch: pytest.MonkeyPatch) ->
     launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
     monkeypatch.setattr(
         "snapper.application.process_manager.config_resolver.get_registered_processes",
-        lambda: {"foo": {"class_ref": DummyProcess}},
+        lambda: {
+            "foo": ProcessRegistryEntry(
+                class_ref=DummyProcess,
+                class_path="test.DummyProcess",
+                method="start",
+                description="Test process",
+                priority=10,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
+        },
     )
     cls = launcher.import_class("ignored.path.DummyProcess", process_name="foo")
     assert cls is DummyProcess
@@ -243,13 +260,20 @@ class TestStartProcessByNameNoSetting:
         mock_repo = MagicMock()
         mock_repo.session.return_value = mock_context
         registry = {
-            "test_proc": {
-                "class_ref": DummyProcess,
-                "class_path": "dummy.path.DummyProcess",
-                "method": "start",
-                "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
-                "role": ProcessRoleEnum.CORE,
-            }
+            "test_proc": ProcessRegistryEntry(
+                class_ref=DummyProcess,
+                class_path="dummy.path.DummyProcess",
+                method="start",
+                description="Test process",
+                priority=10,
+                lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         monkeypatch.setattr(
             "snapper.application.process_manager.launcher.get_registered_processes",
@@ -288,15 +312,20 @@ class TestSyncRegistryTagsNotIterable:
         mock_class = MagicMock()
         mock_class.get_default_kwargs.return_value = {}
         registry = {
-            "test_proc": {
-                "class_ref": mock_class,
-                "class_path": "test.TestProc",
-                "method": "start",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "tags": "not_a_list",
-                "parameters_schema": None,
-            }
+            "test_proc": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="test.TestProc",
+                method="start",
+                description="Test process",
+                priority=10,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=("not_a_list",),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         monkeypatch.setattr(
             "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -400,7 +429,22 @@ class TestImportClass:
         with patch(
             "snapper.application.process_manager.config_resolver.get_registered_processes"
         ) as mock_registry:
-            mock_registry.return_value = {"test_process": {"class_ref": MockProcessClass}}
+            mock_registry.return_value = {
+                "test_process": ProcessRegistryEntry(
+                    class_ref=MockProcessClass,
+                    class_path="some.module.MockProcessClass",
+                    method="start",
+                    description="Mock process",
+                    priority=10,
+                    lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                    role=ProcessRoleEnum.CORE,
+                    tags=(),
+                    parameters_schema=None,
+                    enabled=False,
+                    mode="thread",
+                    args=[],
+                )
+            }
             result = launcher.import_class("some.module.MockProcessClass", "test_process")
             assert result is MockProcessClass
 
@@ -416,7 +460,22 @@ class TestImportClass:
         with patch(
             "snapper.application.process_manager.config_resolver.get_registered_processes"
         ) as mock_registry:
-            mock_registry.return_value = {"test_process": {"class_ref": "not_a_class"}}
+            mock_registry.return_value = {
+                "test_process": ProcessRegistryEntry(
+                    class_ref=cast(Any, "not_a_class"),
+                    class_path="some.path",
+                    method="start",
+                    description="Invalid process",
+                    priority=10,
+                    lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                    role=ProcessRoleEnum.CORE,
+                    tags=(),
+                    parameters_schema=None,
+                    enabled=False,
+                    mode="thread",
+                    args=[],
+                )
+            }
             with pytest.raises(TypeError, match="is not a class"):
                 launcher.import_class("some.path", "test_process")
 
@@ -989,11 +1048,20 @@ class TestGetProcessConfigs:
             }
         )
         metadata = {
-            "test": {
-                "tags": ("meta_tag",),
-                "parameters_schema": {"type": "object"},
-                "priority": 1,
-            }
+            "test": ProcessRegistryEntry(
+                class_ref=cast(Any, type),
+                class_path="test.TestClass",
+                method="start",
+                description="Test",
+                priority=1,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=("meta_tag",),
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         with patch(
             "snapper.application.process_manager.config_resolver.get_repository"
@@ -1540,13 +1608,20 @@ class TestSyncRegistryToDatabase:
             ) as mock_create,
         ):
             mock_registry.return_value = {
-                "new_process": {
-                    "class_ref": TestProcess,
-                    "class_path": "test.TestProcess",
-                    "method": "start",
-                    "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                    "role": ProcessRoleEnum.CORE,
-                }
+                "new_process": ProcessRegistryEntry(
+                    class_ref=TestProcess,
+                    class_path="test.TestProcess",
+                    method="start",
+                    description="Test process",
+                    priority=10,
+                    lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                    role=ProcessRoleEnum.CORE,
+                    tags=(),
+                    parameters_schema=None,
+                    enabled=False,
+                    mode="thread",
+                    args=[],
+                )
             }
             mock_repo = MagicMock()
             mock_session = AsyncMock()
@@ -1688,25 +1763,30 @@ class TestHandleProcessCompletion:
 
 
 class TestGetDefaultsFromMetadata:
-    """Tests for _get_defaults_from_metadata method."""
+    """Tests for _get_defaults_from_entry method."""
 
     def test_get_defaults_from_metadata_with_values(self, launcher: ProcessLauncherService) -> None:
         """Test metadata values are extracted correctly.
 
-        Given: Metadata dict with all fields.
-        When: _get_defaults_from_metadata is called.
+        Given: ProcessRegistryEntry with all fields.
+        When: _get_defaults_from_entry is called.
         Then: All values extracted to defaults dict.
         """
-        metadata = {
-            "enabled": True,
-            "mode": "process",
-            "args": [1, 2, 3],
-            "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
-            "role": ProcessRoleEnum.TASK,
-            "tags": ("tag1", "tag2"),
-            "parameters_schema": {"type": "object"},
-        }
-        defaults = launcher._registry_syncer._get_defaults_from_metadata(metadata)
+        entry = ProcessRegistryEntry(
+            class_ref=cast(Any, type),
+            class_path="test.TestClass",
+            method="start",
+            description="Test",
+            priority=10,
+            lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+            role=ProcessRoleEnum.TASK,
+            tags=("tag1", "tag2"),
+            parameters_schema={"type": "object"},
+            enabled=True,
+            mode="process",
+            args=[1, 2, 3],
+        )
+        defaults = launcher._registry_syncer._get_defaults_from_entry(entry)
         assert defaults["enabled"] is True
         assert defaults["mode"] == "process"
         assert defaults["args"] == [1, 2, 3]
@@ -1716,13 +1796,27 @@ class TestGetDefaultsFromMetadata:
         assert defaults["parameters_schema"] == {"type": "object"}
 
     def test_get_defaults_from_metadata_empty(self, launcher: ProcessLauncherService) -> None:
-        """Test empty metadata returns default values.
+        """Test entry with default values.
 
-        Given: Empty metadata dict.
-        When: _get_defaults_from_metadata is called.
-        Then: Default values returned for all fields.
+        Given: ProcessRegistryEntry with minimal/default values.
+        When: _get_defaults_from_entry is called.
+        Then: Default values extracted from entry.
         """
-        defaults = launcher._registry_syncer._get_defaults_from_metadata({})
+        entry = ProcessRegistryEntry(
+            class_ref=cast(Any, type),
+            class_path="test.TestClass",
+            method="start",
+            description="Test",
+            priority=10,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+            enabled=False,
+            mode="thread",
+            args=[],
+        )
+        defaults = launcher._registry_syncer._get_defaults_from_entry(entry)
         assert defaults["enabled"] is False
         assert defaults["mode"] == "thread"
         assert defaults["args"] == []
@@ -1820,8 +1914,8 @@ async def test_monitor_native_processes_triggers_completion(
     )
     launcher.started_processes["native"] = proc
 
-    def mock_get_status(name: str) -> dict[str, Any]:
-        return {"running": False}
+    def mock_get_status(name: str) -> SpawnerStatusSnapshot:
+        return SpawnerStatusSnapshot(name=name, running=False)
 
     launcher.spawner.get_status = mock_get_status
     called: list[str] = []

@@ -15,7 +15,7 @@ export function createAuthOk(overrides: { exp?: string } = {}) {
 export function createAuthComplete(
   overrides: {
     available_topics?: string[]
-    user_role?: string
+    user_role?: 'viewer' | 'operator' | 'admin'
     ws_token_exp?: string
     session_expires_at?: string | null
   } = {}
@@ -23,7 +23,7 @@ export function createAuthComplete(
   return {
     type: 'auth_complete' as const,
     available_topics: overrides.available_topics ?? [],
-    user_role: overrides.user_role ?? 'user',
+    user_role: overrides.user_role ?? 'operator',
     ws_token_exp: overrides.ws_token_exp ?? new Date(Date.now() + 3600000).toISOString(),
     session_expires_at:
       overrides.session_expires_at ?? new Date(Date.now() + 86400000).toISOString(),

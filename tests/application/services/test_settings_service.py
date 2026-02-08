@@ -15,6 +15,7 @@ import pytest
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.services.settings import SettingChangeEvent
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
@@ -1244,17 +1245,21 @@ class TestProcessRoutesTagsFallback:
         mock_factory.create_process_config = AsyncMock()
         strategy_class = MagicMock()
         strategy_class.get_default_kwargs.return_value = {"name": "test"}
-        registry_data: dict[str, Any] = {
-            "test_process": {
-                "class_ref": strategy_class,
-                "class_path": "snapper.test.TestProcess",
-                "method": "start",
-                "description": "Test process",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "tags": None,
-                "parameters_schema": {"type": "object"},
-            }
+        registry_data: dict[str, ProcessRegistryEntry] = {
+            "test_process": ProcessRegistryEntry(
+                class_ref=strategy_class,
+                class_path="snapper.test.TestProcess",
+                method="start",
+                description="Test process",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         with patch(
             "snapper.server.process_routes.get_registered_processes",
@@ -1291,17 +1296,21 @@ class TestProcessRoutesTagsFallback:
         mock_factory.create_process_config = AsyncMock()
         strategy_class = MagicMock()
         strategy_class.get_default_kwargs.return_value = {"name": "test"}
-        registry_data: dict[str, Any] = {
-            "test_process": {
-                "class_ref": strategy_class,
-                "class_path": "snapper.test.TestProcess",
-                "method": "start",
-                "description": "Test process",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "tags": "not-a-list",
-                "parameters_schema": {"type": "object"},
-            }
+        registry_data: dict[str, ProcessRegistryEntry] = {
+            "test_process": ProcessRegistryEntry(
+                class_ref=strategy_class,
+                class_path="snapper.test.TestProcess",
+                method="start",
+                description="Test process",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         with patch(
             "snapper.server.process_routes.get_registered_processes",

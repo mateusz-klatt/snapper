@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
@@ -44,24 +45,24 @@ class ProcessRegistrySyncer:
         """
         self.settings = settings
 
-    def _get_defaults_from_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        """Extract default configuration values from registry metadata.
+    def _get_defaults_from_entry(self, entry: ProcessRegistryEntry) -> dict[str, Any]:
+        """Extract default configuration values from registry entry.
 
         Args:
-            metadata: Registry metadata dictionary.
+            entry: ProcessRegistryEntry from the registry.
 
         Returns:
             Dictionary of default configuration values.
         """
         return {
-            "enabled": metadata.get("enabled", False),
-            "mode": metadata.get("mode", "thread"),
-            "args": metadata.get("args", []),
+            "enabled": entry.enabled,
+            "mode": entry.mode,
+            "args": entry.args,
             "kwargs": {},
-            "lifecycle": metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING),
-            "role": metadata.get("role", ProcessRoleEnum.CORE),
-            "tags": metadata.get("tags", ()),
-            "parameters_schema": metadata.get("parameters_schema"),
+            "lifecycle": entry.lifecycle,
+            "role": entry.role,
+            "tags": entry.tags,
+            "parameters_schema": entry.parameters_schema,
         }
 
     async def _create_process_config_in_db(
@@ -111,18 +112,18 @@ class ProcessRegistrySyncer:
             await session.commit()
         logger.info(f"Created database config for process '{name}'")
 
-    def _sync_kwargs_from_metadata(
+    def _sync_kwargs_from_entry(
         self,
         name: str,
         config_dict: dict[str, Any],
-        metadata: dict[str, Any],
+        entry: ProcessRegistryEntry,
     ) -> bool:
-        """Sync kwargs from metadata into config_dict if missing.
+        """Sync kwargs from registry entry into config_dict if missing.
 
         Args:
             name: Process name for logging.
             config_dict: Mutable config dictionary.
-            metadata: Registry metadata dictionary.
+            entry: ProcessRegistryEntry from the registry.
 
         Returns:
             True if config_dict was updated.
@@ -131,7 +132,7 @@ class ProcessRegistrySyncer:
         if kwargs:
             logger.debug(f"Process '{name}' already has database config with kwargs")
             return False
-        cls = metadata["class_ref"]
+        cls = entry.class_ref
         try:
             default_kwargs = cls.get_default_kwargs(self.settings)
         except Exception as e:
@@ -166,63 +167,58 @@ class ProcessRegistrySyncer:
         return True
 
     @staticmethod
-    def _sync_tags_from_metadata(
+    def _sync_tags_from_entry(
         config_dict: dict[str, Any],
-        metadata: dict[str, Any],
+        entry: ProcessRegistryEntry,
     ) -> bool:
-        """Sync tags from metadata to config_dict if not present.
+        """Sync tags from registry entry to config_dict if not present.
 
         Args:
             config_dict: Mutable config dictionary.
-            metadata: Registry metadata dictionary.
+            entry: ProcessRegistryEntry from the registry.
 
         Returns:
             True if config_dict was updated.
         """
-        if "tags" in config_dict or not metadata.get("tags"):
+        if "tags" in config_dict or not entry.tags:
             return False
-        tags_meta = metadata.get("tags", ())
-        if not isinstance(tags_meta, (list, tuple, set)):
-            return False
-        config_dict["tags"] = [str(tag) for tag in cast(Iterable[Any], tags_meta)]
+        config_dict["tags"] = [str(tag) for tag in entry.tags]
         return True
 
-    def _apply_metadata_updates(
+    def _apply_entry_updates(
         self,
         name: str,
         config_dict: dict[str, Any],
-        metadata: dict[str, Any],
+        entry: ProcessRegistryEntry,
     ) -> bool:
-        """Apply all metadata updates to an existing config_dict.
+        """Apply all registry entry updates to an existing config_dict.
 
         Args:
             name: Process name for logging.
             config_dict: Mutable config dictionary.
-            metadata: Registry metadata dictionary.
+            entry: ProcessRegistryEntry from the registry.
 
         Returns:
             True if any field was updated.
         """
-        updated = self._sync_kwargs_from_metadata(name, config_dict, metadata)
-        lifecycle_meta = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
-        updated = self._sync_enum_field(config_dict, "lifecycle", lifecycle_meta) or updated
-        role_meta = metadata.get("role", ProcessRoleEnum.CORE)
-        updated = self._sync_enum_field(config_dict, "role", role_meta) or updated
-        updated = self._sync_tags_from_metadata(config_dict, metadata) or updated
-        if "parameters_schema" not in config_dict and metadata.get("parameters_schema") is not None:
-            config_dict["parameters_schema"] = metadata.get("parameters_schema")
+        updated = self._sync_kwargs_from_entry(name, config_dict, entry)
+        updated = self._sync_enum_field(config_dict, "lifecycle", entry.lifecycle) or updated
+        updated = self._sync_enum_field(config_dict, "role", entry.role) or updated
+        updated = self._sync_tags_from_entry(config_dict, entry) or updated
+        if "parameters_schema" not in config_dict and entry.parameters_schema is not None:
+            config_dict["parameters_schema"] = entry.parameters_schema
             updated = True
         return updated
 
-    async def _sync_new_process(self, name: str, metadata: dict[str, Any]) -> None:
+    async def _sync_new_process(self, name: str, entry: ProcessRegistryEntry) -> None:
         """Create database config for a newly registered process.
 
         Args:
             name: Process name.
-            metadata: Registry metadata for this process.
+            entry: ProcessRegistryEntry from the registry.
         """
-        cls: type[RegisterableProcess] = metadata["class_ref"]
-        defaults = self._get_defaults_from_metadata(metadata)
+        cls: type[RegisterableProcess] = entry.class_ref
+        defaults = self._get_defaults_from_entry(entry)
         try:
             defaults["kwargs"] = cls.get_default_kwargs(self.settings)
         except Exception as e:
@@ -230,15 +226,15 @@ class ProcessRegistrySyncer:
             defaults["kwargs"] = {}
         await self._create_process_config_in_db(
             name=name,
-            class_path=metadata["class_path"],
-            method=metadata["method"],
+            class_path=entry.class_path,
+            method=entry.method,
             defaults=defaults,
         )
 
     async def _sync_existing_process(
         self,
         name: str,
-        metadata: dict[str, Any],
+        entry: ProcessRegistryEntry,
         existing: Any,
         repository: Any,
     ) -> None:
@@ -246,7 +242,7 @@ class ProcessRegistrySyncer:
 
         Args:
             name: Process name.
-            metadata: Registry metadata for this process.
+            entry: ProcessRegistryEntry from the registry.
             existing: Existing Setting row from database.
             repository: Database repository for update operations.
         """
@@ -255,7 +251,7 @@ class ProcessRegistrySyncer:
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse config for '{name}': {e}")
             return
-        if not self._apply_metadata_updates(name, config_dict, metadata):
+        if not self._apply_entry_updates(name, config_dict, entry):
             return
         config_key = f"process_{name}"
         async with repository.session() as update_session:
@@ -280,15 +276,15 @@ class ProcessRegistrySyncer:
         registry = get_registered_processes()
         logger.info(f"Syncing {len(registry)} registered processes to database")
         repository = get_repository(self.settings.db_url)
-        for name, metadata in registry.items():
+        for name, entry in registry.items():
             config_key = f"process_{name}"
             async with repository.session() as session:
                 result = await session.execute(select(Setting).where(Setting.key == config_key))
                 existing = result.scalar_one_or_none()
             if existing is None:
-                await self._sync_new_process(name, metadata)
+                await self._sync_new_process(name, entry)
             else:
-                await self._sync_existing_process(name, metadata, existing, repository)
+                await self._sync_existing_process(name, entry, existing, repository)
 
     async def create_process_config(
         self,

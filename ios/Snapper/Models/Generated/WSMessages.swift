@@ -3,6 +3,12 @@
 
 import Foundation
 
+enum UserRole: String, Codable, Sendable {
+    case viewer
+    case operatorRole = "operator"
+    case admin
+}
+
 enum FillEnvelopeSide: String, Codable, Sendable {
     case buy
     case sell
@@ -436,7 +442,7 @@ struct WSAuthCompleteResponse: Codable, Sendable {
     /// Topics available for subscription
     let availableTopics: [String]
     /// Authenticated user role
-    let userRole: String
+    let userRole: UserRole
     /// Session expiration (ISO 8601)
     let sessionExpiresAt: Date?
     /// WS token expiration (ISO 8601)

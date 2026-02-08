@@ -633,6 +633,42 @@ struct SettingUpdate: Codable, Sendable {
     let description: String?
 }
 
+struct StrategyStatusPayload: Codable, Sendable {
+    /// Strategy name
+    let strategyName: String
+    /// Current strategy status
+    let status: String
+    /// Full raw status
+    let details: [String: AnyCodable]?
+    /// Signals generated count
+    let signalsGenerated: Int?
+    /// Trades executed count
+    let tradesExecuted: Int?
+    /// Last signal description
+    let lastSignal: String?
+    /// Last signal timestamp
+    let lastSignalTime: String?
+    /// Current PnL
+    let pnl: Double?
+    /// Process ID
+    let pid: Int?
+    /// Process uptime
+    let uptime: String?
+
+    enum CodingKeys: String, CodingKey {
+        case strategyName = "strategy_name"
+        case status
+        case details
+        case signalsGenerated = "signals_generated"
+        case tradesExecuted = "trades_executed"
+        case lastSignal = "last_signal"
+        case lastSignalTime = "last_signal_time"
+        case pnl
+        case pid
+        case uptime
+    }
+}
+
 struct SubscriptionsStats: Codable, Sendable {
     /// Subscriber count per topic
     let perTopic: [String: Int]
@@ -649,7 +685,7 @@ struct SystemStatus: Codable, Sendable {
     let trader: ProcessStatus
     let backtests: [String: ProcessStatus]
     /// List of active strategies from strategy_runner
-    let strategies: [[String: AnyCodable]]?
+    let strategies: [StrategyStatusPayload]?
 }
 
 struct TradingSignal: Codable, Sendable {

@@ -6,12 +6,12 @@ import subprocess
 import time
 from datetime import UTC
 from datetime import datetime
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 
 
@@ -143,13 +143,13 @@ class TestProcessIsolation:
         wait_time = 0.1
         elapsed = 0.0
         status = spawner.get_status("crash_exception")
-        while status["running"] and elapsed < max_wait:
+        while status.running and elapsed < max_wait:
             time.sleep(wait_time)
             elapsed += wait_time
             wait_time = min(wait_time * 1.5, 0.5)
             status = spawner.get_status("crash_exception")
-        assert status["running"] is False, f"Process still running after {elapsed:.1f}s"
-        assert status["exit_code"] != 0
+        assert status.running is False, f"Process still running after {elapsed:.1f}s"
+        assert status.exit_code != 0
         assert os.getpid() == parent_pid
 
     def test_parent_survives_child_exit(self) -> None:
@@ -173,13 +173,13 @@ class TestProcessIsolation:
         wait_time = 0.1
         elapsed = 0.0
         status = spawner.get_status("crash_exit")
-        while status["running"] and elapsed < max_wait:
+        while status.running and elapsed < max_wait:
             time.sleep(wait_time)
             elapsed += wait_time
             wait_time = min(wait_time * 1.5, 0.5)
             status = spawner.get_status("crash_exit")
-        assert status["running"] is False, f"Process still running after {elapsed:.1f}s"
-        assert status["exit_code"] == 42
+        assert status.running is False, f"Process still running after {elapsed:.1f}s"
+        assert status.exit_code == 42
         assert os.getpid() == parent_pid
 
     def test_parent_survives_child_signal(self) -> None:
@@ -203,13 +203,13 @@ class TestProcessIsolation:
         wait_time = 0.1
         elapsed = 0.0
         status = spawner.get_status("crash_signal")
-        while status["running"] and elapsed < max_wait:
+        while status.running and elapsed < max_wait:
             time.sleep(wait_time)
             elapsed += wait_time
             wait_time = min(wait_time * 1.5, 0.5)
             status = spawner.get_status("crash_signal")
-        assert status["running"] is False, f"Process still running after {elapsed:.1f}s"
-        exit_code = status["exit_code"]
+        assert status.running is False, f"Process still running after {elapsed:.1f}s"
+        exit_code = status.exit_code
         assert exit_code in {signal.SIGTERM, -signal.SIGTERM}
         assert os.getpid() == parent_pid
 
@@ -231,18 +231,18 @@ class TestProcessIsolation:
         assert info.pid > 0
         time.sleep(0.2)
         status = spawner.get_status("hanging_process")
-        assert status["running"] is True
+        assert status.running is True
         spawner.terminate("hanging_process", timeout=0.1)
         max_wait = 3.0
         wait_time = 0.1
         elapsed = 0.0
         status = spawner.get_status("hanging_process")
-        while status["running"] and elapsed < max_wait:
+        while status.running and elapsed < max_wait:
             time.sleep(wait_time)
             elapsed += wait_time
             wait_time = min(wait_time * 1.5, 0.5)
             status = spawner.get_status("hanging_process")
-        assert status["running"] is False, f"Process still running after {elapsed:.1f}s"
+        assert status.running is False, f"Process still running after {elapsed:.1f}s"
         assert os.getpid() > 0
 
     def test_multiple_child_crashes_dont_affect_parent(self) -> None:
@@ -271,13 +271,11 @@ class TestProcessIsolation:
             time.sleep(wait_time)
             elapsed += wait_time
             wait_time = min(wait_time * 1.5, 0.5)
-            all_dead = all(not spawner.get_status(f"crash_{i}")["running"] for i in range(5))
+            all_dead = all(not spawner.get_status(f"crash_{i}").running for i in range(5))
         for i in range(5):
             status = spawner.get_status(f"crash_{i}")
-            assert (
-                status["running"] is False
-            ), f"Process crash_{i} still running after {elapsed:.1f}s"
-            assert status["exit_code"] != 0
+            assert status.running is False, f"Process crash_{i} still running after {elapsed:.1f}s"
+            assert status.exit_code != 0
         assert os.getpid() == parent_pid
 
 
@@ -295,10 +293,10 @@ class DummyProcess:
 
 def _wait_until_not_running(
     spawner: ProcessSpawnerService, name: str, timeout: float = 2.0
-) -> dict[str, Any]:
+) -> SpawnerStatusSnapshot:
     deadline = time.time() + timeout
-    last_status: dict[str, Any] = spawner.get_status(name)
-    while last_status.get("running", False) and time.time() < deadline:
+    last_status: SpawnerStatusSnapshot = spawner.get_status(name)
+    while last_status.running and time.time() < deadline:
         time.sleep(0.05)
         last_status = spawner.get_status(name)
     return last_status
@@ -326,8 +324,8 @@ class TestProcessSpawner:
         assert process_info.pid > 0
         assert process_info.started_at is not None
         status = spawner.get_status("test_process")
-        assert status["running"] is True
-        assert status["pid"] == process_info.pid
+        assert status.running is True
+        assert status.pid == process_info.pid
         spawner.terminate("test_process")
 
     def test_process_status_tracking(self) -> None:
@@ -346,11 +344,11 @@ class TestProcessSpawner:
             kwargs={},
         )
         status = spawner.get_status("status_test")
-        assert status["running"] is True
-        assert "exit_code" not in status
+        assert status.running is True
+        assert status.exit_code is None
         status = _wait_until_not_running(spawner, "status_test", timeout=5.0)
-        assert status["running"] is False
-        assert status["exit_code"] == 0
+        assert status.running is False
+        assert status.exit_code == 0
 
     def test_terminate_process_graceful(self) -> None:
         """Verify graceful process termination.
@@ -375,7 +373,7 @@ class TestProcessSpawner:
         assert success is True
         assert elapsed < 3.0
         status = spawner.get_status("graceful_test")
-        assert status["running"] is False
+        assert status.running is False
 
     def test_terminate_process_forced_kill(self) -> None:
         """Verify forced process termination.
@@ -398,7 +396,7 @@ class TestProcessSpawner:
         assert success is True
         assert elapsed < 1.0
         status = spawner.get_status("forced_kill_test")
-        assert status["running"] is False
+        assert status.running is False
 
     def test_get_status_nonexistent_process(self) -> None:
         """Verify get_status returns error for unknown process.
@@ -409,8 +407,8 @@ class TestProcessSpawner:
         """
         spawner = ProcessSpawnerService()
         status = spawner.get_status("nonexistent")
-        assert status["running"] is False
-        assert "error" in status
+        assert status.running is False
+        assert status.error is not None
 
     def test_terminate_nonexistent_process(self) -> None:
         """Verify terminate returns False for unknown process.
@@ -458,12 +456,12 @@ class TestProcessSpawner:
             )
         for i in range(3):
             status = spawner.get_status(f"multi_test_{i}")
-            assert status["running"] is True
+            assert status.running is True
         for i in range(3):
             spawner.terminate(f"multi_test_{i}")
         for i in range(3):
             status = spawner.get_status(f"multi_test_{i}")
-            assert status["running"] is False
+            assert status.running is False
 
     def test_no_zombie_processes(self) -> None:
         """Verify terminated processes are cleaned up properly.
@@ -484,7 +482,7 @@ class TestProcessSpawner:
             spawner.terminate(f"zombie_test_{i}")
         for i in range(5):
             status = spawner.get_status(f"zombie_test_{i}")
-            assert status["running"] is False
+            assert status.running is False
 
     def test_process_exit_code_captured(self) -> None:
         """Verify exit code captured after process completion.
@@ -502,8 +500,8 @@ class TestProcessSpawner:
             kwargs={},
         )
         status = _wait_until_not_running(spawner, "exitcode_test", timeout=5.0)
-        assert status["running"] is False
-        assert status["exit_code"] == 0
+        assert status.running is False
+        assert status.exit_code == 0
 
     def test_spawner_init(self) -> None:
         """Verify spawner initializes with empty processes dict.
@@ -537,8 +535,8 @@ class TestProcessSpawner:
         pids: set[int] = set()
         for name in names:
             status = spawner.get_status(name)
-            assert status["running"] is True
-            pids.add(status["pid"])
+            assert status.running is True
+            pids.add(status.pid)
         assert len(pids) == 5
         for name in names:
             spawner.terminate(name)
@@ -560,10 +558,10 @@ class TestProcessSpawner:
         )
         time.sleep(0.3)
         status = spawner.get_status("uptime_test")
-        assert status["running"] is True
-        assert "uptime_seconds" in status
-        assert status["uptime_seconds"] >= 0.2
-        assert status["uptime_seconds"] < 1.0
+        assert status.running is True
+        assert status.uptime_seconds is not None
+        assert status.uptime_seconds >= 0.2
+        assert status.uptime_seconds < 1.0
         spawner.terminate("uptime_test")
 
 

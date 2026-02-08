@@ -26,6 +26,8 @@ from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import ProcessRegistryEntry
+from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
@@ -113,10 +115,20 @@ class TestImportClass:
         """
         mock_class = MagicMock(spec=type)
         mock_get_registry.return_value = {
-            "zmq_broker": {
-                "class_ref": mock_class,
-                "class_path": "snapper.ipc.zmq_broker.ZmqBrokerThread",
-            }
+            "zmq_broker": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
+                method="run",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         settings = MagicMock()
         factory = ProcessLauncherService(settings)
@@ -135,10 +147,20 @@ class TestImportClass:
         Then: TypeError is raised with 'is not a class' message.
         """
         mock_get_registry.return_value = {
-            "bad_entry": {
-                "class_ref": "not_a_class",
-                "class_path": "test.BadClass",
-            }
+            "bad_entry": ProcessRegistryEntry(
+                class_ref="not_a_class",
+                class_path="test.BadClass",
+                method="run",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         settings = MagicMock()
         factory = ProcessLauncherService(settings)
@@ -1441,7 +1463,22 @@ async def test_start_process_by_name_reports_start_error(
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_registered_processes",
-        lambda: {"drop_tags": {"tags": ()}},
+        lambda: {
+            "drop_tags": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
+        },
     )
     result = await factory.start_process_by_name("worker")
     assert result.status == "error"
@@ -1516,14 +1553,20 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_registered_processes",
         lambda: {
-            "worker": {
-                "class_ref": SyncProcess,
-                "class_path": "tests.application.process_manager.test_process_launcher.SyncProcess",
-                "method": "start",
-                "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
-                "role": ProcessRoleEnum.CORE,
-                "tags": ("a", "b"),
-            }
+            "worker": ProcessRegistryEntry(
+                class_ref=SyncProcess,
+                class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
+                method="start",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+                role=ProcessRoleEnum.CORE,
+                tags=("a", "b"),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         },
     )
     result = await factory.start_process_by_name(
@@ -1889,7 +1932,22 @@ def test_import_class_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     factory = ProcessLauncherService(settings)
     monkeypatch.setattr(
         "snapper.application.process_manager.config_resolver.get_registered_processes",
-        lambda: {"bad": {"class_ref": object()}},
+        lambda: {
+            "bad": ProcessRegistryEntry(
+                class_ref=object(),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
+        },
     )
     with pytest.raises(TypeError):
         factory.import_class("module.Class", process_name="bad")
@@ -1941,9 +1999,9 @@ async def test_monitor_native_processes_skips_running_and_exits(
     )
     factory.started_processes["native"] = proc_info
 
-    def status_running(_name: str) -> dict[str, Any]:
+    def status_running(_name: str) -> SpawnerStatusSnapshot:
         factory.started_processes.clear()
-        return {"running": True}
+        return SpawnerStatusSnapshot(name=_name, running=True)
 
     spawner_mock.get_status.side_effect = status_running
     sleep_calls: list[float] = []
@@ -2215,7 +2273,22 @@ async def test_get_process_configs_uses_metadata_parameters_schema(
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.config_resolver.get_registered_processes",
-        lambda: {"demo": {"parameters_schema": {"field": "value"}}},
+        lambda: {
+            "demo": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema={"field": "value"},
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
+        },
     )
     configs = await factory.get_process_configs()
     assert configs[0].parameters_schema == {"field": "value"}
@@ -2243,7 +2316,22 @@ async def test_get_process_configs_preserves_existing_parameters_schema(
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.config_resolver.get_registered_processes",
-        lambda: {"demo": {"parameters_schema": {"other": False}}},
+        lambda: {
+            "demo": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema={"other": False},
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
+        },
     )
     configs = await factory.get_process_configs()
     assert configs[0].parameters_schema == {"own": True}
@@ -2456,7 +2544,7 @@ async def test_monitor_native_processes_logs_error_and_recovers(
     )
     factory.started_processes["native"] = proc_info
 
-    def status_side_effect(_name: str) -> dict[str, Any]:
+    def status_side_effect(_name: str) -> SpawnerStatusSnapshot:
         factory.started_processes.clear()
         raise RuntimeError("broken")
 
@@ -2639,7 +2727,22 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_registered_processes",
-        lambda: {"meta_drop": {"tags": ("meta",)}},
+        lambda: {
+            "meta_drop": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=("meta",),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
+        },
     )
     result = await factory.start_process_by_name("meta_drop")
     assert result.status == "success"
@@ -2765,16 +2868,23 @@ async def test_sync_registry_creates_missing_configs(monkeypatch: pytest.MonkeyP
     factory = ProcessLauncherService(settings)
     create_mock = mock.AsyncMock()
     monkeypatch.setattr(factory._registry_syncer, "_create_process_config_in_db", create_mock)
-    metadata = {
-        "class_ref": _RegistryClass,
-        "class_path": "module.Class",
-        "method": "start",
-        "parameters_schema": {"schema": True},
-        "tags": ("x",),
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryClass,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=("x",),
+        parameters_schema={"schema": True},
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"new_proc": metadata},
+        lambda: {"new_proc": entry},
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository",
@@ -2809,14 +2919,23 @@ async def test_sync_registry_creates_missing_configs_even_when_kwargs_fail(
     factory = ProcessLauncherService(settings)
     create_mock = mock.AsyncMock()
     monkeypatch.setattr(factory._registry_syncer, "_create_process_config_in_db", create_mock)
-    metadata = {
-        "class_ref": _RegistryClassFailingKwargs,
-        "class_path": "module.Class",
-        "method": "start",
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryClassFailingKwargs,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"new_proc": metadata},
+        lambda: {"new_proc": entry},
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository",
@@ -2862,16 +2981,23 @@ async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryNoKwargs,
-        "class_path": "module.Class",
-        "method": "start",
-        "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-        "role": ProcessRoleEnum.CORE,
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryNoKwargs,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"existing": metadata},
+        lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
     updated_setting = cast(Setting, repo.setting)
@@ -2915,18 +3041,23 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryClassNoKwargs,
-        "class_path": "module.Class",
-        "method": "start",
-        "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
-        "role": ProcessRoleEnum.CORE,
-        "tags": ("a",),
-        "parameters_schema": {"shape": "x"},
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryClassNoKwargs,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+        role=ProcessRoleEnum.CORE,
+        tags=("a",),
+        parameters_schema={"shape": "x"},
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"existing": metadata},
+        lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
     updated_setting = cast(Setting, repo.setting)
@@ -2968,18 +3099,23 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryClass,
-        "class_path": "module.Class",
-        "method": "start",
-        "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-        "role": ProcessRoleEnum.CORE,
-        "tags": ("sync",),
-        "parameters_schema": {"p": 1},
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryClass,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=("sync",),
+        parameters_schema={"p": 1},
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"existing": metadata},
+        lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
     updated_setting = cast(Setting, repo.setting)
@@ -3044,16 +3180,23 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryClassKwargsFailingUpdate,
-        "class_path": "module.Class",
-        "method": "start",
-        "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-        "role": ProcessRoleEnum.CORE,
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryClassKwargsFailingUpdate,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"existing": metadata},
+        lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
     updated_setting = cast(Setting, repo.setting)
@@ -3093,17 +3236,23 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryClassNoKwargs,
-        "class_path": "module.Class",
-        "method": "start",
-        "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
-        "role": ProcessRoleEnum.CORE,
-        "tags": ("t",),
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryClassNoKwargs,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+        role=ProcessRoleEnum.CORE,
+        tags=("t",),
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"existing": metadata},
+        lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
     assert repo.first_session is not None and repo.first_session.commit_called is False
@@ -3125,14 +3274,23 @@ async def test_sync_registry_handles_invalid_json(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryNoKwargs,
-        "class_path": "module.Class",
-        "method": "start",
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryNoKwargs,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"bad": metadata},
+        lambda: {"bad": entry},
     )
     await factory.sync_registry_to_database()
     assert cast(Setting, repo.setting).value == "{"
@@ -3176,15 +3334,23 @@ async def test_sync_registry_skips_tag_update_when_already_present(
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryWithTagsAlready,
-        "class_path": "module.Class",
-        "method": "start",
-        "tags": ("keep",),
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryWithTagsAlready,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=("keep",),
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"tagged": metadata},
+        lambda: {"tagged": entry},
     )
     await factory.sync_registry_to_database()
     updated_setting = cast(Setting, repo.setting)
@@ -3224,15 +3390,23 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
     )
-    metadata = {
-        "class_ref": _RegistryNoKwargs,
-        "class_path": "module.Class",
-        "method": "start",
-        "tags": ("new",),
-    }
+    entry = ProcessRegistryEntry(
+        class_ref=_RegistryNoKwargs,
+        class_path="module.Class",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=("new",),
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+        args=[],
+    )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
-        lambda: {"tagless": metadata},
+        lambda: {"tagless": entry},
     )
     await factory.sync_registry_to_database()
     updated_setting = cast(Setting, repo.setting)
@@ -3650,15 +3824,20 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
     """
     factory = ProcessLauncherService(get_settings())
     mock_get_registry.return_value = {
-        "test_process": {
-            "class_path": "test.module.TestClass",
-            "class_ref": MagicMock(),
-            "method": "start",
-            "tags": "legacy",
-            "parameters_schema": None,
-            "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-            "role": ProcessRoleEnum.CORE,
-        }
+        "test_process": ProcessRegistryEntry(
+            class_path="test.module.TestClass",
+            class_ref=MagicMock(),
+            method="start",
+            description="",
+            priority=0,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("legacy",),
+            parameters_schema=None,
+            enabled=True,
+            mode="thread",
+            args=[],
+        )
     }
     existing_config: dict[str, Any] = {
         "enabled": True,
@@ -3712,15 +3891,20 @@ async def test_sync_registry_to_database_adds_missing_tags(
         pass
 
     mock_get_registry.return_value = {
-        "reg_process": {
-            "class_ref": DummyProcess,
-            "class_path": "test.module.RegClass",
-            "method": "start",
-            "tags": ("alpha", "beta"),
-            "parameters_schema": {"type": "object"},
-            "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-            "role": ProcessRoleEnum.CORE,
-        }
+        "reg_process": ProcessRegistryEntry(
+            class_ref=DummyProcess,
+            class_path="test.module.RegClass",
+            method="start",
+            description="",
+            priority=0,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("alpha", "beta"),
+            parameters_schema={"type": "object"},
+            enabled=True,
+            mode="thread",
+            args=[],
+        )
     }
     existing_value: dict[str, Any] = {
         "enabled": True,
@@ -3779,13 +3963,21 @@ class TestProcessFactoryConfigLoading:
         When: get_process_configs is called.
         Then: Returns ProcessConfig with correctly parsed fields.
         """
-        mock_registry: dict[str, dict[str, Any]] = {
-            "test_process": {
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "tags": ("test", "coverage"),
-                "parameters_schema": {"type": "object"},
-            }
+        mock_registry: dict[str, ProcessRegistryEntry] = {
+            "test_process": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=("test", "coverage"),
+                parameters_schema={"type": "object"},
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         mock_get_registry.return_value = mock_registry
         mock_repo = MagicMock()
@@ -4237,19 +4429,21 @@ class TestProcessFactoryRegistrySync:
         When: sync_registry_to_database is called.
         Then: New setting is created with all fields from registry.
         """
-        mock_registry: dict[str, dict[str, Any]] = {
-            "new_process": {
-                "class_ref": mock_process_class,
-                "class_path": "test.module.MockProcess",
-                "method": "start",
-                "enabled": True,
-                "mode": "thread",
-                "args": [],
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "tags": ("test", "new"),
-                "parameters_schema": {"type": "object"},
-            }
+        mock_registry: dict[str, ProcessRegistryEntry] = {
+            "new_process": ProcessRegistryEntry(
+                class_ref=mock_process_class,
+                class_path="test.module.MockProcess",
+                method="start",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=("test", "new"),
+                parameters_schema={"type": "object"},
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         mock_get_registry.return_value = mock_registry
         mock_repo = MagicMock()
@@ -4299,14 +4493,21 @@ class TestProcessFactoryRegistrySync:
         When: sync_registry_to_database is called.
         Then: Config is updated with default kwargs from process class.
         """
-        mock_registry: dict[str, dict[str, Any]] = {
-            "existing_process": {
-                "class_ref": mock_process_class,
-                "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
-                "role": ProcessRoleEnum.BACKTEST,
-                "tags": ("updated",),
-                "parameters_schema": None,
-            }
+        mock_registry: dict[str, ProcessRegistryEntry] = {
+            "existing_process": ProcessRegistryEntry(
+                class_ref=mock_process_class,
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+                role=ProcessRoleEnum.BACKTEST,
+                tags=("updated",),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         mock_get_registry.return_value = mock_registry
         mock_repo = MagicMock()
@@ -4361,12 +4562,21 @@ class TestProcessFactoryRegistrySync:
         When: sync_registry_to_database is called.
         Then: Existing kwargs are preserved, not overwritten.
         """
-        mock_registry: dict[str, dict[str, Any]] = {
-            "process_with_kwargs": {
-                "class_ref": type("DummyClass", (), {}),
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-            }
+        mock_registry: dict[str, ProcessRegistryEntry] = {
+            "process_with_kwargs": ProcessRegistryEntry(
+                class_ref=type("DummyClass", (), {}),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         mock_get_registry.return_value = mock_registry
         mock_repo = MagicMock()
@@ -4406,12 +4616,21 @@ class TestProcessFactoryRegistrySync:
         When: sync_registry_to_database is called.
         Then: Error is handled gracefully without raising exception.
         """
-        mock_registry: dict[str, dict[str, Any]] = {
-            "corrupted_process": {
-                "class_ref": type("TestClass", (), {}),
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-            }
+        mock_registry: dict[str, ProcessRegistryEntry] = {
+            "corrupted_process": ProcessRegistryEntry(
+                class_ref=type("TestClass", (), {}),
+                class_path="",
+                method="",
+                description="",
+                priority=0,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         mock_get_registry.return_value = mock_registry
         mock_repo = MagicMock()

@@ -12,11 +12,14 @@ from fastapi import WebSocket
 from snapper.core.types import SubscriptionAction
 
 __all__ = [
-    "UITopicModel",
+    "ConnectionStats",
     "SubscriptionRequestModel",
-    "TopicSubscriptionModel",
     "TopicConfigurationModel",
+    "TopicMetricSnapshot",
     "TopicMetricsModel",
+    "TopicSubscriptionModel",
+    "UITopicModel",
+    "WsStatsSnapshot",
 ]
 
 
@@ -117,3 +120,64 @@ class TopicMetricsModel:
     timeout_count: int = 0
     last_message_ts: float = 0.0
     active_subscribers: int = 0
+
+
+@dataclass
+class ConnectionStats:
+    """Connection-level statistics from the ZMQ-WebSocket bridge.
+
+    Attributes:
+        active_connections: Number of active WebSocket connections.
+        zmq_subscribers: Number of active ZMQ subscriber sockets.
+        subscriber_tasks: Number of running subscriber asyncio tasks.
+        active_topics: Number of topics with at least one subscriber.
+        active_clients: Number of unique connected clients.
+    """
+
+    active_connections: int = 0
+    zmq_subscribers: int = 0
+    subscriber_tasks: int = 0
+    active_topics: int = 0
+    active_clients: int = 0
+
+
+@dataclass
+class TopicMetricSnapshot:
+    """Point-in-time snapshot of metrics for a single topic.
+
+    Attributes:
+        active_subscribers: Current subscriber count for this topic.
+        received: Total messages received from ZMQ.
+        forwarded: Messages successfully forwarded to clients.
+        throttled: Messages dropped due to throttling.
+        dropped: Messages dropped due to backpressure.
+        timeout: Messages that timed out during send.
+        errors: Number of errors encountered.
+        last_message_ts: Timestamp of last received message.
+        throttle_ms: Configured throttle interval (None if unconfigured).
+        pattern: ZMQ subscription pattern (None if unconfigured).
+    """
+
+    active_subscribers: int = 0
+    received: int = 0
+    forwarded: int = 0
+    throttled: int = 0
+    dropped: int = 0
+    timeout: int = 0
+    errors: int = 0
+    last_message_ts: float = 0.0
+    throttle_ms: int | None = None
+    pattern: str | None = None
+
+
+@dataclass
+class WsStatsSnapshot:
+    """Aggregated WebSocket and ZMQ bridge statistics.
+
+    Attributes:
+        connections: Connection-level statistics.
+        topics: Per-topic metrics keyed by topic name.
+    """
+
+    connections: ConnectionStats
+    topics: dict[str, TopicMetricSnapshot]

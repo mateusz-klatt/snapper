@@ -1792,6 +1792,76 @@ export type Components = {
             description?: string | null;
         };
         /**
+         * StrategyStatusPayload
+         * @description Strategy process status payload for the system status endpoint.
+         *
+         *     Attributes:
+         *         strategy_name: Name of the strategy.
+         *         status: Current strategy status string.
+         *         details: Full raw status dictionary from the process.
+         *         signals_generated: Number of signals generated.
+         *         trades_executed: Number of trades executed.
+         *         last_signal: Last signal description.
+         *         last_signal_time: Timestamp of last signal.
+         *         pnl: Current profit and loss.
+         *         pid: Process ID.
+         *         uptime: Process uptime string.
+         */
+        StrategyStatusPayload: {
+            /**
+             * Strategy Name
+             * @description Strategy name
+             */
+            strategy_name: string;
+            /**
+             * Status
+             * @description Current strategy status
+             */
+            status: string;
+            /**
+             * Details
+             * @description Full raw status
+             */
+            details?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Signals Generated
+             * @description Signals generated count
+             */
+            signals_generated?: number | null;
+            /**
+             * Trades Executed
+             * @description Trades executed count
+             */
+            trades_executed?: number | null;
+            /**
+             * Last Signal
+             * @description Last signal description
+             */
+            last_signal?: string | null;
+            /**
+             * Last Signal Time
+             * @description Last signal timestamp
+             */
+            last_signal_time?: string | null;
+            /**
+             * Pnl
+             * @description Current PnL
+             */
+            pnl?: number | null;
+            /**
+             * Pid
+             * @description Process ID
+             */
+            pid?: number | null;
+            /**
+             * Uptime
+             * @description Process uptime
+             */
+            uptime?: string | null;
+        };
+        /**
          * SubscriptionsStats
          * @description Subscription statistics.
          *
@@ -1836,9 +1906,7 @@ export type Components = {
              * Strategies
              * @description List of active strategies from strategy_runner
              */
-            strategies?: {
-                [key: string]: unknown;
-            }[];
+            strategies?: Components["schemas"]["StrategyStatusPayload"][];
         };
         /**
          * TradingSignal

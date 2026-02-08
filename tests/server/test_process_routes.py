@@ -13,6 +13,7 @@ from snapper.api.schemas.process import ProcessStartRequest
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import ProcessStopResult
 from snapper.server.process_routes import create_process_configuration
@@ -66,19 +67,36 @@ class TestListAvailableProcesses:
         When: list_available_processes is called,
         Then: All processes are returned with name, path, and description.
         """
+        mock_class = MagicMock()
         mock_get_registry.return_value = {
-            "zmq_broker": {
-                "class_path": "snapper.ipc.zmq_broker.ZmqBrokerThread",
-                "method": "run",
-                "description": "ZMQ message broker",
-                "class_ref": MagicMock(),
-            },
-            "feed_publisher": {
-                "class_path": "snapper.ipc.feed_publisher.MarketDataPublisherService",
-                "method": "run",
-                "description": "Market data publisher",
-                "class_ref": MagicMock(),
-            },
+            "zmq_broker": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
+                method="run",
+                description="ZMQ message broker",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            ),
+            "feed_publisher": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.ipc.feed_publisher.MarketDataPublisherService",
+                method="run",
+                description="Market data publisher",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            ),
         }
         result = await list_available_processes(_user=MagicMock())
         assert result.count == 2
@@ -179,15 +197,20 @@ class TestGetProcessSchema:
         mock_class = MagicMock()
         mock_class.get_default_kwargs = MagicMock(return_value={"endpoint": "tcp://0.0.0.0:5555"})
         mock_get_registry.return_value = {
-            "zmq_broker": {
-                "class_path": "snapper.ipc.zmq_broker.ZmqBrokerThread",
-                "method": "run",
-                "description": "ZMQ message broker",
-                "class_ref": mock_class,
-                "enabled": True,
-                "mode": "thread",
-                "args": [],
-            }
+            "zmq_broker": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
+                method="run",
+                description="ZMQ message broker",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="thread",
+                args=[],
+            )
         }
         settings = MagicMock()
         result = await get_process_schema(name="zmq_broker", settings=settings, _user=MagicMock())
@@ -212,12 +235,20 @@ class TestGetProcessSchema:
         mock_class = MagicMock()
         del mock_class.get_default_kwargs
         mock_get_registry.return_value = {
-            "custom_process": {
-                "class_path": "custom.Process",
-                "method": "run",
-                "description": "Custom process",
-                "class_ref": mock_class,
-            }
+            "custom_process": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="custom.Process",
+                method="run",
+                description="Custom process",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         settings = MagicMock()
         result = await get_process_schema(
@@ -243,15 +274,20 @@ class TestGetProcessSchema:
         mock_class = MagicMock()
         mock_class.get_default_kwargs = MagicMock(side_effect=Exception("DB error"))
         mock_get_registry.return_value = {
-            "failing_process": {
-                "class_path": "failing.Process",
-                "method": "run",
-                "description": "Process with failing get_default_kwargs",
-                "class_ref": mock_class,
-                "enabled": True,
-                "mode": "process",
-                "args": ["arg1"],
-            }
+            "failing_process": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="failing.Process",
+                method="run",
+                description="Process with failing get_default_kwargs",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=True,
+                mode="process",
+                args=["arg1"],
+            )
         }
         settings = MagicMock()
         result = await get_process_schema(
@@ -437,16 +473,20 @@ class TestCreateProcessConfiguration:
             "output": "signals.default_strategy",
         }
         mock_get_registry.return_value = {
-            "strategy_macd_btc_1h": {
-                "class_ref": strategy_class,
-                "class_path": "snapper.strategies.process_wrapper.MACDStrategyBTC",
-                "method": "start",
-                "description": "MACD strategy",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.STRATEGY,
-                "tags": ("strategy",),
-                "parameters_schema": {"type": "object"},
-            }
+            "strategy_macd_btc_1h": ProcessRegistryEntry(
+                class_ref=strategy_class,
+                class_path="snapper.strategies.process_wrapper.MACDStrategyBTC",
+                method="start",
+                description="MACD strategy",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=("strategy",),
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         request = ProcessCreateRequest(
             name="strategy_macd_custom",
@@ -544,14 +584,20 @@ class TestCreateProcessConfiguration:
         mock_factory.create_process_config = AsyncMock(side_effect=ValueError("exists"))
         strategy_class = MagicMock()
         mock_get_registry.return_value = {
-            "strategy_macd_btc_1h": {
-                "class_ref": strategy_class,
-                "class_path": "path",
-                "method": "start",
-                "description": "desc",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.STRATEGY,
-            }
+            "strategy_macd_btc_1h": ProcessRegistryEntry(
+                class_ref=strategy_class,
+                class_path="path",
+                method="start",
+                description="desc",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         request = ProcessCreateRequest(
             name="strategy_macd_custom",
@@ -579,25 +625,31 @@ class TestProcessRoutesEdgeCases:
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
-    async def test_list_available_processes_tags_not_iterable(
+    async def test_list_available_processes_with_empty_tags(
         self, mock_get_registry: MagicMock
     ) -> None:
-        """Verify tags fallback when not iterable.
+        """Verify empty tags are handled correctly.
 
-        Given: A process with non-iterable tags string,
+        Given: A process with empty tags tuple,
         When: list_available_processes is called,
         Then: Empty tags list is returned.
         """
+        mock_class = MagicMock()
         mock_get_registry.return_value = {
-            "test_process": {
-                "class_path": "snapper.test.TestProcess",
-                "method": "run",
-                "description": "Test process",
-                "class_ref": MagicMock(),
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "tags": "not_iterable_string",
-            },
+            "test_process": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.test.TestProcess",
+                method="run",
+                description="Test process",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            ),
         }
         result = await list_available_processes(_user=MagicMock())
         assert result.count == 1
@@ -624,16 +676,20 @@ class TestProcessRoutesEdgeCases:
                 raise RuntimeError("Failed to load defaults")
 
         mock_get_registry.return_value = {
-            "test_template": {
-                "class_ref": FailingKwargsClass,
-                "class_path": "snapper.test.FailingKwargsClass",
-                "method": "run",
-                "description": "Test with failing get_default_kwargs",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "args": [],
-                "kwargs": {},
-            }
+            "test_template": ProcessRegistryEntry(
+                class_ref=FailingKwargsClass,
+                class_path="snapper.test.FailingKwargsClass",
+                method="run",
+                description="Test with failing get_default_kwargs",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         request = ProcessCreateRequest(
             name="test_process",
@@ -669,16 +725,20 @@ class TestProcessRoutesEdgeCases:
         mock_factory.create_process_config = AsyncMock(return_value=MagicMock())
         mock_class = MagicMock(spec=[])
         mock_get_registry.return_value = {
-            "test_template": {
-                "class_ref": mock_class,
-                "class_path": "snapper.test.NoKwargsClass",
-                "method": "run",
-                "description": "Test without get_default_kwargs",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "args": [],
-                "kwargs": {},
-            }
+            "test_template": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.test.NoKwargsClass",
+                method="run",
+                description="Test without get_default_kwargs",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         request = ProcessCreateRequest(
             name="test_process",
@@ -702,10 +762,10 @@ class TestProcessRoutesEdgeCases:
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
-    async def test_create_process_tags_not_iterable(self, mock_get_registry: MagicMock) -> None:
-        """Verify tags fallback to empty tuple when not iterable.
+    async def test_create_process_with_empty_tags(self, mock_get_registry: MagicMock) -> None:
+        """Verify empty tags are handled correctly.
 
-        Given: A process with non-iterable tags string,
+        Given: A process with empty tags tuple,
         When: create_process_configuration is called,
         Then: Configuration is created with empty tags tuple.
         """
@@ -715,17 +775,20 @@ class TestProcessRoutesEdgeCases:
         mock_class = MagicMock()
         mock_class.get_default_kwargs = MagicMock(return_value={})
         mock_get_registry.return_value = {
-            "test_template": {
-                "class_ref": mock_class,
-                "class_path": "snapper.test.TestClass",
-                "method": "run",
-                "description": "Test with non-iterable tags",
-                "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
-                "role": ProcessRoleEnum.CORE,
-                "args": [],
-                "kwargs": {},
-                "tags": "not_iterable_string",
-            }
+            "test_template": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.test.TestClass",
+                method="run",
+                description="Test with empty tags",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                args=[],
+            )
         }
         request = ProcessCreateRequest(
             name="test_process",

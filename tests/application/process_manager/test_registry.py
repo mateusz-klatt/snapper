@@ -2,6 +2,7 @@
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_process_metadata
@@ -28,15 +29,16 @@ class TestRegisterProcess:
 
         metadata = get_process_metadata("test_basic")
         assert metadata is not None
-        assert metadata["class_ref"] == BasicProcess
-        assert metadata["method"] == "start"
-        assert metadata["description"] == "Basic test process"
-        assert metadata["priority"] == 50
-        assert metadata["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING
-        assert metadata["role"] == ProcessRoleEnum.CORE
-        assert metadata["enabled"] is False
-        assert metadata["mode"] == "thread"
-        assert metadata["args"] == []
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert metadata.class_ref == BasicProcess
+        assert metadata.method == "start"
+        assert metadata.description == "Basic test process"
+        assert metadata.priority == 50
+        assert metadata.lifecycle == ProcessLifecycleEnum.LONG_RUNNING
+        assert metadata.role == ProcessRoleEnum.CORE
+        assert metadata.enabled is False
+        assert metadata.mode == "thread"
+        assert metadata.args == []
 
     def test_register_with_custom_parameters(self) -> None:
         """Verify process registration with all custom parameters.
@@ -70,17 +72,18 @@ class TestRegisterProcess:
 
         metadata = get_process_metadata("test_custom")
         assert metadata is not None
-        assert metadata["class_ref"] == CustomProcess
-        assert metadata["method"] == "run"
-        assert metadata["description"] == "Custom test process"
-        assert metadata["priority"] == 10
-        assert metadata["lifecycle"] == ProcessLifecycleEnum.ONE_SHOT
-        assert metadata["role"] == ProcessRoleEnum.TASK
-        assert metadata["tags"] == ("tag1", "tag2")
-        assert metadata["parameters_schema"] == {"param1": "value1"}
-        assert metadata["enabled"] is True
-        assert metadata["mode"] == "process"
-        assert metadata["args"] == ["arg1", "arg2"]
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert metadata.class_ref == CustomProcess
+        assert metadata.method == "run"
+        assert metadata.description == "Custom test process"
+        assert metadata.priority == 10
+        assert metadata.lifecycle == ProcessLifecycleEnum.ONE_SHOT
+        assert metadata.role == ProcessRoleEnum.TASK
+        assert metadata.tags == ("tag1", "tag2")
+        assert metadata.parameters_schema == {"param1": "value1"}
+        assert metadata.enabled is True
+        assert metadata.mode == "process"
+        assert metadata.args == ["arg1", "arg2"]
 
     def test_register_with_string_enums(self) -> None:
         """Verify registration accepts string enum values.
@@ -102,8 +105,9 @@ class TestRegisterProcess:
 
         metadata = get_process_metadata("test_string_enums")
         assert metadata is not None
-        assert metadata["lifecycle"] == ProcessLifecycleEnum.ONE_SHOT
-        assert metadata["role"] == ProcessRoleEnum.TASK
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert metadata.lifecycle == ProcessLifecycleEnum.ONE_SHOT
+        assert metadata.role == ProcessRoleEnum.TASK
 
     def test_register_with_none_tags(self) -> None:
         """Verify registration handles None tags gracefully.
@@ -121,7 +125,8 @@ class TestRegisterProcess:
 
         metadata = get_process_metadata("test_no_tags")
         assert metadata is not None
-        assert metadata["tags"] == ()
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert metadata.tags == ()
 
     def test_register_with_none_args(self) -> None:
         """Verify registration handles None args gracefully.
@@ -139,7 +144,8 @@ class TestRegisterProcess:
 
         metadata = get_process_metadata("test_no_args")
         assert metadata is not None
-        assert metadata["args"] == []
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert metadata.args == []
 
     def test_class_path_generation(self) -> None:
         """Verify automatic class path generation from module and class.
@@ -157,7 +163,8 @@ class TestRegisterProcess:
 
         metadata = get_process_metadata("test_class_path")
         assert metadata is not None
-        assert metadata["class_path"].endswith(
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert metadata.class_path.endswith(
             "test_registry.TestRegisterProcess.test_class_path_generation.<locals>.ClassPathProcess"
         )
 
@@ -199,7 +206,7 @@ class TestGetRegisteredProcesses:
 
         Given: A registered process,
         When: Metadata is retrieved,
-        Then: All expected keys are present.
+        Then: ProcessRegistryEntry instance with all attributes is returned.
         """
 
         @register_process(name="test_metadata_keys")
@@ -211,21 +218,19 @@ class TestGetRegisteredProcesses:
         processes = get_registered_processes()
         assert "test_metadata_keys" in processes
         metadata = processes["test_metadata_keys"]
-        expected_keys = {
-            "class_ref",
-            "class_path",
-            "method",
-            "description",
-            "priority",
-            "lifecycle",
-            "role",
-            "tags",
-            "parameters_schema",
-            "enabled",
-            "mode",
-            "args",
-        }
-        assert set(metadata.keys()) == expected_keys
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert hasattr(metadata, "class_ref")
+        assert hasattr(metadata, "class_path")
+        assert hasattr(metadata, "method")
+        assert hasattr(metadata, "description")
+        assert hasattr(metadata, "priority")
+        assert hasattr(metadata, "lifecycle")
+        assert hasattr(metadata, "role")
+        assert hasattr(metadata, "tags")
+        assert hasattr(metadata, "parameters_schema")
+        assert hasattr(metadata, "enabled")
+        assert hasattr(metadata, "mode")
+        assert hasattr(metadata, "args")
 
 
 class TestGetProcessMetadata:
@@ -247,7 +252,8 @@ class TestGetProcessMetadata:
 
         metadata = get_process_metadata("test_existing")
         assert metadata is not None
-        assert metadata["class_ref"] == ExistingProcess
+        assert isinstance(metadata, ProcessRegistryEntry)
+        assert metadata.class_ref == ExistingProcess
 
     def test_get_nonexistent_process(self) -> None:
         """Verify get_process_metadata returns None for unknown process.

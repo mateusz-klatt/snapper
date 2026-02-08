@@ -27,6 +27,8 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.user import UserProfile
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
+from snapper.interface.websocket.models import ConnectionStats
+from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.server import process_runner
 from snapper.server.app import _build_strategy_payload
 from snapper.server.app import create_api_router
@@ -938,7 +940,9 @@ class TestZmqHealthCheckErrors:
         context_mock.socket.return_value = test_socket
         manager.zmq_bridge.context = context_mock
         manager.zmq_bridge.available_topics = {"t": "topic"}
-        manager.get_stats = MagicMock(return_value={"connections": {}, "topics": {}})
+        manager.get_stats = MagicMock(
+            return_value=WsStatsSnapshot(connections=ConnectionStats(), topics={})
+        )
         response = client.get("/api/zmq/health")
         assert response.status_code == 200
         test_socket.close.assert_called_once()

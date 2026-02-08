@@ -37,6 +37,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import ProcessStatusResult
 from snapper.application.process_manager.models import ProcessStopResult
@@ -159,10 +160,10 @@ class ProcessLauncherService:
     @staticmethod
     def _resolve_parameters_schema(
         config_dict: dict[str, Any],
-        metadata: dict[str, Any],
+        entry: ProcessRegistryEntry | None,
     ) -> dict[str, Any] | None:
         """Delegate to config_resolver.resolve_parameters_schema."""
-        return resolve_parameters_schema(config_dict, metadata)
+        return resolve_parameters_schema(config_dict, entry)
 
     async def get_process_configs(self) -> list[ProcessConfigModel]:
         """Load process configurations from database.
@@ -381,7 +382,8 @@ class ProcessLauncherService:
         configs = await self.get_process_configs()
         registry = get_registered_processes()
         configs_with_priority = [
-            (config, registry.get(config.name, {}).get("priority", 50)) for config in configs
+            (config, registry[config.name].priority if config.name in registry else 50)
+            for config in configs
         ]
         configs_with_priority.sort(key=lambda x: x[1])
         sorted_configs = [c[0] for c in configs_with_priority]
@@ -417,7 +419,7 @@ class ProcessLauncherService:
         if tracked_processes:
             self.expected_terminations.update(tracked_processes)
         tasks_with_priority = [
-            (name, task, registry.get(name, {}).get("priority", 50))
+            (name, task, registry[name].priority if name in registry else 50)
             for name, task in self.process_tasks.items()
         ]
         tasks_with_priority.sort(key=lambda x: x[2], reverse=True)
@@ -429,7 +431,7 @@ class ProcessLauncherService:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         processes_with_priority = [
-            (name, instance, registry.get(name, {}).get("priority", 50))
+            (name, instance, registry[name].priority if name in registry else 50)
             for name, instance in self.started_processes.items()
         ]
         processes_with_priority.sort(key=lambda x: x[2], reverse=True)
@@ -530,7 +532,7 @@ class ProcessLauncherService:
                         break
                     for name, proc_info in native_processes.items():
                         status = self.spawner.get_status(name)
-                        if not status.get("running", True):
+                        if not status.running:
                             logger.info(f"Native process '{name}' has completed")
                             await self._handle_process_completion(name, proc_info)
                 except asyncio.CancelledError:
@@ -753,18 +755,18 @@ class ProcessLauncherService:
             Fully resolved ProcessConfigModel.
         """
         registry = get_registered_processes()
-        metadata = registry.get(name, {})
+        entry = registry.get(name)
         lifecycle_raw = config_dict.get("lifecycle")
         if lifecycle_raw is None:
-            lifecycle_raw = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
+            lifecycle_raw = entry.lifecycle if entry else ProcessLifecycleEnum.LONG_RUNNING
         role_raw = config_dict.get("role")
         if role_raw is None:
-            role_raw = metadata.get("role", ProcessRoleEnum.CORE)
-        tags_raw = metadata.get("tags")
+            role_raw = entry.role if entry else ProcessRoleEnum.CORE
+        tags_raw = entry.tags if entry else None
         if tags_raw is None:
             tags_raw = config_dict.get("tags", ())
         tags_tuple = self._resolve_tags(tags_raw)
-        parameters_schema = self._resolve_parameters_schema(config_dict, metadata)
+        parameters_schema = self._resolve_parameters_schema(config_dict, entry)
         if parameters_schema is None:
             tags_tuple = ()
         return ProcessConfigModel(

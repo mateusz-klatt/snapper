@@ -41,6 +41,7 @@ import datetime as dt
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import timedelta
 from typing import Annotated
 from typing import Any
@@ -79,6 +80,7 @@ from snapper.api.schemas.market_data import CandleSnapshot
 from snapper.api.schemas.orders import OrderStatus
 from snapper.api.schemas.portfolio import PositionSnapshot
 from snapper.api.schemas.process import ProcessStatus
+from snapper.api.schemas.process import StrategyStatusPayload
 from snapper.api.schemas.process import SystemStatus
 from snapper.api.schemas.signals import TradingSignal
 from snapper.application.process_manager.launcher import ProcessLauncherService
@@ -329,8 +331,8 @@ def _normalize_strategy_status(status: dict[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in status.items()}
 
 
-def _build_strategy_payload(raw_status: dict[str, Any]) -> dict[str, Any] | None:
-    """Build a strategy payload dict from a raw process status.
+def _build_strategy_payload(raw_status: dict[str, Any]) -> StrategyStatusPayload | None:
+    """Build a strategy payload from a raw process status.
 
     Returns None if the raw status does not represent a strategy.
 
@@ -338,34 +340,37 @@ def _build_strategy_payload(raw_status: dict[str, Any]) -> dict[str, Any] | None
         raw_status: Raw process status dictionary.
 
     Returns:
-        Strategy payload dict or None if not a strategy status.
+        StrategyStatusPayload or None if not a strategy status.
     """
     if not isinstance(raw_status, dict):
         return None
     if "strategy_name" not in raw_status:
         return None
     normalized = _normalize_strategy_status(raw_status)
-    payload: dict[str, Any] = {
-        "strategy_name": str(normalized.get("strategy_name", "unknown")),
-        "status": normalized.get("status", "unknown"),
-        "details": normalized,
-    }
+    extra: dict[str, Any] = {}
     for key in _STRATEGY_STATUS_KEYS:
         if key in normalized:
-            payload[key] = normalized[key]
-    return payload
+            extra[key] = normalized[key]
+    return StrategyStatusPayload(
+        strategy_name=str(normalized.get("strategy_name", "unknown")),
+        status=normalized.get("status", "unknown"),
+        details=normalized,
+        **extra,
+    )
 
 
-def _collect_strategy_statuses(process_factory: ProcessLauncherService) -> list[dict[str, Any]]:
+def _collect_strategy_statuses(
+    process_factory: ProcessLauncherService,
+) -> list[StrategyStatusPayload]:
     """Collect strategy statuses from all running processes.
 
     Args:
         process_factory: Process launcher service with started processes.
 
     Returns:
-        List of strategy payload dicts.
+        List of StrategyStatusPayload instances.
     """
-    strategies: list[dict[str, Any]] = []
+    strategies: list[StrategyStatusPayload] = []
     for process_name, process_instance in process_factory.started_processes.items():
         try:
             raw = process_instance.get_status()
@@ -678,12 +683,10 @@ def _create_monitoring_endpoints_router(
             status="healthy",
             timestamp=dt.datetime.now(dt.UTC),
             version="0.1.0",
-            connections=stats["connections"],
+            connections=asdict(stats.connections),
             topics=HealthTopics(
                 available=len(get_all_topic_names()),
-                active=stats["connections"].get(
-                    "active_topics", len(zmq_bridge.topic_subscriptions)
-                ),
+                active=stats.connections.active_topics,
             ),
         )
 
@@ -708,8 +711,8 @@ def _create_monitoring_endpoints_router(
         return WsStatsResponse(
             websocket=websocket_section,
             zmq_bridge=bridge_section,
-            connections=stats["connections"],
-            topics=stats["topics"],
+            connections=asdict(stats.connections),
+            topics={k: asdict(v) for k, v in stats.topics.items()},
             subscriptions=SubscriptionsStats(
                 per_topic={topic: len(subs) for topic, subs in manager.topic_subscribers.items()},
                 per_client={
@@ -745,11 +748,11 @@ def _create_monitoring_endpoints_router(
             components=ZmqComponents(
                 zmq_context="ok" if not error_messages else "error",
                 websocket_manager="ok",
-                active_connections=stats["connections"].get("active_connections", 0),
+                active_connections=stats.connections.active_connections,
             ),
             config=ZmqConfig(available_topics=available_topics),
-            connections=stats["connections"],
-            message_stats=stats["topics"],
+            connections=asdict(stats.connections),
+            message_stats={k: asdict(v) for k, v in stats.topics.items()},
             errors=error_messages,
         )
 

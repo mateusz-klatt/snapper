@@ -80,7 +80,7 @@ async def send_auth_complete(
     session_expires_at_dt = ws_auth_manager.get_connection_expiration(websocket)
     auth_complete = WSAuthCompleteResponse(
         available_topics=allowed_topics,
-        user_role=user.role.value,
+        user_role=user.role,
         session_expires_at=session_expires_at_dt,
         ws_token_exp=datetime.fromtimestamp(ws_payload.exp, UTC),
     )

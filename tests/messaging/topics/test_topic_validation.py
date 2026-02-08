@@ -800,7 +800,7 @@ class TestMarketTopicValidation:
         valid, _err = validate_topic("market.kraken.BTC-USD.candles.1m")
         assert valid, f"Failed for candles: {_err}"
         assert _err == ""
-        for data_type in ["ticks", "trades"]:
+        for data_type in ["ticks", "trades", "tick", "book"]:
             valid, _err = validate_topic(f"market.kraken.BTC-USD.{data_type}")
             assert valid, f"Failed for {data_type}: {_err}"
             assert _err == ""

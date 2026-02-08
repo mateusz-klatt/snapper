@@ -5,12 +5,13 @@ and message broadcasting with ZMQ bridge integration.
 """
 
 import logging
-from typing import Any
 
 from fastapi import WebSocket
 from pydantic import BaseModel
 
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
+from snapper.interface.websocket.models import ConnectionStats
+from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.interface.websocket.schemas import WSErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -221,15 +222,17 @@ class WebSocketConnectionManager:
         error = WSErrorResponse(message=error_message)
         await self.send_response(websocket, error)
 
-    def get_stats(self) -> dict[str, Any]:
+    def get_stats(self) -> WsStatsSnapshot:
         """Get connection and topic statistics.
 
         Returns:
-            Dictionary with connection counts and topic metrics.
+            WsStatsSnapshot with connection counts and topic metrics.
         """
-        bridge_stats = self.zmq_bridge.get_connection_stats() if self.zmq_bridge else {}
-        topic_stats = self.zmq_bridge.get_topic_stats() if self.zmq_bridge else {}
-        return {
-            "connections": {"active_connections": len(self.active_connections), **bridge_stats},
-            "topics": topic_stats,
-        }
+        if self.zmq_bridge:
+            conn_stats = self.zmq_bridge.get_connection_stats()
+            conn_stats.active_connections = len(self.active_connections)
+            topic_stats = self.zmq_bridge.get_topic_stats()
+        else:
+            conn_stats = ConnectionStats(active_connections=len(self.active_connections))
+            topic_stats = {}
+        return WsStatsSnapshot(connections=conn_stats, topics=topic_stats)

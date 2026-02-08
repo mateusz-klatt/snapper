@@ -17,6 +17,7 @@ from sqlalchemy import select
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
 from snapper.core.types import ProcessMode
@@ -130,47 +131,47 @@ def resolve_mode(
 
 def resolve_parameters_schema(
     config_dict: dict[str, Any],
-    metadata: dict[str, Any],
+    entry: ProcessRegistryEntry | None,
 ) -> dict[str, Any] | None:
-    """Resolve parameters_schema from config or metadata.
+    """Resolve parameters_schema from config or registry entry.
 
     Args:
         config_dict: Parsed config dictionary.
-        metadata: Registry metadata dictionary.
+        entry: Registry entry, or None if not registered.
 
     Returns:
         Parameters schema dict or None.
     """
     schema = config_dict.get("parameters_schema")
-    if schema is None:
-        schema = metadata.get("parameters_schema")
+    if schema is None and entry is not None:
+        schema = entry.parameters_schema
     return schema
 
 
 def build_process_config_from_dict(
     process_name: str,
     config_dict: dict[str, Any],
-    metadata: dict[str, Any],
+    entry: ProcessRegistryEntry | None,
 ) -> ProcessConfigModel:
-    """Build ProcessConfigModel from parsed config dict and metadata.
+    """Build ProcessConfigModel from parsed config dict and registry entry.
 
     Args:
         process_name: The process name.
         config_dict: Parsed JSON config dictionary.
-        metadata: Registry metadata dictionary.
+        entry: Registry entry, or None if not registered.
 
     Returns:
         Fully resolved ProcessConfigModel.
     """
     lifecycle_raw = config_dict.get("lifecycle")
     if lifecycle_raw is None:
-        lifecycle_raw = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
+        lifecycle_raw = entry.lifecycle if entry else ProcessLifecycleEnum.LONG_RUNNING
     role_raw = config_dict.get("role")
     if role_raw is None:
-        role_raw = metadata.get("role", ProcessRoleEnum.CORE)
+        role_raw = entry.role if entry else ProcessRoleEnum.CORE
     tags_raw = config_dict.get("tags")
     if tags_raw is None:
-        tags_raw = metadata.get("tags", ())
+        tags_raw = entry.tags if entry else ()
     return ProcessConfigModel(
         name=process_name,
         enabled=config_dict.get("enabled", False),
@@ -183,7 +184,7 @@ def build_process_config_from_dict(
         lifecycle=resolve_lifecycle(lifecycle_raw, process_name),
         role=resolve_role(role_raw, process_name),
         tags=resolve_tags(tags_raw),
-        parameters_schema=resolve_parameters_schema(config_dict, metadata),
+        parameters_schema=resolve_parameters_schema(config_dict, entry),
     )
 
 
@@ -207,7 +208,7 @@ def import_process_class(class_path: str, process_name: str | None = None) -> ty
     if process_name:
         registry = get_registered_processes()
         if process_name in registry:
-            cls = registry[process_name]["class_ref"]
+            cls = registry[process_name].class_ref
             if not isinstance(cls, type):
                 raise TypeError(f"{class_path} is not a class")
             return cls
@@ -246,8 +247,8 @@ async def get_process_configs(settings: AppSettings) -> list[ProcessConfigModel]
             try:
                 config_dict = json.loads(setting.value)
                 process_name = setting.key.replace("process_", "")
-                metadata = registry.get(process_name, {})
-                config = build_process_config_from_dict(process_name, config_dict, metadata)
+                entry = registry.get(process_name)
+                config = build_process_config_from_dict(process_name, config_dict, entry)
                 configs.append(config)
             except (json.JSONDecodeError, KeyError) as e:
                 logger.error(f"Failed to parse process config '{setting.key}': {e}")

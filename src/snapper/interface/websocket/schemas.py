@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import Field
 
 from snapper.api.schemas.base import WsMessageSchema
+from snapper.auth.domain.roles import UserRole
 from snapper.core.types import ExecutionMode
 from snapper.core.types import FillStatus
 from snapper.core.types import HealthStatus
@@ -149,7 +150,7 @@ class WSAuthCompleteResponse(WsMessageSchema):
 
     type: Literal["auth_complete"] = Field("auth_complete", description=_TYPE_DESC)
     available_topics: list[str] = Field(..., description="Topics available for subscription")
-    user_role: str = Field(..., description="Authenticated user role")
+    user_role: UserRole = Field(..., description="Authenticated user role")
     session_expires_at: datetime | None = Field(
         default=None, description="Session expiration (ISO 8601)"
     )

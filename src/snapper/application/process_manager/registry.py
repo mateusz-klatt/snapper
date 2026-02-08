@@ -11,6 +11,7 @@ from typing import Any
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.core.types import ProcessMode
 from snapper.utils.autoload import import_all_under
@@ -21,7 +22,7 @@ __all__ = [
     "get_process_metadata",
     "discover_processes",
 ]
-_PROCESS_REGISTRY: dict[str, dict[str, Any]] = {}
+_PROCESS_REGISTRY: dict[str, ProcessRegistryEntry] = {}
 
 
 def register_process[T: type[RegisterableProcess]](
@@ -84,42 +85,42 @@ def register_process[T: type[RegisterableProcess]](
         role_value = role if isinstance(role, ProcessRoleEnum) else ProcessRoleEnum(str(role))
         tags_value: tuple[str, ...] = tuple(str(tag) for tag in tags) if tags is not None else ()
         args_value: list[Any] = args if args is not None else []
-        _PROCESS_REGISTRY[name] = {
-            "class_ref": cls,
-            "class_path": class_path,
-            "method": method,
-            "description": description,
-            "priority": priority,
-            "lifecycle": lifecycle_value,
-            "role": role_value,
-            "tags": tags_value,
-            "parameters_schema": parameters_schema,
-            "enabled": enabled,
-            "mode": mode,
-            "args": args_value,
-        }
+        _PROCESS_REGISTRY[name] = ProcessRegistryEntry(
+            class_ref=cls,
+            class_path=class_path,
+            method=method,
+            description=description,
+            priority=priority,
+            lifecycle=lifecycle_value,
+            role=role_value,
+            tags=tags_value,
+            parameters_schema=parameters_schema,
+            enabled=enabled,
+            mode=mode,
+            args=args_value,
+        )
         return cls
 
     return decorator
 
 
-def get_registered_processes() -> dict[str, dict[str, Any]]:
+def get_registered_processes() -> dict[str, ProcessRegistryEntry]:
     """Get a copy of all registered processes.
 
     Returns:
-        Dict mapping process name to registration metadata.
+        Dict mapping process name to ProcessRegistryEntry.
     """
     return _PROCESS_REGISTRY.copy()
 
 
-def get_process_metadata(process_name: str) -> dict[str, Any] | None:
+def get_process_metadata(process_name: str) -> ProcessRegistryEntry | None:
     """Get metadata for a specific registered process.
 
     Args:
         process_name: Name of the process to look up.
 
     Returns:
-        Registration metadata dict, or None if not found.
+        ProcessRegistryEntry, or None if not found.
     """
     return _PROCESS_REGISTRY.get(process_name)
 

@@ -15,6 +15,7 @@ from pytest import MonkeyPatch
 
 from snapper.application.process_manager import spawner as spawner_module
 from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.application.process_manager.spawner import _build_process_command
 
@@ -403,12 +404,13 @@ class TestListProcesses:
         service.processes = {"alpha": info1, "bravo": info2}
         result = service.list_processes()
         assert len(result) == 2
-        names = {r["name"] for r in result}
+        assert all(isinstance(r, SpawnerStatusSnapshot) for r in result)
+        names = {r.name for r in result}
         assert names == {"alpha", "bravo"}
-        alpha_status = next(r for r in result if r["name"] == "alpha")
-        assert alpha_status["running"] is True
-        bravo_status = next(r for r in result if r["name"] == "bravo")
-        assert bravo_status["running"] is False
+        alpha_status = next(r for r in result if r.name == "alpha")
+        assert alpha_status.running is True
+        bravo_status = next(r for r in result if r.name == "bravo")
+        assert bravo_status.running is False
 
 
 class TestCaptureOutputPaths:
@@ -1076,8 +1078,9 @@ def test_get_status_for_unknown_process() -> None:
     """
     service = ProcessSpawnerService()
     status = service.get_status("missing")
-    assert status["running"] is False
-    assert status["error"] == "Process not found"
+    assert isinstance(status, SpawnerStatusSnapshot)
+    assert status.running is False
+    assert status.error == "Process not found"
 
 
 def test_get_status_for_stopped_process(monkeypatch: MonkeyPatch) -> None:
@@ -1100,9 +1103,10 @@ def test_get_status_for_stopped_process(monkeypatch: MonkeyPatch) -> None:
     service = ProcessSpawnerService()
     service.processes["worker"] = info
     status = service.get_status("worker")
-    assert status["running"] is False
-    assert status["exit_code"] == 0
-    assert "heartbeat_age_seconds" in status
+    assert isinstance(status, SpawnerStatusSnapshot)
+    assert status.running is False
+    assert status.exit_code == 0
+    assert status.heartbeat_age_seconds is not None
 
 
 def test_cleanup_removes_finished_process(monkeypatch: MonkeyPatch) -> None:

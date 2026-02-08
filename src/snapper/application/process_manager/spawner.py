@@ -23,6 +23,7 @@ from typing import cast
 from loguru import logger
 
 from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import SpawnerStatusSnapshot
 
 IS_WINDOWS = sys.platform == "win32"
 CREATE_NEW_PROCESS_GROUP = 0x00000200 if IS_WINDOWS else 0
@@ -411,40 +412,40 @@ class ProcessSpawnerService:
         logger.info(f"Process '{name}' force killed (exit code: {process.returncode})")
         return True
 
-    def get_status(self, name: str) -> dict[str, Any]:
+    def get_status(self, name: str) -> SpawnerStatusSnapshot:
         """Get status information for a process.
 
         Args:
             name: Process name to query.
 
         Returns:
-            Dict with status including running state, pid, uptime,
+            SpawnerStatusSnapshot with running state, pid, uptime,
             exit_code (if terminated), and heartbeat info.
         """
         if name not in self.processes:
-            return {
-                "name": name,
-                "running": False,
-                "error": "Process not found",
-            }
+            return SpawnerStatusSnapshot(
+                name=name,
+                running=False,
+                error="Process not found",
+            )
         info = self.processes[name]
         is_alive = info.process.poll() is None
-        status: dict[str, Any] = {
-            "name": name,
-            "running": is_alive,
-            "pid": info.pid,
-            "started_at": info.started_at.isoformat(),
-            "uptime_seconds": (datetime.now(UTC) - info.started_at).total_seconds(),
-        }
+        snapshot = SpawnerStatusSnapshot(
+            name=name,
+            running=is_alive,
+            pid=info.pid,
+            started_at=info.started_at.isoformat(),
+            uptime_seconds=(datetime.now(UTC) - info.started_at).total_seconds(),
+        )
         if not is_alive:
-            status["exit_code"] = info.process.returncode
-            status["stopped_at"] = datetime.now(UTC).isoformat()
+            snapshot.exit_code = info.process.returncode
+            snapshot.stopped_at = datetime.now(UTC).isoformat()
         if info.last_heartbeat:
-            status["last_heartbeat"] = info.last_heartbeat.isoformat()
-            status["heartbeat_age_seconds"] = (
+            snapshot.last_heartbeat = info.last_heartbeat.isoformat()
+            snapshot.heartbeat_age_seconds = (
                 datetime.now(UTC) - info.last_heartbeat
             ).total_seconds()
-        return status
+        return snapshot
 
     def cleanup(self, name: str) -> None:
         """Clean up resources for a terminated process.
@@ -476,10 +477,10 @@ class ProcessSpawnerService:
             except Exception as e:
                 logger.error(f"Error cleaning up process '{name}': {e}")
 
-    def list_processes(self) -> list[dict[str, Any]]:
+    def list_processes(self) -> list[SpawnerStatusSnapshot]:
         """List status of all managed processes.
 
         Returns:
-            List of status dicts for each process.
+            List of SpawnerStatusSnapshot for each process.
         """
         return [self.get_status(name) for name in self.processes]

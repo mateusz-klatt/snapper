@@ -26,10 +26,7 @@ Example:
         {"mode": "process", "autostart": true}
 """
 
-from collections.abc import Iterable
 from typing import Annotated
-from typing import Any
-from typing import cast
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -43,8 +40,6 @@ from snapper.api.schemas.process import ConfiguredProcessesResponse
 from snapper.api.schemas.process import ProcessCreatedInfo
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessCreateResponse
-from snapper.api.schemas.process import ProcessLifecycleType
-from snapper.api.schemas.process import ProcessRoleType
 from snapper.api.schemas.process import ProcessRun
 from snapper.api.schemas.process import ProcessRunsResponse
 from snapper.api.schemas.process import ProcessSchemaResponse
@@ -53,7 +48,6 @@ from snapper.api.schemas.process import ProcessStartResponse
 from snapper.api.schemas.process import ProcessStopResponse
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
@@ -92,29 +86,17 @@ async def list_available_processes(
 ) -> AvailableProcessesResponse:
     registry = get_registered_processes()
     processes: list[AvailableProcess] = []
-    for name, metadata in registry.items():
-        lifecycle_meta = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
-        lifecycle_value = (
-            lifecycle_meta.value
-            if isinstance(lifecycle_meta, ProcessLifecycleEnum)
-            else str(lifecycle_meta)
-        )
-        role_meta = metadata.get("role", ProcessRoleEnum.CORE)
-        role_value = role_meta.value if isinstance(role_meta, ProcessRoleEnum) else str(role_meta)
-        tags_meta = metadata.get("tags", ())
-        tags_list: list[str] = []
-        if isinstance(tags_meta, (list, tuple, set)):
-            tags_list = [str(tag) for tag in cast(Iterable[Any], tags_meta)]
+    for name, entry in registry.items():
         processes.append(
             AvailableProcess(
                 name=name,
-                class_path=metadata["class_path"],
-                method=metadata["method"],
-                description=metadata["description"],
-                lifecycle=cast(ProcessLifecycleType, lifecycle_value),
-                role=cast(ProcessRoleType, role_value),
-                tags=tags_list,
-                parameters_schema=metadata.get("parameters_schema"),
+                class_path=entry.class_path,
+                method=entry.method,
+                description=entry.description,
+                lifecycle=entry.lifecycle.value,
+                role=entry.role.value,
+                tags=list(entry.tags),
+                parameters_schema=entry.parameters_schema,
             )
         )
     return AvailableProcessesResponse(processes=processes, count=len(processes))
@@ -180,46 +162,32 @@ async def create_process_configuration(
         HTTPException: If template not found or name already exists.
     """
     registry = get_registered_processes()
-    metadata = registry.get(request.template)
-    if metadata is None:
+    entry = registry.get(request.template)
+    if entry is None:
         raise HTTPException(status_code=404, detail=f"Template '{request.template}' not found")
-    cls: type[RegisterableProcess] = metadata["class_ref"]
+    cls: type[RegisterableProcess] = entry.class_ref
     try:
         base_kwargs = cls.get_default_kwargs(settings)
     except Exception:
         base_kwargs = {}
     if request.kwargs:
         base_kwargs.update(request.kwargs)
-    final_args = request.args if request.args is not None else list(metadata.get("args", []))
-    final_mode = request.mode or resolve_mode(metadata.get("mode", "thread"), request.name)
-    final_enabled = metadata.get("enabled", False) if request.enabled is None else request.enabled
-    lifecycle_meta = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
-    lifecycle = (
-        lifecycle_meta
-        if isinstance(lifecycle_meta, ProcessLifecycleEnum)
-        else ProcessLifecycleEnum(str(lifecycle_meta))
-    )
-    role_meta = metadata.get("role", ProcessRoleEnum.CORE)
-    role = role_meta if isinstance(role_meta, ProcessRoleEnum) else ProcessRoleEnum(str(role_meta))
-    tags_meta = metadata.get("tags", ())
-    tags: tuple[str, ...]
-    if isinstance(tags_meta, (list, tuple, set)):
-        tags = tuple(str(tag) for tag in cast(Iterable[Any], tags_meta))
-    else:
-        tags = ()
+    final_args = request.args if request.args is not None else list(entry.args)
+    final_mode = request.mode or resolve_mode(entry.mode, request.name)
+    final_enabled = entry.enabled if request.enabled is None else request.enabled
     try:
         await factory.create_process_config(
             name=request.name,
-            class_path=metadata["class_path"],
-            method=metadata.get("method", "start"),
+            class_path=entry.class_path,
+            method=entry.method,
             enabled=bool(final_enabled),
             mode=final_mode,
             args=final_args,
             kwargs=base_kwargs,
-            lifecycle=lifecycle,
-            role=role,
-            tags=tags,
-            parameters_schema=metadata.get("parameters_schema"),
+            lifecycle=entry.lifecycle,
+            role=entry.role,
+            tags=entry.tags,
+            parameters_schema=entry.parameters_schema,
             note=request.note,
         )
     except ValueError as exc:
@@ -258,28 +226,22 @@ async def get_process_schema(
     registry = get_registered_processes()
     if name not in registry:
         raise HTTPException(status_code=404, detail=f"Process '{name}' not found in registry")
-    metadata = registry[name]
-    cls: type[RegisterableProcess] = metadata["class_ref"]
+    entry = registry[name]
+    cls: type[RegisterableProcess] = entry.class_ref
     try:
         default_kwargs = cls.get_default_kwargs(settings)
     except Exception:
         default_kwargs = {}
-    lifecycle_meta = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
-    lifecycle_value = (
-        lifecycle_meta.value
-        if isinstance(lifecycle_meta, ProcessLifecycleEnum)
-        else str(lifecycle_meta)
-    )
     return ProcessSchemaResponse(
         name=name,
-        description=metadata["description"],
-        class_path=metadata["class_path"],
-        method=metadata["method"],
-        default_enabled=metadata.get("enabled", False),
-        default_mode=resolve_mode(metadata.get("mode", "thread"), name),
-        default_args=metadata.get("args", []),
+        description=entry.description,
+        class_path=entry.class_path,
+        method=entry.method,
+        default_enabled=entry.enabled,
+        default_mode=resolve_mode(entry.mode, name),
+        default_args=entry.args,
         default_kwargs=default_kwargs,
-        lifecycle=cast(ProcessLifecycleType, lifecycle_value),
+        lifecycle=entry.lifecycle.value,
     )
 
 

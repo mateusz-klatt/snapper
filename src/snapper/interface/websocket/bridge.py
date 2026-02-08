@@ -16,8 +16,10 @@ from fastapi import WebSocket
 
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
+from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.messaging.topics.builders import is_order_topic
 from snapper.messaging.topics.schemas import TOPIC_REGISTRY
@@ -703,40 +705,40 @@ class ZmqWebSocketBridgeService:
         """
         return list(self.available_topics)
 
-    def get_connection_stats(self) -> dict[str, int]:
+    def get_connection_stats(self) -> ConnectionStats:
         """Get connection-related statistics.
 
         Returns:
-            Dictionary with counts of subscribers, tasks, topics, and clients.
+            ConnectionStats with counts of subscribers, tasks, topics, and clients.
         """
-        return {
-            "zmq_subscribers": len(self.zmq_subscribers),
-            "subscriber_tasks": len(self.subscriber_tasks),
-            "active_topics": len(self.topic_subscriptions),
-            "active_clients": len(self.client_subscriptions),
-        }
+        return ConnectionStats(
+            zmq_subscribers=len(self.zmq_subscribers),
+            subscriber_tasks=len(self.subscriber_tasks),
+            active_topics=len(self.topic_subscriptions),
+            active_clients=len(self.client_subscriptions),
+        )
 
-    def get_topic_stats(self) -> dict[str, Any]:
+    def get_topic_stats(self) -> dict[str, TopicMetricSnapshot]:
         """Get per-topic metrics statistics.
 
         Returns:
-            Dictionary mapping topic names to their metrics.
+            Dictionary mapping topic names to their metric snapshots.
         """
-        stats: dict[str, Any] = {}
+        stats: dict[str, TopicMetricSnapshot] = {}
         for topic, metrics in self.topic_metrics.items():
             config = self.available_topics.get(topic)
-            stats[topic] = {
-                "active_subscribers": metrics.active_subscribers,
-                "received": metrics.received_count,
-                "forwarded": metrics.forwarded_count,
-                "throttled": metrics.throttled_count,
-                "dropped": metrics.dropped_count,
-                "timeout": metrics.timeout_count,
-                "errors": metrics.error_count,
-                "last_message_ts": metrics.last_message_ts,
-                "throttle_ms": config.throttle_ms if config else None,
-                "pattern": config.pattern if config else None,
-            }
+            stats[topic] = TopicMetricSnapshot(
+                active_subscribers=metrics.active_subscribers,
+                received=metrics.received_count,
+                forwarded=metrics.forwarded_count,
+                throttled=metrics.throttled_count,
+                dropped=metrics.dropped_count,
+                timeout=metrics.timeout_count,
+                errors=metrics.error_count,
+                last_message_ts=metrics.last_message_ts,
+                throttle_ms=config.throttle_ms if config else None,
+                pattern=config.pattern if config else None,
+            )
         return stats
 
     async def cleanup(self) -> None:

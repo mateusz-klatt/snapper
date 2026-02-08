@@ -46,6 +46,7 @@ __all__ = [
     "ProcessRuntimeStatus",
     "ProcessStartResponse",
     "ProcessStopResponse",
+    "StrategyStatusPayload",
     "ProcessLifecycleType",
     "ProcessRoleType",
     "ProcessRunStatusType",
@@ -188,6 +189,34 @@ class ProcessStatus(StrictApiSchema):
     error: str | None = Field(default=None, description="Error message if failed")
 
 
+class StrategyStatusPayload(StrictApiSchema):
+    """Strategy process status payload for the system status endpoint.
+
+    Attributes:
+        strategy_name: Name of the strategy.
+        status: Current strategy status string.
+        details: Full raw status dictionary from the process.
+        signals_generated: Number of signals generated.
+        trades_executed: Number of trades executed.
+        last_signal: Last signal description.
+        last_signal_time: Timestamp of last signal.
+        pnl: Current profit and loss.
+        pid: Process ID.
+        uptime: Process uptime string.
+    """
+
+    strategy_name: str = Field(description="Strategy name")
+    status: str = Field(description="Current strategy status")
+    details: dict[str, Any] = Field(default_factory=dict, description="Full raw status")
+    signals_generated: int | None = Field(None, description="Signals generated count")
+    trades_executed: int | None = Field(None, description="Trades executed count")
+    last_signal: str | None = Field(None, description="Last signal description")
+    last_signal_time: str | None = Field(None, description="Last signal timestamp")
+    pnl: float | None = Field(None, description="Current PnL")
+    pid: int | None = Field(None, description="Process ID")
+    uptime: str | None = Field(None, description="Process uptime")
+
+
 class SystemStatus(StrictApiSchema):
     """System-wide status response schema.
 
@@ -201,7 +230,7 @@ class SystemStatus(StrictApiSchema):
 
     trader: ProcessStatus
     backtests: dict[str, ProcessStatus]
-    strategies: list[dict[str, Any]] = Field(
+    strategies: list[StrategyStatusPayload] = Field(
         default_factory=list, description="List of active strategies from strategy_runner"
     )
 

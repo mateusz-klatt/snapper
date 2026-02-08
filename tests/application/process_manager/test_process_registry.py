@@ -62,11 +62,11 @@ async def test_strategy_process_creation() -> None:
     )
     metadata = get_process_metadata("test_macd")
     assert metadata is not None
-    assert metadata.get("enabled") is False
-    assert metadata.get("mode") == "thread"
-    assert metadata.get("args") == []
-    assert metadata.get("role") == "strategy"
-    assert "strategy" in metadata.get("tags", ())
+    assert metadata.enabled is False
+    assert metadata.mode == "thread"
+    assert metadata.args == []
+    assert metadata.role == "strategy"
+    assert "strategy" in metadata.tags
     mock_settings = MagicMock()
     kwargs = strategy_process_cls.get_default_kwargs(mock_settings)
     assert kwargs["name"] == "macd_test"
@@ -402,10 +402,10 @@ async def test_predefined_macd_strategy() -> None:
     """
     metadata = get_process_metadata("strategy_macd_btc_1h")
     assert metadata is not None
-    assert metadata.get("enabled") is False
-    assert metadata.get("mode") == "thread"
-    assert metadata.get("role") == "strategy"
-    assert "strategy" in metadata.get("tags", ())
+    assert metadata.enabled is False
+    assert metadata.mode == "thread"
+    assert metadata.role == "strategy"
+    assert "strategy" in metadata.tags
 
 
 @pytest.mark.asyncio
@@ -418,7 +418,7 @@ async def test_predefined_rsi_strategy() -> None:
     """
     metadata = get_process_metadata("strategy_rsi_eth_1h")
     assert metadata is not None
-    assert metadata.get("enabled") is False
-    assert metadata.get("mode") == "thread"
-    assert metadata.get("role") == "strategy"
-    assert "strategy" in metadata.get("tags", ())
+    assert metadata.enabled is False
+    assert metadata.mode == "thread"
+    assert metadata.role == "strategy"
+    assert "strategy" in metadata.tags

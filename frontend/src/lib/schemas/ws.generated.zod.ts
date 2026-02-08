@@ -224,16 +224,7 @@ export const TradeEnvelopeSchema = z
   })
   .strict()
 
-export const WSAuthCompleteResponseSchema = z
-  .object({
-    type: z.literal('auth_complete'),
-    timestamp: z.iso.datetime().optional(),
-    available_topics: z.array(z.string()),
-    user_role: z.string(),
-    session_expires_at: z.iso.datetime().nullable(),
-    ws_token_exp: z.iso.datetime(),
-  })
-  .strict()
+export const UserRoleSchema = z.enum(['viewer', 'operator', 'admin'])
 
 export const WSAuthExpiredResponseSchema = z
   .object({
@@ -382,5 +373,16 @@ export const WSUnsubscribeRequestSchema = z
     type: z.literal('unsubscribe'),
     timestamp: z.iso.datetime().optional(),
     topics: z.array(z.string()),
+  })
+  .strict()
+
+export const WSAuthCompleteResponseSchema = z
+  .object({
+    type: z.literal('auth_complete'),
+    timestamp: z.iso.datetime().optional(),
+    available_topics: z.array(z.string()),
+    user_role: UserRoleSchema,
+    session_expires_at: z.iso.datetime().nullable(),
+    ws_token_exp: z.iso.datetime(),
   })
   .strict()
