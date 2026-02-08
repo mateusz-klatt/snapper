@@ -27,6 +27,7 @@ Example:
 """
 
 from collections.abc import Iterable
+from typing import Annotated
 from typing import Any
 from typing import cast
 
@@ -86,7 +87,7 @@ def get_process_factory(request: Request) -> ProcessLauncherService:
 
 @router.get("/available")
 async def list_available_processes(
-    _user: UserProfile = Depends(require_permission(Permission.MANAGE_PROCESSES)),
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> AvailableProcessesResponse:
     registry = get_registered_processes()
     processes: list[AvailableProcess] = []
@@ -120,8 +121,8 @@ async def list_available_processes(
 
 @router.get("/configured")
 async def list_configured_processes(
-    factory: ProcessLauncherService = Depends(get_process_factory),
-    _user: UserProfile = Depends(require_permission(Permission.MANAGE_PROCESSES)),
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ConfiguredProcessesResponse:
     configs = await factory.get_process_configs()
     processes: list[ConfiguredProcess] = [
@@ -147,13 +148,20 @@ async def list_configured_processes(
     return ConfiguredProcessesResponse(processes=processes, count=len(processes))
 
 
-@router.post("", status_code=201)
+@router.post(
+    "",
+    status_code=201,
+    responses={
+        404: {"description": "Template not found"},
+        409: {"description": "Process name already exists"},
+    },
+)
 async def create_process_configuration(
     request: ProcessCreateRequest,
-    factory: ProcessLauncherService = Depends(get_process_factory),
-    settings: AppSettings = Depends(get_settings),
-    _user: UserProfile = Depends(require_permission(Permission.MANAGE_PROCESSES)),
-    _csrf: None = Depends(validate_csrf_token),
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessCreateResponse:
     """Create a new process configuration from a template.
 
@@ -224,11 +232,14 @@ async def create_process_configuration(
     )
 
 
-@router.get("/schema/{name}")
+@router.get(
+    "/schema/{name}",
+    responses={404: {"description": "Process not found in registry"}},
+)
 async def get_process_schema(
     name: str,
-    settings: AppSettings = Depends(get_settings),
-    _user: UserProfile = Depends(require_permission(Permission.MANAGE_PROCESSES)),
+    settings: Annotated[AppSettings, Depends(get_settings)],
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ProcessSchemaResponse:
     """Get the configuration schema for a registered process.
 
@@ -275,9 +286,9 @@ async def get_process_schema(
 async def start_process(
     name: str,
     request: ProcessStartRequest,
-    factory: ProcessLauncherService = Depends(get_process_factory),
-    _user: UserProfile = Depends(require_permission(Permission.MANAGE_PROCESSES)),
-    _csrf: None = Depends(validate_csrf_token),
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStartResponse:
     result = await factory.start_process_by_name(
         name=name,
@@ -297,9 +308,9 @@ async def start_process(
 @router.post("/{name}/stop")
 async def stop_process(
     name: str,
-    factory: ProcessLauncherService = Depends(get_process_factory),
-    _user: UserProfile = Depends(require_permission(Permission.MANAGE_PROCESSES)),
-    _csrf: None = Depends(validate_csrf_token),
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStopResponse:
     result = await factory.stop_process_by_name(name)
     return ProcessStopResponse(
@@ -311,10 +322,10 @@ async def stop_process(
 
 @router.get("/runs")
 async def list_process_runs(
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     limit: int = 50,
     name: str | None = None,
-    factory: ProcessLauncherService = Depends(get_process_factory),
-    _user: UserProfile = Depends(require_permission(Permission.MANAGE_PROCESSES)),
 ) -> ProcessRunsResponse:
     runs_data = await factory.get_recent_runs(limit=limit, name=name)
     runs = [ProcessRun(**run) for run in runs_data]

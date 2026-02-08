@@ -307,7 +307,7 @@ async def get_current_user_info(
     return current_user
 
 
-@router.get("/users", response_model=UserListResponse)
+@router.get("/users")
 async def get_users(
     current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
     include_inactive: bool = False,
@@ -326,7 +326,7 @@ async def get_users(
     return UserListResponse(users=users, total_count=len(users))
 
 
-@router.post("/users", response_model=UserProfile)
+@router.post("/users")
 async def create_user(
     user_data: CreateUserRequest,
     current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
@@ -360,7 +360,7 @@ async def create_user(
         ) from e
 
 
-@router.put("/users/{user_id}", response_model=UserProfile)
+@router.put("/users/{user_id}")
 async def update_user(
     user_id: str,
     user_data: UpdateUserRequest,

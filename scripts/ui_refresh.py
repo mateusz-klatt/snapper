@@ -84,7 +84,7 @@ def restore_dependency_spec(
         True if package_data was modified, False otherwise.
     """
     modified = False
-    current_section, current_spec = get_dependency_spec(package_data, name)
+    current_section, _ = get_dependency_spec(package_data, name)
 
     if current_section is not None and current_section != section:
         current_section_data = package_data.get(current_section)

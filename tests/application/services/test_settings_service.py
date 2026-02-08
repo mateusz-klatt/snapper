@@ -1273,6 +1273,8 @@ class TestProcessRoutesTagsFallback:
                 request=request,
                 factory=mock_factory,
                 settings=settings,
+                _user=MagicMock(),
+                _csrf=None,
             )
             call_kwargs = mock_factory.create_process_config.call_args.kwargs
             assert call_kwargs["tags"] == ()
@@ -1318,6 +1320,8 @@ class TestProcessRoutesTagsFallback:
                 request=request,
                 factory=mock_factory,
                 settings=settings,
+                _user=MagicMock(),
+                _csrf=None,
             )
             call_kwargs = mock_factory.create_process_config.call_args.kwargs
             assert call_kwargs["tags"] == ()

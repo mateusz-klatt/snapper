@@ -25,6 +25,8 @@ Example:
         {"value": "new-api-key", "category": "exchanges"}
 """
 
+from typing import Annotated
+
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
@@ -45,10 +47,10 @@ from snapper.data.repository import get_repository
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
-@router.get("", response_model=list[SettingRead])
+@router.get("")
 async def get_all_settings(
+    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     category: str | None = None,
-    user: UserProfile = Depends(require_permission(Permission.CONFIGURE_SYSTEM)),
 ) -> list[SettingRead]:
     """Retrieve all application settings, optionally filtered by category.
 
@@ -82,7 +84,7 @@ async def get_all_settings(
 
 @router.get("/categories")
 async def get_setting_categories(
-    user: UserProfile = Depends(require_permission(Permission.CONFIGURE_SYSTEM)),
+    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
 ) -> SettingCategoriesResponse:
     """Retrieve all distinct setting category names.
 
@@ -100,11 +102,11 @@ async def get_setting_categories(
         return SettingCategoriesResponse(categories=sorted(categories))
 
 
-@router.put("/{key}", response_model=SettingRead)
+@router.put("/{key}", responses={404: {"description": "Setting not found"}})
 async def update_setting(
     key: str,
     request: SettingUpdate,
-    user: UserProfile = Depends(require_permission(Permission.CONFIGURE_SYSTEM)),
+    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
 ) -> SettingRead:
     """Update or create a setting by key.
 
@@ -149,10 +151,10 @@ async def update_setting(
         )
 
 
-@router.delete("/{key}")
+@router.delete("/{key}", responses={404: {"description": "Setting not found"}})
 async def delete_setting(
     key: str,
-    user: UserProfile = Depends(require_permission(Permission.CONFIGURE_SYSTEM)),
+    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
 ) -> MessageResponse:
     """Delete a setting by key.
 

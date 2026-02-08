@@ -34,5 +34,5 @@ class TradingSignal(StrictApiSchema):
     side: TradeSide
     strength: float
     reason: str
-    strategy_name: str | None
-    price: float | None
+    strategy_name: str | None = None
+    price: float | None = None

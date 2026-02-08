@@ -15,6 +15,8 @@ from alembic import op
 from sqlalchemy import text
 
 _INSTRUMENT_FK = "instruments.id"
+_FK_SYMBOL_CATALOG = "symbol_catalog.native_symbol"
+_CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -158,10 +160,10 @@ def upgrade() -> None:
         sa.Column("exchange_symbol", sa.String(40), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["native_symbol"], ["symbol_catalog.native_symbol"]),
+        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOL_CATALOG]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
-            "exchange = LOWER(exchange)",
+            _CK_EXCHANGE_LOWER,
             name="ck_symbol_alias_exchange_lower",
         ),
         sa.CheckConstraint(
@@ -192,10 +194,10 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(1024), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["native_symbol"], ["symbol_catalog.native_symbol"]),
+        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOL_CATALOG]),
         sa.PrimaryKeyConstraint("native_symbol", "exchange"),
         sa.CheckConstraint(
-            "exchange = LOWER(exchange)",
+            _CK_EXCHANGE_LOWER,
             name="ck_sec_exchange_lower",
         ),
     )
@@ -221,9 +223,9 @@ def upgrade() -> None:
         sa.Column("quote", sa.String(16), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["symbol"], ["symbol_catalog.native_symbol"]),
+        sa.ForeignKeyConstraint(["symbol"], [_FK_SYMBOL_CATALOG]),
         sa.UniqueConstraint("symbol", "exchange", name="uq_instrument_symbol_exchange"),
-        sa.CheckConstraint("exchange = LOWER(exchange)", name="ck_instrument_exchange_lower"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
     )
     op.create_index("ix_instruments_symbol", "instruments", ["symbol"])
     op.create_index("ix_instruments_exchange", "instruments", ["exchange"])

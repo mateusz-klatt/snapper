@@ -384,14 +384,18 @@ def _create_candles_signals_router() -> APIRouter:
     """
     router = APIRouter()
 
-    @router.get("/candles", response_model=list[CandleSnapshot])
+    @router.get(
+        "/candles",
+        response_model=list[CandleSnapshot],
+        responses={500: {"description": "Internal server error"}},
+    )
     async def get_candles(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-        instrument: str = Query(description="Instrument symbol"),
-        exchange: str = Query(description="Exchange name"),
-        timeframe: str = Query(description="Timeframe"),
-        limit: int = Query(default=100, le=1000, description="Number of candles to return"),
+        instrument: Annotated[str, Query(description="Instrument symbol")],
+        exchange: Annotated[str, Query(description="Exchange name")],
+        timeframe: Annotated[str, Query(description="Timeframe")],
+        limit: Annotated[int, Query(le=1000, description="Number of candles to return")] = 100,
     ) -> list[CandleSnapshot] | Response:
         settings = get_settings()
         repo = get_repository(settings.db_url)
@@ -436,16 +440,16 @@ def _create_candles_signals_router() -> APIRouter:
             logger.error(f"Failed to fetch candles for {instrument}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
 
-    @router.get("/signals", response_model=list[TradingSignal])
+    @router.get("/signals", responses={500: {"description": "Internal server error"}})
     async def get_signals(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-        instrument: str | None = Query(default=None, description="Filter by instrument"),
-        strategy: str | None = Query(default=None, description="Filter by strategy"),
-        exchange: str | None = Query(default=None, description="Filter by exchange"),
-        hours: int = Query(default=24, le=168, description="Hours of history to return"),
-        limit: int = Query(default=100, le=1000, description="Number of signals to return"),
-        repo: Repository = Depends(get_repository_dependency),
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        instrument: Annotated[str | None, Query(description="Filter by instrument")] = None,
+        strategy: Annotated[str | None, Query(description="Filter by strategy")] = None,
+        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+        hours: Annotated[int, Query(le=168, description="Hours of history to return")] = 24,
+        limit: Annotated[int, Query(le=1000, description="Number of signals to return")] = 100,
     ) -> list[TradingSignal]:
         try:
             async with repo.session() as session:
@@ -490,11 +494,11 @@ def _create_exchange_router() -> APIRouter:
     """
     router = APIRouter()
 
-    @router.get("/exchanges", response_model=list[str])
+    @router.get("/exchanges", responses={500: {"description": "Internal server error"}})
     async def get_exchanges(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Repository = Depends(get_repository_dependency),
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
     ) -> list[str]:
         """Return distinct exchange names from symbol_aliases."""
         try:
@@ -507,12 +511,15 @@ def _create_exchange_router() -> APIRouter:
             logger.error(f"Failed to fetch exchanges: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch exchanges") from exc
 
-    @router.get("/exchanges/{exchange}/instruments", response_model=list[str])
+    @router.get(
+        "/exchanges/{exchange}/instruments",
+        responses={500: {"description": "Internal server error"}},
+    )
     async def get_exchange_instruments(
         exchange: str,
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Repository = Depends(get_repository_dependency),
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
     ) -> list[str]:
         """Return distinct native symbols available on a given exchange."""
         try:
@@ -538,15 +545,15 @@ def _create_orders_executions_router() -> APIRouter:
     """
     router = APIRouter()
 
-    @router.get("/orders", response_model=list[OrderStatus])
+    @router.get("/orders", responses={500: {"description": "Internal server error"}})
     async def get_orders(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-        symbol: str | None = Query(default=None, description="Symbol to filter by"),
-        exchange: str | None = Query(default=None, description="Filter by exchange"),
-        limit: int = Query(default=100, ge=1, le=1000, description="Number of orders to return"),
-        offset: int = Query(default=0, ge=0, description="Number of orders to skip"),
-        repo: Repository = Depends(get_repository_dependency),
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        symbol: Annotated[str | None, Query(description="Symbol to filter by")] = None,
+        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+        limit: Annotated[int, Query(ge=1, le=1000, description="Number of orders to return")] = 100,
+        offset: Annotated[int, Query(ge=0, description="Number of orders to skip")] = 0,
     ) -> list[OrderStatus]:
         try:
             async with repo.session() as session:
@@ -581,12 +588,12 @@ def _create_orders_executions_router() -> APIRouter:
             logger.error(f"Failed to fetch orders: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
 
-    @router.get("/executions", response_model=list[ExecutionRecord])
+    @router.get("/executions", responses={500: {"description": "Internal server error"}})
     async def get_executions(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-        limit: int = Query(default=100, le=1000, description="Number of executions to return"),
-        repo: Repository = Depends(get_repository_dependency),
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        limit: Annotated[int, Query(le=1000, description="Number of executions to return")] = 100,
     ) -> list[ExecutionRecord]:
         try:
             async with repo.session() as session:
@@ -618,11 +625,11 @@ def _create_orders_executions_router() -> APIRouter:
             logger.error(f"Failed to fetch executions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch executions") from exc
 
-    @router.get("/positions", response_model=list[PositionSnapshot])
+    @router.get("/positions", responses={500: {"description": "Internal server error"}})
     async def get_positions(
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Repository = Depends(get_repository_dependency),
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
     ) -> list[PositionSnapshot]:
         try:
             async with repo.session() as session:

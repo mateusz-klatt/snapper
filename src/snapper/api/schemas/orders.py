@@ -37,13 +37,13 @@ class OrderStatus(StrictApiSchema):
     id: int
     instrument: str
     exchange: str
-    client_order_id: str | None
-    exchange_order_id: str | None
+    client_order_id: str | None = None
+    exchange_order_id: str | None = None
     created_at: datetime
-    updated_at: datetime | None
+    updated_at: datetime | None = None
     side: TradeSide
     type: OrderType
-    price: float | None
+    price: float | None = None
     size: float
     status: OrderStatusLiteral
     time_in_force: str | None = None

@@ -64,6 +64,8 @@ __all__ = [
 
 
 _INSTRUMENT_FK = "instruments.id"
+_FK_SYMBOL_CATALOG = "symbol_catalog.native_symbol"
+_CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 
 
 class Base(DeclarativeBase):
@@ -76,13 +78,11 @@ class Instrument(Base):
     __tablename__ = "instruments"
     __table_args__ = (
         UniqueConstraint("symbol", "exchange", name="uq_instrument_symbol_exchange"),
-        CheckConstraint("exchange = LOWER(exchange)", name="ck_instrument_exchange_lower"),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
         Index("ix_instruments_exchange", "exchange"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("symbol_catalog.native_symbol"), index=True
-    )
+    symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOL_CATALOG), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
@@ -295,7 +295,7 @@ class SymbolAlias(Base):
     __tablename__ = "symbol_aliases"
     __table_args__ = (
         CheckConstraint(
-            "exchange = LOWER(exchange)",
+            _CK_EXCHANGE_LOWER,
             name="ck_symbol_alias_exchange_lower",
         ),
         CheckConstraint(
@@ -318,7 +318,7 @@ class SymbolAlias(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     native_symbol: Mapped[str] = mapped_column(
         String(32),
-        ForeignKey("symbol_catalog.native_symbol"),
+        ForeignKey(_FK_SYMBOL_CATALOG),
         nullable=False,
         index=True,
     )
@@ -353,7 +353,7 @@ class SymbolExchangeCapability(Base):
     __tablename__ = "symbol_exchange_capabilities"
     __table_args__ = (
         CheckConstraint(
-            "exchange = LOWER(exchange)",
+            _CK_EXCHANGE_LOWER,
             name="ck_sec_exchange_lower",
         ),
         Index("ix_sec_exchange", "exchange"),
@@ -372,7 +372,7 @@ class SymbolExchangeCapability(Base):
     )
     native_symbol: Mapped[str] = mapped_column(
         String(32),
-        ForeignKey("symbol_catalog.native_symbol"),
+        ForeignKey(_FK_SYMBOL_CATALOG),
         primary_key=True,
     )
     exchange: Mapped[str] = mapped_column(String(20), primary_key=True)

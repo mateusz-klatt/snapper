@@ -78,7 +78,7 @@ class TestListAvailableProcesses:
                 "class_ref": MagicMock(),
             },
         }
-        result = await list_available_processes()
+        result = await list_available_processes(_user=MagicMock())
         assert result.count == 2
         assert len(result.processes) == 2
         assert result.processes[0].name == "zmq_broker"
@@ -96,7 +96,7 @@ class TestListAvailableProcesses:
         Then: Empty list with zero count is returned.
         """
         mock_get_registry.return_value = {}
-        result = await list_available_processes()
+        result = await list_available_processes(_user=MagicMock())
         assert result.count == 0
         assert result.processes == []
 
@@ -130,7 +130,7 @@ class TestListConfiguredProcesses:
         )
         mock_factory.started_processes = {"zmq_broker": MagicMock()}
         mock_factory.active_runs = {}
-        result = await list_configured_processes(factory=mock_factory)
+        result = await list_configured_processes(factory=mock_factory, _user=MagicMock())
         assert result.count == 1
         assert len(result.processes) == 1
         process = result.processes[0]
@@ -157,7 +157,7 @@ class TestListConfiguredProcesses:
         mock_factory = MagicMock()
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.started_processes = {}
-        result = await list_configured_processes(factory=mock_factory)
+        result = await list_configured_processes(factory=mock_factory, _user=MagicMock())
         assert result.count == 0
         assert result.processes == []
 
@@ -188,7 +188,7 @@ class TestGetProcessSchema:
             }
         }
         settings = MagicMock()
-        result = await get_process_schema(name="zmq_broker", settings=settings)
+        result = await get_process_schema(name="zmq_broker", settings=settings, _user=MagicMock())
         assert result.name == "zmq_broker"
         assert result.description == "ZMQ message broker"
         assert result.class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
@@ -218,7 +218,9 @@ class TestGetProcessSchema:
             }
         }
         settings = MagicMock()
-        result = await get_process_schema(name="custom_process", settings=settings)
+        result = await get_process_schema(
+            name="custom_process", settings=settings, _user=MagicMock()
+        )
         assert result.name == "custom_process"
         assert result.default_enabled is False
         assert result.default_mode == "thread"
@@ -250,7 +252,9 @@ class TestGetProcessSchema:
             }
         }
         settings = MagicMock()
-        result = await get_process_schema(name="failing_process", settings=settings)
+        result = await get_process_schema(
+            name="failing_process", settings=settings, _user=MagicMock()
+        )
         assert result.default_kwargs == {}
         assert result.default_enabled is True
         assert result.default_mode == "process"
@@ -268,7 +272,7 @@ class TestGetProcessSchema:
         mock_get_registry.return_value = {}
         settings = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
-            await get_process_schema(name="nonexistent", settings=settings)
+            await get_process_schema(name="nonexistent", settings=settings, _user=MagicMock())
         assert exc_info.value.status_code == 404
         assert "not found in registry" in exc_info.value.detail
 
@@ -294,7 +298,13 @@ class TestStartProcess:
             kwargs={"endpoint": "tcp://0.0.0.0:6666"},
             autostart=True,
         )
-        result = await start_process(name="zmq_broker", request=request, factory=mock_factory)
+        result = await start_process(
+            name="zmq_broker",
+            request=request,
+            factory=mock_factory,
+            _user=MagicMock(),
+            _csrf=None,
+        )
         assert result.status == "started"
         assert result.name == "zmq_broker"
         mock_factory.start_process_by_name.assert_awaited_once_with(
@@ -318,7 +328,13 @@ class TestStartProcess:
             return_value={"status": "started", "name": "zmq_broker"}
         )
         request = ProcessStartRequest(mode=None, args=None, kwargs=None, autostart=None)
-        result = await start_process(name="zmq_broker", request=request, factory=mock_factory)
+        result = await start_process(
+            name="zmq_broker",
+            request=request,
+            factory=mock_factory,
+            _user=MagicMock(),
+            _csrf=None,
+        )
         assert result.status == "started"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker", mode=None, args=None, kwargs=None, autostart=None
@@ -340,7 +356,9 @@ class TestStopProcess:
         mock_factory.stop_process_by_name = AsyncMock(
             return_value={"status": "stopped", "name": "zmq_broker"}
         )
-        result = await stop_process(name="zmq_broker", factory=mock_factory)
+        result = await stop_process(
+            name="zmq_broker", factory=mock_factory, _user=MagicMock(), _csrf=None
+        )
         assert result.status == "stopped"
         assert result.name == "zmq_broker"
         mock_factory.stop_process_by_name.assert_awaited_once_with("zmq_broker")
@@ -441,6 +459,8 @@ class TestCreateProcessConfiguration:
             request=request,
             factory=mock_factory,
             settings=settings,
+            _user=MagicMock(),
+            _csrf=None,
         )
         mock_factory.create_process_config.assert_awaited_once_with(
             name="strategy_macd_custom",
@@ -491,6 +511,8 @@ class TestCreateProcessConfiguration:
                 request=request,
                 factory=factory,
                 settings=settings,
+                _user=MagicMock(),
+                _csrf=None,
             )
         assert exc_info.value.status_code == 404
         assert "Template" in exc_info.value.detail
@@ -542,6 +564,8 @@ class TestCreateProcessConfiguration:
                 request=request,
                 factory=mock_factory,
                 settings=MagicMock(),
+                _user=MagicMock(),
+                _csrf=None,
             )
         assert exc_info.value.status_code == 409
         assert "exists" in exc_info.value.detail
@@ -572,7 +596,7 @@ class TestProcessRoutesEdgeCases:
                 "tags": "not_iterable_string",
             },
         }
-        result = await list_available_processes()
+        result = await list_available_processes(_user=MagicMock())
         assert result.count == 1
         assert result.processes[0].tags == []
 
@@ -621,6 +645,8 @@ class TestProcessRoutesEdgeCases:
             request=request,
             factory=mock_factory,
             settings=MagicMock(),
+            _user=MagicMock(),
+            _csrf=None,
         )
         mock_factory.create_process_config.assert_called_once()
         call_args = mock_factory.create_process_config.call_args
@@ -664,6 +690,8 @@ class TestProcessRoutesEdgeCases:
             request=request,
             factory=mock_factory,
             settings=MagicMock(),
+            _user=MagicMock(),
+            _csrf=None,
         )
         mock_factory.create_process_config.assert_called_once()
         call_args = mock_factory.create_process_config.call_args
@@ -709,6 +737,8 @@ class TestProcessRoutesEdgeCases:
             request=request,
             factory=mock_factory,
             settings=MagicMock(),
+            _user=MagicMock(),
+            _csrf=None,
         )
         mock_factory.create_process_config.assert_called_once()
         call_args = mock_factory.create_process_config.call_args
@@ -754,9 +784,10 @@ class TestProcessRoutesEdgeCases:
             ]
         )
         result = await list_process_runs(
+            factory=mock_factory,
+            _user=MagicMock(),
             limit=50,
             name=None,
-            factory=mock_factory,
         )
         assert result.count == 2
         assert len(result.runs) == 2
@@ -789,9 +820,10 @@ class TestProcessRoutesEdgeCases:
             ]
         )
         result = await list_process_runs(
+            factory=mock_factory,
+            _user=MagicMock(),
             limit=10,
             name="zmq_broker",
-            factory=mock_factory,
         )
         assert result.count == 1
         mock_factory.get_recent_runs.assert_awaited_once_with(limit=10, name="zmq_broker")
