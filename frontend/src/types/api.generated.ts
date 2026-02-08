@@ -911,8 +911,9 @@ export type Components = {
             /**
              * Mode
              * @description Execution mode (thread/process)
+             * @enum {string}
              */
-            mode: string;
+            mode: "thread" | "process";
             /**
              * Class Path
              * @description Full Python class path
@@ -1083,8 +1084,9 @@ export type Components = {
             /**
              * Status
              * @description Overall service health status
+             * @enum {string}
              */
-            status: string;
+            status: "healthy" | "unhealthy" | "warning" | "error";
             /**
              * Timestamp
              * Format: date-time
@@ -1207,16 +1209,16 @@ export type Components = {
             /** Exchange */
             exchange: string;
             /** Client Order Id */
-            client_order_id: string | null;
+            client_order_id?: string | null;
             /** Exchange Order Id */
-            exchange_order_id: string | null;
+            exchange_order_id?: string | null;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
             /** Updated At */
-            updated_at: string | null;
+            updated_at?: string | null;
             /**
              * Side
              * @enum {string}
@@ -1228,7 +1230,7 @@ export type Components = {
              */
             type: "market" | "limit" | "stop" | "stop_limit";
             /** Price */
-            price: number | null;
+            price?: number | null;
             /** Size */
             size: number;
             /**
@@ -1313,7 +1315,7 @@ export type Components = {
              * Mode
              * @description Execution mode override (thread/process)
              */
-            mode?: string | null;
+            mode?: ("thread" | "process") | null;
             /**
              * Args
              * @description Constructor positional arguments
@@ -1513,8 +1515,9 @@ export type Components = {
             /**
              * Default Mode
              * @description Default execution mode
+             * @enum {string}
              */
-            default_mode: string;
+            default_mode: "thread" | "process";
             /**
              * Default Args
              * @description Default arguments
@@ -1553,7 +1556,7 @@ export type Components = {
              * @example thread
              * @example process
              */
-            mode?: string | null;
+            mode?: ("thread" | "process") | null;
             /**
              * Args
              * @description Constructor positional arguments override
@@ -1585,7 +1588,7 @@ export type Components = {
          * @description Process start response schema.
          *
          *     Attributes:
-         *         status: Operation status (started, already_running, etc.).
+         *         status: Operation status (success, already_running, error).
          *         name: Process name.
          *         run_id: Run ID if started.
          *         message: Additional message.
@@ -1593,9 +1596,10 @@ export type Components = {
         ProcessStartResponse: {
             /**
              * Status
-             * @description Operation status (started, already_running, etc.)
+             * @description Operation status (success, already_running, error)
+             * @enum {string}
              */
-            status: string;
+            status: "success" | "already_running" | "error";
             /**
              * Name
              * @description Process name
@@ -1663,16 +1667,17 @@ export type Components = {
          * @description Process stop response schema.
          *
          *     Attributes:
-         *         status: Operation status (stopped, not_running, etc.).
+         *         status: Operation status (success, not_running, error).
          *         name: Process name.
          *         message: Additional message.
          */
         ProcessStopResponse: {
             /**
              * Status
-             * @description Operation status (stopped, not_running, etc.)
+             * @description Operation status (success, not_running, error)
+             * @enum {string}
              */
-            status: string;
+            status: "success" | "not_running" | "error";
             /**
              * Name
              * @description Process name
@@ -1873,9 +1878,9 @@ export type Components = {
             /** Reason */
             reason: string;
             /** Strategy Name */
-            strategy_name: string | null;
+            strategy_name?: string | null;
             /** Price */
-            price: number | null;
+            price?: number | null;
         };
         /**
          * UpdateUserRequest
@@ -2099,13 +2104,15 @@ export type Components = {
             /**
              * Zmq Context
              * @description ZMQ context status
+             * @enum {string}
              */
-            zmq_context: string;
+            zmq_context: "ok" | "error";
             /**
              * Websocket Manager
              * @description WebSocket manager status
+             * @enum {string}
              */
-            websocket_manager: string;
+            websocket_manager: "ok" | "error";
             /**
              * Active Connections
              * @description Number of active WebSocket connections
@@ -2146,8 +2153,9 @@ export type Components = {
             /**
              * Status
              * @description Overall ZMQ bridge health status
+             * @enum {string}
              */
-            status: string;
+            status: "healthy" | "unhealthy" | "warning" | "error";
             /**
              * Timestamp
              * Format: date-time
@@ -2555,6 +2563,13 @@ export interface Operations {
                     "application/json": Components["schemas"]["SettingRead"];
                 };
             };
+            /** @description Setting not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2585,6 +2600,13 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["MessageResponse"];
                 };
+            };
+            /** @description Setting not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -2659,6 +2681,20 @@ export interface Operations {
                     "application/json": Components["schemas"]["ProcessCreateResponse"];
                 };
             };
+            /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Process name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2689,6 +2725,13 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["ProcessSchemaResponse"];
                 };
+            };
+            /** @description Process not found in registry */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -2835,6 +2878,13 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_signals_api_signals_get: {
@@ -2875,6 +2925,13 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_exchanges_api_exchanges_get: {
@@ -2894,6 +2951,13 @@ export interface Operations {
                 content: {
                     "application/json": string[];
                 };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -2925,6 +2989,13 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -2964,6 +3035,13 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_executions_api_executions_get: {
@@ -2996,6 +3074,13 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_positions_api_positions_get: {
@@ -3015,6 +3100,13 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["PositionSnapshot"][];
                 };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

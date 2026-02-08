@@ -23,7 +23,7 @@ Example:
     Start a process::
 
         POST /api/processes/my-strategy/start
-        {"mode": "subprocess", "autostart": true}
+        {"mode": "process", "autostart": true}
 """
 
 from collections.abc import Iterable
@@ -51,6 +51,7 @@ from snapper.api.schemas.process import ProcessSchemaResponse
 from snapper.api.schemas.process import ProcessStartRequest
 from snapper.api.schemas.process import ProcessStartResponse
 from snapper.api.schemas.process import ProcessStopResponse
+from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
@@ -190,7 +191,7 @@ async def create_process_configuration(
     if request.kwargs:
         base_kwargs.update(request.kwargs)
     final_args = request.args if request.args is not None else list(metadata.get("args", []))
-    final_mode = request.mode or str(metadata.get("mode", "thread"))
+    final_mode = request.mode or resolve_mode(metadata.get("mode", "thread"), request.name)
     final_enabled = metadata.get("enabled", False) if request.enabled is None else request.enabled
     lifecycle_meta = metadata.get("lifecycle", ProcessLifecycleEnum.LONG_RUNNING)
     lifecycle = (
@@ -275,7 +276,7 @@ async def get_process_schema(
         class_path=metadata["class_path"],
         method=metadata["method"],
         default_enabled=metadata.get("enabled", False),
-        default_mode=metadata.get("mode", "thread"),
+        default_mode=resolve_mode(metadata.get("mode", "thread"), name),
         default_args=metadata.get("args", []),
         default_kwargs=default_kwargs,
         lifecycle=cast(ProcessLifecycleType, lifecycle_value),
@@ -298,10 +299,10 @@ async def start_process(
         autostart=request.autostart,
     )
     return ProcessStartResponse(
-        status=result.get("status", "unknown"),
+        status=result.status,
         name=name,
-        run_id=result.get("run_id"),
-        message=result.get("message"),
+        run_id=result.run_id,
+        message=result.message,
     )
 
 
@@ -314,9 +315,9 @@ async def stop_process(
 ) -> ProcessStopResponse:
     result = await factory.stop_process_by_name(name)
     return ProcessStopResponse(
-        status=result.get("status", "unknown"),
+        status=result.status,
         name=name,
-        message=result.get("message"),
+        message=result.message,
     )
 
 

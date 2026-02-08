@@ -12,6 +12,7 @@ from typing import Any
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.core.types import ProcessMode
 from snapper.utils.autoload import import_all_under
 
 __all__ = [
@@ -33,7 +34,7 @@ def register_process[T: type[RegisterableProcess]](
     tags: Iterable[str] | None = None,
     parameters_schema: dict[str, Any] | None = None,
     enabled: bool = False,
-    mode: str = "thread",
+    mode: ProcessMode = "thread",
     args: list[Any] | None = None,
 ) -> Callable[[T], T]:
     """Decorator to register a process class in the global registry.

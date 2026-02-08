@@ -24,9 +24,11 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.application.process_manager.config_resolver import VALID_PROCESS_MODES
 from snapper.application.process_manager.config_resolver import get_process_configs
 from snapper.application.process_manager.config_resolver import import_process_class
 from snapper.application.process_manager.config_resolver import resolve_lifecycle
+from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.config_resolver import resolve_parameters_schema
 from snapper.application.process_manager.config_resolver import resolve_role
 from snapper.application.process_manager.config_resolver import resolve_tags
@@ -35,12 +37,16 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
+from snapper.application.process_manager.models import ProcessStartResult
+from snapper.application.process_manager.models import ProcessStatusResult
+from snapper.application.process_manager.models import ProcessStopResult
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
 from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.settings import AppSettings
+from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 
@@ -188,12 +194,6 @@ class ProcessLauncherService:
         Raises:
             Exception: Re-raised if task fails within startup grace period.
         """
-        if config.mode != "thread":
-            logger.warning(
-                "Async process '{}' requested non-thread mode '{}'; running as thread",
-                config.name,
-                config.mode,
-            )
         task = asyncio.create_task(method())
         self.process_tasks[config.name] = task
         self._register_task_completion(config.name, task)
@@ -211,12 +211,6 @@ class ProcessLauncherService:
             config: Process configuration.
             method: Sync method to run.
         """
-        if config.mode != "thread":
-            logger.warning(
-                "Sync process '{}' requested non-thread mode '{}'; running in executor",
-                config.name,
-                config.mode,
-            )
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, method)
         logger.info(f"Process '{config.name}' started in thread executor")
@@ -364,8 +358,13 @@ class ProcessLauncherService:
             )
             if config.mode == "process":
                 self._start_as_subprocess(config)
-            else:
+            elif config.mode == "thread":
                 await self._start_in_process(config)
+            else:
+                raise ValueError(
+                    f"Invalid mode '{config.mode}' for process '{config.name}'. "
+                    f"Valid modes: {sorted(VALID_PROCESS_MODES)}"
+                )
             if config.note:
                 logger.info(f"Note for '{config.name}': {config.note}")
         except Exception as exc:
@@ -698,7 +697,7 @@ class ProcessLauncherService:
     def _apply_overrides_to_config_dict(
         self,
         config_dict: dict[str, Any],
-        mode: str | None,
+        mode: ProcessMode | None,
         args: list[Any] | None,
         kwargs: dict[str, Any] | None,
         autostart: bool | None,
@@ -771,7 +770,7 @@ class ProcessLauncherService:
         return ProcessConfigModel(
             name=name,
             enabled=autostart_enabled,
-            mode=config_dict.get("mode", "thread"),
+            mode=resolve_mode(config_dict.get("mode", "thread"), name),
             class_path=config_dict["class"],
             method=config_dict.get("method", "start"),
             args=config_dict.get("args", []),
@@ -822,26 +821,29 @@ class ProcessLauncherService:
     async def start_process_by_name(
         self,
         name: str,
-        mode: str | None = None,
+        mode: ProcessMode | None = None,
         args: list[Any] | None = None,
         kwargs: dict[str, Any] | None = None,
         autostart: bool | None = None,
-    ) -> dict[str, Any]:
+    ) -> ProcessStartResult:
         """Start a process by its registered name.
 
         Args:
             name: Process name from registry.
-            mode: Execution mode (thread/process/async).
+            mode: Execution mode (thread/process).
             args: Positional arguments for the process.
             kwargs: Keyword arguments for the process.
             autostart: Whether to enable autostart on boot.
 
         Returns:
-            Status dict with operation result.
+            Typed result with operation status, message, and optional run_id.
         """
         if name in self.started_processes:
             logger.warning(f"Process '{name}' is already running")
-            return {"status": "already_running", "message": f"Process '{name}' is already running"}
+            return ProcessStartResult(
+                status="already_running",
+                message=f"Process '{name}' is already running",
+            )
         repository = get_repository(self.settings.db_url)
         config_key = f"process_{name}"
         config_dict: dict[str, Any] = {}
@@ -849,10 +851,10 @@ class ProcessLauncherService:
             result = await session.execute(select(Setting).where(Setting.key == config_key))
             setting = result.scalar_one_or_none()
             if not setting:
-                return {
-                    "status": "error",
-                    "message": f"Process '{name}' not found in configuration",
-                }
+                return ProcessStartResult(
+                    status="error",
+                    message=f"Process '{name}' not found in configuration",
+                )
             config_dict = json.loads(setting.value)
             autostart_enabled = self._apply_overrides_to_config_dict(
                 config_dict, mode, args, kwargs, autostart
@@ -862,19 +864,25 @@ class ProcessLauncherService:
             await self.start_process(config)
         except Exception as e:
             logger.error(f"Failed to start process '{name}': {e}")
-            return {
-                "status": "error",
-                "message": f"Failed to start process '{name}': {str(e)}",
-            }
+            return ProcessStartResult(
+                status="error",
+                message=f"Failed to start process '{name}': {str(e)}",
+            )
         self._start_native_process_monitoring()
         await self._persist_config_after_start(repository, config_key, config_dict, config)
+        run_id = self.active_runs.get(name)
         if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
-            return {
-                "status": "success",
-                "message": f"Process '{name}' executed successfully",
-            }
+            return ProcessStartResult(
+                status="success",
+                message=f"Process '{name}' executed successfully",
+                run_id=run_id,
+            )
         logger.info(f"Process '{name}' started successfully")
-        return {"status": "success", "message": f"Process '{name}' started successfully"}
+        return ProcessStartResult(
+            status="success",
+            message=f"Process '{name}' started successfully",
+            run_id=run_id,
+        )
 
     async def _cancel_process_task(self, name: str) -> None:
         """Cancel and await the asyncio task for a process.
@@ -910,18 +918,21 @@ class ProcessLauncherService:
                 setting.updated_at = datetime.now(UTC)
                 await session.commit()
 
-    async def stop_process_by_name(self, name: str) -> dict[str, Any]:
+    async def stop_process_by_name(self, name: str) -> ProcessStopResult:
         """Stop a running process by name.
 
         Args:
             name: Process name to stop.
 
         Returns:
-            Status dict with operation result.
+            Typed result with operation status and message.
         """
         if name not in self.started_processes:
             logger.warning(f"Process '{name}' is not running")
-            return {"status": "not_running", "message": f"Process '{name}' is not running"}
+            return ProcessStopResult(
+                status="not_running",
+                message=f"Process '{name}' is not running",
+            )
         try:
             self.expected_terminations.add(name)
             await self._cancel_process_task(name)
@@ -935,43 +946,42 @@ class ProcessLauncherService:
             await self._disable_process_in_db(name)
             logger.info(f"Process '{name}' stopped and marked as disabled in database")
             await self._finalize_process_run(name, ProcessRunStatusEnum.CANCELLED)
-            return {
-                "status": "success",
-                "message": f"Process '{name}' stopped and marked as disabled in database",
-            }
+            return ProcessStopResult(
+                status="success",
+                message=f"Process '{name}' stopped and marked as disabled in database",
+            )
         except Exception as e:
             logger.error(f"Failed to stop process '{name}': {e}")
-            return {"status": "error", "message": str(e)}
+            return ProcessStopResult(status="error", message=str(e))
         finally:
             self.expected_terminations.discard(name)
 
-    async def get_process_status(self, name: str) -> dict[str, Any]:
+    async def get_process_status(self, name: str) -> ProcessStatusResult:
         """Get current status of a process.
 
         Args:
             name: Process name to query.
 
         Returns:
-            Status dict with running state, role, lifecycle and details.
+            Typed status with running state, role, lifecycle and details.
         """
         is_running = name in self.started_processes
-        status: dict[str, Any] = {
-            "name": name,
-            "running": is_running,
-            "role": (self.process_roles.get(name) or ProcessRoleEnum.CORE).value,
-            "lifecycle": self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING).value,
-        }
-        active_run_id = self.active_runs.get(name)
-        if active_run_id is not None:
-            status["active_run_id"] = active_run_id
+        details: dict[str, Any] | None = None
         instance = self.started_processes.get(name)
         if instance:
             try:
-                status["details"] = instance.get_status()
+                details = instance.get_status()
             except Exception as e:
                 logger.warning(f"Failed to get status from process '{name}': {e}")
         await asyncio.sleep(0)
-        return status
+        return ProcessStatusResult(
+            name=name,
+            running=is_running,
+            role=(self.process_roles.get(name) or ProcessRoleEnum.CORE).value,
+            lifecycle=self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING).value,
+            active_run_id=self.active_runs.get(name),
+            details=details,
+        )
 
     async def get_recent_runs(
         self,
@@ -1001,7 +1011,7 @@ class ProcessLauncherService:
         class_path: str,
         method: str,
         enabled: bool,
-        mode: str,
+        mode: ProcessMode,
         args: list[Any],
         kwargs: dict[str, Any],
         lifecycle: ProcessLifecycleEnum,

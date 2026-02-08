@@ -584,7 +584,7 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        status: 'ok',
+        status: 'healthy',
         timestamp: '2024-01-01T00:00:00Z',
         version: '1.0.0',
         connections: { websocket: 5, zmq: 2 },
@@ -593,7 +593,7 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.getHealth()
 
-    expect(result.status).toBe('ok')
+    expect(result.status).toBe('healthy')
     expect(result.timestamp).toBe('2024-01-01T00:00:00Z')
   })
   it('getSystemStatus returns system status', async () => {
@@ -1018,7 +1018,7 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'started', name: 'test-process', message: 'Process started' }),
+      json: async () => ({ status: 'success', name: 'test-process', message: 'Process started' }),
     })
     const result = await apiClient.startProcessByName('test-process', {
       mode: 'live',
@@ -1027,13 +1027,13 @@ describe('domain API methods', () => {
       autostart: true,
     })
 
-    expect(result).toEqual({ status: 'started', name: 'test-process', message: 'Process started' })
+    expect(result).toEqual({ status: 'success', name: 'test-process', message: 'Process started' })
   })
   it('startProcessByName works without options', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'started', name: 'test-process', message: 'Started' }),
+      json: async () => ({ status: 'success', name: 'test-process', message: 'Started' }),
     })
     await apiClient.startProcessByName('test-process')
     expect(mockFetch).toHaveBeenCalled()
@@ -1042,11 +1042,11 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'stopped', name: 'test-process', message: 'Process stopped' }),
+      json: async () => ({ status: 'success', name: 'test-process', message: 'Process stopped' }),
     })
     const result = await apiClient.stopProcessByName('test-process')
 
-    expect(result).toEqual({ status: 'stopped', name: 'test-process', message: 'Process stopped' })
+    expect(result).toEqual({ status: 'success', name: 'test-process', message: 'Process stopped' })
   })
   it('changePassword changes user password', async () => {
     mockFetch.mockResolvedValueOnce({

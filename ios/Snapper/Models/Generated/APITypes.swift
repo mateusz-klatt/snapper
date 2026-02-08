@@ -21,6 +21,11 @@ enum AvailableProcessRole: String, Codable, Sendable {
     case backtest
 }
 
+enum ConfiguredProcessMode: String, Codable, Sendable {
+    case thread
+    case process
+}
+
 enum ConfiguredProcessLifecycle: String, Codable, Sendable {
     case longRunning = "long_running"
     case oneShot = "one_shot"
@@ -36,6 +41,13 @@ enum ConfiguredProcessRole: String, Codable, Sendable {
 enum ExecutionRecordSide: String, Codable, Sendable {
     case buy
     case sell
+}
+
+enum HealthCheckResponseStatus: String, Codable, Sendable {
+    case healthy
+    case unhealthy
+    case warning
+    case error
 }
 
 enum OrderStatusSide: String, Codable, Sendable {
@@ -79,14 +91,48 @@ enum ProcessRunLifecycle: String, Codable, Sendable {
     case oneShot = "one_shot"
 }
 
+enum ProcessSchemaResponseDefaultMode: String, Codable, Sendable {
+    case thread
+    case process
+}
+
 enum ProcessSchemaResponseLifecycle: String, Codable, Sendable {
     case longRunning = "long_running"
     case oneShot = "one_shot"
 }
 
+enum ProcessStartResponseStatus: String, Codable, Sendable {
+    case success
+    case alreadyRunning = "already_running"
+    case error
+}
+
+enum ProcessStopResponseStatus: String, Codable, Sendable {
+    case success
+    case notRunning = "not_running"
+    case error
+}
+
 enum TradingSignalSide: String, Codable, Sendable {
     case buy
     case sell
+}
+
+enum ZmqComponentsZmqContext: String, Codable, Sendable {
+    case ok
+    case error
+}
+
+enum ZmqComponentsWebsocketManager: String, Codable, Sendable {
+    case ok
+    case error
+}
+
+enum ZmqHealthResponseStatus: String, Codable, Sendable {
+    case healthy
+    case unhealthy
+    case warning
+    case error
 }
 
 struct AdminResetPasswordRequest: Codable, Sendable {
@@ -481,7 +527,7 @@ struct ProcessStartRequest: Codable, Sendable {
 }
 
 struct ProcessStartResponse: Codable, Sendable {
-    /// Operation status (started, already_running, etc.)
+    /// Operation status (success, already_running, error)
     let status: String
     /// Process name
     let name: String
@@ -523,7 +569,7 @@ struct ProcessStatus: Codable, Sendable {
 }
 
 struct ProcessStopResponse: Codable, Sendable {
-    /// Operation status (stopped, not_running, etc.)
+    /// Operation status (success, not_running, error)
     let status: String
     /// Process name
     let name: String

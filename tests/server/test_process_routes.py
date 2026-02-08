@@ -13,6 +13,8 @@ from snapper.api.schemas.process import ProcessStartRequest
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
+from snapper.application.process_manager.models import ProcessStartResult
+from snapper.application.process_manager.models import ProcessStopResult
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import get_process_factory
 from snapper.server.process_routes import get_process_schema
@@ -290,7 +292,7 @@ class TestStartProcess:
         """
         mock_factory = MagicMock()
         mock_factory.start_process_by_name = AsyncMock(
-            return_value={"status": "started", "name": "zmq_broker"}
+            return_value=ProcessStartResult(status="success", message="started", run_id="run-001")
         )
         request = ProcessStartRequest(
             mode="process",
@@ -305,8 +307,9 @@ class TestStartProcess:
             _user=MagicMock(),
             _csrf=None,
         )
-        assert result.status == "started"
+        assert result.status == "success"
         assert result.name == "zmq_broker"
+        assert result.run_id == "run-001"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker",
             mode="process",
@@ -325,7 +328,7 @@ class TestStartProcess:
         """
         mock_factory = MagicMock()
         mock_factory.start_process_by_name = AsyncMock(
-            return_value={"status": "started", "name": "zmq_broker"}
+            return_value=ProcessStartResult(status="success", message="started")
         )
         request = ProcessStartRequest(mode=None, args=None, kwargs=None, autostart=None)
         result = await start_process(
@@ -335,7 +338,7 @@ class TestStartProcess:
             _user=MagicMock(),
             _csrf=None,
         )
-        assert result.status == "started"
+        assert result.status == "success"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker", mode=None, args=None, kwargs=None, autostart=None
         )
@@ -354,12 +357,12 @@ class TestStopProcess:
         """
         mock_factory = MagicMock()
         mock_factory.stop_process_by_name = AsyncMock(
-            return_value={"status": "stopped", "name": "zmq_broker"}
+            return_value=ProcessStopResult(status="success", message="stopped")
         )
         result = await stop_process(
             name="zmq_broker", factory=mock_factory, _user=MagicMock(), _csrf=None
         )
-        assert result.status == "stopped"
+        assert result.status == "success"
         assert result.name == "zmq_broker"
         mock_factory.stop_process_by_name.assert_awaited_once_with("zmq_broker")
 

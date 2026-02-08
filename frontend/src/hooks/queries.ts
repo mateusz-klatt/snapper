@@ -274,7 +274,7 @@ export const useStartProcessByName = () => {
       autostart,
     }: {
       name: string
-      mode?: string
+      mode?: 'thread' | 'process'
       args?: unknown[]
       kwargs?: Record<string, unknown>
       autostart?: boolean

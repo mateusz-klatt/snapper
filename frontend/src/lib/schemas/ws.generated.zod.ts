@@ -57,7 +57,7 @@ export const HeartbeatEnvelopeSchema = z
     meta: z.record(z.string(), z.unknown()).optional(),
     component: z.string(),
     sequence: z.number().int(),
-    status: z.enum(['healthy', 'warning', 'error']),
+    status: z.enum(['healthy', 'unhealthy', 'warning', 'error']),
     lag_ms: z.number().int(),
   })
   .strict()

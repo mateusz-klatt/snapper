@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.enums import ProcessRunStatusEnum
@@ -114,12 +115,12 @@ class AsyncDummyProcess:
 
 
 @pytest.mark.asyncio
-async def test_start_process_warns_on_async_non_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify start_process handles async method in worker mode.
+async def test_start_process_rejects_invalid_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify start_process raises ValueError for invalid mode.
 
-    Given: Async process with mode='worker',
+    Given: Process config with mode='worker' (not a valid ProcessMode),
     When: start_process is called,
-    Then: Process is registered without errors.
+    Then: ValueError is raised with descriptive message.
     """
     launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
     launcher._create_process_run_record = AsyncMock()
@@ -141,9 +142,8 @@ async def test_start_process_warns_on_async_non_thread(monkeypatch: pytest.Monke
         tags=(),
         parameters_schema=None,
     )
-    await launcher.start_process(config)
-    assert "async_proc" in launcher.process_tasks
-    assert "async_proc" in launcher.started_processes
+    with pytest.raises(ValueError, match="Invalid mode 'worker'"):
+        await launcher.start_process(config)
 
 
 class StopRaises:
@@ -260,8 +260,8 @@ class TestStartProcessByNameNoSetting:
             return_value=mock_repo,
         ):
             result = await launcher.start_process_by_name("test_proc")
-        assert result["status"] == "success"
-        assert "executed successfully" in result["message"]
+        assert result.status == "success"
+        assert "executed successfully" in result.message
         mock_session.commit.assert_not_called()
 
 
@@ -1128,7 +1128,7 @@ class TestStartProcessByName:
         """
         launcher.started_processes["running_process"] = MagicMock()
         result = await launcher.start_process_by_name("running_process")
-        assert result["status"] == "already_running"
+        assert result.status == "already_running"
 
     @pytest.mark.asyncio
     async def test_start_process_by_name_not_found(self, launcher: ProcessLauncherService) -> None:
@@ -1148,8 +1148,8 @@ class TestStartProcessByName:
             mock_repo.session.return_value.__aexit__ = AsyncMock()
             mock_get_repo.return_value = mock_repo
             result = await launcher.start_process_by_name("nonexistent")
-            assert result["status"] == "error"
-            assert "not found" in result["message"]
+            assert result.status == "error"
+            assert "not found" in result.message
 
 
 class TestStopProcessByName:
@@ -1164,7 +1164,7 @@ class TestStopProcessByName:
         Then: Returns not_running status.
         """
         result = await launcher.stop_process_by_name("not_running")
-        assert result["status"] == "not_running"
+        assert result.status == "not_running"
 
     @pytest.mark.asyncio
     async def test_stop_process_by_name_cancels_task(
@@ -1199,7 +1199,7 @@ class TestStopProcessByName:
             mock_get_repo.return_value = mock_repo
             with patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock):
                 result = await launcher.stop_process_by_name("task_process")
-            assert result["status"] == "success"
+            assert result.status == "success"
             assert task.cancelled()
 
     @pytest.mark.asyncio
@@ -1232,7 +1232,7 @@ class TestStopProcessByName:
             mock_repo.session.return_value.__aexit__ = AsyncMock()
             mock_get_repo.return_value = mock_repo
             result = await launcher.stop_process_by_name("native")
-            assert result["status"] == "success"
+            assert result.status == "success"
             mock_proc_info.stop.assert_called_once()
 
 
@@ -1252,9 +1252,9 @@ class TestGetProcessStatus:
         launcher.process_lifecycles["running"] = ProcessLifecycleEnum.LONG_RUNNING
         launcher.active_runs["running"] = "test-run-id"
         status = await launcher.get_process_status("running")
-        assert status["name"] == "running"
-        assert status["running"] is True
-        assert status["active_run_id"] == "test-run-id"
+        assert status.name == "running"
+        assert status.running is True
+        assert status.active_run_id == "test-run-id"
 
     @pytest.mark.asyncio
     async def test_get_process_status_not_running(self, launcher: ProcessLauncherService) -> None:
@@ -1265,8 +1265,8 @@ class TestGetProcessStatus:
         Then: Returns status with running=False.
         """
         status = await launcher.get_process_status("not_running")
-        assert status["name"] == "not_running"
-        assert status["running"] is False
+        assert status.name == "not_running"
+        assert status.running is False
 
     @pytest.mark.asyncio
     async def test_get_process_status_with_details(self, launcher: ProcessLauncherService) -> None:
@@ -1286,7 +1286,7 @@ class TestGetProcessStatus:
         launcher.process_roles["with_status"] = ProcessRoleEnum.CORE
         launcher.process_lifecycles["with_status"] = ProcessLifecycleEnum.LONG_RUNNING
         status = await launcher.get_process_status("with_status")
-        assert status["details"] == {"connections": 5, "messages": 100}
+        assert status.details == {"connections": 5, "messages": 100}
 
     @pytest.mark.asyncio
     async def test_get_process_status_details_error_handled(
@@ -1308,8 +1308,8 @@ class TestGetProcessStatus:
         launcher.process_roles["broken_status"] = ProcessRoleEnum.CORE
         launcher.process_lifecycles["broken_status"] = ProcessLifecycleEnum.LONG_RUNNING
         status = await launcher.get_process_status("broken_status")
-        assert status["running"] is True
-        assert "details" not in status
+        assert status.running is True
+        assert status.details is None
 
 
 class TestGetRecentRuns:
@@ -1892,3 +1892,36 @@ def test_resolve_role_returns_default_for_none() -> None:
     """
     result = ProcessLauncherService._resolve_role(None, "test_process")
     assert result == ProcessRoleEnum.CORE
+
+
+def test_resolve_mode_returns_thread_for_none() -> None:
+    """Verify resolve_mode returns 'thread' when raw is None.
+
+    Given a None mode value,
+    When resolve_mode is called,
+    Then it returns 'thread' as the default.
+    """
+    result = resolve_mode(None, "test_process")
+    assert result == "thread"
+
+
+def test_resolve_mode_raises_on_invalid_value() -> None:
+    """Verify resolve_mode raises ValueError for unknown mode.
+
+    Given an invalid mode value 'worker',
+    When resolve_mode is called,
+    Then it raises ValueError with a descriptive message.
+    """
+    with pytest.raises(ValueError, match="Invalid mode 'worker'"):
+        resolve_mode("worker", "test_process")
+
+
+def test_resolve_mode_accepts_valid_modes() -> None:
+    """Verify resolve_mode accepts 'thread' and 'process'.
+
+    Given valid ProcessMode values,
+    When resolve_mode is called,
+    Then it returns the value unchanged.
+    """
+    assert resolve_mode("thread", "test_process") == "thread"
+    assert resolve_mode("process", "test_process") == "process"

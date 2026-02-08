@@ -11,8 +11,11 @@ from pydantic import Field
 
 from snapper.api.schemas.base import StrictApiSchema
 from snapper.core.types import ProcessLifecycleType
+from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleType
 from snapper.core.types import ProcessRunStatusType
+from snapper.core.types import StartProcessStatus
+from snapper.core.types import StopProcessStatus
 
 _UNIQUE_PROCESS_NAME_DESC = "Unique process name"
 _CLASS_PATH_DESC = "Full Python class path"
@@ -60,7 +63,7 @@ class ProcessStartRequest(StrictApiSchema):
         autostart: Toggle autostart flag (None keeps stored value).
     """
 
-    mode: str | None = Field(
+    mode: ProcessMode | None = Field(
         None,
         description="Execution mode (thread/process) - for ProcessLauncherService, not constructor",
         examples=["thread", "process"],
@@ -111,7 +114,7 @@ class ProcessCreateRequest(StrictApiSchema):
         None,
         description="Whether process should autostart on boot",
     )
-    mode: str | None = Field(
+    mode: ProcessMode | None = Field(
         None,
         description="Execution mode override (thread/process)",
     )
@@ -306,7 +309,7 @@ class ConfiguredProcess(StrictApiSchema):
     name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
     enabled: bool = Field(description="Whether process autostarts on boot")
     running: bool = Field(description="Whether process is currently running")
-    mode: str = Field(description="Execution mode (thread/process)")
+    mode: ProcessMode = Field(description="Execution mode (thread/process)")
     class_path: str = Field(description=_CLASS_PATH_DESC)
     method: str = Field(description=_METHOD_DESC)
     args: list[Any] = Field(default_factory=list, description="Constructor arguments")
@@ -378,7 +381,7 @@ class ProcessSchemaResponse(StrictApiSchema):
     class_path: str = Field(description=_CLASS_PATH_DESC)
     method: str = Field(description=_METHOD_DESC)
     default_enabled: bool = Field(description="Default autostart setting")
-    default_mode: str = Field(description="Default execution mode")
+    default_mode: ProcessMode = Field(description="Default execution mode")
     default_args: list[Any] = Field(default_factory=list, description="Default arguments")
     default_kwargs: dict[str, Any] = Field(default_factory=dict, description="Default kwargs")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
@@ -454,13 +457,15 @@ class ProcessStartResponse(StrictApiSchema):
     """Process start response schema.
 
     Attributes:
-        status: Operation status (started, already_running, etc.).
+        status: Operation status (success, already_running, error).
         name: Process name.
         run_id: Run ID if started.
         message: Additional message.
     """
 
-    status: str = Field(description="Operation status (started, already_running, etc.)")
+    status: StartProcessStatus = Field(
+        description="Operation status (success, already_running, error)"
+    )
     name: str = Field(description=_PROCESS_NAME_DESC)
     run_id: str | None = Field(None, description="Run ID if started")
     message: str | None = Field(None, description="Additional message")
@@ -470,11 +475,11 @@ class ProcessStopResponse(StrictApiSchema):
     """Process stop response schema.
 
     Attributes:
-        status: Operation status (stopped, not_running, etc.).
+        status: Operation status (success, not_running, error).
         name: Process name.
         message: Additional message.
     """
 
-    status: str = Field(description="Operation status (stopped, not_running, etc.)")
+    status: StopProcessStatus = Field(description="Operation status (success, not_running, error)")
     name: str = Field(description=_PROCESS_NAME_DESC)
     message: str | None = Field(None, description="Additional message")

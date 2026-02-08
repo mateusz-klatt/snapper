@@ -51,7 +51,7 @@ export const ConfiguredProcessSchema = z
     name: z.string(),
     enabled: z.boolean(),
     running: z.boolean(),
-    mode: z.string(),
+    mode: z.enum(['thread', 'process']),
     class_path: z.string(),
     method: z.string(),
     args: z.array(z.unknown()).optional(),
@@ -107,13 +107,13 @@ export const OrderStatusSchema = z
     id: z.number().int(),
     instrument: z.string(),
     exchange: z.string(),
-    client_order_id: z.string().nullable(),
-    exchange_order_id: z.string().nullable(),
+    client_order_id: z.string().nullable().optional(),
+    exchange_order_id: z.string().nullable().optional(),
     created_at: z.iso.datetime(),
-    updated_at: z.iso.datetime().nullable(),
+    updated_at: z.iso.datetime().nullable().optional(),
     side: z.enum(['buy', 'sell']),
     type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
-    price: z.number().nullable(),
+    price: z.number().nullable().optional(),
     size: z.number(),
     status: z.enum([
       'new',
@@ -147,7 +147,7 @@ export const ProcessCreateRequestSchema = z
     name: z.string().min(3).max(64),
     template: z.string(),
     enabled: z.boolean().nullable().optional(),
-    mode: z.string().nullable().optional(),
+    mode: z.enum(['thread', 'process']).nullable().optional(),
     args: z.array(z.unknown()).nullable().optional(),
     kwargs: z.record(z.string(), z.unknown()).nullable().optional(),
     note: z.string().max(512).nullable().optional(),
@@ -184,7 +184,7 @@ export const ProcessSchemaResponseSchema = z
     class_path: z.string(),
     method: z.string(),
     default_enabled: z.boolean(),
-    default_mode: z.string(),
+    default_mode: z.enum(['thread', 'process']),
     default_args: z.array(z.unknown()).optional(),
     default_kwargs: z.record(z.string(), z.unknown()).optional(),
     lifecycle: z.enum(['long_running', 'one_shot']),
@@ -193,7 +193,7 @@ export const ProcessSchemaResponseSchema = z
 
 export const ProcessStartRequestSchema = z
   .object({
-    mode: z.string().nullable().optional(),
+    mode: z.enum(['thread', 'process']).nullable().optional(),
     args: z.array(z.unknown()).nullable().optional(),
     kwargs: z.record(z.string(), z.unknown()).nullable().optional(),
     autostart: z.boolean().nullable().optional(),
@@ -202,7 +202,7 @@ export const ProcessStartRequestSchema = z
 
 export const ProcessStartResponseSchema = z
   .object({
-    status: z.string(),
+    status: z.enum(['success', 'already_running', 'error']),
     name: z.string(),
     run_id: z.string().nullable().optional(),
     message: z.string().nullable().optional(),
@@ -222,7 +222,7 @@ export const ProcessStatusSchema = z
 
 export const ProcessStopResponseSchema = z
   .object({
-    status: z.string(),
+    status: z.enum(['success', 'not_running', 'error']),
     name: z.string(),
     message: z.string().nullable().optional(),
   })
@@ -269,8 +269,8 @@ export const TradingSignalSchema = z
     side: z.enum(['buy', 'sell']),
     strength: z.number(),
     reason: z.string(),
-    strategy_name: z.string().nullable(),
-    price: z.number().nullable(),
+    strategy_name: z.string().nullable().optional(),
+    price: z.number().nullable().optional(),
   })
   .strict()
 
@@ -311,8 +311,8 @@ export const ZmqBridgeStatsSchema = z
 
 export const ZmqComponentsSchema = z
   .object({
-    zmq_context: z.string(),
-    websocket_manager: z.string(),
+    zmq_context: z.enum(['ok', 'error']),
+    websocket_manager: z.enum(['ok', 'error']),
     active_connections: z.number().int(),
   })
   .strict()
@@ -339,7 +339,7 @@ export const ConfiguredProcessesResponseSchema = z
 
 export const HealthCheckResponseSchema = z
   .object({
-    status: z.string(),
+    status: z.enum(['healthy', 'unhealthy', 'warning', 'error']),
     timestamp: z.iso.datetime(),
     version: z.string(),
     connections: z.record(z.string(), z.unknown()),
@@ -418,7 +418,7 @@ export const WsStatsResponseSchema = z
 
 export const ZmqHealthResponseSchema = z
   .object({
-    status: z.string(),
+    status: z.enum(['healthy', 'unhealthy', 'warning', 'error']),
     timestamp: z.iso.datetime(),
     components: ZmqComponentsSchema,
     config: ZmqConfigSchema,

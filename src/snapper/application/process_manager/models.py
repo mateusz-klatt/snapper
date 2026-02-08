@@ -4,6 +4,9 @@ This module defines the core data structures for process management:
 - RegisterableProcess: Abstract base class for manageable processes
 - ProcessInstanceInfo: Runtime information for spawned subprocesses
 - ProcessConfigModel: Configuration model for process definitions
+- ProcessStartResult: Typed result for start operations
+- ProcessStopResult: Typed result for stop operations
+- ProcessStatusResult: Typed runtime status snapshot
 """
 
 import asyncio
@@ -18,6 +21,9 @@ from typing import Any
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.config.settings import AppSettings
+from snapper.core.types import ProcessMode
+from snapper.core.types import StartProcessStatus
+from snapper.core.types import StopProcessStatus
 
 
 class RegisterableProcess(ABC):
@@ -155,7 +161,7 @@ class ProcessConfigModel:
 
     name: str
     enabled: bool
-    mode: str
+    mode: ProcessMode
     class_path: str
     method: str
     args: list[Any]
@@ -165,3 +171,52 @@ class ProcessConfigModel:
     role: ProcessRoleEnum = ProcessRoleEnum.CORE
     tags: tuple[str, ...] = ()
     parameters_schema: dict[str, Any] | None = None
+
+
+@dataclass
+class ProcessStartResult:
+    """Result of a process start operation.
+
+    Attributes:
+        status: Operation outcome (success, already_running, error).
+        message: Human-readable description of the result.
+        run_id: Database run record ID if the process was started.
+    """
+
+    status: StartProcessStatus
+    message: str
+    run_id: str | None = None
+
+
+@dataclass
+class ProcessStopResult:
+    """Result of a process stop operation.
+
+    Attributes:
+        status: Operation outcome (success, not_running, error).
+        message: Human-readable description of the result.
+    """
+
+    status: StopProcessStatus
+    message: str
+
+
+@dataclass
+class ProcessStatusResult:
+    """Current runtime status of a managed process.
+
+    Attributes:
+        name: Process name.
+        running: Whether the process is currently running.
+        role: Process role category (enum string value).
+        lifecycle: Process lifecycle type (enum string value).
+        active_run_id: Active run record ID if currently running.
+        details: Additional process-specific status information.
+    """
+
+    name: str
+    running: bool
+    role: str
+    lifecycle: str
+    active_run_id: str | None = None
+    details: dict[str, Any] | None = None

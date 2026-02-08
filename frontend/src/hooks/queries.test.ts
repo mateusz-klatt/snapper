@@ -37,8 +37,8 @@ vi.mock('../lib/apiClient', () => ({
     getConfiguredProcesses: vi.fn(() => Promise.resolve({ processes: [] })),
     getProcessSchema: vi.fn(() => Promise.resolve({ schema: {} })),
     getProcessRuns: vi.fn(() => Promise.resolve({ runs: [] })),
-    startProcessByName: vi.fn(() => Promise.resolve({ status: 'ok', message: 'started' })),
-    stopProcessByName: vi.fn(() => Promise.resolve({ status: 'ok', message: 'stopped' })),
+    startProcessByName: vi.fn(() => Promise.resolve({ status: 'success', message: 'started' })),
+    stopProcessByName: vi.fn(() => Promise.resolve({ status: 'success', message: 'stopped' })),
     createProcessConfig: vi.fn(() => Promise.resolve({ name: 'test', id: '123' })),
   },
 }))

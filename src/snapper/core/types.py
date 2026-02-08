@@ -16,6 +16,10 @@ Type Aliases:
     ReplaySourceExchange: Valid paper replay source exchanges.
     AllExchange: All known exchange identifiers.
     HealthStatus: Component health state.
+    ComponentStatus: Infrastructure component status.
+    ProcessMode: Process execution mode (thread/process).
+    StartProcessStatus: Start operation outcome.
+    StopProcessStatus: Stop operation outcome.
     ProcessLifecycleType: Process duration type.
     ProcessRoleType: Process role in the system.
     ProcessRunStatusType: Current process execution state.
@@ -88,8 +92,20 @@ ReplaySourceExchange = Literal["kraken", "zonda", "walutomat", "polygon"]
 AllExchange = Literal["paper", "kraken", "zonda", "walutomat", "polygon"]
 """All known exchange identifiers across all domains."""
 
-HealthStatus = Literal["healthy", "warning", "error"]
+HealthStatus = Literal["healthy", "unhealthy", "warning", "error"]
 """Component health state for monitoring and alerting."""
+
+ComponentStatus = Literal["ok", "error"]
+"""Infrastructure component status for ZMQ and WebSocket health checks."""
+
+ProcessMode = Literal["thread", "process"]
+"""Process execution mode: 'thread' for in-process, 'process' for subprocess."""
+
+StartProcessStatus = Literal["success", "already_running", "error"]
+"""Start operation outcome: success, already running, or error."""
+
+StopProcessStatus = Literal["success", "not_running", "error"]
+"""Stop operation outcome: success, not running, or error."""
 
 ProcessLifecycleType = Literal["long_running", "one_shot"]
 """Process duration: 'long_running' for services, 'one_shot' for tasks."""
@@ -101,6 +117,7 @@ ProcessRunStatusType = Literal["running", "succeeded", "failed", "cancelled"]
 """Current execution state of a managed process."""
 __all__ = [
     "AllExchange",
+    "ComponentStatus",
     "TradeSide",
     "OrderType",
     "OrderStatus",
@@ -109,10 +126,13 @@ __all__ = [
     "FillStatus",
     "ExecutionMode",
     "MarketSubscribeExchange",
+    "ProcessMode",
     "ReplaySourceExchange",
     "TradingExchange",
     "HealthStatus",
     "ProcessLifecycleType",
     "ProcessRoleType",
     "ProcessRunStatusType",
+    "StartProcessStatus",
+    "StopProcessStatus",
 ]

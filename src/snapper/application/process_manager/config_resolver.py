@@ -19,8 +19,12 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
+from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
+
+VALID_PROCESS_MODES: frozenset[str] = frozenset(("thread", "process"))
+"""Valid process mode values matching the ProcessMode Literal."""
 
 
 def resolve_lifecycle(
@@ -93,6 +97,37 @@ def resolve_tags(raw: Any) -> tuple[str, ...]:
     return ()
 
 
+def resolve_mode(
+    raw: Any,
+    process_name: str,
+) -> ProcessMode:
+    """Resolve and validate process execution mode.
+
+    Unlike lifecycle/role resolvers which fall back to defaults,
+    this function raises ValueError for unknown mode values to prevent
+    silent fallthrough to thread execution.
+
+    Args:
+        raw: Raw mode value from config or API.
+        process_name: Process name for error messages.
+
+    Returns:
+        Validated ProcessMode value.
+
+    Raises:
+        ValueError: If mode is not a valid ProcessMode.
+    """
+    if raw is None:
+        return "thread"
+    mode_str = str(raw)
+    if mode_str not in VALID_PROCESS_MODES:
+        raise ValueError(
+            f"Invalid mode '{mode_str}' for process '{process_name}'. "
+            f"Valid modes: {sorted(VALID_PROCESS_MODES)}"
+        )
+    return cast(ProcessMode, mode_str)
+
+
 def resolve_parameters_schema(
     config_dict: dict[str, Any],
     metadata: dict[str, Any],
@@ -139,7 +174,7 @@ def build_process_config_from_dict(
     return ProcessConfigModel(
         name=process_name,
         enabled=config_dict.get("enabled", False),
-        mode=config_dict.get("mode", "thread"),
+        mode=resolve_mode(config_dict.get("mode", "thread"), process_name),
         class_path=config_dict["class"],
         method=config_dict.get("method", "start"),
         args=config_dict.get("args", []),

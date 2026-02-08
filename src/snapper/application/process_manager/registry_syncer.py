@@ -20,6 +20,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
+from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 
@@ -295,7 +296,7 @@ class ProcessRegistrySyncer:
         class_path: str,
         method: str,
         enabled: bool,
-        mode: str,
+        mode: ProcessMode,
         args: list[Any],
         kwargs: dict[str, Any],
         lifecycle: ProcessLifecycleEnum,
@@ -311,7 +312,7 @@ class ProcessRegistrySyncer:
             class_path: Fully qualified class path.
             method: Entry method name.
             enabled: Whether process is enabled for autostart.
-            mode: Execution mode (thread/process/async).
+            mode: Execution mode (thread/process).
             args: Positional arguments.
             kwargs: Keyword arguments.
             lifecycle: Process lifecycle type.

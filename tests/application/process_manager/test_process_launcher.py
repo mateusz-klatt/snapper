@@ -667,8 +667,8 @@ class TestStartProcessByName:
         factory = ProcessLauncherService(settings)
         factory.started_processes["zmq_broker"] = MagicMock()
         result = await factory.start_process_by_name("zmq_broker")
-        assert result["status"] == "already_running"
-        assert "already running" in result["message"]
+        assert result.status == "already_running"
+        assert "already running" in result.message
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.get_repository")
@@ -691,8 +691,8 @@ class TestStartProcessByName:
         settings.db_url = "sqlite:///:memory:"
         factory = ProcessLauncherService(settings)
         result = await factory.start_process_by_name("nonexistent")
-        assert result["status"] == "error"
-        assert "not found" in result["message"]
+        assert result.status == "error"
+        assert "not found" in result.message
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
@@ -730,8 +730,8 @@ class TestStartProcessByName:
         settings.db_url = "sqlite:///:memory:"
         factory = ProcessLauncherService(settings)
         result = await factory.start_process_by_name("zmq_broker")
-        assert result["status"] == "success"
-        assert "started successfully" in result["message"]
+        assert result.status == "success"
+        assert "started successfully" in result.message
         mock_start.assert_awaited_once()
         mock_session.commit.assert_awaited_once()
         updated_config = json.loads(mock_setting.value)
@@ -774,8 +774,8 @@ class TestStartProcessByName:
         settings.db_url = "sqlite:///:memory:"
         factory = ProcessLauncherService(settings)
         result = await factory.start_process_by_name("symbol_updater")
-        assert result["status"] == "success"
-        assert "executed successfully" in result["message"]
+        assert result.status == "success"
+        assert "executed successfully" in result.message
         updated_config = json.loads(mock_setting.value)
         assert updated_config["enabled"] is False
         assert updated_config["lifecycle"] == "one_shot"
@@ -823,7 +823,7 @@ class TestStartProcessByName:
             kwargs={"override": "value"},
             autostart=True,
         )
-        assert result["status"] == "success"
+        assert result.status == "success"
         call_args = mock_start.call_args[0][0]
         assert call_args.mode == "process"
         assert call_args.args == ["new_arg"]
@@ -866,8 +866,8 @@ class TestStartProcessByName:
         settings.db_url = "sqlite:///:memory:"
         factory = ProcessLauncherService(settings)
         result = await factory.start_process_by_name("failing_process")
-        assert result["status"] == "error"
-        assert "Failed to start" in result["message"]
+        assert result.status == "error"
+        assert "Failed to start" in result.message
 
 
 class TestStopProcessByName:
@@ -884,8 +884,8 @@ class TestStopProcessByName:
         settings = MagicMock()
         factory = ProcessLauncherService(settings)
         result = await factory.stop_process_by_name("nonexistent")
-        assert result["status"] == "not_running"
-        assert "not running" in result["message"]
+        assert result.status == "not_running"
+        assert "not running" in result.message
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.get_repository")
@@ -914,8 +914,8 @@ class TestStopProcessByName:
         mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
         mock_get_repo.return_value = mock_repo
         result = await factory.stop_process_by_name("test_process")
-        assert result["status"] == "success"
-        assert "stopped and marked as disabled" in result["message"]
+        assert result.status == "success"
+        assert "stopped and marked as disabled" in result.message
         mock_instance.stop.assert_awaited_once()
         assert "test_process" not in factory.started_processes
         mock_session.commit.assert_awaited_once()
@@ -951,8 +951,8 @@ class TestStopProcessByName:
         mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
         mock_get_repo.return_value = mock_repo
         result = await factory.stop_process_by_name("task_process")
-        assert result["status"] == "success"
-        assert "stopped and marked as disabled" in result["message"]
+        assert result.status == "success"
+        assert "stopped and marked as disabled" in result.message
         assert task.cancelled()
         assert "task_process" not in factory.process_tasks
         assert "task_process" not in factory.started_processes
@@ -975,8 +975,8 @@ class TestStopProcessByName:
         factory = ProcessLauncherService(settings)
         factory.started_processes["failing_process"] = mock_instance
         result = await factory.stop_process_by_name("failing_process")
-        assert result["status"] == "error"
-        assert "Stop failed" in result["message"]
+        assert result.status == "error"
+        assert "Stop failed" in result.message
 
 
 class TestGetProcessStatus:
@@ -993,9 +993,9 @@ class TestGetProcessStatus:
         settings = MagicMock()
         factory = ProcessLauncherService(settings)
         result = await factory.get_process_status("nonexistent")
-        assert result["name"] == "nonexistent"
-        assert result["running"] is False
-        assert "details" not in result
+        assert result.name == "nonexistent"
+        assert result.running is False
+        assert result.details is None
 
     @pytest.mark.asyncio
     async def test_get_process_status_running_simple(self) -> None:
@@ -1010,9 +1010,9 @@ class TestGetProcessStatus:
         mock_instance = MagicMock(spec=[])
         factory.started_processes["running_process"] = mock_instance
         result = await factory.get_process_status("running_process")
-        assert result["name"] == "running_process"
-        assert result["running"] is True
-        assert "details" not in result
+        assert result.name == "running_process"
+        assert result.running is True
+        assert result.details is None
 
     @pytest.mark.asyncio
     async def test_get_process_status_with_details(self) -> None:
@@ -1028,9 +1028,9 @@ class TestGetProcessStatus:
         mock_instance.get_status = MagicMock(return_value={"custom": "status", "count": 42})
         factory.started_processes["detailed_process"] = mock_instance
         result = await factory.get_process_status("detailed_process")
-        assert result["name"] == "detailed_process"
-        assert result["running"] is True
-        assert result["details"] == {"custom": "status", "count": 42}
+        assert result.name == "detailed_process"
+        assert result.running is True
+        assert result.details == {"custom": "status", "count": 42}
         mock_instance.get_status.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1047,9 +1047,9 @@ class TestGetProcessStatus:
         mock_instance.get_status = MagicMock(side_effect=Exception("Status error"))
         factory.started_processes["error_process"] = mock_instance
         result = await factory.get_process_status("error_process")
-        assert result["name"] == "error_process"
-        assert result["running"] is True
-        assert "details" not in result
+        assert result.name == "error_process"
+        assert result.running is True
+        assert result.details is None
 
 
 @dataclass
@@ -1395,8 +1395,8 @@ async def test_start_process_by_name_handles_missing_setting(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
     )
     result = await factory.start_process_by_name("nonexistent")
-    assert result["status"] == "error"
-    assert "not found" in result["message"]
+    assert result.status == "error"
+    assert "not found" in result.message
 
 
 @pytest.mark.asyncio()
@@ -1411,7 +1411,7 @@ async def test_start_process_by_name_when_already_running() -> None:
     factory = ProcessLauncherService(settings)
     factory.started_processes["worker"] = SimpleNamespace()
     result = await factory.start_process_by_name("worker")
-    assert result["status"] == "already_running"
+    assert result.status == "already_running"
 
 
 @pytest.mark.asyncio()
@@ -1444,8 +1444,8 @@ async def test_start_process_by_name_reports_start_error(
         lambda: {"drop_tags": {"tags": ()}},
     )
     result = await factory.start_process_by_name("worker")
-    assert result["status"] == "error"
-    assert "Failed to start process 'worker'" in result["message"]
+    assert result.status == "error"
+    assert "Failed to start process 'worker'" in result.message
 
 
 @pytest.mark.asyncio()
@@ -1478,8 +1478,8 @@ async def test_start_process_by_name_one_shot_message(
         "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
     )
     result = await factory.start_process_by_name("once")
-    assert result["status"] == "success"
-    assert "executed successfully" in result["message"]
+    assert result.status == "success"
+    assert "executed successfully" in result.message
     assert repo.last_session is not None and repo.last_session.commit_called is True
     cast(mock.AsyncMock, factory.start_process).assert_awaited_once()
 
@@ -1533,7 +1533,7 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
         kwargs={"x": 1},
         autostart=True,
     )
-    assert result["status"] == "success"
+    assert result.status == "success"
     assert mock_start.called
     assert repo.last_session is not None and repo.last_session.commit_called is True
     assert isinstance(repo.setting, Setting)
@@ -1575,7 +1575,7 @@ async def test_start_process_by_name_keeps_tags_when_present(
         "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
     )
     result = await factory.start_process_by_name("tagged")
-    assert result["status"] == "success"
+    assert result.status == "success"
     persisted = json.loads(setting.value)
     assert cast(list[str], persisted["tags"]) == ["keep"]
 
@@ -1591,7 +1591,7 @@ async def test_stop_process_by_name_not_running() -> None:
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
     result = await factory.stop_process_by_name("worker")
-    assert result["status"] == "not_running"
+    assert result.status == "not_running"
 
 
 @pytest.mark.asyncio()
@@ -1626,7 +1626,7 @@ async def test_stop_process_by_name_async_stop(
     )
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("worker")
-    assert result["status"] == "success"
+    assert result.status == "success"
     assert "worker" not in factory.started_processes
     assert repo.last_session is not None and repo.last_session.commit_called is True
 
@@ -1662,7 +1662,7 @@ async def test_stop_process_by_name_with_coroutine_stop_and_no_setting(
     )
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("worker")
-    assert result["status"] == "success"
+    assert result.status == "success"
     assert proc.stopped is True
     assert "worker" not in factory.started_processes
 
@@ -1690,7 +1690,7 @@ async def test_stop_process_by_name_when_instance_missing_disables_autostart(
     )
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("ghost")
-    assert result["status"] == "success"
+    assert result.status == "success"
     persisted = json.loads(setting.value)
     assert persisted["enabled"] is False
     assert "ghost" not in factory.started_processes
@@ -1728,7 +1728,7 @@ async def test_stop_process_by_name_when_stop_handler_removes_instance(
     )
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("selfrem")
-    assert result["status"] == "success"
+    assert result.status == "success"
     assert "selfrem" not in factory.started_processes
 
 
@@ -2313,43 +2313,27 @@ async def test_start_process_immediate_async_failure_raises() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_start_process_sync_warns_on_non_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify sync method on non-thread mode uses executor and finalizes.
+async def test_start_process_rejects_invalid_mode() -> None:
+    """Verify start_process raises ValueError for invalid mode.
 
-    Given: A sync process config with mode='sequential',
+    Given: A sync process config with mode='sequential' (not a valid ProcessMode),
     When: start_process is called,
-    Then: Method runs via executor and run is finalized after completion.
+    Then: ValueError is raised describing valid modes.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
     _stub_run_tracking(factory)
-    tracker: list[str] = []
     config = ProcessConfigModel(
         name="sync_non_thread",
         enabled=True,
         mode="sequential",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[tracker],
+        args=[],
         kwargs={},
     )
-
-    class DummyLoop:
-        def __init__(self) -> None:
-            self.called = False
-
-        async def run_in_executor(self, _executor: Any, func: Any) -> None:
-            self.called = True
-            func()
-
-    dummy_loop = DummyLoop()
-    monkeypatch.setattr(asyncio, "get_event_loop", lambda: dummy_loop)
-    finalize_mock = mock.AsyncMock()
-    monkeypatch.setattr(factory, "_finalize_process_run", finalize_mock)
-    await factory.start_process(config)
-    assert dummy_loop.called is True
-    assert tracker == ["sync"]
-    finalize_mock.assert_awaited_once()
+    with pytest.raises(ValueError, match="Invalid mode 'sequential'"):
+        await factory.start_process(config)
 
 
 @pytest.mark.asyncio()
@@ -2553,7 +2537,7 @@ async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
         "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
     )
     result = await factory.start_process_by_name("clean")
-    assert result["status"] == "success"
+    assert result.status == "success"
     persisted = json.loads(setting.value)
     assert "tags" not in persisted
     assert persisted["parameters_schema"] == {"p": 1}
@@ -2588,7 +2572,7 @@ async def test_start_process_by_name_skips_persisting_schema_when_absent(
         "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
     )
     result = await factory.start_process_by_name("plain")
-    assert result["status"] == "success"
+    assert result.status == "success"
     persisted = json.loads(setting.value)
     assert "parameters_schema" not in persisted
 
@@ -2623,7 +2607,7 @@ async def test_start_process_by_name_removes_stale_tags_without_schema(
         "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
     )
     result = await factory.start_process_by_name("drop_tags")
-    assert result["status"] == "success"
+    assert result.status == "success"
     persisted = json.loads(setting.value)
     assert "tags" not in persisted
 
@@ -2658,7 +2642,7 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
         lambda: {"meta_drop": {"tags": ("meta",)}},
     )
     result = await factory.start_process_by_name("meta_drop")
-    assert result["status"] == "success"
+    assert result.status == "success"
     persisted = json.loads(setting.value)
     assert "tags" not in persisted
 
@@ -2698,7 +2682,7 @@ async def test_stop_process_by_name_cancels_task_and_terminates(
     )
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("native")
-    assert result["status"] == "success"
+    assert result.status == "success"
     spawner_mock.terminate.assert_called_once_with("native")
     spawner_mock.cleanup.assert_called_once_with("native")
     assert "native" not in factory.process_tasks
@@ -2724,8 +2708,8 @@ async def test_get_process_status_handles_get_status_error() -> None:
     factory.process_lifecycles["bad"] = ProcessLifecycleEnum.LONG_RUNNING
     factory.active_runs["bad"] = "run-id"
     status = await factory.get_process_status("bad")
-    assert status["running"] is True
-    assert status["active_run_id"] == "run-id"
+    assert status.running is True
+    assert status.active_run_id == "run-id"
 
 
 @pytest.mark.asyncio()
@@ -3698,7 +3682,7 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
     cast(Any, factory).start_process = AsyncMock()
     cast(Any, factory)._start_native_process_monitoring = MagicMock()
     response = await factory.start_process_by_name("test_process")
-    assert response["status"] == "success"
+    assert response.status == "success"
     persisted = json.loads(setting.value)
     assert "tags" not in persisted
     assert persisted["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING.value

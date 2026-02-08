@@ -15,6 +15,7 @@ enum FillEnvelopeStatus: String, Codable, Sendable {
 
 enum HeartbeatEnvelopeStatus: String, Codable, Sendable {
     case healthy
+    case unhealthy
     case warning
     case error
 }

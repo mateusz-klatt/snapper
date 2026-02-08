@@ -94,6 +94,7 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.config.settings_routes import router as settings_router
+from snapper.core.types import HealthStatus
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
@@ -737,7 +738,7 @@ def _create_monitoring_endpoints_router(
             error_messages.append(f"ZMQ context error: {exc}")
             available_topics = zmq_bridge.get_available_topics()
         stats = manager.get_stats()
-        status = "healthy" if not error_messages else "unhealthy"
+        status: HealthStatus = "healthy" if not error_messages else "unhealthy"
         return ZmqHealthResponse(
             status=status,
             timestamp=dt.datetime.now(dt.UTC),

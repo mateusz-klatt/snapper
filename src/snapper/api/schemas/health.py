@@ -10,6 +10,8 @@ from typing import Any
 from pydantic import Field
 
 from snapper.api.schemas.base import StrictApiSchema
+from snapper.core.types import ComponentStatus
+from snapper.core.types import HealthStatus
 
 _CONN_STATS_DESC = "Connection statistics"
 
@@ -40,7 +42,7 @@ class HealthCheckResponse(StrictApiSchema):
         topics: Topic availability information.
     """
 
-    status: str = Field(description="Overall service health status")
+    status: HealthStatus = Field(description="Overall service health status")
     timestamp: datetime = Field(description="Timestamp of the health check")
     version: str = Field(description="Application version")
     connections: dict[str, Any] = Field(description=_CONN_STATS_DESC)
@@ -56,8 +58,8 @@ class ZmqComponents(StrictApiSchema):
         active_connections: Number of active WebSocket connections.
     """
 
-    zmq_context: str = Field(description="ZMQ context status")
-    websocket_manager: str = Field(description="WebSocket manager status")
+    zmq_context: ComponentStatus = Field(description="ZMQ context status")
+    websocket_manager: ComponentStatus = Field(description="WebSocket manager status")
     active_connections: int = Field(description="Number of active WebSocket connections")
 
 
@@ -87,7 +89,7 @@ class ZmqHealthResponse(StrictApiSchema):
         errors: Error messages if unhealthy.
     """
 
-    status: str = Field(description="Overall ZMQ bridge health status")
+    status: HealthStatus = Field(description="Overall ZMQ bridge health status")
     timestamp: datetime = Field(description="Timestamp of the health check")
     components: ZmqComponents = Field(description="Component status details")
     config: ZmqConfig = Field(description="ZMQ configuration")

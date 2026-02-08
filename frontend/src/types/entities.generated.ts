@@ -63,7 +63,7 @@ export interface Heartbeat {
   timestamp?: Date
   component: string
   sequence: number
-  status: 'healthy' | 'warning' | 'error'
+  status: 'healthy' | 'unhealthy' | 'warning' | 'error'
   lagMs: number
 }
 
@@ -309,7 +309,7 @@ export interface ProcessCreate {
   name: string
   template: string
   enabled?: boolean | null
-  mode?: string | null
+  mode?: 'thread' | 'process' | null
   args?: unknown[] | null
   kwargs?: Record<string, unknown> | null
   note?: string | null
@@ -320,7 +320,7 @@ export interface ProcessCreate {
  * Use with processStartToAPI() transform.
  */
 export interface ProcessStart {
-  mode?: string | null
+  mode?: 'thread' | 'process' | null
   args?: unknown[] | null
   kwargs?: Record<string, unknown> | null
   autostart?: boolean | null
