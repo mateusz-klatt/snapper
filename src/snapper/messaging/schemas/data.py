@@ -18,7 +18,9 @@ from datetime import datetime
 from pydantic import BaseModel
 from pydantic import Field
 
+from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderEventType
+from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import FillStatus
 from snapper.interface.websocket.schemas import OrderType
 from snapper.interface.websocket.schemas import TradeSide
@@ -32,6 +34,7 @@ class TickData(BaseModel):
 
     Attributes:
         instrument: Trading pair symbol (e.g., 'BTC-USD').
+        exchange: Source exchange producing this tick data.
         volume: Trading volume for the current period.
         bid: Best bid price (highest buy order).
         ask: Best ask price (lowest sell order).
@@ -39,6 +42,7 @@ class TickData(BaseModel):
     """
 
     instrument: str
+    exchange: MarketDataExchange
     volume: float
     bid: float | None = None
     ask: float | None = None
@@ -53,6 +57,7 @@ class CandleData(BaseModel):
 
     Attributes:
         instrument: Trading pair symbol (e.g., 'BTC-USD').
+        exchange: Source exchange producing this candle data.
         timeframe: Bar duration (e.g., '1m', '1h', '1d').
         open: Opening price of the bar.
         high: Highest price during the bar.
@@ -64,6 +69,7 @@ class CandleData(BaseModel):
     """
 
     instrument: str
+    exchange: MarketDataExchange
     timeframe: str
     open: float
     high: float
@@ -82,12 +88,14 @@ class TradeData(BaseModel):
 
     Attributes:
         instrument: Trading pair symbol (e.g., 'BTC-USD').
+        exchange: Source exchange where the trade occurred.
         price: Execution price of the trade.
         volume: Size of the trade.
         side: Trade direction ('buy'/'sell') if available.
     """
 
     instrument: str
+    exchange: MarketDataExchange
     price: float
     volume: float
     side: str | None = None
@@ -101,6 +109,7 @@ class SignalData(BaseModel):
 
     Attributes:
         instrument: Target trading pair symbol.
+        exchange: Target exchange for execution.
         side: Recommended direction ('buy' or 'sell').
         strength: Signal confidence from 0.0 (weak) to 1.0 (strong).
         reason: Human-readable explanation for the signal.
@@ -109,6 +118,7 @@ class SignalData(BaseModel):
     """
 
     instrument: str
+    exchange: OrderExchange
     side: TradeSide
     strength: float = Field(ge=0.0, le=1.0)
     reason: str
@@ -143,7 +153,7 @@ class FillData(BaseModel):
     exchange_order_id: str | None = None
     client_order_id: str
     instrument: str
-    exchange: str
+    exchange: OrderExchange
     side: TradeSide
     size: float
     price: float
@@ -189,7 +199,7 @@ class OrderStatusData(BaseModel):
     exchange_order_id: str | None = None
     client_order_id: str
     instrument: str
-    exchange: str
+    exchange: OrderExchange
     side: TradeSide
     status: OrderEventType
     order_type: OrderType

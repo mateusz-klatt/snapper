@@ -1968,3 +1968,36 @@ class TestExtractRepeatedUnions:
         ]
         result = extract_repeated_unions(lines)
         assert result[0] == "type Side = 'buy' | 'sell'"
+
+    def test_alias_collision_appends_suffix(self) -> None:
+        """Verify numeric suffix is appended when two unions share the same field name.
+
+        Given: Two different exchange unions each appearing 3+ times,
+        When: extract_repeated_unions processes them,
+        Then: The second alias gets a numeric suffix to avoid duplication.
+        """
+        lines = [
+            "",
+            "interface A {",
+            "  exchange: 'kraken' | 'zonda'",
+            "}",
+            "interface B {",
+            "  exchange: 'kraken' | 'zonda'",
+            "}",
+            "interface C {",
+            "  exchange: 'kraken' | 'zonda'",
+            "}",
+            "interface D {",
+            "  exchange: 'paper' | 'kraken'",
+            "}",
+            "interface E {",
+            "  exchange: 'paper' | 'kraken'",
+            "}",
+            "interface F {",
+            "  exchange: 'paper' | 'kraken'",
+            "}",
+        ]
+        result = extract_repeated_unions(lines)
+        alias_lines = [line for line in result if line.startswith("type Exchange")]
+        assert len(alias_lines) == 2
+        assert any("Exchange2" in line for line in alias_lines)

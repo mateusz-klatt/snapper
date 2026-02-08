@@ -169,14 +169,14 @@ describe('StrategyCard', () => {
         onStart={mockOnStart}
         onStop={mockOnStop}
         health={{
-          status: 'ok',
+          status: 'healthy',
           lag_ms: 500,
           timestamp: Date.now(),
           seq: 42,
         }}
       />
     )
-    expect(screen.getByText('OK')).toBeInTheDocument()
+    expect(screen.getByText('HEALTHY')).toBeInTheDocument()
     expect(screen.getByText('500ms')).toBeInTheDocument()
     expect(screen.getByText('#42')).toBeInTheDocument()
   })
@@ -190,14 +190,14 @@ describe('StrategyCard', () => {
         onStart={mockOnStart}
         onStop={mockOnStop}
         health={{
-          status: 'warn',
+          status: 'warning',
           lag_ms: 5000,
           timestamp: Date.now(),
           seq: 100,
         }}
       />
     )
-    expect(screen.getByText('WARN')).toBeInTheDocument()
+    expect(screen.getByText('WARNING')).toBeInTheDocument()
     expect(screen.getByText('lag: 5s')).toBeInTheDocument()
   })
   it('shows error health status', () => {
@@ -232,7 +232,7 @@ describe('StrategyCard', () => {
         onStart={mockOnStart}
         onStop={mockOnStop}
         health={{
-          status: 'ok',
+          status: 'healthy',
           lag_ms: 500,
           timestamp: Date.now(),
           seq: 10,
@@ -263,7 +263,7 @@ describe('StrategyCard', () => {
         onStart={mockOnStart}
         onStop={mockOnStop}
         health={{
-          status: 'ok',
+          status: 'healthy',
           lag_ms: 500,
           timestamp: Date.now(),
           seq: 10,
@@ -337,7 +337,7 @@ describe('StrategyCard', () => {
         onStart={mockOnStart}
         onStop={mockOnStop}
         health={{
-          status: 'ok',
+          status: 'healthy',
           lag_ms: 500,
           timestamp: Date.now(),
         }}

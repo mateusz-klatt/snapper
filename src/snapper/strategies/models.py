@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
+from snapper.core.types import OrderExchange
 from snapper.core.types import TradeSide
-from snapper.infrastructure.symbols.functions import TradingExchange
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import is_tradeable
 
@@ -55,7 +55,7 @@ class StrategyConfig:
     strategy_class: str
     inputs: list[str]
     outputs: list[str]
-    exchange: TradingExchange = "paper"
+    exchange: OrderExchange = "paper"
     params: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod

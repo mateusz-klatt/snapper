@@ -159,8 +159,8 @@ def filter_topics(
 def determine_topic_category(topic: str) -> str | None:
     """Determine category from topic name.
 
-    Uses prefix mapping for dotted names (e.g., 'market.BTCUSD.tick')
-    or keyword mapping for simple names (e.g., 'tick').
+    Uses prefix mapping for dotted names (e.g., 'market.BTCUSD.ticks')
+    or keyword mapping for simple names (e.g., 'ticks').
     Supports two-level prefixes for orders.commands and orders.events.
 
     Args:

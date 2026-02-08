@@ -175,6 +175,7 @@ export function positionFromAPI(api: PositionSnapshot): Position {
 export function candleFromAPI(api: CandleSnapshot): Candle {
   return {
     instrument: api.instrument,
+    exchange: api.exchange,
     timeframe: api.timeframe,
     open: api.open,
     high: api.high,

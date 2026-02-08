@@ -1490,7 +1490,7 @@ class TestZmqHealthCheckContextError:
             response = client.get("/api/zmq/health")
             assert response.status_code == 200
             data = response.json()
-            assert data["status"] == "unhealthy"
+            assert data["status"] == "error"
             assert data["components"]["zmq_context"] == "error"
             assert len(data["errors"]) > 0
             assert "ZMQ context error" in data["errors"][0]

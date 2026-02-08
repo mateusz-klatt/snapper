@@ -14,8 +14,9 @@ export type {
   Status2 as HeartbeatStatus,
 } from './ws.generated'
 
+type Exchange = 'kraken' | 'zonda' | 'walutomat' | 'polygon'
+type Exchange2 = 'paper' | 'kraken' | 'zonda' | 'walutomat'
 type Side = 'buy' | 'sell'
-type Exchange = 'paper' | 'kraken' | 'zonda' | 'walutomat'
 
 /**
  * Canonical Bar entity.
@@ -24,6 +25,7 @@ type Exchange = 'paper' | 'kraken' | 'zonda' | 'walutomat'
 export interface Bar {
   timestamp?: Date
   instrument: string
+  exchange: Exchange
   timeframe: string
   open: number
   high: number
@@ -32,7 +34,6 @@ export interface Bar {
   volume: number
   vwap?: number | null
   trades?: number | null
-  exchange: string
 }
 
 /**
@@ -45,7 +46,7 @@ export interface Fill {
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
-  exchange: string
+  exchange: Exchange2
   side: Side
   size: number
   price: number
@@ -63,7 +64,7 @@ export interface Heartbeat {
   timestamp?: Date
   component: string
   sequence: number
-  status: 'healthy' | 'unhealthy' | 'warning' | 'error'
+  status: 'healthy' | 'warning' | 'error'
   lagMs: number
 }
 
@@ -73,7 +74,7 @@ export interface Heartbeat {
  */
 export interface OrderCancel {
   timestamp?: Date
-  exchange: Exchange
+  exchange: Exchange2
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
@@ -87,7 +88,7 @@ export interface OrderEvent {
   timestamp?: Date
   exchangeOrderId: string
   clientOrderId: string
-  exchange: Exchange
+  exchange: Exchange2
   instrument: string
   event: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   reason?: string | null
@@ -99,7 +100,7 @@ export interface OrderEvent {
  */
 export interface OrderReplace {
   timestamp?: Date
-  exchange: Exchange
+  exchange: Exchange2
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
@@ -114,7 +115,7 @@ export interface OrderReplace {
 export interface OrderRequest {
   timestamp?: Date
   strategyId: string
-  exchange: Exchange
+  exchange: Exchange2
   instrument: string
   mode: 'live' | 'paper'
   side: Side
@@ -134,7 +135,7 @@ export interface OrderStatus {
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
-  exchange: string
+  exchange: Exchange2
   side: Side
   status: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
@@ -183,13 +184,13 @@ export interface SettingChanged {
 export interface Signal {
   timestamp?: Date
   instrument: string
+  exchange: Exchange2
   side: Side
   strength: number
   reason: string
   price?: number | null
   strategyName?: string | null
   id?: string | number | null
-  exchange: string
 }
 
 /**
@@ -209,11 +210,11 @@ export interface SymbolAliasUpdate {
 export interface Tick {
   timestamp?: Date
   instrument: string
+  exchange: Exchange
   volume: number
   bid?: number | null
   ask?: number | null
   last?: number | null
-  exchange: string
 }
 
 /**
@@ -223,10 +224,10 @@ export interface Tick {
 export interface Trade {
   timestamp?: Date
   instrument: string
+  exchange: Exchange
   price: number
   volume: number
   side?: string | null
-  exchange: string
 }
 
 /**
@@ -235,6 +236,7 @@ export interface Trade {
  */
 export interface Candle {
   instrument: string
+  exchange: Exchange
   timeframe: string
   timestamp: Date
   open: number
@@ -253,7 +255,7 @@ export interface Candle {
 export interface Position {
   id: string | number
   instrument: string
-  exchange: string
+  exchange: Exchange2
   quantity: number
   averagePrice: number
   unrealizedPnl: number

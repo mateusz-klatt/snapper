@@ -653,7 +653,7 @@ describe('WebSocketClient', () => {
       const barMsg = createCandle()
 
       mockWs.onmessage?.({ data: JSON.stringify(barMsg) })
-      const expectedTopic = 'market.test.BTC-USD.candles.1m'
+      const expectedTopic = 'market.kraken.BTC-USD.candles.1m'
 
       expect(handler).not.toHaveBeenCalled()
       expect((client as any).pendingMessages.get(expectedTopic)).toEqual(barMsg)

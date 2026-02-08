@@ -33,8 +33,8 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
+from snapper.core.types import OrderExchange
 from snapper.data.repository import get_repository
-from snapper.infrastructure.symbols.functions import TradingExchange
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -461,11 +461,11 @@ class TraderCoordinator(RegisterableProcess):
             return
         exchange_str = parsed.exchange
         mode = parsed.signal_type
-        valid_exchanges = get_args(TradingExchange)
+        valid_exchanges = get_args(OrderExchange)
         if exchange_str not in valid_exchanges:
             logger.warning(f"ZMQTrader: Unknown exchange '{exchange_str}' in topic")
             return
-        exchange = cast(TradingExchange, exchange_str)
+        exchange = cast(OrderExchange, exchange_str)
         instrument = signal.instrument
         if not is_tradeable(instrument, exchange):
             logger.warning(

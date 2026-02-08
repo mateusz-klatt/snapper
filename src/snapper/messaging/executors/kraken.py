@@ -28,9 +28,9 @@ Register and run via process manager::
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
+from snapper.core.types import OrderExchange
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
-from snapper.infrastructure.symbols.functions import TradingExchange
 from snapper.messaging.executors.base import ExchangeExecutorService
 
 
@@ -85,10 +85,10 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
             repository=repository,
         )
 
-    def _get_exchange_name(self) -> TradingExchange:
+    def _get_exchange_name(self) -> OrderExchange:
         """Get exchange identifier.
 
         Returns:
-            "kraken" as TradingExchange literal.
+            "kraken" as OrderExchange literal.
         """
         return "kraken"

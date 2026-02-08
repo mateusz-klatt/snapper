@@ -9,6 +9,20 @@ enum UserRole: String, Codable, Sendable {
     case admin
 }
 
+enum BarEnvelopeExchange: String, Codable, Sendable {
+    case kraken
+    case zonda
+    case walutomat
+    case polygon
+}
+
+enum FillEnvelopeExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
 enum FillEnvelopeSide: String, Codable, Sendable {
     case buy
     case sell
@@ -21,7 +35,6 @@ enum FillEnvelopeStatus: String, Codable, Sendable {
 
 enum HeartbeatEnvelopeStatus: String, Codable, Sendable {
     case healthy
-    case unhealthy
     case warning
     case error
 }
@@ -80,6 +93,13 @@ enum OrderRequestEnvelopeOrderType: String, Codable, Sendable {
     case stopLimit = "stop_limit"
 }
 
+enum OrderStatusEnvelopeExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
 enum OrderStatusEnvelopeSide: String, Codable, Sendable {
     case buy
     case sell
@@ -101,9 +121,30 @@ enum OrderStatusEnvelopeOrderType: String, Codable, Sendable {
     case stopLimit = "stop_limit"
 }
 
+enum SignalEnvelopeExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
 enum SignalEnvelopeSide: String, Codable, Sendable {
     case buy
     case sell
+}
+
+enum TickEnvelopeExchange: String, Codable, Sendable {
+    case kraken
+    case zonda
+    case walutomat
+    case polygon
+}
+
+enum TradeEnvelopeExchange: String, Codable, Sendable {
+    case kraken
+    case zonda
+    case walutomat
+    case polygon
 }
 
 enum WSSubscriptionSuccessResponseAction: String, Codable, Sendable {
@@ -129,6 +170,7 @@ struct BarEnvelope: Codable, Sendable {
     let timestamp: Date?
     let meta: [String: AnyCodable]?
     let instrument: String
+    let exchange: String
     let timeframe: String
     let open: Double
     let high: Double
@@ -137,7 +179,6 @@ struct BarEnvelope: Codable, Sendable {
     let volume: Double
     let vwap: Double?
     let trades: Int?
-    let exchange: String
 }
 
 struct FillEnvelope: Codable, Sendable {
@@ -381,26 +422,26 @@ struct SignalEnvelope: Codable, Sendable {
     let timestamp: Date?
     let meta: [String: AnyCodable]?
     let instrument: String
+    let exchange: String
     let side: String
     let strength: Double
     let reason: String
     let price: Double?
     let strategyName: String?
     let id: String?
-    let exchange: String
 
     enum CodingKeys: String, CodingKey {
         case type
         case timestamp
         case meta
         case instrument
+        case exchange
         case side
         case strength
         case reason
         case price
         case strategyName = "strategy_name"
         case id
-        case exchange
     }
 }
 
@@ -417,11 +458,11 @@ struct TickEnvelope: Codable, Sendable {
     let timestamp: Date?
     let meta: [String: AnyCodable]?
     let instrument: String
+    let exchange: String
     let volume: Double
     let bid: Double?
     let ask: Double?
     let last: Double?
-    let exchange: String
 }
 
 struct TradeEnvelope: Codable, Sendable {
@@ -429,10 +470,10 @@ struct TradeEnvelope: Codable, Sendable {
     let timestamp: Date?
     let meta: [String: AnyCodable]?
     let instrument: String
+    let exchange: String
     let price: Double
     let volume: Double
     let side: String?
-    let exchange: String
 }
 
 struct WSAuthCompleteResponse: Codable, Sendable {

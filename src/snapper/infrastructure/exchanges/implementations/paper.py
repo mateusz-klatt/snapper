@@ -38,6 +38,7 @@ from typing import Any
 
 from loguru import logger
 
+from snapper.core.types import MarketDataExchange
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
@@ -94,7 +95,7 @@ class PaperExchangeClient(ExchangeClientBase):
         initial_balance: float = 10000.0,
         start_time: float | None = None,
         end_time: float | None = None,
-        source_exchange: str | None = None,
+        source_exchange: MarketDataExchange | None = None,
     ) -> None:
         """Initialize paper trading client.
 

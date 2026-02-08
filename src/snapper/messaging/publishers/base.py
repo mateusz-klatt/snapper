@@ -11,6 +11,7 @@ from abc import abstractmethod
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 import zmq
 import zmq.asyncio
@@ -21,6 +22,8 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import AllExchange
+from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
@@ -78,11 +81,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         ...
 
     @abstractmethod
-    def _get_exchange_name(self) -> str:
+    def _get_exchange_name(self) -> AllExchange:
         """Return the name identifier for the exchange.
 
         Returns:
-            Exchange name string used in topics and logging.
+            Exchange name used in topics and logging.
         """
         ...
 
@@ -229,16 +232,16 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return f"market.{exchange}.{symbol}.{data_type}.{timeframe}"
         return f"market.{exchange}.{symbol}.{data_type}"
 
-    def _get_data_exchange(self) -> str:
+    def _get_data_exchange(self) -> MarketDataExchange:
         """Return exchange name for market data envelopes.
 
         Override when envelope exchange differs from topic exchange
         (e.g. paper publisher reports source exchange in payloads).
 
         Returns:
-            Exchange name string for BarEnvelope/TickEnvelope/TradeEnvelope.
+            Exchange name for BarEnvelope/TickEnvelope/TradeEnvelope.
         """
-        return self._get_exchange_name()
+        return cast(MarketDataExchange, self._get_exchange_name())
 
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
         """Subscribe to candle data and publish to ZMQ.

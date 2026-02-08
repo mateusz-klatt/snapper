@@ -65,7 +65,7 @@ class DummyPublisher(MarketDataPublisherService[Any]):
         return DummyClient()
 
     def _get_exchange_name(self) -> str:
-        return "dummy"
+        return "kraken"
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         return symbols
@@ -945,7 +945,7 @@ def test_get_status() -> None:
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     status = pub.get_status()
     assert status["symbols"] == ["BTC-USD"]
-    assert status["exchange"] == "dummy"
+    assert status["exchange"] == "kraken"
 
 
 def test_get_max_symbols_per_connection_default() -> None:

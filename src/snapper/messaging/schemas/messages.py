@@ -5,7 +5,7 @@ Snapper processes via ZeroMQ pub/sub messaging. Each envelope wraps domain
 data (ticks, bars, signals, orders) with metadata for routing and parsing.
 
 The messaging system uses topic-based routing where publishers send to
-topics like 'market.kraken.BTC-USD.tick' and subscribers filter by patterns.
+topics like 'market.kraken.BTC-USD.ticks' and subscribers filter by patterns.
 
 Classes:
     MessageEnvelopeBase: Base class with common envelope fields.
@@ -37,7 +37,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from snapper.core.types import OrderEventType
-from snapper.infrastructure.symbols.functions import TradingExchange
+from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import HealthStatus
 from snapper.interface.websocket.schemas import OrderType
@@ -95,11 +95,9 @@ class TickEnvelope(TickData, MessageEnvelopeBase):
 
     Attributes:
         type: Fixed as 'tick' for message routing.
-        exchange: Source exchange name.
     """
 
     type: Literal["tick"] = "tick"
-    exchange: str
 
 
 class BarEnvelope(CandleData, MessageEnvelopeBase):
@@ -110,11 +108,9 @@ class BarEnvelope(CandleData, MessageEnvelopeBase):
 
     Attributes:
         type: Fixed as 'bar' for message routing.
-        exchange: Source exchange name.
     """
 
     type: Literal["bar"] = "bar"
-    exchange: str
 
 
 class TradeEnvelope(TradeData, MessageEnvelopeBase):
@@ -125,11 +121,9 @@ class TradeEnvelope(TradeData, MessageEnvelopeBase):
 
     Attributes:
         type: Fixed as 'trade' for message routing.
-        exchange: Source exchange name.
     """
 
     type: Literal["trade"] = "trade"
-    exchange: str
 
 
 MarketDataEnvelope = TickEnvelope | BarEnvelope | TradeEnvelope
@@ -145,12 +139,10 @@ class SignalEnvelope(SignalData, MessageEnvelopeBase):
     Attributes:
         type: Fixed as 'signal' for message routing.
         id: Unique signal identifier (optional).
-        exchange: Target exchange for execution.
     """
 
     type: Literal["signal"] = "signal"
     id: str | None = None
-    exchange: str
 
 
 class OrderRequestEnvelope(MessageEnvelopeBase):
@@ -176,7 +168,7 @@ class OrderRequestEnvelope(MessageEnvelopeBase):
 
     type: Literal["order_req"] = "order_req"
     strategy_id: str
-    exchange: TradingExchange
+    exchange: OrderExchange
     instrument: str
     mode: ExecutionMode
     side: TradeSide
@@ -205,7 +197,7 @@ class OrderCancelEnvelope(MessageEnvelopeBase):
     """
 
     type: Literal["order_cancel"] = "order_cancel"
-    exchange: TradingExchange
+    exchange: OrderExchange
     instrument: str
     exchange_order_id: str
     client_order_id: str
@@ -231,7 +223,7 @@ class OrderReplaceEnvelope(MessageEnvelopeBase):
     """
 
     type: Literal["order_replace"] = "order_replace"
-    exchange: TradingExchange
+    exchange: OrderExchange
     instrument: str
     exchange_order_id: str
     client_order_id: str
@@ -264,7 +256,7 @@ class OrderEventEnvelope(MessageEnvelopeBase):
     type: Literal["order_event"] = "order_event"
     exchange_order_id: str
     client_order_id: str
-    exchange: TradingExchange
+    exchange: OrderExchange
     instrument: str
     event: OrderEventType
     reason: str | None = None

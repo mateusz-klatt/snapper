@@ -22,6 +22,7 @@ from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import CancelEventType
 from snapper.core.types import OrderEventType
+from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
@@ -31,7 +32,6 @@ from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
-from snapper.infrastructure.symbols.functions import TradingExchange
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.schemas import FillStatus
@@ -96,7 +96,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         ...
 
     @abstractmethod
-    def _get_exchange_name(self) -> TradingExchange:
+    def _get_exchange_name(self) -> OrderExchange:
         """Return the trading exchange identifier.
 
         Returns:
@@ -713,7 +713,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         execution: ExecutionUpdate,
         exchange_order_id: str,
         original_order: OrderRequestEnvelope,
-        exchange_name: str,
+        exchange_name: OrderExchange,
     ) -> FillEnvelope:
         """Build a FillEnvelope from execution and order data.
 

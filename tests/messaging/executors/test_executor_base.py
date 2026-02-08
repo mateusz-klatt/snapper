@@ -213,7 +213,7 @@ class MergedDummyExecutor(ExchangeExecutorService[Any]):
         return MergedDummyClient()
 
     def _get_exchange_name(self) -> str:
-        return "dummy"
+        return "kraken"
 
 
 def make_order(**overrides: Any) -> OrderRequestEnvelope:
@@ -454,7 +454,7 @@ async def test_order_handler_malformed_topic(
 
         async def recv_multipart(self) -> tuple[str, bytes]:
             ex.running = False
-            return ("orders.commands.dummy.BTC-USD", b"{}")
+            return ("orders.commands.kraken.BTC-USD", b"{}")
 
     ex.subscriber = OneShotSubscriber()
     task = asyncio.create_task(ex._order_handler())
@@ -467,7 +467,7 @@ async def test_order_handler_ignores_unknown_command_topic(
 ) -> None:
     """Test order handler ignores unknown command topics.
 
-    Given: A running executor with subscriber returning orders.commands.dummy.BTC-USD.unknown,
+    Given: A running executor with subscriber returning orders.commands.kraken.BTC-USD.unknown,
     When: _order_handler processes messages,
     Then: The topic is ignored (logged at debug level).
     """
@@ -482,7 +482,7 @@ async def test_order_handler_ignores_unknown_command_topic(
 
         async def recv_multipart(self) -> tuple[str, bytes]:
             ex.running = False
-            return ("orders.commands.dummy.BTC-USD.unknown", b"{}")
+            return ("orders.commands.kraken.BTC-USD.unknown", b"{}")
 
     ex.subscriber = OneShotSubscriber()
     task = asyncio.create_task(ex._order_handler())
@@ -534,7 +534,7 @@ async def test_order_handler_wrong_exchange(monkeypatch: pytest.MonkeyPatch) -> 
 
     async def recv_multipart() -> tuple[str, bytes]:
         ex.running = False
-        return ("orders.commands.dummy.BTC-USD.submit", b"{}")
+        return ("orders.commands.kraken.BTC-USD.submit", b"{}")
 
     ex.subscriber = SimpleNamespace(
         recv_multipart=AsyncMock(side_effect=recv_multipart),
@@ -562,7 +562,7 @@ async def test_order_handler_non_order_message(monkeypatch: pytest.MonkeyPatch) 
 
     async def recv_multipart() -> tuple[str, bytes]:
         ex.running = False
-        return ("orders.commands.dummy.BTC-USD.submit", b"{}")
+        return ("orders.commands.kraken.BTC-USD.submit", b"{}")
 
     ex.subscriber = SimpleNamespace(
         recv_multipart=AsyncMock(side_effect=recv_multipart),

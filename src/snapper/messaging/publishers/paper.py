@@ -15,6 +15,7 @@ Architecture:
 
 import asyncio
 from typing import Any
+from typing import cast
 
 from loguru import logger
 
@@ -22,6 +23,8 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import AllExchange
+from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -39,7 +42,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
 
     def __init__(
         self,
-        source_exchange: str,
+        source_exchange: MarketDataExchange,
         symbols: list[str],
         start_time: float | None = None,
         end_time: float | None = None,
@@ -69,7 +72,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
             source_exchange=self._source_exchange,
         )
 
-    def _get_exchange_name(self) -> str:
+    def _get_exchange_name(self) -> AllExchange:
         """Return 'paper' as the trading exchange identity."""
         return "paper"
 
@@ -97,7 +100,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
             source_exchange=self._source_exchange,
         )
 
-    def _get_data_exchange(self) -> str:
+    def _get_data_exchange(self) -> MarketDataExchange:
         """Return source exchange for envelope payloads."""
         return self._source_exchange
 
@@ -139,7 +142,7 @@ class PaperMarketDataPublisher(RegisterableProcess):
             start_time: Start timestamp for backtesting (Unix seconds).
             end_time: End timestamp for backtesting (Unix seconds).
         """
-        self.paper_instruments = (
+        self.paper_instruments: dict[MarketDataExchange, list[str]] = (
             self._validate_paper_instruments(paper_instruments) if paper_instruments else {}
         )
         self.start_time = start_time
@@ -205,7 +208,7 @@ class PaperMarketDataPublisher(RegisterableProcess):
     @staticmethod
     def _validate_paper_instruments(
         paper_instruments: dict[str, list[str]],
-    ) -> dict[str, list[str]]:
+    ) -> dict[MarketDataExchange, list[str]]:
         """Validate and normalize paper instruments configuration.
 
         Filters out empty exchange names and empty symbol lists.
@@ -217,12 +220,12 @@ class PaperMarketDataPublisher(RegisterableProcess):
         Returns:
             Validated mapping with normalized exchange names and deduplicated symbols.
         """
-        validated: dict[str, list[str]] = {}
+        validated: dict[MarketDataExchange, list[str]] = {}
         for source_exchange, symbols in paper_instruments.items():
             if not source_exchange:
                 continue
-            normalized_exchange = source_exchange.lower()
+            normalized = cast(MarketDataExchange, source_exchange.lower())
             validated_symbols = list(dict.fromkeys(symbols))
             if validated_symbols:
-                validated[normalized_exchange] = validated_symbols
+                validated[normalized] = validated_symbols
         return validated

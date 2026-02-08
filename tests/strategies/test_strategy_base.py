@@ -72,7 +72,7 @@ async def feed_bar_to_strategy(
     strategy: BaseStrategy,
     instrument: str,
     close: float,
-    exchange: str = "paper",
+    exchange: str = "kraken",
 ) -> Signal | None:
     """Feed a single bar to strategy and return resulting signal."""
     bar = make_bar_envelope(instrument, close, exchange=exchange)
@@ -89,7 +89,7 @@ async def feed_closes_to_strategy(
     strategy: BaseStrategy,
     instrument: str,
     closes: list[float],
-    exchange: str = "paper",
+    exchange: str = "kraken",
 ) -> Signal | None:
     """Feed multiple close prices to strategy sequentially."""
     signal: Signal | None = None
@@ -102,7 +102,7 @@ def prefill_candle_buffer(
     strategy: BaseStrategy,
     instrument: str,
     closes: list[float],
-    exchange: str = "paper",
+    exchange: str = "kraken",
 ) -> None:
     """Populate strategy candle buffer without triggering signals."""
     if instrument not in strategy.candle_buffer:

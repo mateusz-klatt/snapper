@@ -32,6 +32,7 @@ from loguru import logger
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_zonda
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -93,7 +94,7 @@ class ZondaMarketDataPublisher(MarketDataPublisherService[ZondaExchangeClient]):
         """
         return ZondaExchangeClient()
 
-    def _get_exchange_name(self) -> str:
+    def _get_exchange_name(self) -> MarketDataExchange:
         """Get exchange identifier.
 
         Returns:

@@ -3,7 +3,7 @@ import { useWebSocketStore } from '../stores/websocket'
 import { HEARTBEAT_STALE_THRESHOLD_MS, HEARTBEAT_PRUNE_INTERVAL_MS } from '../lib/constants'
 
 export interface HeartbeatData {
-  status: string
+  status: 'healthy' | 'warning' | 'error'
   lag_ms?: number
   timestamp: number
   healthy: boolean

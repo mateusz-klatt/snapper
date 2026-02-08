@@ -44,27 +44,29 @@ export type WebSocketMessages =
   | WSTopicSuggestionsResponse
   | WSUnsubscribeRequest;
 export type Type = "bar";
+export type Exchange = "kraken" | "zonda" | "walutomat" | "polygon";
 export type Vwap = number | null;
 export type Trades = number | null;
 export type Type1 = "fill";
 export type TradeId = string | null;
 export type ExchangeOrderId = string | null;
+export type Exchange1 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Side = "buy" | "sell";
 export type Status = "filled" | "partial";
 export type Type2 = "heartbeat";
-export type Status1 = "healthy" | "unhealthy" | "warning" | "error";
+export type Status1 = "healthy" | "warning" | "error";
 export type Type3 = "order_cancel";
-export type Exchange = "paper" | "kraken" | "zonda" | "walutomat";
+export type Exchange2 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Type4 = "order_event";
-export type Exchange1 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Exchange3 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Event = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
 export type Reason = string | null;
 export type Type5 = "order_replace";
-export type Exchange2 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Exchange4 = "paper" | "kraken" | "zonda" | "walutomat";
 export type NewQuantity = number | null;
 export type NewPrice = number | null;
 export type Type6 = "order_req";
-export type Exchange3 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Exchange5 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Mode = "live" | "paper";
 export type Side1 = "buy" | "sell";
 export type OrderType = "market" | "limit" | "stop" | "stop_limit";
@@ -72,6 +74,7 @@ export type Price = number | null;
 export type SignaledAt = string | null;
 export type Type7 = "order_status";
 export type ExchangeOrderId1 = string | null;
+export type Exchange6 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Side2 = "buy" | "sell";
 export type Status2 = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
 export type OrderType1 = "market" | "limit" | "stop" | "stop_limit";
@@ -85,6 +88,7 @@ export type StartedAt = string | null;
 export type Type10 = "setting_changed";
 export type UpdatedBy = string | null;
 export type Type11 = "signal";
+export type Exchange7 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Side3 = "buy" | "sell";
 export type Price2 = number | null;
 export type StrategyName = string | null;
@@ -93,10 +97,12 @@ export type Type12 = "symbol_alias_update";
 export type Event1 = "symbol_aliases_updated";
 export type Action = "clear_cache";
 export type Type13 = "tick";
+export type Exchange8 = "kraken" | "zonda" | "walutomat" | "polygon";
 export type Bid = number | null;
 export type Ask = number | null;
 export type Last = number | null;
 export type Type14 = "trade";
+export type Exchange9 = "kraken" | "zonda" | "walutomat" | "polygon";
 export type Side4 = string | null;
 /**
  * Message type discriminator
@@ -261,13 +267,13 @@ export interface WsMessageSchema {
  *
  * Attributes:
  *     type: Fixed as 'bar' for message routing.
- *     exchange: Source exchange name.
  */
 export interface BarEnvelope {
   type: Type;
   timestamp?: string;
   meta?: Meta;
   instrument: string;
+  exchange: Exchange;
   timeframe: string;
   open: number;
   high: number;
@@ -276,7 +282,6 @@ export interface BarEnvelope {
   volume: number;
   vwap?: Vwap;
   trades?: Trades;
-  exchange: string;
 }
 export interface Meta {
   [k: string]: unknown;
@@ -299,7 +304,7 @@ export interface FillEnvelope {
   exchange_order_id?: ExchangeOrderId;
   client_order_id: string;
   instrument: string;
-  exchange: string;
+  exchange: Exchange1;
   side: Side;
   size: number;
   price: number;
@@ -356,7 +361,7 @@ export interface OrderCancelEnvelope {
   type: Type3;
   timestamp?: string;
   meta?: Meta3;
-  exchange: Exchange;
+  exchange: Exchange2;
   instrument: string;
   exchange_order_id: string;
   client_order_id: string;
@@ -391,7 +396,7 @@ export interface OrderEventEnvelope {
   meta?: Meta4;
   exchange_order_id: string;
   client_order_id: string;
-  exchange: Exchange1;
+  exchange: Exchange3;
   instrument: string;
   event: Event;
   reason?: Reason;
@@ -421,7 +426,7 @@ export interface OrderReplaceEnvelope {
   type: Type5;
   timestamp?: string;
   meta?: Meta5;
-  exchange: Exchange2;
+  exchange: Exchange4;
   instrument: string;
   exchange_order_id: string;
   client_order_id: string;
@@ -456,7 +461,7 @@ export interface OrderRequestEnvelope {
   timestamp?: string;
   meta?: Meta6;
   strategy_id: string;
-  exchange: Exchange3;
+  exchange: Exchange5;
   instrument: string;
   mode: Mode;
   side: Side1;
@@ -486,7 +491,7 @@ export interface OrderStatusEnvelope {
   exchange_order_id?: ExchangeOrderId1;
   client_order_id: string;
   instrument: string;
-  exchange: string;
+  exchange: Exchange6;
   side: Side2;
   status: Status2;
   order_type: OrderType1;
@@ -571,20 +576,19 @@ export interface Meta10 {
  * Attributes:
  *     type: Fixed as 'signal' for message routing.
  *     id: Unique signal identifier (optional).
- *     exchange: Target exchange for execution.
  */
 export interface SignalEnvelope {
   type: Type11;
   timestamp?: string;
   meta?: Meta11;
   instrument: string;
+  exchange: Exchange7;
   side: Side3;
   strength: number;
   reason: string;
   price?: Price2;
   strategy_name?: StrategyName;
   id?: Id;
-  exchange: string;
 }
 export interface Meta11 {
   [k: string]: unknown;
@@ -618,18 +622,17 @@ export interface Meta12 {
  *
  * Attributes:
  *     type: Fixed as 'tick' for message routing.
- *     exchange: Source exchange name.
  */
 export interface TickEnvelope {
   type: Type13;
   timestamp?: string;
   meta?: Meta13;
   instrument: string;
+  exchange: Exchange8;
   volume: number;
   bid?: Bid;
   ask?: Ask;
   last?: Last;
-  exchange: string;
 }
 export interface Meta13 {
   [k: string]: unknown;
@@ -642,17 +645,16 @@ export interface Meta13 {
  *
  * Attributes:
  *     type: Fixed as 'trade' for message routing.
- *     exchange: Source exchange name.
  */
 export interface TradeEnvelope {
   type: Type14;
   timestamp?: string;
   meta?: Meta14;
   instrument: string;
+  exchange: Exchange9;
   price: number;
   volume: number;
   side?: Side4;
-  exchange: string;
 }
 export interface Meta14 {
   [k: string]: unknown;

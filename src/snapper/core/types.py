@@ -11,9 +11,8 @@ Type Aliases:
     FillStatus: Result of an order fill attempt.
     ExecutionMode: Trading mode (live/paper).
     OrderExchange: Order-capable exchanges.
-    TradingExchange: Alias for OrderExchange (backward compat).
     MarketSubscribeExchange: Live market feed exchanges.
-    ReplaySourceExchange: Valid paper replay source exchanges.
+    MarketDataExchange: Exchanges that produce market data (live or historical).
     AllExchange: All known exchange identifiers.
     HealthStatus: Component health state.
     ComponentStatus: Infrastructure component status.
@@ -26,7 +25,7 @@ Type Aliases:
     IndicatorBackend: Technical indicator computation backend.
     UpsertResult: Outcome of an upsert operation.
     AssetType: Financial asset class category.
-    MarketDataType: Type of market data in ZMQ topics.
+    MarketDataType: Market data type for ZMQ topic routing.
     SubscriptionAction: WebSocket subscription action.
     SubscriptionStatus: WebSocket subscription result status.
     SpawnerProcessStatus: Subprocess-level process status.
@@ -90,19 +89,16 @@ ExecutionMode = Literal["live", "paper"]
 OrderExchange = Literal["paper", "kraken", "zonda", "walutomat"]
 """Exchanges capable of order execution (paper simulator + live venues)."""
 
-TradingExchange = OrderExchange
-"""Alias for OrderExchange — backward compatibility during type split."""
-
 MarketSubscribeExchange = Literal["kraken", "zonda", "walutomat"]
 """Live market feed exchanges (no paper — paper replays from these)."""
 
-ReplaySourceExchange = Literal["kraken", "zonda", "walutomat", "polygon"]
-"""Valid source exchanges for paper replay (paper excluded — it is the consumer, not source)."""
+MarketDataExchange = Literal["kraken", "zonda", "walutomat", "polygon"]
+"""Exchanges that produce market data, live or historical (paper excluded — it consumes, not produces)."""
 
 AllExchange = Literal["paper", "kraken", "zonda", "walutomat", "polygon"]
 """All known exchange identifiers across all domains."""
 
-HealthStatus = Literal["healthy", "unhealthy", "warning", "error"]
+HealthStatus = Literal["healthy", "warning", "error"]
 """Component health state for monitoring and alerting."""
 
 ComponentStatus = Literal["ok", "error"]
@@ -135,8 +131,8 @@ UpsertResult = Literal["created", "updated", "unchanged"]
 AssetType = Literal["crypto", "forex", "equity", "index"]
 """Financial asset class category for symbol catalog entries."""
 
-MarketDataType = Literal["tick", "ticks", "trades", "book", "candles"]
-"""Type of market data for ZMQ market.* topics."""
+MarketDataType = Literal["ticks", "trades", "candles"]
+"""Market data type for ZMQ topic routing (market.{exchange}.{instrument}.{type})."""
 
 SubscriptionAction = Literal["subscribe", "unsubscribe"]
 """WebSocket subscription action: subscribe to or unsubscribe from topics."""
@@ -167,6 +163,7 @@ __all__ = [
     "FillStatus",
     "HealthStatus",
     "IndicatorBackend",
+    "MarketDataExchange",
     "MarketDataType",
     "MarketSubscribeExchange",
     "OrderCommand",
@@ -179,13 +176,11 @@ __all__ = [
     "ProcessMode",
     "ProcessRoleType",
     "ProcessRunStatusType",
-    "ReplaySourceExchange",
     "SpawnerProcessStatus",
     "StartProcessStatus",
     "StopProcessStatus",
     "SubscriptionAction",
     "SubscriptionStatus",
     "TradeSide",
-    "TradingExchange",
     "UpsertResult",
 ]

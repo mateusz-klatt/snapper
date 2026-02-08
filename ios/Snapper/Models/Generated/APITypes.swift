@@ -21,6 +21,13 @@ enum AvailableProcessRole: String, Codable, Sendable {
     case backtest
 }
 
+enum CandleSnapshotExchange: String, Codable, Sendable {
+    case kraken
+    case zonda
+    case walutomat
+    case polygon
+}
+
 enum ConfiguredProcessMode: String, Codable, Sendable {
     case thread
     case process
@@ -43,11 +50,24 @@ enum ExecutionRecordSide: String, Codable, Sendable {
     case sell
 }
 
+enum ExecutionRecordExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
 enum HealthCheckResponseStatus: String, Codable, Sendable {
     case healthy
-    case unhealthy
     case warning
     case error
+}
+
+enum OrderStatusExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
 }
 
 enum OrderStatusSide: String, Codable, Sendable {
@@ -70,6 +90,13 @@ enum OrderStatusStatus: String, Codable, Sendable {
     case partiallyFilled = "partially_filled"
     case cancelled
     case rejected
+}
+
+enum PositionSnapshotExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
 }
 
 enum ProcessRunStatus: String, Codable, Sendable {
@@ -121,6 +148,13 @@ enum ProcessStopResponseStatus: String, Codable, Sendable {
     case error
 }
 
+enum TradingSignalExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
 enum TradingSignalSide: String, Codable, Sendable {
     case buy
     case sell
@@ -138,7 +172,6 @@ enum ZmqComponentsWebsocketManager: String, Codable, Sendable {
 
 enum ZmqHealthResponseStatus: String, Codable, Sendable {
     case healthy
-    case unhealthy
     case warning
     case error
 }
@@ -188,6 +221,7 @@ struct AvailableProcessesResponse: Codable, Sendable {
 
 struct CandleSnapshot: Codable, Sendable {
     let instrument: String
+    let exchange: String
     let timeframe: String
     let timestamp: Date
     let open: Double
@@ -922,7 +956,7 @@ struct ZmqHealthResponse: Codable, Sendable {
     let connections: ConnectionStatsSchema
     /// Message statistics per topic
     let messageStats: [String: TopicMetricSnapshotSchema]
-    /// Error messages if unhealthy
+    /// Error messages if not healthy
     let errors: [String]?
 
     enum CodingKeys: String, CodingKey {

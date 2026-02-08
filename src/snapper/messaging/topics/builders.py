@@ -34,24 +34,26 @@ from dataclasses import dataclass
 from typing import cast
 from typing import get_args
 
+from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.core.types import OrderCommand
 from snapper.core.types import OrderEvent
+from snapper.core.types import OrderExchange
 
 
 def market_topic(
-    exchange: str,
+    exchange: OrderExchange,
     instrument: str,
     data_type: MarketDataType,
     timeframe: str | None = None,
-    source_exchange: str | None = None,
+    source_exchange: MarketDataExchange | None = None,
 ) -> str:
     """Build a market data topic string.
 
     Args:
-        exchange: Exchange name or TradingExchange enum.
+        exchange: Exchange name (OrderExchange literal).
         instrument: Trading instrument symbol (e.g., 'BTC-USD').
-        data_type: Type of market data ('tick', 'trades', 'book', 'candles').
+        data_type: Type of market data ('ticks', 'trades', 'candles').
         timeframe: Candle timeframe (required when data_type is 'candles').
         source_exchange: Source exchange for paper replay topics.
 
@@ -63,8 +65,8 @@ def market_topic(
         ValueError: If timeframe is missing for candles data type.
 
     Examples:
-        >>> market_topic("kraken", "BTC-USD", "tick")
-        'market.kraken.BTC-USD.tick'
+        >>> market_topic("kraken", "BTC-USD", "ticks")
+        'market.kraken.BTC-USD.ticks'
         >>> market_topic("kraken", "BTC-USD", "candles", "1m")
         'market.kraken.BTC-USD.candles.1m'
         >>> market_topic("paper", "BTC-USD", "ticks", source_exchange="kraken")
@@ -87,7 +89,7 @@ def market_topic(
 
 
 def order_command_topic(
-    exchange: str,
+    exchange: OrderExchange,
     instrument: str,
     command: OrderCommand,
 ) -> str:
@@ -96,7 +98,7 @@ def order_command_topic(
     Order commands flow from trader/strategy to executor.
 
     Args:
-        exchange: Exchange name or TradingExchange enum.
+        exchange: Exchange name (OrderExchange literal).
         instrument: Trading instrument symbol (e.g., 'BTC-USD').
         command: Command type ('submit', 'cancel', 'replace').
 
@@ -106,7 +108,7 @@ def order_command_topic(
     Examples:
         >>> order_command_topic("kraken", "BTC-USD", "submit")
         'orders.commands.kraken.BTC-USD.submit'
-        >>> order_command_topic(TradingExchange.PAPER, "ETH-USD", "cancel")
+        >>> order_command_topic("paper", "ETH-USD", "cancel")
         'orders.commands.paper.ETH-USD.cancel'
     """
     exchange_str = exchange
@@ -114,7 +116,7 @@ def order_command_topic(
 
 
 def order_event_topic(
-    exchange: str,
+    exchange: OrderExchange,
     instrument: str,
     event: OrderEvent,
 ) -> str:
@@ -123,7 +125,7 @@ def order_event_topic(
     Order events flow from executor to trader/UI.
 
     Args:
-        exchange: Exchange name or TradingExchange enum.
+        exchange: Exchange name (OrderExchange literal).
         instrument: Trading instrument symbol (e.g., 'BTC-USD').
         event: Event type ('submitted', 'accepted', 'rejected', 'fill', etc.).
 
@@ -141,14 +143,14 @@ def order_event_topic(
 
 
 def signal_topic(
-    exchange: str,
+    exchange: OrderExchange,
     instrument: str,
     signal_type: str = "live",
 ) -> str:
     """Build a signal topic string.
 
     Args:
-        exchange: Exchange name or TradingExchange enum.
+        exchange: Exchange name (OrderExchange literal).
         instrument: Trading instrument symbol (e.g., 'BTC-USD').
         signal_type: Signal type identifier (default 'live', or strategy name).
 
@@ -218,13 +220,13 @@ def admin_topic(resource: str) -> str:
     return f"admin.{resource}"
 
 
-def order_commands_prefix(exchange: str) -> str:
+def order_commands_prefix(exchange: OrderExchange) -> str:
     """Build subscription prefix for all order commands for an exchange.
 
     Used by executors to subscribe to all commands for their exchange.
 
     Args:
-        exchange: Exchange name or TradingExchange enum.
+        exchange: Exchange name (OrderExchange literal).
 
     Returns:
         Prefix string like 'orders.commands.kraken.'.
@@ -237,7 +239,7 @@ def order_commands_prefix(exchange: str) -> str:
     return f"orders.commands.{exchange_str}."
 
 
-def order_events_prefix(exchange: str | None = None) -> str:
+def order_events_prefix(exchange: OrderExchange | None = None) -> str:
     """Build subscription prefix for order events.
 
     Args:
@@ -280,7 +282,7 @@ class ParsedMarketTopic:
     Attributes:
         exchange: Main exchange segment (or 'paper' for replay topics).
         instrument: Instrument symbol from topic.
-        data_type: Market data type (candles/ticks/trades/book/tick).
+        data_type: Market data type (candles/ticks/trades).
         timeframe: Optional timeframe for candles topics.
         source_exchange: Source exchange for paper replay topics.
     """
@@ -383,7 +385,7 @@ def parse_order_command_topic(topic: str) -> ParsedOrderTopic | None:
     Examples:
         >>> parse_order_command_topic("orders.commands.kraken.BTC-USD.submit")
         ParsedOrderTopic(exchange='kraken', instrument='BTC-USD', suffix='submit')
-        >>> parse_order_command_topic("market.kraken.tick")
+        >>> parse_order_command_topic("market.kraken.ticks")
         None
     """
     parts = topic.split(".")
@@ -455,7 +457,7 @@ def is_order_topic(topic: str) -> bool:
     Examples:
         >>> is_order_topic("orders.events.kraken.BTC-USD.fill")
         True
-        >>> is_order_topic("market.kraken.BTC-USD.tick")
+        >>> is_order_topic("market.kraken.BTC-USD.ticks")
         False
     """
     parts = topic.split(".")

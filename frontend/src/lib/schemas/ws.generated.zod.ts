@@ -18,6 +18,7 @@ export const BarEnvelopeSchema = z
     timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
+    exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     timeframe: z.string(),
     open: z.number(),
     high: z.number(),
@@ -26,7 +27,6 @@ export const BarEnvelopeSchema = z
     volume: z.number(),
     vwap: z.number().nullable(),
     trades: z.number().int().nullable(),
-    exchange: z.string(),
   })
   .strict()
 
@@ -39,7 +39,7 @@ export const FillEnvelopeSchema = z
     exchange_order_id: z.string().nullable(),
     client_order_id: z.string(),
     instrument: z.string(),
-    exchange: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     side: z.enum(['buy', 'sell']),
     size: z.number(),
     price: z.number(),
@@ -57,7 +57,7 @@ export const HeartbeatEnvelopeSchema = z
     meta: z.record(z.string(), z.unknown()).optional(),
     component: z.string(),
     sequence: z.number().int(),
-    status: z.enum(['healthy', 'unhealthy', 'warning', 'error']),
+    status: z.enum(['healthy', 'warning', 'error']),
     lag_ms: z.number().int(),
   })
   .strict()
@@ -128,7 +128,7 @@ export const OrderStatusEnvelopeSchema = z
     exchange_order_id: z.string().nullable(),
     client_order_id: z.string(),
     instrument: z.string(),
-    exchange: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     side: z.enum(['buy', 'sell']),
     status: z.enum(['submitted', 'accepted', 'rejected', 'cancelled', 'expired', 'replaced']),
     order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
@@ -177,13 +177,13 @@ export const SignalEnvelopeSchema = z
     timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     side: z.enum(['buy', 'sell']),
     strength: z.number(),
     reason: z.string(),
     price: z.number().nullable(),
     strategy_name: z.string().nullable(),
     id: z.string().nullable(),
-    exchange: z.string(),
   })
   .strict()
 
@@ -203,11 +203,11 @@ export const TickEnvelopeSchema = z
     timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
+    exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     volume: z.number(),
     bid: z.number().nullable(),
     ask: z.number().nullable(),
     last: z.number().nullable(),
-    exchange: z.string(),
   })
   .strict()
 
@@ -217,10 +217,10 @@ export const TradeEnvelopeSchema = z
     timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
+    exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     price: z.number(),
     volume: z.number(),
     side: z.string().nullable(),
-    exchange: z.string(),
   })
   .strict()
 

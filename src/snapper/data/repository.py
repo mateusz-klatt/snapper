@@ -65,6 +65,7 @@ from sqlalchemy.orm import sessionmaker as sync_sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
+from snapper.core.types import AllExchange
 from snapper.data.models import Base
 from snapper.data.models import Candle
 from snapper.data.models import Execution
@@ -203,21 +204,21 @@ class Repository(ABC):
         timeframe: str,
         start: datetime,
         end: datetime,
-        exchange: str,
+        exchange: AllExchange,
     ) -> list[dict[str, Any]]:
         """Retrieve candles for instrument in time range."""
         ...
 
     @abstractmethod
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime, exchange: str
+        self, instrument: str, start: datetime, end: datetime, exchange: AllExchange
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument in time range."""
         ...
 
     @abstractmethod
     async def get_market_snapshots(
-        self, exchange: str, symbols: list[str], start: datetime, end: datetime
+        self, exchange: AllExchange, symbols: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         """Retrieve market snapshots for symbols in time range."""
         ...
@@ -489,7 +490,7 @@ class SQLAlchemyRepository(Repository):
         timeframe: str,
         start: datetime,
         end: datetime,
-        exchange: str,
+        exchange: AllExchange,
     ) -> list[dict[str, Any]]:
         """Retrieve candles for instrument within time range."""
         async with self.session() as s:
@@ -540,7 +541,7 @@ class SQLAlchemyRepository(Repository):
             ]
 
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime, exchange: str
+        self, instrument: str, start: datetime, end: datetime, exchange: AllExchange
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument within time range."""
         async with self.session() as s:
@@ -582,7 +583,7 @@ class SQLAlchemyRepository(Repository):
             ]
 
     async def get_market_snapshots(
-        self, exchange: str, symbols: list[str], start: datetime, end: datetime
+        self, exchange: AllExchange, symbols: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         """Retrieve market snapshots for exchange and symbols in time range."""
         async with self.session() as s:
@@ -977,7 +978,7 @@ class MSSQLRepository(Repository):
         timeframe: str,
         start: datetime,
         end: datetime,
-        exchange: str,
+        exchange: AllExchange,
     ) -> list[dict[str, Any]]:
         """Retrieve candles via sync thread."""
 
@@ -1031,7 +1032,7 @@ class MSSQLRepository(Repository):
         return await self._run_sync(_do)
 
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime, exchange: str
+        self, instrument: str, start: datetime, end: datetime, exchange: AllExchange
     ) -> list[dict[str, Any]]:
         """Retrieve trades via sync thread."""
 
@@ -1076,7 +1077,7 @@ class MSSQLRepository(Repository):
         return await self._run_sync(_do)
 
     async def get_market_snapshots(
-        self, exchange: str, symbols: list[str], start: datetime, end: datetime
+        self, exchange: AllExchange, symbols: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         """Retrieve market snapshots via sync thread."""
 

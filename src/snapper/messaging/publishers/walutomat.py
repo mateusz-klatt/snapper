@@ -10,6 +10,7 @@ from loguru import logger
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_walutomat
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -47,7 +48,7 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
     def _create_exchange_client(self) -> WalutomatExchangeClient:
         return WalutomatExchangeClient()
 
-    def _get_exchange_name(self) -> str:
+    def _get_exchange_name(self) -> MarketDataExchange:
         return "walutomat"
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:

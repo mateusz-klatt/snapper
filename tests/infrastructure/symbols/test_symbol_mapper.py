@@ -16,10 +16,9 @@ from sqlalchemy.exc import OperationalError
 import snapper.infrastructure.symbols.functions as functions
 import snapper.infrastructure.symbols.mapper as symbol_mapper_module
 from snapper.core.types import AllExchange
+from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketSubscribeExchange
 from snapper.core.types import OrderExchange
-from snapper.core.types import ReplaySourceExchange
-from snapper.core.types import TradingExchange
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.infrastructure.symbols.functions import ccxt_to_kraken_websocket
@@ -34,9 +33,9 @@ from snapper.infrastructure.symbols.functions import get_available_walutomat_res
 from snapper.infrastructure.symbols.functions import get_available_walutomat_symbols
 from snapper.infrastructure.symbols.functions import get_available_ws_symbols
 from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
+from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_data_symbols
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
-from snapper.infrastructure.symbols.functions import get_replay_source_exchanges
 from snapper.infrastructure.symbols.functions import get_tradeable_symbols
 from snapper.infrastructure.symbols.functions import is_market_data_available
 from snapper.infrastructure.symbols.functions import is_tradeable
@@ -1713,25 +1712,16 @@ class TestGetAvailableExchanges:
         assert "paper" not in result
         assert "polygon" not in result
 
-    def test_get_replay_source_exchanges_includes_polygon(self) -> None:
-        """Return list of replay source exchanges including polygon.
+    def test_get_market_data_exchanges_includes_polygon(self) -> None:
+        """Return list of market data exchanges including polygon.
 
         Given: No parameters,
-        When: get_replay_source_exchanges is called,
-        Then: Returns exchanges valid for paper replay, including polygon.
+        When: get_market_data_exchanges is called,
+        Then: Returns exchanges valid for market data, including polygon.
         """
-        result = get_replay_source_exchanges()
+        result = get_market_data_exchanges()
         assert result == ["kraken", "polygon", "walutomat", "zonda"]
         assert "paper" not in result
-
-    def test_trading_exchange_aliases_order_exchange(self) -> None:
-        """Verify TradingExchange is an alias for OrderExchange.
-
-        Given: Both type aliases,
-        When: Their Literal args are compared,
-        Then: They contain the same values.
-        """
-        assert get_args(TradingExchange) == get_args(OrderExchange)
 
     def test_market_subscribe_exchange_excludes_paper_and_polygon(self) -> None:
         """Verify MarketSubscribeExchange excludes paper and polygon.
@@ -1745,14 +1735,14 @@ class TestGetAvailableExchanges:
         assert "polygon" not in args
         assert "kraken" in args
 
-    def test_replay_source_exchange_includes_polygon_excludes_paper(self) -> None:
-        """Verify ReplaySourceExchange includes polygon but not paper.
+    def test_market_data_exchange_includes_polygon_excludes_paper(self) -> None:
+        """Verify MarketDataExchange includes polygon but not paper.
 
-        Given: ReplaySourceExchange Literal type,
+        Given: MarketDataExchange Literal type,
         When: Its args are inspected,
         Then: Polygon is present, paper is absent.
         """
-        args = get_args(ReplaySourceExchange)
+        args = get_args(MarketDataExchange)
         assert "polygon" in args
         assert "paper" not in args
 
@@ -1760,12 +1750,12 @@ class TestGetAvailableExchanges:
         """Verify AllExchange covers all domain-specific types.
 
         Given: AllExchange Literal type,
-        When: Its args are compared to OrderExchange and ReplaySourceExchange,
+        When: Its args are compared to OrderExchange and MarketDataExchange,
         Then: AllExchange is a superset of both.
         """
         all_args = set(get_args(AllExchange))
         assert set(get_args(OrderExchange)).issubset(all_args)
-        assert set(get_args(ReplaySourceExchange)).issubset(all_args)
+        assert set(get_args(MarketDataExchange)).issubset(all_args)
         assert set(get_args(MarketSubscribeExchange)).issubset(all_args)
 
 

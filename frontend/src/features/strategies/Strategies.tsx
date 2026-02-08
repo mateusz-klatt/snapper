@@ -14,13 +14,13 @@ import { StrategyCard } from './StrategyCard'
 import { StrategiesSkeleton } from '../../components/Skeleton'
 
 interface FeedHealth {
-  status: string
+  status: 'healthy' | 'warning' | 'error'
   lag_ms: number
   heartbeat_age_ms: number
   healthy: boolean
 }
 interface HealthStatus {
-  status: 'ok' | 'warn' | 'error'
+  status: 'healthy' | 'warning' | 'error'
   lag_ms: number
   timestamp: number
   seq?: number
@@ -85,14 +85,7 @@ export const Strategies: React.FC = () => {
         const strategy = strategies.find(s => s.name === strategyName)
 
         if (strategy) {
-          const resolveHeartbeatStatus = (heartbeatStatus: string): 'ok' | 'warn' | 'error' => {
-            if (heartbeatStatus === 'healthy') return 'ok'
-            if (heartbeatStatus === 'warning') return 'warn'
-
-            return 'error'
-          }
-
-          const status = resolveHeartbeatStatus(message.status)
+          const status = message.status as HealthStatus['status']
 
           setHealthStatuses(prev => ({
             ...prev,

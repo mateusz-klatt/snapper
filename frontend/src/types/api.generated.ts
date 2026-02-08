@@ -818,6 +818,7 @@ export type Components = {
          *
          *     Attributes:
          *         instrument: Trading instrument symbol.
+         *         exchange: Source exchange that produced this candle data.
          *         timeframe: Candle timeframe (e.g., '1m', '1h', '1d').
          *         timestamp: Candle open timestamp.
          *         open: Opening price.
@@ -831,6 +832,11 @@ export type Components = {
         CandleSnapshot: {
             /** Instrument */
             instrument: string;
+            /**
+             * Exchange
+             * @enum {string}
+             */
+            exchange: "kraken" | "zonda" | "walutomat" | "polygon";
             /** Timeframe */
             timeframe: string;
             /**
@@ -1101,8 +1107,11 @@ export type Components = {
              * @enum {string}
              */
             side: "buy" | "sell";
-            /** Exchange */
-            exchange: string;
+            /**
+             * Exchange
+             * @enum {string}
+             */
+            exchange: "paper" | "kraken" | "zonda" | "walutomat";
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1117,7 +1126,7 @@ export type Components = {
          *     connection statistics, and topic availability.
          *
          *     Attributes:
-         *         status: Overall service health status (healthy/unhealthy).
+         *         status: Overall service health status (healthy/warning/error).
          *         timestamp: Timestamp of the health check.
          *         version: Application version string.
          *         connections: Connection statistics.
@@ -1129,7 +1138,7 @@ export type Components = {
              * @description Overall service health status
              * @enum {string}
              */
-            status: "healthy" | "unhealthy" | "warning" | "error";
+            status: "healthy" | "warning" | "error";
             /**
              * Timestamp
              * Format: date-time
@@ -1244,8 +1253,11 @@ export type Components = {
             id: number;
             /** Instrument */
             instrument: string;
-            /** Exchange */
-            exchange: string;
+            /**
+             * Exchange
+             * @enum {string}
+             */
+            exchange: "paper" | "kraken" | "zonda" | "walutomat";
             /** Client Order Id */
             client_order_id?: string | null;
             /** Exchange Order Id */
@@ -1302,8 +1314,11 @@ export type Components = {
             id: number;
             /** Instrument */
             instrument: string;
-            /** Exchange */
-            exchange: string;
+            /**
+             * Exchange
+             * @enum {string}
+             */
+            exchange: "paper" | "kraken" | "zonda" | "walutomat";
             /** Quantity */
             quantity: number;
             /** Average Price */
@@ -2044,8 +2059,11 @@ export type Components = {
             id: number;
             /** Instrument */
             instrument: string;
-            /** Exchange */
-            exchange: string;
+            /**
+             * Exchange
+             * @enum {string}
+             */
+            exchange: "paper" | "kraken" | "zonda" | "walutomat";
             /**
              * Timestamp
              * Format: date-time
@@ -2325,7 +2343,7 @@ export type Components = {
          *         config: ZMQ configuration.
          *         connections: Connection statistics.
          *         message_stats: Message statistics per topic.
-         *         errors: Error messages if unhealthy.
+         *         errors: Error messages if not healthy.
          */
         ZmqHealthResponse: {
             /**
@@ -2333,7 +2351,7 @@ export type Components = {
              * @description Overall ZMQ bridge health status
              * @enum {string}
              */
-            status: "healthy" | "unhealthy" | "warning" | "error";
+            status: "healthy" | "warning" | "error";
             /**
              * Timestamp
              * Format: date-time
@@ -2355,7 +2373,7 @@ export type Components = {
             };
             /**
              * Errors
-             * @description Error messages if unhealthy
+             * @description Error messages if not healthy
              */
             errors?: string[];
         };
@@ -3021,7 +3039,7 @@ export interface Operations {
                 /** @description Instrument symbol */
                 instrument: string;
                 /** @description Exchange name */
-                exchange: string;
+                exchange: "kraken" | "zonda" | "walutomat" | "polygon";
                 /** @description Timeframe */
                 timeframe: string;
                 /** @description Number of candles to return */
@@ -3068,7 +3086,7 @@ export interface Operations {
                 /** @description Filter by strategy */
                 strategy?: string | null;
                 /** @description Filter by exchange */
-                exchange?: string | null;
+                exchange?: ("paper" | "kraken" | "zonda" | "walutomat") | null;
                 /** @description Hours of history to return */
                 hours?: number;
                 /** @description Number of signals to return */
@@ -3178,7 +3196,7 @@ export interface Operations {
                 /** @description Symbol to filter by */
                 symbol?: string | null;
                 /** @description Filter by exchange */
-                exchange?: string | null;
+                exchange?: ("paper" | "kraken" | "zonda" | "walutomat") | null;
                 /** @description Number of orders to return */
                 limit?: number;
                 /** @description Number of orders to skip */

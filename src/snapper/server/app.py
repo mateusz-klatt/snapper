@@ -100,6 +100,8 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.config.settings_routes import router as settings_router
 from snapper.core.types import HealthStatus
+from snapper.core.types import MarketDataExchange
+from snapper.core.types import OrderExchange
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
@@ -402,7 +404,7 @@ def _create_candles_signals_router() -> APIRouter:
         _auth: Annotated[UserProfile, Depends(require_authentication)],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         instrument: Annotated[str, Query(description="Instrument symbol")],
-        exchange: Annotated[str, Query(description="Exchange name")],
+        exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
         timeframe: Annotated[str, Query(description="Timeframe")],
         limit: Annotated[int, Query(le=1000, description="Number of candles to return")] = 100,
     ) -> list[CandleSnapshot] | Response:
@@ -431,6 +433,7 @@ def _create_candles_signals_router() -> APIRouter:
                 return [
                     CandleSnapshot(
                         instrument=instrument,
+                        exchange=exchange,
                         timeframe=candle.timeframe,
                         timestamp=candle.timestamp,
                         open=candle.open,
@@ -456,7 +459,7 @@ def _create_candles_signals_router() -> APIRouter:
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         instrument: Annotated[str | None, Query(description="Filter by instrument")] = None,
         strategy: Annotated[str | None, Query(description="Filter by strategy")] = None,
-        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+        exchange: Annotated[OrderExchange | None, Query(description="Filter by exchange")] = None,
         hours: Annotated[int, Query(le=168, description="Hours of history to return")] = 24,
         limit: Annotated[int, Query(le=1000, description="Number of signals to return")] = 100,
     ) -> list[TradingSignal]:
@@ -560,7 +563,7 @@ def _create_orders_executions_router() -> APIRouter:
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         symbol: Annotated[str | None, Query(description="Symbol to filter by")] = None,
-        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+        exchange: Annotated[OrderExchange | None, Query(description="Filter by exchange")] = None,
         limit: Annotated[int, Query(ge=1, le=1000, description="Number of orders to return")] = 100,
         offset: Annotated[int, Query(ge=0, description="Number of orders to skip")] = 0,
     ) -> list[OrderStatus]:
@@ -744,7 +747,7 @@ def _create_monitoring_endpoints_router(
             error_messages.append(f"ZMQ context error: {exc}")
             available_topics = zmq_bridge.get_available_topics()
         stats = manager.get_stats()
-        status: HealthStatus = "healthy" if not error_messages else "unhealthy"
+        status: HealthStatus = "healthy" if not error_messages else "error"
         return ZmqHealthResponse(
             status=status,
             timestamp=dt.datetime.now(dt.UTC),

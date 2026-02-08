@@ -149,7 +149,7 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'unhealthy',
+        status: 'error',
         trader: { status: 'error' },
         backtests: {},
       },
@@ -187,7 +187,7 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'unhealthy',
+        status: 'error',
         trader: { status: 'stopped', exit_code: 1, error: 'Process crashed' },
         backtests: {},
       },
@@ -220,7 +220,7 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'unhealthy',
+        status: 'error',
         trader: { status: 'running' },
         backtests: {
           'bt-error': {
@@ -298,7 +298,7 @@ describe('Health', () => {
         metrics: [
           { name: 'CPU Usage', value: '45%', status: 'healthy' },
           { name: 'Memory', value: '2GB', status: 'warning' },
-          { name: 'Disk', value: '90%', status: 'critical' },
+          { name: 'Disk', value: '90%', status: 'error' },
           { name: 'Network', value: '100Mbps', status: 'unknown' },
         ],
       },
@@ -341,7 +341,7 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'unhealthy',
+        status: 'error',
         trader: { status: 'error' },
         backtests: {},
       },
@@ -415,9 +415,9 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'critical',
+        status: 'error',
         components: {
-          database: { status: 'critical', error: 'Connection failed' },
+          database: { status: 'error', error: 'Connection failed' },
         },
         trader: { status: 'error', pid: null },
         backtests: {},

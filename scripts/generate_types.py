@@ -1357,9 +1357,17 @@ def _build_entity_union_alias_map(
         Mapping from union string to alias name.
     """
     alias_map: dict[str, str] = {}
+    used_names: set[str] = set()
     for union_str, occurrences in repeated.items():
         camel = snake_to_camel(occurrences[0][1])
-        alias_map[union_str] = camel[0].upper() + camel[1:]
+        base_name = camel[0].upper() + camel[1:]
+        name = base_name
+        counter = 2
+        while name in used_names:
+            name = f"{base_name}{counter}"
+            counter += 1
+        alias_map[union_str] = name
+        used_names.add(name)
     return alias_map
 
 

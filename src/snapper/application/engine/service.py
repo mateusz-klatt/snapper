@@ -15,7 +15,7 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
-from snapper.infrastructure.symbols.functions import TradingExchange
+from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -51,7 +51,7 @@ class TradingEngineService:
 
     instrument: str
     execution_socket: ValidatedPublisher
-    exchange: TradingExchange
+    exchange: OrderExchange
     cfg: EngineConfigModel
     portfolio: PortfolioTracker
     risk: RiskEvaluator
@@ -68,7 +68,7 @@ class TradingEngineService:
         cfg: EngineConfigModel | None = None,
         *,
         instrument_specs: dict[str, dict[str, float]] | None = None,
-        exchange: TradingExchange = "paper",
+        exchange: OrderExchange = "paper",
     ) -> None:
         """Initialize trading engine for a specific instrument.
 

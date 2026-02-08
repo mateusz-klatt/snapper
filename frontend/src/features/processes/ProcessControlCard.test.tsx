@@ -231,8 +231,8 @@ describe('ProcessControlCard', () => {
   })
   it('displays heartbeat data when provided', () => {
     const heartbeatData = {
-      component1: { status: 'ok', lag_ms: 50, timestamp: Date.now(), healthy: true },
-      component2: { status: 'unknown', lag_ms: undefined, timestamp: Date.now(), healthy: false },
+      component1: { status: 'healthy', lag_ms: 50, timestamp: Date.now(), healthy: true },
+      component2: { status: 'error', lag_ms: undefined, timestamp: Date.now(), healthy: false },
     }
 
     renderWithMocks(
@@ -278,7 +278,7 @@ describe('ProcessControlCard', () => {
   })
   it('displays custom heartbeat label', () => {
     const heartbeatData = {
-      feed: { status: 'ok', lag_ms: 10, timestamp: Date.now(), healthy: true },
+      feed: { status: 'healthy', lag_ms: 10, timestamp: Date.now(), healthy: true },
     }
 
     renderWithMocks(

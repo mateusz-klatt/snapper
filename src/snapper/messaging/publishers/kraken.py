@@ -34,6 +34,7 @@ from loguru import logger
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -98,7 +99,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """
         return KrakenExchangeClient()
 
-    def _get_exchange_name(self) -> str:
+    def _get_exchange_name(self) -> MarketDataExchange:
         """Get exchange identifier.
 
         Returns:

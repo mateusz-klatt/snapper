@@ -38,7 +38,7 @@ Fundamental types and aliases used throughout the application:
 - `OrderType` — Order type (`market`, `limit`, `stop`, `stop_limit`)
 - `OrderStatus` — Order status in lifecycle
 - `ExecutionMode` — Execution mode (`live`, `paper`)
-- `TradingExchange` — Supported exchanges (`kraken`, `zonda`, `walutomat`, `paper`)
+- `OrderExchange` — Order-capable exchanges (`paper`, `kraken`, `zonda`, `walutomat`)
 
 ### Config (`src/snapper/config/`)
 

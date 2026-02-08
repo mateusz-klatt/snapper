@@ -5,9 +5,9 @@ Processes order requests and reports fills for Zonda cryptocurrency exchange.
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
+from snapper.core.types import OrderExchange
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
-from snapper.infrastructure.symbols.functions import TradingExchange
 from snapper.messaging.executors.base import ExchangeExecutorService
 
 
@@ -35,5 +35,5 @@ class ZondaOrderExecutor(ExchangeExecutorService[ZondaExchangeClient]):
             repository=repository,
         )
 
-    def _get_exchange_name(self) -> TradingExchange:
+    def _get_exchange_name(self) -> OrderExchange:
         return "zonda"

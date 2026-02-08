@@ -1344,7 +1344,7 @@ describe('Strategies', () => {
       storedHeartbeatCallback(
         createHeartbeat('strategy_test', 'warning', 100, 1, {
           feed_health: {
-            binance: { status: 'ok', lag_ms: 10, heartbeat_age_ms: 100, healthy: true },
+            binance: { status: 'healthy', lag_ms: 10, heartbeat_age_ms: 100, healthy: true },
           },
           inputs: ['input1'],
           outputs: ['output1'],
@@ -1699,7 +1699,7 @@ describe('Strategies', () => {
       storedHeartbeatCallback(
         createHeartbeat('strategy_test', 'error', 500, 1, {
           feed_health: {
-            kraken: { status: 'ok', lag_ms: 10, heartbeat_age_ms: 100, healthy: true },
+            kraken: { status: 'healthy', lag_ms: 10, heartbeat_age_ms: 100, healthy: true },
           },
           inputs: ['feed.kraken.BTC-USD'],
           outputs: ['signal.macd'],

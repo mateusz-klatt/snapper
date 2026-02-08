@@ -17,7 +17,7 @@ export function createTestOrder(
   return {
     id: overrides.id,
     instrument: overrides.instrument,
-    exchange: overrides.exchange ?? 'test',
+    exchange: overrides.exchange ?? 'kraken',
     side: overrides.side ?? 'buy',
     orderType: overrides.orderType ?? 'limit',
     size: overrides.size ?? 1,
@@ -49,7 +49,7 @@ export function createTestExecution(
   return {
     id: overrides.id,
     orderId: overrides.orderId,
-    exchange: overrides.exchange ?? 'test',
+    exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     side: overrides.side ?? 'buy',
     size: overrides.size ?? 0.5,
@@ -72,7 +72,7 @@ export function createTestSignal(
 
   return {
     id: overrides.id ?? 1,
-    exchange: overrides.exchange ?? 'test',
+    exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument,
     side: overrides.side ?? 'buy',
     strength: overrides.strength ?? 0.8,
@@ -95,7 +95,7 @@ export function createTestPosition(
   return {
     id: overrides.id ?? 1,
     instrument: overrides.instrument,
-    exchange: overrides.exchange ?? 'test',
+    exchange: overrides.exchange ?? 'kraken',
     quantity: overrides.quantity ?? 1,
     averagePrice: overrides.averagePrice ?? 50000,
     unrealizedPnl: overrides.unrealizedPnl ?? 0,

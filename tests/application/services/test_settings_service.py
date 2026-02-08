@@ -63,7 +63,7 @@ async def feed_bar_to_strategy(
     strategy: BaseStrategy,
     instrument: str,
     close: float,
-    exchange: str = "paper",
+    exchange: str = "kraken",
 ) -> Signal | None:
     """Feed a bar envelope to a strategy and return generated signal."""
     bar = make_bar_envelope(instrument, close, exchange=exchange)

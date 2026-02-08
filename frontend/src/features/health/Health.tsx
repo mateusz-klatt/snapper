@@ -11,7 +11,7 @@ interface ProcessStatus {
   exit_code?: number | null
   error?: string | null
 }
-type HealthStatus = 'healthy' | 'warning' | 'critical'
+type HealthStatus = 'healthy' | 'warning' | 'error'
 
 interface HealthMetric {
   name: string
@@ -142,7 +142,7 @@ const MetricCard: React.FC<{ metric: HealthMetric }> = ({ metric }) => {
   const statusColors: Record<HealthMetric['status'], string> = {
     healthy: 'text-green-400 border-green-800 bg-green-900/20',
     warning: 'text-yellow-400 border-yellow-800 bg-yellow-900/20',
-    critical: 'text-red-400 border-red-800 bg-red-900/20',
+    error: 'text-red-400 border-red-800 bg-red-900/20',
   }
   const getStatusColor = (status: HealthMetric['status']) => statusColors[status]
 
@@ -165,7 +165,7 @@ export const Health: React.FC = () => {
   const backtestsList = Object.values(systemStatus?.backtests || {})
   const runningBacktests = backtestsList.filter(b => b.status === 'running').length
   const hasErroredBacktest = backtestsList.some(b => b.status === 'error')
-  const backtestStatus: HealthStatus = hasErroredBacktest ? 'critical' : 'healthy'
+  const backtestStatus: HealthStatus = hasErroredBacktest ? 'error' : 'healthy'
   const healthMetrics: HealthMetric[] = [
     {
       name: 'Trading Engine',
@@ -203,7 +203,7 @@ export const Health: React.FC = () => {
 
   const resolveOverallHealth = (): HealthStatus => {
     if (healthMetrics.every(m => m.status === 'healthy')) return 'healthy'
-    if (healthMetrics.some(m => m.status === 'critical')) return 'critical'
+    if (healthMetrics.some(m => m.status === 'error')) return 'error'
 
     return 'warning'
   }

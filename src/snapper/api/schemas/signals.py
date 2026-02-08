@@ -7,6 +7,7 @@ by signal-related endpoints.
 from datetime import datetime
 
 from snapper.api.schemas.base import StrictApiSchema
+from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import TradeSide
 
 
@@ -29,7 +30,7 @@ class TradingSignal(StrictApiSchema):
 
     id: int
     instrument: str
-    exchange: str
+    exchange: OrderExchange
     timestamp: datetime
     side: TradeSide
     strength: float

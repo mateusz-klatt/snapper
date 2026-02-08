@@ -48,7 +48,7 @@ Topic Hierarchy
 Message Types
 -------------
 MarketDataEnvelope
-    Base for tick, trade, bar, book data.
+    Base for tick, trade, bar data.
 OrderRequestEnvelope
     Order submission requests.
 OrderStatusEnvelope

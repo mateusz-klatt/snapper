@@ -30,8 +30,8 @@ class TestMarketTopic:
         When: Building tick topic,
         Then: Returns correctly formatted topic.
         """
-        result = market_topic("kraken", "BTC-USD", "tick")
-        assert result == "market.kraken.BTC-USD.tick"
+        result = market_topic("kraken", "BTC-USD", "ticks")
+        assert result == "market.kraken.BTC-USD.ticks"
 
     def test_tick_topic_various_exchanges(self) -> None:
         """Verify tick topic builds correctly with various exchanges.
@@ -40,12 +40,12 @@ class TestMarketTopic:
         When: Building tick topics,
         Then: Returns correctly formatted topics.
         """
-        assert market_topic("kraken", "ETH-USD", "tick") == "market.kraken.ETH-USD.tick"
+        assert market_topic("kraken", "ETH-USD", "ticks") == "market.kraken.ETH-USD.ticks"
         assert (
-            market_topic("paper", "BTC-USD", "tick", source_exchange="kraken")
-            == "market.paper.kraken.BTC-USD.tick"
+            market_topic("paper", "BTC-USD", "ticks", source_exchange="kraken")
+            == "market.paper.kraken.BTC-USD.ticks"
         )
-        assert market_topic("zonda", "BTC-PLN", "tick") == "market.zonda.BTC-PLN.tick"
+        assert market_topic("zonda", "BTC-PLN", "ticks") == "market.zonda.BTC-PLN.ticks"
 
     def test_trades_topic(self) -> None:
         """Verify trades topic builds correctly.
@@ -56,16 +56,6 @@ class TestMarketTopic:
         """
         result = market_topic("zonda", "BTC-PLN", "trades")
         assert result == "market.zonda.BTC-PLN.trades"
-
-    def test_book_topic(self) -> None:
-        """Verify book topic builds correctly.
-
-        Given: Exchange and instrument,
-        When: Building book topic,
-        Then: Returns correctly formatted topic.
-        """
-        result = market_topic("kraken", "BTC-USD", "book")
-        assert result == "market.kraken.BTC-USD.book"
 
     def test_candles_topic_with_timeframe(self) -> None:
         """Verify candles topic includes timeframe.
@@ -504,7 +494,7 @@ class TestParseOrderCommandTopic:
         When: Parsing as command topic,
         Then: Returns None.
         """
-        result = parse_order_command_topic("market.kraken.BTC-USD.tick")
+        result = parse_order_command_topic("market.kraken.BTC-USD.ticks")
         assert result is None
 
 
@@ -648,7 +638,7 @@ class TestIsOrderTopic:
         When: Checking if order topic,
         Then: Returns False.
         """
-        assert is_order_topic("market.kraken.BTC-USD.tick") is False
+        assert is_order_topic("market.kraken.BTC-USD.ticks") is False
         assert is_order_topic("market.paper.kraken.ETH-USD.candles.1m") is False
 
     def test_signal_topic_returns_false(self) -> None:

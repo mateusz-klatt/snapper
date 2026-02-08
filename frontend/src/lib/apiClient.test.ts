@@ -623,6 +623,7 @@ describe('domain API methods', () => {
       json: async () => [
         {
           instrument: 'BTC/USD',
+          exchange: 'kraken',
           timeframe: '1h',
           timestamp: '2024-01-01T00:00:00Z',
           open: 1,
@@ -672,7 +673,7 @@ describe('domain API methods', () => {
         {
           id: 1,
           instrument: 'BTC/USD',
-          exchange: 'test',
+          exchange: 'kraken',
           client_order_id: 'client-1',
           exchange_order_id: 'ex-1',
           created_at: '2024-01-01T00:00:00Z',
@@ -720,7 +721,7 @@ describe('domain API methods', () => {
           fee_asset: 'USD',
           instrument: 'BTC/USD',
           side: 'buy',
-          exchange: 'test',
+          exchange: 'kraken',
         },
       ],
     })
@@ -744,7 +745,7 @@ describe('domain API methods', () => {
           fee_asset: 'USD',
           instrument: 'BTC/USD',
           side: 'buy',
-          exchange: 'test',
+          exchange: 'kraken',
         },
       ],
     })
@@ -761,7 +762,7 @@ describe('domain API methods', () => {
         {
           id: 1,
           instrument: 'BTC/USD',
-          exchange: 'test',
+          exchange: 'kraken',
           quantity: 1,
           average_price: 50000,
           unrealized_pnl: 100,
@@ -782,7 +783,7 @@ describe('domain API methods', () => {
         {
           id: 1,
           instrument: 'BTC/USD',
-          exchange: 'test',
+          exchange: 'kraken',
           timestamp: '2024-01-01T00:00:00Z',
           side: 'buy',
           strength: 0.8,

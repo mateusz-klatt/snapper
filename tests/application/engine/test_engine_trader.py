@@ -494,7 +494,7 @@ class TestTraderCoverage:
             side="buy",
             strength=0.8,
             price=50000.0,
-            exchange="binance",
+            exchange="kraken",
             reason="test",
         )
         await trader._on_signal(signal_msg)
@@ -935,7 +935,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     coord_any = cast(Any, coord)
     coord_any._current_topic = "signals.invalid"
     signal_invalid_topic = SignalEnvelope(
-        instrument="BTC-USD", side="buy", strength=0.5, price=10.0, exchange="test", reason="test"
+        instrument="BTC-USD", side="buy", strength=0.5, price=10.0, exchange="kraken", reason="test"
     )
     await coord_any._on_signal(signal_invalid_topic)
     assert coord.engines == {}

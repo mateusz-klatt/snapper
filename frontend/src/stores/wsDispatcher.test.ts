@@ -327,7 +327,7 @@ describe('WSDispatcher', () => {
       const candleMessage = {
         type: 'bar',
         instrument: 'BTC-USD',
-        exchange: 'test',
+        exchange: 'kraken',
         timeframe: '1m',
         timestamp: nowIso,
         open: 49000,
@@ -350,7 +350,7 @@ describe('WSDispatcher', () => {
       const candleMessage: BarEnvelope = {
         type: 'bar',
         instrument: 'BTC-USD',
-        exchange: 'test',
+        exchange: 'kraken',
         timeframe: '1m',
         open: 50000,
         high: 51000,
@@ -363,7 +363,7 @@ describe('WSDispatcher', () => {
 
       candleHandler?.(candleMessage)
       expect(invalidateQueriesSpy).toHaveBeenCalledWith({
-        queryKey: ['candles', 'BTC-USD', 'test', '1m'],
+        queryKey: ['candles', 'BTC-USD', 'kraken', '1m'],
       })
     })
     it('order invalidation predicate correctly filters queries', () => {
@@ -499,7 +499,7 @@ describe('WSDispatcher', () => {
       const candleMessage: BarEnvelope = {
         type: 'bar',
         instrument: 'BTC-USD',
-        exchange: 'test',
+        exchange: 'kraken',
         timeframe: '1m',
         open: 50000,
         high: 51000,
@@ -512,7 +512,7 @@ describe('WSDispatcher', () => {
 
       candleHandler?.(candleMessage)
       expect(capturedQueryKey).toBeDefined()
-      expect(capturedQueryKey).toEqual(['candles', 'BTC-USD', 'test', '1m'])
+      expect(capturedQueryKey).toEqual(['candles', 'BTC-USD', 'kraken', '1m'])
       invalidateQueriesSpy.mockRestore()
     })
     it('candle message without instrument/timeframe invalidates via predicate', () => {
@@ -535,7 +535,7 @@ describe('WSDispatcher', () => {
       const candleMessage: BarEnvelope = {
         type: 'bar',
         instrument: '',
-        exchange: 'test',
+        exchange: 'kraken',
         timeframe: '',
         open: 50000,
         high: 51000,

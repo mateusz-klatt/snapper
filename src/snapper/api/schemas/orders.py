@@ -7,6 +7,7 @@ order-related endpoints.
 from datetime import datetime
 
 from snapper.api.schemas.base import StrictApiSchema
+from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import OrderStatus as OrderStatusLiteral
 from snapper.interface.websocket.schemas import OrderType
 from snapper.interface.websocket.schemas import TradeSide
@@ -36,7 +37,7 @@ class OrderStatus(StrictApiSchema):
 
     id: int
     instrument: str
-    exchange: str
+    exchange: OrderExchange
     client_order_id: str | None = None
     exchange_order_id: str | None = None
     created_at: datetime

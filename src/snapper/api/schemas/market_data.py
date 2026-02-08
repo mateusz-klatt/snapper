@@ -7,6 +7,7 @@ market data endpoints.
 from datetime import datetime
 
 from snapper.api.schemas.base import StrictApiSchema
+from snapper.core.types import MarketDataExchange
 
 
 class CandleSnapshot(StrictApiSchema):
@@ -16,6 +17,7 @@ class CandleSnapshot(StrictApiSchema):
 
     Attributes:
         instrument: Trading instrument symbol.
+        exchange: Source exchange that produced this candle data.
         timeframe: Candle timeframe (e.g., '1m', '1h', '1d').
         timestamp: Candle open timestamp.
         open: Opening price.
@@ -28,6 +30,7 @@ class CandleSnapshot(StrictApiSchema):
     """
 
     instrument: str
+    exchange: MarketDataExchange
     timeframe: str
     timestamp: datetime
     open: float

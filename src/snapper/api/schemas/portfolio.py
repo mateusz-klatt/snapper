@@ -7,6 +7,7 @@ returned by portfolio-related endpoints.
 from datetime import datetime
 
 from snapper.api.schemas.base import StrictApiSchema
+from snapper.core.types import OrderExchange
 
 
 class PositionSnapshot(StrictApiSchema):
@@ -27,7 +28,7 @@ class PositionSnapshot(StrictApiSchema):
 
     id: int
     instrument: str
-    exchange: str
+    exchange: OrderExchange
     quantity: float
     average_price: float
     unrealized_pnl: float

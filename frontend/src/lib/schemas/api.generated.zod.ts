@@ -27,6 +27,7 @@ export const AvailableProcessSchema = z
 export const CandleSnapshotSchema = z
   .object({
     instrument: z.string(),
+    exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     timeframe: z.string(),
     timestamp: z.iso.datetime(),
     open: z.number(),
@@ -87,7 +88,7 @@ export const ExecutionRecordSchema = z
     fee_asset: z.string(),
     instrument: z.string(),
     side: z.enum(['buy', 'sell']),
-    exchange: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
   })
   .strict()
 
@@ -116,7 +117,7 @@ export const OrderStatusSchema = z
   .object({
     id: z.number().int(),
     instrument: z.string(),
-    exchange: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     client_order_id: z.string().nullable().optional(),
     exchange_order_id: z.string().nullable().optional(),
     created_at: z.iso.datetime(),
@@ -143,7 +144,7 @@ export const PositionSnapshotSchema = z
   .object({
     id: z.number().int(),
     instrument: z.string(),
-    exchange: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     quantity: z.number(),
     average_price: z.number(),
     unrealized_pnl: z.number(),
@@ -304,7 +305,7 @@ export const TradingSignalSchema = z
   .object({
     id: z.number().int(),
     instrument: z.string(),
-    exchange: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     timestamp: z.iso.datetime(),
     side: z.enum(['buy', 'sell']),
     strength: z.number(),
@@ -379,7 +380,7 @@ export const ConfiguredProcessesResponseSchema = z
 
 export const HealthCheckResponseSchema = z
   .object({
-    status: z.enum(['healthy', 'unhealthy', 'warning', 'error']),
+    status: z.enum(['healthy', 'warning', 'error']),
     timestamp: z.iso.datetime(),
     version: z.string(),
     connections: ConnectionStatsSchemaSchema,
@@ -458,7 +459,7 @@ export const WsStatsResponseSchema = z
 
 export const ZmqHealthResponseSchema = z
   .object({
-    status: z.enum(['healthy', 'unhealthy', 'warning', 'error']),
+    status: z.enum(['healthy', 'warning', 'error']),
     timestamp: z.iso.datetime(),
     components: ZmqComponentsSchema,
     config: ZmqConfigSchema,

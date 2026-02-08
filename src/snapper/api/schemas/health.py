@@ -80,7 +80,7 @@ class HealthCheckResponse(StrictApiSchema):
     connection statistics, and topic availability.
 
     Attributes:
-        status: Overall service health status (healthy/unhealthy).
+        status: Overall service health status (healthy/warning/error).
         timestamp: Timestamp of the health check.
         version: Application version string.
         connections: Connection statistics.
@@ -131,7 +131,7 @@ class ZmqHealthResponse(StrictApiSchema):
         config: ZMQ configuration.
         connections: Connection statistics.
         message_stats: Message statistics per topic.
-        errors: Error messages if unhealthy.
+        errors: Error messages if not healthy.
     """
 
     status: HealthStatus = Field(description="Overall ZMQ bridge health status")
@@ -142,7 +142,7 @@ class ZmqHealthResponse(StrictApiSchema):
     message_stats: dict[str, TopicMetricSnapshotSchema] = Field(
         description="Message statistics per topic"
     )
-    errors: list[str] = Field(default_factory=list, description="Error messages if unhealthy")
+    errors: list[str] = Field(default_factory=list, description="Error messages if not healthy")
 
 
 class WebSocketStats(StrictApiSchema):

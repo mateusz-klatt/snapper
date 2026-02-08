@@ -26,7 +26,7 @@ TopicValidationError
 Topic Categories
 ----------------
 market
-    Real-time market data (ticks, candles, trades, book).
+    Real-time market data (ticks, candles, trades).
 orders.commands
     Order command messages (submit, cancel, replace).
 orders.events
@@ -61,8 +61,8 @@ from typing import get_args
 from snapper.core.types import MarketDataType
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols
+from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
-from snapper.infrastructure.symbols.functions import get_replay_source_exchanges
 
 __all__ = ["validate_topic", "validate_subscription_pattern", "TopicValidationError"]
 logger = logging.getLogger(__name__)
@@ -471,7 +471,7 @@ def _validate_feed_heartbeat(segments: list[str]) -> tuple[bool, str]:
         system.heartbeats.feed.paper.{source} — paper replay (5 segments)
 
     Live feed exchange must be in MarketSubscribeExchange (kraken/zonda/walutomat).
-    Paper source must be in ReplaySourceExchange (kraken/zonda/walutomat/polygon).
+    Paper source must be in MarketDataExchange (kraken/zonda/walutomat/polygon).
 
     Args:
         segments: Split topic segments starting with system.heartbeats.feed.
@@ -763,7 +763,7 @@ def _validate_replay_source(exchange: str) -> tuple[bool, str]:
     """
     if not exchange:
         return False, "Source exchange cannot be empty"
-    valid = set(get_replay_source_exchanges())
+    valid = set(get_market_data_exchanges())
     if exchange not in valid:
         return (
             False,

@@ -7,6 +7,7 @@ returned by execution-related endpoints.
 from datetime import datetime
 
 from snapper.api.schemas.base import StrictApiSchema
+from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import TradeSide
 
 
@@ -37,4 +38,4 @@ class ExecutionRecord(StrictApiSchema):
     fee_asset: str
     instrument: str
     side: TradeSide
-    exchange: str
+    exchange: OrderExchange

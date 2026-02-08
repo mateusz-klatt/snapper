@@ -26,13 +26,13 @@ Example:
     "BTC-USD"
 """
 
+from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketSubscribeExchange
-from snapper.core.types import ReplaySourceExchange
-from snapper.core.types import TradingExchange
+from snapper.core.types import OrderExchange
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 
 __all__ = [
-    "TradingExchange",
+    "OrderExchange",
     "kraken_websocket_to_ccxt",
     "ccxt_to_kraken_websocket",
     "native_to_ccxt",
@@ -59,7 +59,7 @@ __all__ = [
     "validate_symbol",
     "get_available_exchanges",
     "get_market_subscribe_exchanges",
-    "get_replay_source_exchanges",
+    "get_market_data_exchanges",
     "get_available_polygon_rest_symbols",
     "get_available_walutomat_rest_symbols",
     "is_tradeable",
@@ -494,7 +494,7 @@ def get_available_symbols() -> list[str]:
     return sorted(all_symbols)
 
 
-def get_available_exchanges() -> list[TradingExchange]:
+def get_available_exchanges() -> list[OrderExchange]:
     """Get list of order-capable trading exchanges.
 
     Returns:
@@ -512,7 +512,7 @@ def get_market_subscribe_exchanges() -> list[MarketSubscribeExchange]:
     return ["kraken", "walutomat", "zonda"]
 
 
-def get_replay_source_exchanges() -> list[ReplaySourceExchange]:
+def get_market_data_exchanges() -> list[MarketDataExchange]:
     """Get exchanges valid as paper replay data sources.
 
     Returns:

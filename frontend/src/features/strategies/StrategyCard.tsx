@@ -2,13 +2,13 @@ import React, { useState } from 'react'
 import clsx from 'clsx'
 
 interface FeedHealth {
-  status: string
+  status: 'healthy' | 'warning' | 'error'
   lag_ms: number
   heartbeat_age_ms: number
   healthy: boolean
 }
 interface HealthStatus {
-  status: 'ok' | 'warn' | 'error'
+  status: 'healthy' | 'warning' | 'error'
   lag_ms: number
   timestamp: number
   seq?: number
@@ -45,15 +45,15 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
     const showStopButton = running || isStopping
     const healthColor = health
       ? {
-          ok: 'bg-green-500',
-          warn: 'bg-orange-500',
+          healthy: 'bg-green-500',
+          warning: 'bg-orange-500',
           error: 'bg-red-500',
         }[health.status]
       : 'bg-gray-400'
     const healthLabel = health
       ? {
-          ok: 'Healthy - receiving fresh data',
-          warn: 'Warning - data is stale',
+          healthy: 'Healthy - receiving fresh data',
+          warning: 'Warning - data is stale',
           error: 'Error - no recent data',
         }[health.status]
       : 'Unknown - no heartbeat data'
@@ -135,8 +135,8 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
                 <div className='text-dark-400 mb-1'>Status</div>
                 <div
                   className={clsx('font-medium', {
-                    'text-green-400': health.status === 'ok',
-                    'text-orange-400': health.status === 'warn',
+                    'text-green-400': health.status === 'healthy',
+                    'text-orange-400': health.status === 'warning',
                     'text-red-400': health.status === 'error',
                   })}
                 >
@@ -239,8 +239,8 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
                               </div>
                               <span
                                 className={clsx('text-xs', {
-                                  'text-green-400': feed.status === 'ok',
-                                  'text-orange-400': feed.status === 'warn',
+                                  'text-green-400': feed.status === 'healthy',
+                                  'text-orange-400': feed.status === 'warning',
                                   'text-red-400': feed.status === 'error',
                                 })}
                               >
