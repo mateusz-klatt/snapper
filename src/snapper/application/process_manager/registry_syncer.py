@@ -9,6 +9,7 @@ import json
 from collections.abc import Iterable
 from datetime import UTC
 from datetime import datetime
+from enum import Enum
 from typing import Any
 from typing import cast
 
@@ -158,7 +159,7 @@ class ProcessRegistrySyncer:
         Returns:
             True if config_dict was updated.
         """
-        new_value = meta_value.value if hasattr(meta_value, "value") else str(meta_value)
+        new_value = meta_value.value if isinstance(meta_value, Enum) else str(meta_value)
         if config_dict.get(field_key) == new_value:
             return False
         config_dict[field_key] = new_value

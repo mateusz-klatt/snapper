@@ -23,6 +23,7 @@ Type Aliases:
     ProcessLifecycleType: Process duration type.
     ProcessRoleType: Process role in the system.
     ProcessRunStatusType: Current process execution state.
+    IndicatorBackend: Technical indicator computation backend.
 """
 
 from typing import Literal
@@ -115,6 +116,10 @@ ProcessRoleType = Literal["core", "task", "strategy", "backtest"]
 
 ProcessRunStatusType = Literal["running", "succeeded", "failed", "cancelled"]
 """Current execution state of a managed process."""
+
+IndicatorBackend = Literal["talib", "python"]
+"""Technical indicator computation backend: 'talib' for TA-Lib C library, 'python' for pure Python."""
+
 __all__ = [
     "AllExchange",
     "ComponentStatus",
@@ -130,6 +135,7 @@ __all__ = [
     "ReplaySourceExchange",
     "TradingExchange",
     "HealthStatus",
+    "IndicatorBackend",
     "ProcessLifecycleType",
     "ProcessRoleType",
     "ProcessRunStatusType",

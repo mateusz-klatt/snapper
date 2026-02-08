@@ -26,6 +26,7 @@ from typing import Any
 
 import pandas as pd
 
+from snapper.core.types import IndicatorBackend
 from snapper.indicators.macd import macd as python_macd
 from snapper.indicators.rsi import rsi as python_rsi
 
@@ -100,7 +101,7 @@ def is_talib_available() -> bool:
     return _talib_available
 
 
-def get_backend() -> str:
+def get_backend() -> IndicatorBackend:
     """Get the current indicator backend name.
 
     Returns:
