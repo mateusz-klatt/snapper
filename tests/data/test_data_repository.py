@@ -372,6 +372,13 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
     commit_should_fail: dict[str, bool] = {"pending": True}
     scalar_one_called: dict[str, bool] = {"value": False}
 
+    class _SyncSavepoint:
+        def __enter__(self) -> "_SyncSavepoint":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            return None
+
     class DummySession:
         def __init__(self) -> None:
             self._last_added: Any | None = None
@@ -382,6 +389,9 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
             return None
+
+        def begin_nested(self) -> "_SyncSavepoint":
+            return _SyncSavepoint()
 
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self._execute_count += 1
@@ -830,6 +840,9 @@ async def test_mssql_get_market_snapshots_returns_results(
             self.ask_volume = 2.0
             self.last_price = 42050.0
             self.volume_24h = 100.0
+            self.vwap_24h = 42025.0
+            self.low_24h = 41500.0
+            self.high_24h = 42500.0
 
     class FakeSession:
         def __enter__(self) -> "FakeSession":
@@ -864,9 +877,18 @@ async def test_mssql_get_market_snapshots_returns_results(
         end=datetime(2024, 1, 2, tzinfo=UTC),
     )
     assert len(snapshots) == 1
-    assert snapshots[0]["exchange"] == "kraken"
-    assert snapshots[0]["symbol"] == "BTC/USD"
-    assert snapshots[0]["bid"] == pytest.approx(42000.0)
+    snap = snapshots[0]
+    assert snap["exchange"] == "kraken"
+    assert snap["symbol"] == "BTC/USD"
+    assert snap["bid"] == pytest.approx(42000.0)
+    assert snap["bid_volume"] == pytest.approx(1.5)
+    assert snap["ask_volume"] == pytest.approx(2.0)
+    assert snap["last"] == pytest.approx(42050.0)
+    assert snap["volume"] == pytest.approx(100.0)
+    assert snap["vwap"] == pytest.approx(42025.0)
+    assert snap["low"] == pytest.approx(41500.0)
+    assert snap["high"] == pytest.approx(42500.0)
+    assert snap["ts"] == datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -889,6 +911,7 @@ async def test_mssql_get_trades_returns_results(
         price = 42000.0
         size = 0.5
         side = "buy"
+        trade_id = "t-123"
 
     call_count = 0
 
@@ -938,6 +961,7 @@ async def test_mssql_get_trades_returns_results(
     assert len(trades) == 1
     assert trades[0]["price"] == pytest.approx(42000.0)
     assert trades[0]["side"] == "buy"
+    assert trades[0]["trade_id"] == "t-123"
 
 
 TEST_TIMEOUT = 5

@@ -35,6 +35,7 @@ import asyncio
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -337,77 +338,61 @@ class SQLAlchemyRepository(Repository):
             else:
                 return int(inst.id)
 
-    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        """Insert candles with dialect-specific conflict handling."""
-        if not rows:
-            return 0
+    async def _upsert_batch(
+        self, model: type[Base], rows: list[dict[str, Any]], index_elements: list[str]
+    ) -> int:
+        """Dialect-aware batch upsert with conflict-do-nothing.
+
+        Uses SQLite/PostgreSQL native INSERT ... ON CONFLICT DO NOTHING
+        when available, falling back to row-by-row IntegrityError handling.
+
+        Args:
+            model: SQLAlchemy model class to insert into.
+            rows: List of column-value dicts.
+            index_elements: Columns that form the unique constraint.
+
+        Returns:
+            Number of rows successfully inserted.
+        """
         name = self.dialect_name
         if name == "sqlite":
             async with self.session() as s:
-                stmt_sqlite = sqlite_insert(Candle).values(rows)
-                stmt_sqlite = stmt_sqlite.on_conflict_do_nothing(
-                    index_elements=["instrument_id", "timeframe", "timestamp"]
-                )
-                res = await s.execute(stmt_sqlite)
+                stmt_sq = sqlite_insert(model).values(rows)
+                stmt_sq = stmt_sq.on_conflict_do_nothing(index_elements=index_elements)
+                res = await s.execute(stmt_sq)
                 await s.commit()
-                rowcount = cast(Any, res).rowcount
-                return int(rowcount or 0)
+                return int(cast(Any, res).rowcount or 0)
         elif name.startswith("postgres"):
             async with self.session() as s:
-                stmt_pg = pg_insert(Candle).values(rows)
-                stmt_pg = stmt_pg.on_conflict_do_nothing(
-                    index_elements=["instrument_id", "timeframe", "timestamp"]
-                )
+                stmt_pg = pg_insert(model).values(rows)
+                stmt_pg = stmt_pg.on_conflict_do_nothing(index_elements=index_elements)
                 res = await s.execute(stmt_pg)
                 await s.commit()
-                rowcount = cast(Any, res).rowcount
-                return int(rowcount or 0)
+                return int(cast(Any, res).rowcount or 0)
         else:
             async with self.session() as s:
                 inserted = 0
                 for r in rows:
                     try:
-                        await s.execute(insert(Candle).values(**r))
+                        async with s.begin_nested():
+                            await s.execute(insert(model).values(**r))
                         inserted += 1
                     except IntegrityError:
-                        await s.rollback()
                         continue
                 await s.commit()
                 return inserted
+
+    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
+        """Insert candles with dialect-specific conflict handling."""
+        if not rows:
+            return 0
+        return await self._upsert_batch(Candle, rows, ["instrument_id", "timeframe", "timestamp"])
 
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         """Insert trades with dialect-specific conflict handling."""
         if not rows:
             return 0
-        name = self.dialect_name
-        if name == "sqlite":
-            async with self.session() as s:
-                stmt_sqlite = sqlite_insert(Trade).values(rows)
-                stmt_sqlite = stmt_sqlite.on_conflict_do_nothing(index_elements=["trade_id"])
-                res = await s.execute(stmt_sqlite)
-                await s.commit()
-                rowcount = cast(Any, res).rowcount
-                return int(rowcount or 0)
-        elif name.startswith("postgres"):
-            async with self.session() as s:
-                stmt_pg = pg_insert(Trade).values(rows)
-                stmt_pg = stmt_pg.on_conflict_do_nothing(index_elements=["trade_id"])
-                res = await s.execute(stmt_pg)
-                await s.commit()
-                rowcount = cast(Any, res).rowcount
-                return int(rowcount or 0)
-        else:
-            async with self.session() as s:
-                inserted = 0
-                for r in rows:
-                    try:
-                        await s.execute(insert(Trade).values(**r))
-                        inserted += 1
-                    except IntegrityError:
-                        await s.rollback()
-                        continue
-                await s.commit()
-                return inserted
+        return await self._upsert_batch(Trade, rows, ["trade_id"])
 
     async def insert_order(
         self,
@@ -793,83 +778,100 @@ class MSSQLRepository(Repository):
         """Not implemented for MSSQL repository."""
         raise NotImplementedError("MSSQLRepository session() not implemented for server use")
 
+    async def _run_sync[T](self, fn: Callable[[SyncSession], T]) -> T:
+        """Execute a sync session callback in a background thread.
+
+        Opens a sync session, passes it to ``fn``, and runs the whole
+        closure via ``asyncio.to_thread`` so the event-loop stays free.
+
+        Args:
+            fn: Callable receiving a SyncSession and returning T.
+
+        Returns:
+            The value returned by *fn*.
+        """
+
+        def _work() -> T:
+            with self.session_factory() as s:
+                return fn(s)
+
+        return await asyncio.to_thread(_work)
+
+    @staticmethod
+    def _sync_upsert_batch(s: SyncSession, model: type[Base], rows: list[dict[str, Any]]) -> int:
+        """Insert rows one-by-one, skipping duplicates via SAVEPOINT.
+
+        Each row is wrapped in a nested transaction (SAVEPOINT) so that
+        an IntegrityError only rolls back the failing row, preserving
+        previously inserted rows and keeping the counter accurate.
+
+        Args:
+            s: Active sync session.
+            model: SQLAlchemy model class to insert into.
+            rows: List of column-value dicts.
+
+        Returns:
+            Number of rows successfully inserted.
+        """
+        inserted = 0
+        for r in rows:
+            try:
+                with s.begin_nested():
+                    s.execute(insert(model).values(**r))
+                inserted += 1
+            except IntegrityError:
+                continue
+        s.commit()
+        return inserted
+
     async def upsert_instrument(self, **kwargs: Any) -> int:
         """Insert or retrieve instrument by (symbol, exchange) via sync thread."""
         filtered = _filter_instrument_kwargs(kwargs)
         exchange = filtered["exchange"]
 
-        def _work() -> int:
-            with self.session_factory() as s:
-                q = s.execute(
-                    select(Instrument).where(
-                        and_(Instrument.symbol == kwargs["symbol"], Instrument.exchange == exchange)
-                    )
+        def _do(s: SyncSession) -> int:
+            q = s.execute(
+                select(Instrument).where(
+                    and_(Instrument.symbol == kwargs["symbol"], Instrument.exchange == exchange)
                 )
-                inst = q.scalar_one_or_none()
-                if inst is None:
-                    inst = Instrument(**filtered)
-                    s.add(inst)
-                    try:
-                        s.commit()
-                    except IntegrityError as exc:
-                        s.rollback()
-                        q2 = s.execute(
-                            select(Instrument).where(
-                                and_(
-                                    Instrument.symbol == kwargs["symbol"],
-                                    Instrument.exchange == exchange,
-                                )
+            )
+            inst = q.scalar_one_or_none()
+            if inst is None:
+                inst = Instrument(**filtered)
+                s.add(inst)
+                try:
+                    s.commit()
+                except IntegrityError as exc:
+                    s.rollback()
+                    q2 = s.execute(
+                        select(Instrument).where(
+                            and_(
+                                Instrument.symbol == kwargs["symbol"],
+                                Instrument.exchange == exchange,
                             )
                         )
-                        inst = q2.scalar_one_or_none()
-                        if inst is None:
-                            raise exc
-                    s.refresh(inst)
-                    return int(inst.id)
-                else:
-                    return int(inst.id)
+                    )
+                    inst = q2.scalar_one_or_none()
+                    if inst is None:
+                        raise exc
+                s.refresh(inst)
+                return int(inst.id)
+            else:
+                return int(inst.id)
 
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(_do)
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Insert candles via sync thread, skipping duplicates."""
         if not rows:
             return 0
-
-        def _work() -> int:
-            inserted = 0
-            with self.session_factory() as s:
-                for r in rows:
-                    try:
-                        s.execute(insert(Candle).values(**r))
-                        inserted += 1
-                    except IntegrityError:
-                        s.rollback()
-                        continue
-                s.commit()
-            return inserted
-
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(lambda s: self._sync_upsert_batch(s, Candle, rows))
 
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         """Insert trades via sync thread, skipping duplicates."""
         if not rows:
             return 0
-
-        def _work() -> int:
-            inserted = 0
-            with self.session_factory() as s:
-                for r in rows:
-                    try:
-                        s.execute(insert(Trade).values(**r))
-                        inserted += 1
-                    except IntegrityError:
-                        s.rollback()
-                        continue
-                s.commit()
-            return inserted
-
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(lambda s: self._sync_upsert_batch(s, Trade, rows))
 
     async def insert_order(
         self,
@@ -886,28 +888,27 @@ class MSSQLRepository(Repository):
     ) -> int:
         """Insert order record via sync thread."""
 
-        def _work() -> int:
-            with self.session_factory() as s:
-                order = OrderRecord(
-                    instrument_id=instrument_id,
-                    client_order_id=client_order_id,
-                    exchange_order_id=exchange_order_id,
-                    created_at=created_at,
-                    updated_at=None,
-                    side=side,
-                    type=order_type,
-                    price=price,
-                    size=size,
-                    status=status,
-                    time_in_force=time_in_force,
-                    error=None,
-                )
-                s.add(order)
-                s.commit()
-                s.refresh(order)
-                return int(order.id)
+        def _do(s: SyncSession) -> int:
+            order = OrderRecord(
+                instrument_id=instrument_id,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                created_at=created_at,
+                updated_at=None,
+                side=side,
+                type=order_type,
+                price=price,
+                size=size,
+                status=status,
+                time_in_force=time_in_force,
+                error=None,
+            )
+            s.add(order)
+            s.commit()
+            s.refresh(order)
+            return int(order.id)
 
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(_do)
 
     async def update_order(
         self,
@@ -919,26 +920,25 @@ class MSSQLRepository(Repository):
     ) -> None:
         """Update order status via sync thread."""
 
-        def _work() -> None:
-            with self.session_factory() as s:
-                stmt = (
-                    update(OrderRecord)
-                    .where(OrderRecord.id == order_id)
-                    .values(
-                        status=status,
-                        updated_at=updated_at,
-                        exchange_order_id=(
-                            exchange_order_id
-                            if exchange_order_id is not None
-                            else OrderRecord.exchange_order_id
-                        ),
-                        error=error if error is not None else OrderRecord.error,
-                    )
+        def _do(s: SyncSession) -> None:
+            stmt = (
+                update(OrderRecord)
+                .where(OrderRecord.id == order_id)
+                .values(
+                    status=status,
+                    updated_at=updated_at,
+                    exchange_order_id=(
+                        exchange_order_id
+                        if exchange_order_id is not None
+                        else OrderRecord.exchange_order_id
+                    ),
+                    error=error if error is not None else OrderRecord.error,
                 )
-                s.execute(stmt)
-                s.commit()
+            )
+            s.execute(stmt)
+            s.commit()
 
-        await asyncio.to_thread(_work)
+        await self._run_sync(_do)
 
     async def insert_execution(
         self,
@@ -953,24 +953,23 @@ class MSSQLRepository(Repository):
     ) -> int:
         """Insert execution record via sync thread."""
 
-        def _work() -> int:
-            with self.session_factory() as s:
-                execution = Execution(
-                    order_id=order_id,
-                    exec_id=exec_id,
-                    trade_id=trade_id,
-                    timestamp=timestamp,
-                    price=price,
-                    size=size,
-                    fee=fee,
-                    fee_asset=fee_asset,
-                )
-                s.add(execution)
-                s.commit()
-                s.refresh(execution)
-                return int(execution.id)
+        def _do(s: SyncSession) -> int:
+            execution = Execution(
+                order_id=order_id,
+                exec_id=exec_id,
+                trade_id=trade_id,
+                timestamp=timestamp,
+                price=price,
+                size=size,
+                fee=fee,
+                fee_asset=fee_asset,
+            )
+            s.add(execution)
+            s.commit()
+            s.refresh(execution)
+            return int(execution.id)
 
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(_do)
 
     async def get_candles(
         self,
@@ -982,136 +981,151 @@ class MSSQLRepository(Repository):
     ) -> list[dict[str, Any]]:
         """Retrieve candles via sync thread."""
 
-        def _work() -> list[dict[str, Any]]:
-            with self.session_factory() as s:
-                q_inst = s.execute(
-                    select(Instrument).where(
-                        and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+        def _do(s: SyncSession) -> list[dict[str, Any]]:
+            q_inst = s.execute(
+                select(Instrument).where(
+                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                )
+            )
+            inst = q_inst.scalars().first()
+            if inst is None:
+                return []
+            q = s.execute(
+                select(
+                    Candle.timestamp,
+                    Candle.timeframe,
+                    Candle.open,
+                    Candle.high,
+                    Candle.low,
+                    Candle.close,
+                    Candle.volume,
+                    Candle.vwap,
+                    Candle.trades,
+                )
+                .where(
+                    and_(
+                        Candle.instrument_id == inst.id,
+                        Candle.timeframe == timeframe,
+                        Candle.timestamp >= start,
+                        Candle.timestamp <= end,
                     )
                 )
-                inst = q_inst.scalars().first()
-                if inst is None:
-                    return []
-                q = s.execute(
-                    select(
-                        Candle.timestamp,
-                        Candle.timeframe,
-                        Candle.open,
-                        Candle.high,
-                        Candle.low,
-                        Candle.close,
-                        Candle.volume,
-                        Candle.vwap,
-                        Candle.trades,
-                    )
-                    .where(
-                        and_(
-                            Candle.instrument_id == inst.id,
-                            Candle.timeframe == timeframe,
-                            Candle.timestamp >= start,
-                            Candle.timestamp <= end,
-                        )
-                    )
-                    .order_by(Candle.timestamp.asc())
-                )
-                rows = q.all()
-                return [
-                    {
-                        "timestamp": r.timestamp,
-                        "timeframe": r.timeframe,
-                        "open": r.open,
-                        "high": r.high,
-                        "low": r.low,
-                        "close": r.close,
-                        "volume": r.volume,
-                        "vwap": r.vwap,
-                        "trades": r.trades,
-                    }
-                    for r in rows
-                ]
+                .order_by(Candle.timestamp.asc())
+            )
+            rows = q.all()
+            return [
+                {
+                    "timestamp": r.timestamp,
+                    "timeframe": r.timeframe,
+                    "open": r.open,
+                    "high": r.high,
+                    "low": r.low,
+                    "close": r.close,
+                    "volume": r.volume,
+                    "vwap": r.vwap,
+                    "trades": r.trades,
+                }
+                for r in rows
+            ]
 
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(_do)
 
     async def get_trades(
         self, instrument: str, start: datetime, end: datetime, exchange: str
     ) -> list[dict[str, Any]]:
         """Retrieve trades via sync thread."""
 
-        def _work() -> list[dict[str, Any]]:
-            with self.session_factory() as s:
-                q_inst = s.execute(
-                    select(Instrument).where(
-                        and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+        def _do(s: SyncSession) -> list[dict[str, Any]]:
+            q_inst = s.execute(
+                select(Instrument).where(
+                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                )
+            )
+            inst = q_inst.scalars().first()
+            if inst is None:
+                return []
+            q = s.execute(
+                select(
+                    Trade.timestamp,
+                    Trade.price,
+                    Trade.size,
+                    Trade.side,
+                    Trade.trade_id,
+                )
+                .where(
+                    and_(
+                        Trade.instrument_id == inst.id,
+                        Trade.timestamp >= start,
+                        Trade.timestamp <= end,
                     )
                 )
-                inst = q_inst.scalars().first()
-                if inst is None:
-                    return []
-                q = s.execute(
-                    select(
-                        Trade.timestamp,
-                        Trade.price,
-                        Trade.size,
-                        Trade.side,
-                    )
-                    .where(
-                        and_(
-                            Trade.instrument_id == inst.id,
-                            Trade.timestamp >= start,
-                            Trade.timestamp <= end,
-                        )
-                    )
-                    .order_by(Trade.timestamp.asc())
-                )
-                rows = q.all()
-                return [
-                    {
-                        "timestamp": r.timestamp,
-                        "price": r.price,
-                        "size": r.size,
-                        "side": r.side,
-                    }
-                    for r in rows
-                ]
+                .order_by(Trade.timestamp.asc())
+            )
+            rows = q.all()
+            return [
+                {
+                    "timestamp": r.timestamp,
+                    "price": r.price,
+                    "size": r.size,
+                    "side": r.side,
+                    "trade_id": r.trade_id,
+                }
+                for r in rows
+            ]
 
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(_do)
 
     async def get_market_snapshots(
         self, exchange: str, symbols: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         """Retrieve market snapshots via sync thread."""
 
-        def _work() -> list[dict[str, Any]]:
-            with self.session_factory() as s:
-                q = s.execute(
-                    select(MarketSnapshot)
-                    .where(
-                        and_(
-                            MarketSnapshot.exchange == exchange,
-                            MarketSnapshot.symbol.in_(symbols),
-                            MarketSnapshot.updated_at >= start,
-                            MarketSnapshot.updated_at <= end,
-                        )
-                    )
-                    .order_by(MarketSnapshot.updated_at.asc())
+        def _do(s: SyncSession) -> list[dict[str, Any]]:
+            q = s.execute(
+                select(
+                    MarketSnapshot.updated_at,
+                    MarketSnapshot.symbol,
+                    MarketSnapshot.exchange,
+                    MarketSnapshot.bid,
+                    MarketSnapshot.bid_volume,
+                    MarketSnapshot.ask,
+                    MarketSnapshot.ask_volume,
+                    MarketSnapshot.last_price,
+                    MarketSnapshot.volume_24h,
+                    MarketSnapshot.vwap_24h,
+                    MarketSnapshot.low_24h,
+                    MarketSnapshot.high_24h,
                 )
-                rows = q.scalars().all()
-                return [
-                    {
-                        "exchange": r.exchange,
-                        "symbol": r.symbol,
-                        "timestamp": r.updated_at,
-                        "bid": r.bid,
-                        "ask": r.ask,
-                        "bid_size": r.bid_volume,
-                        "ask_size": r.ask_volume,
-                        "last_price": r.last_price,
-                        "volume_24h": r.volume_24h,
-                    }
-                    for r in rows
-                ]
+                .where(
+                    and_(
+                        MarketSnapshot.exchange == exchange,
+                        MarketSnapshot.symbol.in_(symbols),
+                        MarketSnapshot.updated_at >= start,
+                        MarketSnapshot.updated_at <= end,
+                    )
+                )
+                .order_by(MarketSnapshot.updated_at.asc())
+            )
+            rows = q.all()
+            return [
+                {
+                    "ts": r.updated_at,
+                    "symbol": r.symbol,
+                    "exchange": r.exchange,
+                    "bid": r.bid,
+                    "bid_volume": r.bid_volume,
+                    "ask": r.ask,
+                    "ask_volume": r.ask_volume,
+                    "last": r.last_price,
+                    "volume": r.volume_24h,
+                    "vwap": r.vwap_24h,
+                    "low": r.low_24h,
+                    "high": r.high_24h,
+                }
+                for r in rows
+            ]
 
-        return await asyncio.to_thread(_work)
+        return await self._run_sync(_do)
 
 
 class DatabaseRepository:

@@ -49,12 +49,16 @@ class _DummyAsyncSession:
         self.calls = 0
         self.rollback_called = False
         self.commit_called = False
+        self.savepoint_rollbacks = 0
 
     async def __aenter__(self) -> "_DummyAsyncSession":
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         return False
+
+    def begin_nested(self) -> "_DummyAsyncSavepoint":
+        return _DummyAsyncSavepoint(self)
 
     async def execute(self, stmt: Any) -> Any:
         self.calls += 1
@@ -67,6 +71,24 @@ class _DummyAsyncSession:
 
     async def rollback(self) -> None:
         self.rollback_called = True
+
+
+class _DummyAsyncSavepoint:
+    def __init__(self, parent: _DummyAsyncSession) -> None:
+        self._parent = parent
+
+    async def __aenter__(self) -> "_DummyAsyncSavepoint":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is not None:
+            self._parent.savepoint_rollbacks += 1
+        return False
+
+
+def _patch_begin_nested(mock_session: AsyncMock) -> None:
+    """Configure begin_nested on an AsyncMock session as a sync call returning async CM."""
+    mock_session.begin_nested = Mock(return_value=AsyncMock())
 
 
 @asynccontextmanager
@@ -133,7 +155,7 @@ async def test_upsert_candles_other_dialect_skips_duplicates(
 
     Given: Session that fails on second execute,
     When: upsert_candles is called with two rows,
-    Then: Returns 1 and rolls back failed row.
+    Then: Returns 1 and savepoint rolled back for failed row.
     """
     session = _DummyAsyncSession(fail_on=2)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
@@ -141,7 +163,7 @@ async def test_upsert_candles_other_dialect_skips_duplicates(
     rows = [{"instrument_id": 1}, {"instrument_id": 2}]
     inserted = await repo.upsert_candles(rows)
     assert inserted == 1
-    assert session.rollback_called is True
+    assert session.savepoint_rollbacks == 1
     assert session.commit_called is True
 
 
@@ -153,7 +175,7 @@ async def test_upsert_trades_other_dialect_skips_duplicates(
 
     Given: Session that fails on second execute,
     When: upsert_trades is called with two rows,
-    Then: Returns 1 and rolls back failed row.
+    Then: Returns 1 and savepoint rolled back for failed row.
     """
     session = _DummyAsyncSession(fail_on=2)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
@@ -161,7 +183,47 @@ async def test_upsert_trades_other_dialect_skips_duplicates(
     rows = [{"trade_id": "t1"}, {"trade_id": "t2"}]
     inserted = await repo.upsert_trades(rows)
     assert inserted == 1
-    assert session.rollback_called is True
+    assert session.savepoint_rollbacks == 1
+    assert session.commit_called is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_savepoint_preserves_earlier_inserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SAVEPOINT does not roll back previously inserted rows.
+
+    Given: 3-row batch where the second row is a duplicate,
+    When: upsert_candles is called via the fallback dialect path,
+    Then: First and third rows are counted (inserted == 2).
+    """
+    session = _DummyAsyncSession(fail_on=2)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
+    rows = [{"instrument_id": 1}, {"instrument_id": 2}, {"instrument_id": 3}]
+    inserted = await repo.upsert_candles(rows)
+    assert inserted == 2
+    assert session.savepoint_rollbacks == 1
+    assert session.commit_called is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_trades_savepoint_preserves_earlier_inserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SAVEPOINT does not roll back previously inserted rows.
+
+    Given: 3-row batch where the second row is a duplicate,
+    When: upsert_trades is called via the fallback dialect path,
+    Then: First and third rows are counted (inserted == 2).
+    """
+    session = _DummyAsyncSession(fail_on=2)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
+    rows = [{"trade_id": "t1"}, {"trade_id": "t2"}, {"trade_id": "t3"}]
+    inserted = await repo.upsert_trades(rows)
+    assert inserted == 2
+    assert session.savepoint_rollbacks == 1
     assert session.commit_called is True
 
 
@@ -1005,7 +1067,7 @@ async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -
     class IntegrityLoopSession:
         def __init__(self) -> None:
             self.execute_calls = 0
-            self.rollback_calls = 0
+            self.savepoint_rollbacks = 0
 
         def __enter__(self) -> "IntegrityLoopSession":
             return self
@@ -1013,14 +1075,25 @@ async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
+        def begin_nested(self) -> "IntegrityLoopSession._Savepoint":
+            return IntegrityLoopSession._Savepoint(self)
+
+        class _Savepoint:
+            def __init__(self, parent: "IntegrityLoopSession") -> None:
+                self._parent = parent
+
+            def __enter__(self) -> "IntegrityLoopSession._Savepoint":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                if exc_type is not None:
+                    self._parent.savepoint_rollbacks += 1
+
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self.execute_calls += 1
             if self.execute_calls == 1:
                 raise IntegrityError("duplicate", {}, Exception())
             return object()
-
-        def rollback(self) -> None:
-            self.rollback_calls += 1
 
         def commit(self) -> None:
             return None
@@ -1075,7 +1148,7 @@ async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -
     ]
     result = await repo.upsert_candles(rows)
     assert result == 1
-    assert created_sessions[0].rollback_calls == 1
+    assert created_sessions[0].savepoint_rollbacks == 1
 
 
 @pytest.mark.asyncio
@@ -1097,7 +1170,7 @@ async def test_mssql_upsert_trades_integrity(monkeypatch: pytest.MonkeyPatch) ->
     class IntegrityTradeSession:
         def __init__(self) -> None:
             self.execute_calls = 0
-            self.rollback_calls = 0
+            self.savepoint_rollbacks = 0
 
         def __enter__(self) -> "IntegrityTradeSession":
             return self
@@ -1105,14 +1178,25 @@ async def test_mssql_upsert_trades_integrity(monkeypatch: pytest.MonkeyPatch) ->
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
+        def begin_nested(self) -> "IntegrityTradeSession._Savepoint":
+            return IntegrityTradeSession._Savepoint(self)
+
+        class _Savepoint:
+            def __init__(self, parent: "IntegrityTradeSession") -> None:
+                self._parent = parent
+
+            def __enter__(self) -> "IntegrityTradeSession._Savepoint":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                if exc_type is not None:
+                    self._parent.savepoint_rollbacks += 1
+
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self.execute_calls += 1
             if self.execute_calls == 1:
                 raise IntegrityError("duplicate", {}, Exception())
             return object()
-
-        def rollback(self) -> None:
-            self.rollback_calls += 1
 
         def commit(self) -> None:
             return None
@@ -1159,7 +1243,243 @@ async def test_mssql_upsert_trades_integrity(monkeypatch: pytest.MonkeyPatch) ->
     ]
     result = await repo.upsert_trades(rows)
     assert result == 1
-    assert created_sessions[0].rollback_calls == 1
+    assert created_sessions[0].savepoint_rollbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_candles_savepoint_preserves_earlier_inserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify MSSQL SAVEPOINT keeps first/third row when second is duplicate.
+
+    Given: 3 candle rows where the second triggers IntegrityError,
+    When: upsert_candles is called,
+    Then: inserted == 2 and exactly one savepoint rollback.
+    """
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class FailOnSecondSession:
+        """Session that raises IntegrityError on the second execute call."""
+
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.savepoint_rollbacks = 0
+
+        def __enter__(self) -> "FailOnSecondSession":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def begin_nested(self) -> "FailOnSecondSession._Savepoint":
+            return FailOnSecondSession._Savepoint(self)
+
+        class _Savepoint:
+            def __init__(self, parent: "FailOnSecondSession") -> None:
+                self._parent = parent
+
+            def __enter__(self) -> "FailOnSecondSession._Savepoint":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                if exc_type is not None:
+                    self._parent.savepoint_rollbacks += 1
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.execute_calls += 1
+            if self.execute_calls == 2:
+                raise IntegrityError("duplicate", {}, Exception())
+            return object()
+
+        def commit(self) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    created_sessions: list[FailOnSecondSession] = []
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], FailOnSecondSession]:
+        def factory() -> FailOnSecondSession:
+            session = FailOnSecondSession()
+            created_sessions.append(session)
+            return session
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 1.5,
+            "low": 0.5,
+            "close": 1.2,
+            "volume": 10.0,
+            "vwap": None,
+            "trades": 5,
+        },
+        {
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 1.5,
+            "low": 0.5,
+            "close": 1.2,
+            "volume": 10.0,
+            "vwap": None,
+            "trades": 5,
+        },
+        {
+            "instrument_id": 2,
+            "timestamp": datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 2.0,
+            "high": 2.5,
+            "low": 1.5,
+            "close": 2.2,
+            "volume": 20.0,
+            "vwap": None,
+            "trades": 8,
+        },
+    ]
+    result = await repo.upsert_candles(rows)
+    assert result == 2
+    assert created_sessions[0].savepoint_rollbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_trades_savepoint_preserves_earlier_inserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify MSSQL SAVEPOINT keeps first/third row when second is duplicate.
+
+    Given: 3 trade rows where the second triggers IntegrityError,
+    When: upsert_trades is called,
+    Then: inserted == 2 and exactly one savepoint rollback.
+    """
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class FailOnSecondSession:
+        """Session that raises IntegrityError on the second execute call."""
+
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.savepoint_rollbacks = 0
+
+        def __enter__(self) -> "FailOnSecondSession":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def begin_nested(self) -> "FailOnSecondSession._Savepoint":
+            return FailOnSecondSession._Savepoint(self)
+
+        class _Savepoint:
+            def __init__(self, parent: "FailOnSecondSession") -> None:
+                self._parent = parent
+
+            def __enter__(self) -> "FailOnSecondSession._Savepoint":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                if exc_type is not None:
+                    self._parent.savepoint_rollbacks += 1
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.execute_calls += 1
+            if self.execute_calls == 2:
+                raise IntegrityError("duplicate", {}, Exception())
+            return object()
+
+        def commit(self) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    created_sessions: list[FailOnSecondSession] = []
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], FailOnSecondSession]:
+        def factory() -> FailOnSecondSession:
+            session = FailOnSecondSession()
+            created_sessions.append(session)
+            return session
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    rows: list[dict[str, Any]] = [
+        {
+            "trade_id": "t1",
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "side": "buy",
+            "size": 1.0,
+            "price": 1.5,
+        },
+        {
+            "trade_id": "t1",
+            "instrument_id": 1,
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "side": "buy",
+            "size": 1.0,
+            "price": 1.5,
+        },
+        {
+            "trade_id": "t3",
+            "instrument_id": 2,
+            "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            "side": "sell",
+            "size": 2.0,
+            "price": 2.5,
+        },
+    ]
+    result = await repo.upsert_trades(rows)
+    assert result == 2
+    assert created_sessions[0].savepoint_rollbacks == 1
 
 
 def test_database_repository_get_session_and_create_all(
@@ -1446,6 +1766,7 @@ class TestSQLAlchemyRepositoryDialects:
         Then: Inserts rows individually.
         """
         mock_session = AsyncMock()
+        _patch_begin_nested(mock_session)
         with patch.object(mock_other_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -1488,9 +1809,10 @@ class TestSQLAlchemyRepositoryDialects:
 
         Given: MySQL repository with duplicate key,
         When: upsert_candles is called,
-        Then: Rolls back and continues.
+        Then: Savepoint rolls back failed row and continues.
         """
         mock_session = AsyncMock()
+        _patch_begin_nested(mock_session)
         mock_session.execute.side_effect = [
             IntegrityError("duplicate", "params", Exception()),
             None,
@@ -1527,7 +1849,7 @@ class TestSQLAlchemyRepositoryDialects:
             result = await mock_other_repo.upsert_candles(rows)
             assert result == 1
             assert mock_session.execute.call_count == 2
-            mock_session.rollback.assert_called_once()
+            assert mock_session.begin_nested.call_count == 2
             mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1571,6 +1893,7 @@ class TestSQLAlchemyRepositoryDialects:
         Then: Inserts rows individually.
         """
         mock_session = AsyncMock()
+        _patch_begin_nested(mock_session)
         with patch.object(mock_other_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
