@@ -34,6 +34,8 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonExch
 class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
     """Service for updating Polygon symbol mappings from REST API."""
 
+    BATCH_COMMIT_SIZE: int = 1000
+
     @staticmethod
     def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
         """Return default kwargs for the Polygon updater service.
@@ -222,7 +224,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                     )
                     processed_symbols.add(native_symbol)
                     total_processed = stats["updated"] + stats["inserted"]
-                    if total_processed % 1000 == 0 and total_processed > 0:
+                    if total_processed % self.BATCH_COMMIT_SIZE == 0 and total_processed > 0:
                         session.commit()
                         logger.info(f"Committed batch: {stats}")
                 deactivated = self._reconcile_capabilities(

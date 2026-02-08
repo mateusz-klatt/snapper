@@ -1033,12 +1033,11 @@ async def test_update_database_skips_unmatchable_symbols(
 
 
 @pytest.mark.xdist_group(name="database")
-@pytest.mark.timeout(30)
 @pytest.mark.asyncio()
 async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
     """Verify update_database commits large datasets in batches.
 
-    Given: 1100 symbols with insert_new=True,
+    Given: 110 symbols with BATCH_COMMIT_SIZE=100 and insert_new=True,
     When: Update database called,
     Then: All catalog and alias rows inserted via batch commits.
     """
@@ -1046,17 +1045,18 @@ async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
     repository = DatabaseRepository(f"sqlite:///{db_path}")
     repository.create_all()
     updater = ExposedPolygonSymbolUpdater(update_threshold_hours=1, force=True, insert_new=True)
+    updater.BATCH_COMMIT_SIZE = 100
     updater.repository = repository
     symbols: list[dict[str, Any]] = [
-        {"ticker": f"SYM{i:04d}", "currency_symbol": "USD"} for i in range(1100)
+        {"ticker": f"SYM{i:04d}", "currency_symbol": "USD"} for i in range(110)
     ]
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
         catalog_count = len(session.execute(select(SymbolCatalog)).scalars().all())
         alias_count = len(session.execute(select(SymbolAlias)).scalars().all())
-    assert catalog_count == 1100
-    assert alias_count == 1100
+    assert catalog_count == 110
+    assert alias_count == 110
     repository.engine.dispose()
 
 
