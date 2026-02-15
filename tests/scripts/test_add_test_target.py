@@ -439,6 +439,7 @@ class TestAddBuildConfigurations:
         assert DEBUG_CONFIG_UUID in result
         assert RELEASE_CONFIG_UUID in result
         assert "ie.klatt.snapper.tests" in result
+        assert "IPHONEOS_DEPLOYMENT_TARGET = 26.0" in result
 
     def test_adds_release_at_end_if_no_dad(self) -> None:
         """Adds release config at section end if no DAD UUID found."""
@@ -553,6 +554,51 @@ class TestNormalizeToXcodeFormat:
         result = normalize_to_xcode_format(content)
 
         assert "minimizedProjectReferenceProxies = 1;\n\t\t\tprojectDirPath" in result
+
+    def test_strips_infoplist_key_cfbundledisplayname(self) -> None:
+        """Strips INFOPLIST_KEY_CFBundleDisplayName line."""
+        content = "before\n\t\t\t\tINFOPLIST_KEY_CFBundleDisplayName = Snapper;\nafter"
+
+        result = normalize_to_xcode_format(content)
+
+        assert "INFOPLIST_KEY_CFBundleDisplayName" not in result
+        assert "before\nafter" in result
+
+    def test_strips_supported_platforms(self) -> None:
+        """Strips SUPPORTED_PLATFORMS line."""
+        content = 'before\n\t\t\t\tSUPPORTED_PLATFORMS = "iphoneos iphonesimulator";\nafter'
+
+        result = normalize_to_xcode_format(content)
+
+        assert "SUPPORTED_PLATFORMS" not in result
+        assert "before\nafter" in result
+
+    def test_strips_supports_maccatalyst(self) -> None:
+        """Strips SUPPORTS_MACCATALYST line."""
+        content = "before\n\t\t\t\tSUPPORTS_MACCATALYST = NO;\nafter"
+
+        result = normalize_to_xcode_format(content)
+
+        assert "SUPPORTS_MACCATALYST" not in result
+        assert "before\nafter" in result
+
+    def test_strips_supports_mac_designed_for_iphone(self) -> None:
+        """Strips SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD line."""
+        content = "before\n\t\t\t\tSUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;\nafter"
+
+        result = normalize_to_xcode_format(content)
+
+        assert "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" not in result
+        assert "before\nafter" in result
+
+    def test_strips_supports_xr_designed_for_iphone(self) -> None:
+        """Strips SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD line."""
+        content = "before\n\t\t\t\tSUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;\nafter"
+
+        result = normalize_to_xcode_format(content)
+
+        assert "SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD" not in result
+        assert "before\nafter" in result
 
 
 class TestAddTestTarget:

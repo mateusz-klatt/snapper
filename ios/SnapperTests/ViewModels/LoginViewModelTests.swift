@@ -1,6 +1,7 @@
 import XCTest
 @testable import Snapper
 
+@MainActor
 final class LoginViewModelTests: XCTestCase {
 
     var mockAuthService: AuthService!

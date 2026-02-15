@@ -4,7 +4,14 @@ import Foundation
 class MockURLProtocol: URLProtocol {
 
     static let stubURL = "https://test.com"
-    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data?))?
+
+    private static let _lock = NSLock()
+    private nonisolated(unsafe) static var _handler: ((URLRequest) throws -> (HTTPURLResponse, Data?))?
+
+    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data?))? {
+        get { _lock.withLock { _handler } }
+        set { _lock.withLock { _handler = newValue } }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool {
         /* Always intercept: all requests are handled by the mock */

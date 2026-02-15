@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 
+@MainActor
 class AuthService: ObservableObject {
     static let shared = AuthService()
 
@@ -21,9 +22,7 @@ class AuthService: ObservableObject {
 
     func login(username: String, password: String) async {
         guard let url = URL(string: "\(AppConfig.apiBaseURL)\(AppConfig.Endpoints.login)") else {
-            await MainActor.run {
-                errorMessage = "Invalid URL"
-            }
+            errorMessage = "Invalid URL"
             return
         }
 
@@ -38,7 +37,7 @@ class AuthService: ObservableObject {
             let (data, response) = try await session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else {
-                await MainActor.run { errorMessage = "Invalid response" }
+                errorMessage = "Invalid response"
                 return
             }
 
@@ -46,31 +45,23 @@ class AuthService: ObservableObject {
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
                 let loginResponse = try decoder.decode(LoginResponse.self, from: data)
-                await MainActor.run {
-                    self.currentUser = loginResponse.user
-                    self.errorMessage = nil
-                    self.isAuthenticated = true
-                }
+                currentUser = loginResponse.user
+                errorMessage = nil
+                isAuthenticated = true
             } else {
                 let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data)
-                await MainActor.run {
-                    errorMessage = errorResponse?.detail ?? "Login failed"
-                }
+                errorMessage = errorResponse?.detail ?? "Login failed"
             }
         } catch {
-            await MainActor.run {
-                errorMessage = "Network error: \(error.localizedDescription)"
-            }
+            errorMessage = "Network error: \(error.localizedDescription)"
         }
     }
 
     func logout() async {
         await logoutFromServer()
-        await MainActor.run {
-            wsToken = nil
-            currentUser = nil
-            isAuthenticated = false
-        }
+        wsToken = nil
+        currentUser = nil
+        isAuthenticated = false
     }
 
     private func logoutFromServer() async {
@@ -109,9 +100,7 @@ class AuthService: ObservableObject {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let refreshResponse = try decoder.decode(RefreshResponse.self, from: data)
-            await MainActor.run {
-                self.wsToken = refreshResponse.wsToken
-            }
+            wsToken = refreshResponse.wsToken
             return refreshResponse.wsToken
         } catch {
             print("Failed to fetch fresh ws_token: \(error)")

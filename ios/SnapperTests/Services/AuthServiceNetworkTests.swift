@@ -1,6 +1,7 @@
 import XCTest
 @testable import Snapper
 
+@MainActor
 final class AuthServiceNetworkTests: XCTestCase {
 
     var authService: AuthService!

@@ -399,6 +399,7 @@ def add_build_configurations(content: str) -> str:
         f'\t\t\t\tBUNDLE_LOADER = "$(TEST_HOST)";\n'
         f"\t\t\t\tCODE_SIGN_STYLE = Automatic;\n"
         f"\t\t\t\tGENERATE_INFOPLIST_FILE = YES;\n"
+        f"\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 26.0;\n"
         f"\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ie.klatt.snapper.tests;\n"
         f'\t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";\n'
         f'\t\t\t\tTEST_HOST = "$(BUILT_PRODUCTS_DIR)/Snapper.app/'
@@ -414,6 +415,7 @@ def add_build_configurations(content: str) -> str:
         f'\t\t\t\tBUNDLE_LOADER = "$(TEST_HOST)";\n'
         f"\t\t\t\tCODE_SIGN_STYLE = Automatic;\n"
         f"\t\t\t\tGENERATE_INFOPLIST_FILE = YES;\n"
+        f"\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 26.0;\n"
         f"\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ie.klatt.snapper.tests;\n"
         f'\t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";\n'
         f'\t\t\t\tTEST_HOST = "$(BUILT_PRODUCTS_DIR)/Snapper.app/'
@@ -496,7 +498,7 @@ def normalize_to_xcode_format(content: str) -> str:
     )
     content = re.sub(
         r"[ \t]*DevelopmentTeam = [^;]+;\n",
-        "\n",
+        "",
         content,
     )
     content = content.replace(
@@ -506,6 +508,31 @@ def normalize_to_xcode_format(content: str) -> str:
     content = re.sub(
         r'(minimizedProjectReferenceProxies = 1;)\n\n(\s+projectDirPath = "";)',
         r"\1\n\2",
+        content,
+    )
+    content = re.sub(
+        r"[ \t]*INFOPLIST_KEY_CFBundleDisplayName = [^;]+;\n",
+        "",
+        content,
+    )
+    content = re.sub(
+        r'[ \t]*SUPPORTED_PLATFORMS = "[^"]*";\n',
+        "",
+        content,
+    )
+    content = re.sub(
+        r"[ \t]*SUPPORTS_MACCATALYST = [^;]+;\n",
+        "",
+        content,
+    )
+    content = re.sub(
+        r"[ \t]*SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = [^;]+;\n",
+        "",
+        content,
+    )
+    content = re.sub(
+        r"[ \t]*SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = [^;]+;\n",
+        "",
         content,
     )
     return content

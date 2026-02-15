@@ -403,11 +403,11 @@ ios-gen-types:
 
 ios-build:
 	$(info Building iOS app...)
-	cd ios && xcodebuild -scheme Snapper -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=17.5' build
+	cd ios && xcodebuild -scheme Snapper -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2' build
 
 ios-test:
 	$(info Running iOS tests...)
-	cd ios && xcodebuild -scheme Snapper -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=17.5' test
+	cd ios && xcodebuild -scheme Snapper -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2' test
 
 ios-clean:
 	$(info Cleaning iOS build artifacts...)

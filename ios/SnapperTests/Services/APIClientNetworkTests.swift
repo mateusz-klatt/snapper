@@ -1,11 +1,11 @@
 import XCTest
 @testable import Snapper
 
+@MainActor
 final class APIClientNetworkTests: XCTestCase {
 
     var apiClient: APIClient!
     var mockSession: URLSession!
-    var mockAuthService: AuthService!
 
     override func setUp() {
         super.setUp()
@@ -14,15 +14,12 @@ final class APIClientNetworkTests: XCTestCase {
         configuration.protocolClasses = [MockURLProtocol.self]
         mockSession = URLSession(configuration: configuration)
 
-        mockAuthService = AuthService(session: mockSession)
-
-        apiClient = APIClient(session: mockSession, authService: mockAuthService)
+        apiClient = APIClient(session: mockSession)
     }
 
     override func tearDown() {
         apiClient = nil
         mockSession = nil
-        mockAuthService = nil
         MockURLProtocol.requestHandler = nil
         super.tearDown()
     }
