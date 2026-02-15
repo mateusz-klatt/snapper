@@ -49,11 +49,6 @@ class AuthService: ObservableObject {
                 await MainActor.run {
                     self.currentUser = loginResponse.user
                     self.errorMessage = nil
-                }
-
-                await refreshTokens()
-
-                await MainActor.run {
                     self.isAuthenticated = true
                 }
             } else {
@@ -69,10 +64,25 @@ class AuthService: ObservableObject {
         }
     }
 
-    func logout() {
-        wsToken = nil
-        currentUser = nil
-        isAuthenticated = false
+    func logout() async {
+        await logoutFromServer()
+        await MainActor.run {
+            wsToken = nil
+            currentUser = nil
+            isAuthenticated = false
+        }
+    }
+
+    private func logoutFromServer() async {
+        guard let url = URL(string: "\(AppConfig.apiBaseURL)\(AppConfig.Endpoints.logout)") else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
+
+        _ = try? await session.data(for: request)
     }
 
     func getWsToken() -> String? {
@@ -106,34 +116,6 @@ class AuthService: ObservableObject {
         } catch {
             print("Failed to fetch fresh ws_token: \(error)")
             return nil
-        }
-    }
-
-    private func refreshTokens() async {
-        guard let url = URL(string: "\(AppConfig.apiBaseURL)\(AppConfig.Endpoints.refresh)") else {
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
-
-        do {
-            let (data, response) = try await session.data(for: request)
-
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                return
-            }
-
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let refreshResponse = try decoder.decode(RefreshResponse.self, from: data)
-            await MainActor.run {
-                self.wsToken = refreshResponse.wsToken
-            }
-        } catch {
-            print("Failed to refresh tokens: \(error)")
         }
     }
 }

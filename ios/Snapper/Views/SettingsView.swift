@@ -130,7 +130,9 @@ struct SettingsView: View {
 
     private func logout() {
         webSocketManager.disconnect()
-        authService.logout()
+        Task {
+            await authService.logout()
+        }
     }
 }
 

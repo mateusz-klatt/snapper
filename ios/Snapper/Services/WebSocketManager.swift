@@ -12,6 +12,7 @@ class WebSocketManager: ObservableObject {
     private var webSocketTask: URLSessionWebSocketTask?
     private var pingTimer: Timer?
     private var shouldReconnect = false
+    private var intentionalDisconnect = false
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 10
     private let baseReconnectInterval: TimeInterval = 3
@@ -38,6 +39,7 @@ class WebSocketManager: ObservableObject {
 
         connectionState = .connecting
         shouldReconnect = true
+        intentionalDisconnect = false
 
         let request = URLRequest(url: url)
         webSocketTask = URLSession.shared.webSocketTask(with: request)
@@ -48,6 +50,7 @@ class WebSocketManager: ObservableObject {
 
     func disconnect() {
         shouldReconnect = false
+        intentionalDisconnect = true
         reconnectAttempts = 0
         pingTimer?.invalidate()
         pingTimer = nil
@@ -88,7 +91,9 @@ class WebSocketManager: ObservableObject {
                     self.handleRawMessage(message)
                     self.listenForMessages()
                 case .failure(let error):
-                    print("WebSocket receive error: \(error)")
+                    if !self.intentionalDisconnect {
+                        print("WebSocket receive error: \(error)")
+                    }
                     self.handleDisconnection()
                 }
             }
