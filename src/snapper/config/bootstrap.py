@@ -9,6 +9,7 @@ Bootstrap settings include:
     - Master password for settings encryption
     - Encryption salt
     - HTTP server configuration (host, port, reload)
+    - Reverse proxy trust configuration (proxy headers, trusted proxy IPs)
     - ZMQ broker endpoints
 
 Example:
@@ -24,6 +25,8 @@ Example:
         MASTER_PASSWORD=secure-password
         SERVER_HOST=0.0.0.0
         SERVER_PORT=8000
+        SERVER_PROXY_HEADERS=true
+        SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
         ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500
         ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
 """
@@ -49,6 +52,9 @@ class BootstrapSettingsLoader(BaseSettings):
         server_host: HTTP server bind address.
         server_port: HTTP server port.
         server_reload: Enable uvicorn auto-reload for development.
+        server_proxy_headers: Enable parsing proxy headers in uvicorn.
+        server_forwarded_allow_ips: Trusted proxy source IP list for
+            forwarded headers.
         zmq_broker_xsub: ZMQ XSUB endpoint (publishers connect here).
         zmq_broker_xpub: ZMQ XPUB endpoint (subscribers connect here).
     """
@@ -64,5 +70,7 @@ class BootstrapSettingsLoader(BaseSettings):
     server_host: str = Field(default="127.0.0.1", alias="SERVER_HOST")
     server_port: int = Field(default=8000, alias="SERVER_PORT")
     server_reload: bool = Field(default=False, alias="SERVER_RELOAD")
+    server_proxy_headers: bool = Field(default=True, alias="SERVER_PROXY_HEADERS")
+    server_forwarded_allow_ips: str = Field(default="127.0.0.1", alias="SERVER_FORWARDED_ALLOW_IPS")
     zmq_broker_xsub: str = Field(default="tcp://127.0.0.1:7500", alias="ZMQ_BROKER_XSUB")
     zmq_broker_xpub: str = Field(default="tcp://127.0.0.1:7501", alias="ZMQ_BROKER_XPUB")

@@ -42,6 +42,8 @@ DB_URL=mssql+pyodbc://user:password@server.database.windows.net/snapper?driver=O
 | `SERVER_HOST` | `127.0.0.1` | Listen address |
 | `SERVER_PORT` | `8000` | Server port |
 | `SERVER_RELOAD` | `false` | Auto-reload for development |
+| `SERVER_PROXY_HEADERS` | `true` | Enable proxy header parsing in uvicorn |
+| `SERVER_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for forwarded headers |
 
 ### ZeroMQ
 
@@ -101,6 +103,8 @@ ENCRYPTION_SALT=your_unique_salt_value
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8000
 SERVER_RELOAD=false
+SERVER_PROXY_HEADERS=true
+SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
 
 # ZeroMQ Broker Endpoints
 ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500
@@ -165,6 +169,8 @@ DB_URL=sqlite+aiosqlite:///./data/snapper_dev.db
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8000
 SERVER_RELOAD=true
+SERVER_PROXY_HEADERS=true
+SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
 ```
 
 ### Production
@@ -177,6 +183,8 @@ ENCRYPTION_SALT=<unique_random_salt>
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
 SERVER_RELOAD=false
+SERVER_PROXY_HEADERS=true
+SERVER_FORWARDED_ALLOW_IPS=127.0.0.1,172.17.0.1
 ```
 
 ### Docker

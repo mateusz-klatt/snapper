@@ -572,3 +572,46 @@ class TestServerReloadProperty:
         )
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.server_reload is True
+
+
+class TestServerProxyProperties:
+    """Tests for AppSettings reverse proxy bootstrap properties."""
+
+    def test_server_proxy_headers_returns_true_by_default(self) -> None:
+        """Verify server_proxy_headers defaults to True.
+
+        Given bootstrap without override,
+        When accessing settings.server_proxy_headers,
+        Then True is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.server_proxy_headers is True
+
+    def test_server_proxy_headers_returns_false_when_disabled(self) -> None:
+        """Verify server_proxy_headers can be disabled explicitly.
+
+        Given bootstrap with SERVER_PROXY_HEADERS=False,
+        When accessing settings.server_proxy_headers,
+        Then False is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SERVER_PROXY_HEADERS=False,
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.server_proxy_headers is False
+
+    def test_server_forwarded_allow_ips_returns_bootstrap_value(self) -> None:
+        """Verify trusted forwarded proxy list is exposed.
+
+        Given bootstrap with SERVER_FORWARDED_ALLOW_IPS configured,
+        When accessing settings.server_forwarded_allow_ips,
+        Then configured value is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SERVER_FORWARDED_ALLOW_IPS="127.0.0.1,172.17.0.1",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.server_forwarded_allow_ips == "127.0.0.1,172.17.0.1"

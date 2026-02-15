@@ -278,6 +278,8 @@ def server(
     server_host = host or s.server_host
     server_port = port or s.server_port
     server_reload = reload if reload is not None else s.server_reload
+    server_proxy_headers = s.server_proxy_headers
+    server_forwarded_allow_ips = s.server_forwarded_allow_ips
     typer.echo(f"Starting Snapper server on {server_host}:{server_port}")
     typer.echo(f"Dashboard available at: http://{server_host}:{server_port}")
     if server_reload:
@@ -292,6 +294,8 @@ def server(
                 reload=server_reload,
                 log_level="info",
                 log_config=None,
+                proxy_headers=server_proxy_headers,
+                forwarded_allow_ips=server_forwarded_allow_ips,
             )
         else:
             uvicorn.run(
@@ -301,6 +305,8 @@ def server(
                 reload=server_reload,
                 log_level="info",
                 log_config=None,
+                proxy_headers=server_proxy_headers,
+                forwarded_allow_ips=server_forwarded_allow_ips,
             )
     except KeyboardInterrupt:
         typer.echo("\nShutting down gracefully...")

@@ -4,7 +4,7 @@ services:
     build: .
     env_file: .env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports
@@ -16,7 +16,7 @@ services:
       POSTGRES_DB: snapper
       POSTGRES_USER: snapper
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 volumes:

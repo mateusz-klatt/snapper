@@ -423,7 +423,7 @@ docker-push:
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)
 
 docker-run:
-	docker run -d --name snapper --rm -p 8000:8000 -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) server
+	docker run -d --name snapper --rm --env-file "$(CURDIR)/.env" -p 127.0.0.1:8000:8000 -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) server
 
 docker-stop:
 	-docker stop snapper

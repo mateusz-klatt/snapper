@@ -7,6 +7,7 @@ two sources:
    - Database connection URL
    - Master password and encryption salt
    - Server host/port configuration
+   - Reverse proxy trust configuration
    - ZMQ broker endpoints
 
 2. **Database settings** - Runtime configuration stored in DB (via SettingsService)
@@ -118,6 +119,24 @@ class AppSettings:
             True if auto-reload is enabled, False otherwise.
         """
         return self._bootstrap.server_reload
+
+    @property
+    def server_proxy_headers(self) -> bool:
+        """Return whether uvicorn should parse proxy headers.
+
+        Returns:
+            True if proxy header parsing is enabled, False otherwise.
+        """
+        return self._bootstrap.server_proxy_headers
+
+    @property
+    def server_forwarded_allow_ips(self) -> str:
+        """Return trusted proxy source IP list for forwarded headers.
+
+        Returns:
+            Comma-separated trusted proxy IP addresses or CIDRs.
+        """
+        return self._bootstrap.server_forwarded_allow_ips
 
     @property
     def zmq_broker_xsub(self) -> str:

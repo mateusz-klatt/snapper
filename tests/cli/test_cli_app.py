@@ -320,6 +320,8 @@ def _fake_settings(**overrides: Any) -> Any:
         "server_host": "127.0.0.1",
         "server_port": 8000,
         "server_reload": False,
+        "server_proxy_headers": True,
+        "server_forwarded_allow_ips": "127.0.0.1",
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -335,16 +337,39 @@ def test_server_runs_without_reload(monkeypatch: pytest.MonkeyPatch, cli_runner:
     captured: dict[str, Any] = {}
 
     def fake_run(
-        app_obj: Any, host: str, port: int, reload: bool, log_level: str, log_config: Any
+        app_obj: Any,
+        host: str,
+        port: int,
+        reload: bool,
+        log_level: str,
+        log_config: Any,
+        proxy_headers: bool,
+        forwarded_allow_ips: str,
     ) -> None:
-        captured.update({"app": app_obj, "host": host, "port": port, "reload": reload})
+        captured.update(
+            {
+                "app": app_obj,
+                "host": host,
+                "port": port,
+                "reload": reload,
+                "proxy_headers": proxy_headers,
+                "forwarded_allow_ips": forwarded_allow_ips,
+            }
+        )
 
     monkeypatch.setattr(app_module, "get_settings", lambda: _fake_settings(server_reload=False))
     monkeypatch.setattr(app_module, "create_app", lambda: "APP_INSTANCE")
     monkeypatch.setattr(uvicorn, "run", fake_run)
     result = cli_runner.invoke(app, ["server"])
     assert result.exit_code == 0
-    assert captured == {"app": "APP_INSTANCE", "host": "127.0.0.1", "port": 8000, "reload": False}
+    assert captured == {
+        "app": "APP_INSTANCE",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "reload": False,
+        "proxy_headers": True,
+        "forwarded_allow_ips": "127.0.0.1",
+    }
 
 
 def test_server_runs_with_reload(monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
@@ -364,9 +389,19 @@ def test_server_runs_with_reload(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
         reload: bool,
         log_level: str,
         log_config: Any,
+        proxy_headers: bool,
+        forwarded_allow_ips: str,
     ) -> None:
         captured.update(
-            {"app_path": app_path, "factory": factory, "host": host, "port": port, "reload": reload}
+            {
+                "app_path": app_path,
+                "factory": factory,
+                "host": host,
+                "port": port,
+                "reload": reload,
+                "proxy_headers": proxy_headers,
+                "forwarded_allow_ips": forwarded_allow_ips,
+            }
         )
 
     monkeypatch.setattr(app_module, "get_settings", lambda: _fake_settings(server_reload=True))
@@ -376,6 +411,8 @@ def test_server_runs_with_reload(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
     assert captured["app_path"] == "snapper.server.app:create_app"
     assert captured["factory"] is True
     assert captured["reload"] is True
+    assert captured["proxy_headers"] is True
+    assert captured["forwarded_allow_ips"] == "127.0.0.1"
 
 
 def test_broker_starts_and_stops(monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
@@ -1249,6 +1286,8 @@ def create_mock_settings(**overrides: Any) -> type:
         "server_host": "0.0.0.0",
         "server_port": 8000,
         "server_reload": False,
+        "server_proxy_headers": True,
+        "server_forwarded_allow_ips": "127.0.0.1",
     }
     default_attrs.update(overrides)
     return type("AppSettings", (), default_attrs)
@@ -1384,6 +1423,8 @@ class TestServerCommands:
                 mock_uvicorn_run.assert_called_once()
                 call_kwargs = mock_uvicorn_run.call_args[1]
                 assert call_kwargs["port"] == 8000
+                assert call_kwargs["proxy_headers"] is True
+                assert call_kwargs["forwarded_allow_ips"] == "127.0.0.1"
 
     def test_server_command_custom_port(self, cli_runner: CliRunner) -> None:
         """Test server uses custom port argument.
@@ -1400,6 +1441,8 @@ class TestServerCommands:
                 assert result.exit_code == 0
                 call_kwargs = mock_uvicorn_run.call_args[1]
                 assert call_kwargs["port"] == 9000
+                assert call_kwargs["proxy_headers"] is True
+                assert call_kwargs["forwarded_allow_ips"] == "127.0.0.1"
 
 
 class TestUserCommands:
@@ -2384,6 +2427,8 @@ def mock_settings() -> SimpleNamespace:
         server_host="0.0.0.0",
         server_port=8000,
         server_reload=False,
+        server_proxy_headers=True,
+        server_forwarded_allow_ips="127.0.0.1",
     )
 
 
@@ -2414,6 +2459,8 @@ def test_server_command_starts_uvicorn(
     assert captured["uvicorn_kwargs"]["host"] == "0.0.0.0"
     assert captured["uvicorn_kwargs"]["port"] == 8000
     assert captured["uvicorn_kwargs"]["reload"] is False
+    assert captured["uvicorn_kwargs"]["proxy_headers"] is True
+    assert captured["uvicorn_kwargs"]["forwarded_allow_ips"] == "127.0.0.1"
 
 
 def test_server_command_with_override_options(
@@ -2442,6 +2489,8 @@ def test_server_command_with_override_options(
     assert captured["uvicorn_kwargs"]["host"] == "127.0.0.1"
     assert captured["uvicorn_kwargs"]["port"] == 9000
     assert captured["uvicorn_kwargs"]["reload"] is True
+    assert captured["uvicorn_kwargs"]["proxy_headers"] is True
+    assert captured["uvicorn_kwargs"]["forwarded_allow_ips"] == "127.0.0.1"
 
 
 def test_broker_command_starts_zmq_broker(
