@@ -65,6 +65,7 @@ jobs:
       - name: Build and test Docker image
         run: |
           make docker-build
+          cp .env.example .env
           make docker-run
           make server-check
           make docker-stop
