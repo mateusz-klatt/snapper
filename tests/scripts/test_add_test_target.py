@@ -34,6 +34,7 @@ from scripts.add_test_target import find_main_target_uuid
 from scripts.add_test_target import find_section_bounds
 from scripts.add_test_target import generate_uuid
 from scripts.add_test_target import main
+from scripts.add_test_target import normalize_scheme
 from scripts.add_test_target import normalize_to_xcode_format
 from scripts.add_test_target import read_pbxproj
 from scripts.add_test_target import update_products_group
@@ -522,12 +523,20 @@ class TestNormalizeToXcodeFormat:
         assert explicit_pos < include_pos
 
     def test_removes_empty_development_team(self) -> None:
-        """Removes empty DevelopmentTeam lines."""
+        """Removes DevelopmentTeam attribute lines regardless of value."""
         content = 'some content\n\t\t\t\tDevelopmentTeam = "";\nmore content'
 
         result = normalize_to_xcode_format(content)
 
-        assert 'DevelopmentTeam = ""' not in result
+        assert "DevelopmentTeam" not in result
+
+    def test_removes_nonempty_development_team_attribute(self) -> None:
+        """Removes DevelopmentTeam attribute lines with non-empty value."""
+        content = "some content\n\t\t\t\tDevelopmentTeam = 26MP7QQP95;\nmore content"
+
+        result = normalize_to_xcode_format(content)
+
+        assert "DevelopmentTeam" not in result
 
     def test_sets_development_team(self) -> None:
         """Sets DEVELOPMENT_TEAM to specific value."""
@@ -615,6 +624,64 @@ class TestAddTestTarget:
         assert "Added SnapperTests target to project" in captured.out
 
 
+class TestNormalizeScheme:
+    """Tests for normalize_scheme function."""
+
+    def test_downgrades_scheme_version(self) -> None:
+        """Changes scheme version from 1.7 to 1.3."""
+        content = '<Scheme version = "1.7">'
+
+        result = normalize_scheme(content)
+
+        assert 'version = "1.3"' in result
+
+    def test_removes_run_post_actions_on_failure(self) -> None:
+        """Removes runPostActionsOnFailure attribute from BuildAction."""
+        content = (
+            "   <BuildAction\n"
+            '      parallelizeBuildables = "YES"\n'
+            '      buildImplicitDependencies = "YES"\n'
+            '      runPostActionsOnFailure = "NO">'
+        )
+
+        result = normalize_scheme(content)
+
+        assert "runPostActionsOnFailure" not in result
+        assert 'buildImplicitDependencies = "YES">' in result
+
+    def test_removes_only_generate_coverage(self) -> None:
+        """Removes onlyGenerateCoverageForSpecifiedTargets attribute."""
+        content = (
+            '      shouldUseLaunchSchemeArgsEnv = "YES"\n'
+            '      onlyGenerateCoverageForSpecifiedTargets = "NO">'
+        )
+
+        result = normalize_scheme(content)
+
+        assert "onlyGenerateCoverageForSpecifiedTargets" not in result
+
+    def test_removes_empty_command_line_arguments(self) -> None:
+        """Removes empty CommandLineArguments elements."""
+        content = (
+            "   </TestAction>\n"
+            "      <CommandLineArguments>\n"
+            "      </CommandLineArguments>\n"
+            "   <LaunchAction>"
+        )
+
+        result = normalize_scheme(content)
+
+        assert "CommandLineArguments" not in result
+
+    def test_preserves_unrelated_content(self) -> None:
+        """Leaves unrelated scheme content unchanged."""
+        content = '<Scheme version = "1.3"><BuildAction>test</BuildAction></Scheme>'
+
+        result = normalize_scheme(content)
+
+        assert result == content
+
+
 class TestUpdateScheme:
     """Tests for update_scheme function."""
 
@@ -634,58 +701,46 @@ class TestUpdateScheme:
         scheme_dir = project_path / "xcshareddata" / "xcschemes"
         scheme_dir.mkdir(parents=True)
         scheme_path = scheme_dir / "Snapper.xcscheme"
-        scheme_path.write_text('<?xml version="1.0" encoding="UTF-8"?><Scheme></Scheme>')
+        scheme_path.write_text("<Scheme></Scheme>")
 
         update_scheme(project_path, TEST_TARGET_UUID)
 
         captured = capsys.readouterr()
         assert "TestAction not found in scheme" in captured.out
 
-    def test_skips_if_test_target_exists(self, tmp_path: Path, capsys: Any) -> None:
-        """Skips if test target already in scheme."""
+    def test_normalizes_when_test_target_exists(self, tmp_path: Path, capsys: Any) -> None:
+        """Normalizes scheme even when test target already present."""
         project_path = tmp_path / "Test.xcodeproj"
         scheme_dir = project_path / "xcshareddata" / "xcschemes"
         scheme_dir.mkdir(parents=True)
         scheme_path = scheme_dir / "Snapper.xcscheme"
         scheme_path.write_text(
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            "<Scheme><TestAction><Testables>"
-            '<TestableReference><BuildableReference BlueprintName="SnapperTests"/>'
+            '<Scheme version = "1.7"><TestAction>'
+            "<Testables><TestableReference>"
+            '<BuildableReference BlueprintName="SnapperTests"/>'
             "</TestableReference></Testables></TestAction></Scheme>"
         )
 
         update_scheme(project_path, TEST_TARGET_UUID)
 
+        content = scheme_path.read_text()
+        assert 'version = "1.3"' in content
         captured = capsys.readouterr()
         assert "Test target already in scheme" in captured.out
 
-    def test_creates_testables_if_missing(self, tmp_path: Path, capsys: Any) -> None:
-        """Creates Testables element if missing."""
+    def test_adds_test_target_to_empty_testables(self, tmp_path: Path, capsys: Any) -> None:
+        """Adds test target reference into empty Testables element."""
         project_path = tmp_path / "Test.xcodeproj"
         scheme_dir = project_path / "xcshareddata" / "xcschemes"
         scheme_dir.mkdir(parents=True)
         scheme_path = scheme_dir / "Snapper.xcscheme"
         scheme_path.write_text(
-            '<?xml version="1.0" encoding="UTF-8"?><Scheme><TestAction></TestAction></Scheme>'
-        )
-
-        update_scheme(project_path, TEST_TARGET_UUID)
-
-        content = scheme_path.read_text()
-        assert "Testables" in content
-        assert TEST_TARGET_UUID in content
-        captured = capsys.readouterr()
-        assert "Added test target to scheme" in captured.out
-
-    def test_adds_test_target_to_scheme(self, tmp_path: Path, capsys: Any) -> None:
-        """Adds test target to scheme."""
-        project_path = tmp_path / "Test.xcodeproj"
-        scheme_dir = project_path / "xcshareddata" / "xcschemes"
-        scheme_dir.mkdir(parents=True)
-        scheme_path = scheme_dir / "Snapper.xcscheme"
-        scheme_path.write_text(
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            "<Scheme><TestAction><Testables></Testables></TestAction></Scheme>"
+            '<Scheme version = "1.7">\n'
+            "   <TestAction>\n"
+            "      <Testables>\n"
+            "      </Testables>\n"
+            "   </TestAction>\n"
+            "</Scheme>"
         )
 
         update_scheme(project_path, TEST_TARGET_UUID)
@@ -693,8 +748,31 @@ class TestUpdateScheme:
         content = scheme_path.read_text()
         assert TEST_TARGET_UUID in content
         assert "SnapperTests" in content
+        assert 'version = "1.3"' in content
         captured = capsys.readouterr()
         assert "Added test target to scheme" in captured.out
+
+    def test_produces_xcode_compatible_testable_format(self, tmp_path: Path) -> None:
+        """Generated TestableReference uses Xcode multi-line attribute format."""
+        project_path = tmp_path / "Test.xcodeproj"
+        scheme_dir = project_path / "xcshareddata" / "xcschemes"
+        scheme_dir.mkdir(parents=True)
+        scheme_path = scheme_dir / "Snapper.xcscheme"
+        scheme_path.write_text(
+            "<Scheme>\n"
+            "   <TestAction>\n"
+            "      <Testables>\n"
+            "      </Testables>\n"
+            "   </TestAction>\n"
+            "</Scheme>"
+        )
+
+        update_scheme(project_path, TEST_TARGET_UUID)
+
+        content = scheme_path.read_text()
+        assert "         <TestableReference\n" in content
+        assert '            skipped = "NO">' in content
+        assert "            <BuildableReference\n" in content
 
 
 class TestMain:
@@ -860,25 +938,28 @@ class TestUpdateProductsGroupPartialEntries:
         assert result.count(TEST_PRODUCT_UUID) == 1
 
 
-class TestUpdateSchemeWithNullBuildable:
-    """Tests for update_scheme when buildable is None."""
+class TestNormalizeSchemeAppliedDuringUpdate:
+    """Tests for normalize_scheme integration in update_scheme."""
 
-    def test_continues_when_buildable_is_none(self, tmp_path: Path, capsys: Any) -> None:
-        """Continues iteration when buildable element is None."""
+    def test_removes_command_line_arguments_on_insert(self, tmp_path: Path) -> None:
+        """Normalization strips CommandLineArguments when adding test target."""
         project_path = tmp_path / "Test.xcodeproj"
         scheme_dir = project_path / "xcshareddata" / "xcschemes"
         scheme_dir.mkdir(parents=True)
         scheme_path = scheme_dir / "Snapper.xcscheme"
         scheme_path.write_text(
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            "<Scheme><TestAction><Testables>"
-            "<TestableReference></TestableReference>"
-            "</Testables></TestAction></Scheme>"
+            '<Scheme version = "1.7">\n'
+            "   <TestAction>\n"
+            "      <Testables>\n"
+            "      </Testables>\n"
+            "      <CommandLineArguments>\n"
+            "      </CommandLineArguments>\n"
+            "   </TestAction>\n"
+            "</Scheme>"
         )
 
         update_scheme(project_path, TEST_TARGET_UUID)
 
         content = scheme_path.read_text()
+        assert "CommandLineArguments" not in content
         assert TEST_TARGET_UUID in content
-        captured = capsys.readouterr()
-        assert "Added test target to scheme" in captured.out

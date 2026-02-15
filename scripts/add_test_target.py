@@ -7,7 +7,6 @@ and updates the scheme to include the test target.
 import hashlib
 import re
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -399,7 +398,6 @@ def add_build_configurations(content: str) -> str:
         f"\t\t\tbuildSettings = {{\n"
         f'\t\t\t\tBUNDLE_LOADER = "$(TEST_HOST)";\n'
         f"\t\t\t\tCODE_SIGN_STYLE = Automatic;\n"
-        f"\t\t\t\tDEVELOPMENT_TEAM = 26MP7QQP95;\n"
         f"\t\t\t\tGENERATE_INFOPLIST_FILE = YES;\n"
         f"\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ie.klatt.snapper.tests;\n"
         f'\t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";\n'
@@ -415,7 +413,6 @@ def add_build_configurations(content: str) -> str:
         f"\t\t\tbuildSettings = {{\n"
         f'\t\t\t\tBUNDLE_LOADER = "$(TEST_HOST)";\n'
         f"\t\t\t\tCODE_SIGN_STYLE = Automatic;\n"
-        f"\t\t\t\tDEVELOPMENT_TEAM = 26MP7QQP95;\n"
         f"\t\t\t\tGENERATE_INFOPLIST_FILE = YES;\n"
         f"\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ie.klatt.snapper.tests;\n"
         f'\t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";\n'
@@ -498,7 +495,7 @@ def normalize_to_xcode_format(content: str) -> str:
         content,
     )
     content = re.sub(
-        r'\s*DevelopmentTeam = "";\n',
+        r"\s*DevelopmentTeam = [^;]*;\n",
         "\n",
         content,
     )
@@ -549,8 +546,30 @@ def add_test_target(project_path: Path) -> str:
     return TEST_TARGET_UUID
 
 
+def normalize_scheme(content: str) -> str:
+    """Normalize xcodegen scheme output to match Xcode IDE format.
+
+    Removes xcodegen-specific attributes and empty elements that Xcode
+    strips when it opens the project for the first time.
+
+    Args:
+        content: Raw scheme XML text from xcodegen.
+
+    Returns:
+        Normalized scheme text matching Xcode output format.
+    """
+    content = content.replace('version = "1.7"', 'version = "1.3"')
+    content = re.sub(r"\n\s+runPostActionsOnFailure\s*=\s*\"NO\"", "", content)
+    content = re.sub(r"\n\s+onlyGenerateCoverageForSpecifiedTargets\s*=\s*\"NO\"", "", content)
+    content = re.sub(r" *<CommandLineArguments>\n *</CommandLineArguments>\n", "", content)
+    return content
+
+
 def update_scheme(project_path: Path, test_target_uuid: str) -> None:
-    """Add test target to Snapper.xcscheme.
+    """Add test target to Snapper.xcscheme and normalize to Xcode format.
+
+    Uses text-based manipulation to preserve xcodegen multi-line XML
+    formatting that Xcode expects.
 
     Args:
         project_path: Path to the .xcodeproj directory
@@ -560,30 +579,34 @@ def update_scheme(project_path: Path, test_target_uuid: str) -> None:
     if not scheme_path.exists():
         print("Scheme file not found, skipping")
         return
-    ET.register_namespace("", "")
-    tree = ET.parse(scheme_path)
-    root = tree.getroot()
-    test_action = root.find("TestAction")
-    if test_action is None:
+    content = scheme_path.read_text()
+    if "SnapperTests" in content:
+        print("Test target already in scheme")
+        content = normalize_scheme(content)
+        scheme_path.write_text(content)
+        return
+    if "<TestAction" not in content:
         print("TestAction not found in scheme")
         return
-    testables = test_action.find("Testables")
-    if testables is None:
-        testables = ET.SubElement(test_action, "Testables")
-    for testable in testables.findall("TestableReference"):
-        buildable = testable.find("BuildableReference")
-        if buildable is not None and buildable.get("BlueprintName") == "SnapperTests":
-            print("Test target already in scheme")
-            return
-    testable_ref = ET.SubElement(testables, "TestableReference")
-    testable_ref.set("skipped", "NO")
-    buildable_ref = ET.SubElement(testable_ref, "BuildableReference")
-    buildable_ref.set("BuildableIdentifier", "primary")
-    buildable_ref.set("BlueprintIdentifier", test_target_uuid)
-    buildable_ref.set("BuildableName", "SnapperTests.xctest")
-    buildable_ref.set("BlueprintName", "SnapperTests")
-    buildable_ref.set("ReferencedContainer", "container:Snapper.xcodeproj")
-    tree.write(scheme_path, encoding="utf-8", xml_declaration=True)
+    testable_block = (
+        "         <TestableReference\n"
+        '            skipped = "NO">\n'
+        "            <BuildableReference\n"
+        '               BuildableIdentifier = "primary"\n'
+        f'               BlueprintIdentifier = "{test_target_uuid}"\n'
+        '               BuildableName = "SnapperTests.xctest"\n'
+        '               BlueprintName = "SnapperTests"\n'
+        '               ReferencedContainer = "container:Snapper.xcodeproj">\n'
+        "            </BuildableReference>\n"
+        "         </TestableReference>\n"
+    )
+    content = re.sub(
+        r"(<Testables>)\s*(</Testables>)",
+        rf"\1\n{testable_block}      \2",
+        content,
+    )
+    content = normalize_scheme(content)
+    scheme_path.write_text(content)
     print("Added test target to scheme")
 
 
