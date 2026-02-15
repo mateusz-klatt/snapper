@@ -106,7 +106,7 @@ struct SettingsView: View {
         switch webSocketManager.connectionState {
         case .connected:
             return .green
-        case .connecting:
+        case .connecting, .authenticating:
             return .orange
         case .disconnected, .error:
             return .red
@@ -119,6 +119,8 @@ struct SettingsView: View {
             return "Connected"
         case .connecting:
             return "Connecting"
+        case .authenticating:
+            return "Authenticating"
         case .disconnected:
             return "Disconnected"
         case .error:

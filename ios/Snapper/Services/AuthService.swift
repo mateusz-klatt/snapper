@@ -29,10 +29,10 @@ class AuthService: ObservableObject {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue(AppConfig.ContentType.formURLEncoded, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
+        request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
 
-        let bodyString = "username=\(username)&password=\(password)"
-        request.httpBody = bodyString.data(using: .utf8)
+        let body = ["username": username, "password": password]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -48,11 +48,14 @@ class AuthService: ObservableObject {
                 let loginResponse = try decoder.decode(LoginResponse.self, from: data)
                 await MainActor.run {
                     self.currentUser = loginResponse.user
-                    self.isAuthenticated = true
                     self.errorMessage = nil
                 }
 
                 await refreshTokens()
+
+                await MainActor.run {
+                    self.isAuthenticated = true
+                }
             } else {
                 let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data)
                 await MainActor.run {
@@ -76,6 +79,36 @@ class AuthService: ObservableObject {
         return wsToken
     }
 
+    func fetchFreshWsToken() async -> String? {
+        guard let url = URL(string: "\(AppConfig.apiBaseURL)\(AppConfig.Endpoints.refresh)") else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
+
+        do {
+            let (data, response) = try await session.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                return nil
+            }
+
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let refreshResponse = try decoder.decode(RefreshResponse.self, from: data)
+            await MainActor.run {
+                self.wsToken = refreshResponse.wsToken
+            }
+            return refreshResponse.wsToken
+        } catch {
+            print("Failed to fetch fresh ws_token: \(error)")
+            return nil
+        }
+    }
+
     private func refreshTokens() async {
         guard let url = URL(string: "\(AppConfig.apiBaseURL)\(AppConfig.Endpoints.refresh)") else {
             return
@@ -83,6 +116,7 @@ class AuthService: ObservableObject {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
 
         do {
             let (data, response) = try await session.data(for: request)

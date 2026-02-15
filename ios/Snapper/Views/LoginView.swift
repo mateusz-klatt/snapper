@@ -39,16 +39,18 @@ struct LoginView: View {
                     }
 
                     Button(action: { Task { await viewModel.login() } }) {
-                        if viewModel.isLoading {
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        } else {
-                            Text("Login")
-                                .fontWeight(.semibold)
+                        Group {
+                            if viewModel.isLoading {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            } else {
+                                Text("Login")
+                                    .fontWeight(.semibold)
+                            }
                         }
+                        .frame(maxWidth: .infinity)
+                        .padding()
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding()
                     .background(Color.blue)
                     .foregroundColor(.white)
                     .cornerRadius(10)

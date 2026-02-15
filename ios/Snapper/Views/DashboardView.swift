@@ -65,7 +65,7 @@ struct DashboardView: View {
         switch webSocketManager.connectionState {
         case .connected:
             return .green
-        case .connecting:
+        case .connecting, .authenticating:
             return .orange
         case .disconnected, .error:
             return .red
@@ -78,6 +78,8 @@ struct DashboardView: View {
             return "Connected"
         case .connecting:
             return "Connecting..."
+        case .authenticating:
+            return "Authenticating..."
         case .disconnected:
             return "Disconnected"
         case .error(let message):
