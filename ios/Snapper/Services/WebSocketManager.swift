@@ -25,7 +25,9 @@ class WebSocketManager: ObservableObject {
         case error(String)
     }
 
-    private init() {}
+    private init() {
+        // Singleton: prevent external instantiation
+    }
 
     func connect() {
         if case .connected = connectionState { return }
