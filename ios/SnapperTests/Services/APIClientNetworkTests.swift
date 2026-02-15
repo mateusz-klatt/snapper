@@ -41,6 +41,7 @@ final class APIClientNetworkTests: XCTestCase {
                 [
                     "id": 1,
                     "instrument": "BTCUSD",
+                    "exchange": "kraken",
                     "side": "buy",
                     "type": "limit",
                     "size": 1.0,
@@ -107,6 +108,7 @@ final class APIClientNetworkTests: XCTestCase {
                 [
                     "id": 1,
                     "instrument": "BTCUSD",
+                    "exchange": "kraken",
                     "quantity": 1.5,
                     "average_price": 50000.0,
                     "unrealized_pnl": 500.0,
@@ -141,6 +143,7 @@ final class APIClientNetworkTests: XCTestCase {
                 [
                     "id": 1,
                     "instrument": "ETHUSD",
+                    "exchange": "kraken",
                     "side": "buy",
                     "strength": 0.8,
                     "reason": "Strategy triggered",
@@ -169,6 +172,7 @@ final class APIClientNetworkTests: XCTestCase {
                 [
                     "id": 1,
                     "instrument": "BTCUSD",
+                    "exchange": "kraken",
                     "side": "buy",
                     "type": "limit",
                     "size": 1.0,
