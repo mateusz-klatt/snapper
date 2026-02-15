@@ -1,9 +1,13 @@
 """Tests for rate limiting configuration and middleware integration."""
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import HTTPException
+from fastapi import Request
+from limits import parse
 from slowapi import Limiter
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -11,7 +15,10 @@ from snapper.server.app import handle_rate_limit_exceeded
 from snapper.server.rate_limiting import LOGIN_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
+from snapper.server.rate_limiting import clear_failed_login_attempts
+from snapper.server.rate_limiting import enforce_failed_login_rate_limit
 from snapper.server.rate_limiting import limiter
+from snapper.server.rate_limiting import register_failed_login_attempt
 
 
 class TestRateLimitingConfig:
@@ -113,3 +120,94 @@ class TestHandleRateLimitExceeded:
         assert response.status_code == 429
         assert "Retry-After" not in response.headers
         assert b"Rate limit exceeded: generic error" in response.body
+
+
+class TestFailedLoginRateLimiting:
+    """Tests for failed-only login rate limiting behavior."""
+
+    def setup_method(self) -> None:
+        """Reset limiter storage before each test."""
+        limiter.enabled = True
+        limiter.reset()
+
+    def teardown_method(self) -> None:
+        """Reset limiter storage after each test."""
+        limiter.reset()
+
+    def _build_request(self, host: str = "127.0.0.1") -> Request:
+        """Build request with a specific client host.
+
+        Args:
+            host: Client IP address.
+
+        Returns:
+            Starlette request instance.
+        """
+        scope: dict[str, Any] = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "headers": [],
+            "client": (host, 12345),
+        }
+        return Request(scope)
+
+    def test_blocks_after_configured_number_of_failed_attempts(self) -> None:
+        """Failed attempts are blocked once configured threshold is reached.
+
+        Given: Repeated failed login attempts for same username and IP,
+        When: Checking limiter after exhausting quota,
+        Then: HTTP 429 is raised with retry hint.
+        """
+        request = self._build_request()
+        username = "admin"
+        allowed_attempts = parse(LOGIN_RATE_LIMIT).amount
+        for _ in range(allowed_attempts):
+            enforce_failed_login_rate_limit(request, username)
+            register_failed_login_attempt(request, username)
+        with pytest.raises(HTTPException) as exc:
+            enforce_failed_login_rate_limit(request, username)
+        assert exc.value.status_code == 429
+        assert exc.value.detail == "Too many failed login attempts"
+        assert exc.value.headers is not None
+        assert "Retry-After" in exc.value.headers
+
+    def test_successful_login_reset_allows_new_failed_attempt_budget(self) -> None:
+        """Successful login clears failed-attempt counter.
+
+        Given: Failed attempts reaching the configured threshold,
+        When: Counter is cleared after successful authentication,
+        Then: Full failed-attempt budget is available again.
+        """
+        request = self._build_request()
+        username = "admin"
+        allowed_attempts = parse(LOGIN_RATE_LIMIT).amount
+        for _ in range(allowed_attempts):
+            enforce_failed_login_rate_limit(request, username)
+            register_failed_login_attempt(request, username)
+        with pytest.raises(HTTPException):
+            enforce_failed_login_rate_limit(request, username)
+        clear_failed_login_attempts(request, username)
+        for _ in range(allowed_attempts):
+            enforce_failed_login_rate_limit(request, username)
+            register_failed_login_attempt(request, username)
+        with pytest.raises(HTTPException):
+            enforce_failed_login_rate_limit(request, username)
+
+    def test_counter_is_scoped_per_username_on_same_ip(self) -> None:
+        """Failed-attempt quota is isolated per username on same source IP.
+
+        Given: One username already blocked for a shared IP,
+        When: Another username logs in from same IP,
+        Then: Second username retains its own failed-attempt budget.
+        """
+        request = self._build_request()
+        blocked_username = "admin"
+        second_username = "operator"
+        allowed_attempts = parse(LOGIN_RATE_LIMIT).amount
+        for _ in range(allowed_attempts):
+            enforce_failed_login_rate_limit(request, blocked_username)
+            register_failed_login_attempt(request, blocked_username)
+        with pytest.raises(HTTPException):
+            enforce_failed_login_rate_limit(request, blocked_username)
+        enforce_failed_login_rate_limit(request, second_username)

@@ -35,10 +35,12 @@ from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import User
-from snapper.server.rate_limiting import LOGIN_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
+from snapper.server.rate_limiting import clear_failed_login_attempts
+from snapper.server.rate_limiting import enforce_failed_login_rate_limit
 from snapper.server.rate_limiting import limiter
+from snapper.server.rate_limiting import register_failed_login_attempt
 
 _AUTH_API_PATH = "/api/auth"
 
@@ -46,7 +48,6 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
 @router.post("/login")
-@limiter.limit(LOGIN_RATE_LIMIT)
 async def login(
     request: Request,
     response: Response,
@@ -67,14 +68,17 @@ async def login(
     Raises:
         HTTPException: 401 if credentials invalid.
     """
+    enforce_failed_login_rate_limit(request, login_data.username)
     user_service = get_user_service()
     settings = request.app.state.settings
     user = await user_service.authenticate_user(login_data.username, login_data.password)
     if not user:
+        register_failed_login_attempt(request, login_data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
+    clear_failed_login_attempts(request, login_data.username)
     token_manager = get_token_manager()
     token_pair = token_manager.create_tokens(user)
     csrf_manager = get_csrf_manager()
