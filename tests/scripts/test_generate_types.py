@@ -707,7 +707,7 @@ class TestGetAnyCodableHelper:
         lines = get_any_codable_helper()
         result = "\n".join(lines)
         assert "struct AnyCodable" in result
-        assert "Codable, Sendable" in result
+        assert "Codable, @unchecked Sendable" in result
 
 
 class TestGenerateSwiftTypes:
@@ -786,6 +786,55 @@ class TestGenerateSwiftTypes:
         content = output_path.read_text()
         assert content.count("enum OrderStatus") == 1
 
+    def test_returns_generated_enum_names(self, tmp_path: Path) -> None:
+        """Returns set of enum names that were generated."""
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "Status": {"type": "string", "enum": ["active"]},
+                        "User": {
+                            "type": "object",
+                            "properties": {"id": {"type": "integer"}},
+                        },
+                    }
+                }
+            )
+        )
+        output_path = tmp_path / "Types.swift"
+
+        result = generate_swift_types(tmp_path, schema_path, output_path)
+
+        assert result == {"Status"}
+
+    def test_exclude_enums_skips_duplicates(self, tmp_path: Path) -> None:
+        """Excludes enums already emitted in another file."""
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "UserRole": {"type": "string", "enum": ["viewer", "admin"]},
+                        "Profile": {
+                            "type": "object",
+                            "properties": {"role": {"$ref": "#/definitions/UserRole"}},
+                        },
+                    }
+                }
+            )
+        )
+        output_path = tmp_path / "Types.swift"
+
+        result = generate_swift_types(
+            tmp_path, schema_path, output_path, exclude_enums={"UserRole"}
+        )
+
+        content = output_path.read_text()
+        assert "enum UserRole" not in content
+        assert "struct Profile" in content
+        assert result == set()
+
 
 class TestGenerateIosTypes:
     """Tests for generate_ios_types function."""
@@ -828,6 +877,45 @@ class TestGenerateIosTypes:
 
         assert (ios_dir / "WSMessages.swift").exists()
         assert not (ios_dir / "APITypes.swift").exists()
+
+    def test_deduplicates_shared_enums_across_files(self, tmp_path: Path) -> None:
+        """Shared enums between WS and API schemas appear only in WSMessages."""
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "UserRole": {"type": "string", "enum": ["viewer", "admin"]},
+                    }
+                }
+            )
+        )
+        (build_dir / "openapi-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "UserRole": {"type": "string", "enum": ["viewer", "admin"]},
+                        "UserProfile": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"$ref": "#/definitions/UserRole"},
+                            },
+                        },
+                    }
+                }
+            )
+        )
+        ios_dir = tmp_path / "ios" / "Snapper" / "Models" / "Generated"
+        ios_dir.mkdir(parents=True)
+
+        generate_ios_types(tmp_path)
+
+        ws_content = (ios_dir / "WSMessages.swift").read_text()
+        api_content = (ios_dir / "APITypes.swift").read_text()
+        assert "enum UserRole" in ws_content
+        assert "enum UserRole" not in api_content
+        assert "struct UserProfile" in api_content
 
 
 class TestJsonTypeToZod:

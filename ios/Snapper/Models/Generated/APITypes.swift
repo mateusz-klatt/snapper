@@ -3,12 +3,6 @@
 
 import Foundation
 
-enum UserRole: String, Codable, Sendable {
-    case viewer
-    case operatorRole = "operator"
-    case admin
-}
-
 enum AvailableProcessLifecycle: String, Codable, Sendable {
     case longRunning = "long_running"
     case oneShot = "one_shot"

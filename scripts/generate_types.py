@@ -669,7 +669,7 @@ def get_any_codable_helper() -> list[str]:
     """
     return [
         "/// Type-erased Codable value for dynamic JSON fields.",
-        "struct AnyCodable: Codable, Sendable {",
+        "struct AnyCodable: Codable, @unchecked Sendable {",
         "    let value: Any",
         "",
         "    init(_ value: Any) {",
@@ -738,9 +738,10 @@ def _collect_top_level_enums(
     """
     for name, type_schema in definitions.items():
         if type_schema.get("type") == "string" and "enum" in type_schema:
-            lines.extend(generate_swift_enum(name, type_schema["enum"]))
-            lines.append("")
-            generated_enums.add(name)
+            if name not in generated_enums:
+                lines.extend(generate_swift_enum(name, type_schema["enum"]))
+                lines.append("")
+                generated_enums.add(name)
 
 
 def _collect_inline_enums(
@@ -785,8 +786,12 @@ def _collect_structs(
 
 
 def generate_swift_types(
-    _project_root: Path, schema_path: Path, output_path: Path, include_any_codable: bool = True
-) -> None:
+    _project_root: Path,
+    schema_path: Path,
+    output_path: Path,
+    include_any_codable: bool = True,
+    exclude_enums: set[str] | None = None,
+) -> set[str]:
     """Generate Swift types from JSON Schema.
 
     Args:
@@ -794,6 +799,10 @@ def generate_swift_types(
         schema_path: Path to the JSON Schema file.
         output_path: Path for the generated Swift file.
         include_any_codable: Whether to include the AnyCodable helper.
+        exclude_enums: Enum names already emitted in another file to skip here.
+
+    Returns:
+        Set of enum names generated in this file.
     """
     with schema_path.open() as f:
         schema = json.load(f)
@@ -810,7 +819,7 @@ def generate_swift_types(
     if include_any_codable:
         lines.extend(get_any_codable_helper())
 
-    generated_enums: set[str] = set()
+    generated_enums: set[str] = set(exclude_enums or ())
     _collect_top_level_enums(definitions, lines, generated_enums)
     _collect_inline_enums(definitions, lines, generated_enums)
     _collect_structs(definitions, lines)
@@ -818,6 +827,7 @@ def generate_swift_types(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines))
     print(f"Generated {output_path} ({len(definitions)} types)")
+    return generated_enums - (exclude_enums or set())
 
 
 def generate_ios_types(project_root: Path) -> None:
@@ -841,9 +851,10 @@ def generate_ios_types(project_root: Path) -> None:
     any_codable_path.write_text("\n".join(any_codable_lines))
     print(f"Generated {any_codable_path}")
 
+    ws_enums: set[str] = set()
     ws_schema_path = project_root / "build" / _WS_SCHEMAS_FILE
     if ws_schema_path.exists():
-        generate_swift_types(
+        ws_enums = generate_swift_types(
             project_root,
             ws_schema_path,
             ios_gen_dir / "WSMessages.swift",
@@ -857,6 +868,7 @@ def generate_ios_types(project_root: Path) -> None:
             api_schema_path,
             ios_gen_dir / "APITypes.swift",
             include_any_codable=False,
+            exclude_enums=ws_enums,
         )
 
 
