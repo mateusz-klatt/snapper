@@ -55,10 +55,10 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
-from snapper.infrastructure.symbols.functions import native_to_walutomat
 from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
+from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
-from snapper.infrastructure.symbols.functions import walutomat_to_native
+from snapper.infrastructure.symbols.functions import walutomat_ws_to_native
 
 
 class _RaisingAsyncIterator[T](AsyncIterator[T]):
@@ -367,7 +367,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             symbols: List of native symbols to poll.
         """
         logger.info(f"Starting Walutomat polling (interval: {self.polling_interval}s)")
-        symbol_map = {native_to_walutomat(s): s for s in symbols}
+        symbol_map = {native_to_walutomat_ws(s): s for s in symbols}
         while self._running:
             try:
                 data = await self._fetch_market_data()
@@ -456,7 +456,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         """
         self._require_connected()
         data = await self._fetch_market_data()
-        wal_symbol = native_to_walutomat(symbol)
+        wal_symbol = native_to_walutomat_ws(symbol)
         if wal_symbol not in data:
             available = ", ".join(data.keys())
             raise ValueError(f"Symbol {symbol} not found. Available: {available}")
@@ -876,4 +876,4 @@ class WalutomatExchangeClient(ExchangeClientBase):
         """
         if not self._last_data:
             raise RuntimeError("No data available - call connect() or get_ticker() first")
-        return [walutomat_to_native(symbol) for symbol in self._last_data]
+        return [walutomat_ws_to_native(symbol) for symbol in self._last_data]

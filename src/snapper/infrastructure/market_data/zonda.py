@@ -29,7 +29,7 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
 from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
-from snapper.infrastructure.symbols.functions import zonda_to_native
+from snapper.infrastructure.symbols.functions import zonda_ws_to_native
 from snapper.utils.logging import set_log_context
 
 
@@ -142,7 +142,7 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
             Native symbol string, or None if symbol is unknown.
         """
         try:
-            return zonda_to_native(zonda_symbol)
+            return zonda_ws_to_native(zonda_symbol)
         except ValueError:
             logger.warning(f"Unknown Zonda symbol: {zonda_symbol}")
             return None

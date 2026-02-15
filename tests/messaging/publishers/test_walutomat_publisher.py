@@ -34,7 +34,7 @@ class TestWalutomatPublisherUnknownSymbols:
         """
         publisher = WalutomatMarketDataPublisher(symbols=[])
         with patch(
-            "snapper.messaging.publishers.walutomat.native_to_walutomat",
+            "snapper.messaging.publishers.walutomat.native_to_walutomat_ws",
             return_value="BTCPLN",
         ):
             valid_symbols = publisher._validate_symbols(["BTC-PLN", "BTC-PLN", "BTC-PLN"])

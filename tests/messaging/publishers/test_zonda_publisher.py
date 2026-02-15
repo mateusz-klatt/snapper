@@ -115,7 +115,7 @@ class TestZondaPublisher:
         assert kwargs == {"symbols": ["BTC-PLN", "ETH-PLN"]}
 
     @patch("snapper.messaging.publishers.zonda.logger")
-    @patch("snapper.messaging.publishers.zonda.native_to_zonda")
+    @patch("snapper.messaging.publishers.zonda.native_to_zonda_ws")
     @patch("snapper.config.settings.get_settings")
     def test_validate_symbols_filters_invalid_and_duplicates(
         self,

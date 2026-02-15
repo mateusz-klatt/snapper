@@ -120,14 +120,14 @@ def stub_symbol_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
         return f"{base}-{quote}"
 
     monkeypatch.setattr(
-        "snapper.infrastructure.exchanges.implementations.walutomat.native_to_walutomat", to_ws
+        "snapper.infrastructure.exchanges.implementations.walutomat.native_to_walutomat_ws", to_ws
     )
     monkeypatch.setattr(
         "snapper.infrastructure.exchanges.implementations.walutomat.native_to_walutomat_rest",
         to_rest,
     )
     monkeypatch.setattr(
-        "snapper.infrastructure.exchanges.implementations.walutomat.walutomat_to_native",
+        "snapper.infrastructure.exchanges.implementations.walutomat.walutomat_ws_to_native",
         ws_to_native,
     )
     monkeypatch.setattr(

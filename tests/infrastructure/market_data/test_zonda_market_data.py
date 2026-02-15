@@ -148,7 +148,7 @@ async def test_collect_snapshots_loop_creates_entries(monkeypatch: pytest.Monkey
         raise ValueError("unknown symbol")
 
     monkeypatch.setattr(
-        "snapper.infrastructure.market_data.zonda.zonda_to_native",
+        "snapper.infrastructure.market_data.zonda.zonda_ws_to_native",
         fake_zonda_to_native,
     )
     service = ZondaSnapshotUpdaterService(
@@ -453,7 +453,7 @@ async def test_collect_snapshots_loop_exception_continues(monkeypatch: pytest.Mo
     repo: Any = DummyRepo()
     svc = ZondaSnapshotUpdaterService(client, repo)
     monkeypatch.setattr(
-        "snapper.infrastructure.market_data.zonda.zonda_to_native",
+        "snapper.infrastructure.market_data.zonda.zonda_ws_to_native",
         lambda s: s,
     )
     snapshots: dict[str, Any] = {}
@@ -491,7 +491,7 @@ async def test_collect_snapshots_loop_logs_progress(
     repo: Any = DummyRepo()
     svc = ZondaSnapshotUpdaterService(client, repo)
     monkeypatch.setattr(
-        "snapper.infrastructure.market_data.zonda.zonda_to_native",
+        "snapper.infrastructure.market_data.zonda.zonda_ws_to_native",
         lambda s: s,
     )
     with caplog.at_level(logging.DEBUG):
@@ -555,7 +555,7 @@ async def test_collect_snapshots_loop_stops_when_all_collected(
     repo: Any = DummyRepo()
     svc = ZondaSnapshotUpdaterService(client, repo)
     monkeypatch.setattr(
-        "snapper.infrastructure.market_data.zonda.zonda_to_native",
+        "snapper.infrastructure.market_data.zonda.zonda_ws_to_native",
         lambda s: s,
     )
     snapshots: dict[str, Any] = {}

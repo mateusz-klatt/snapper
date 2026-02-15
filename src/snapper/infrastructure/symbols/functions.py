@@ -41,14 +41,14 @@ __all__ = [
     "kraken_websocket_to_native",
     "native_to_kraken_rest",
     "kraken_rest_to_native",
-    "native_to_zonda",
-    "zonda_to_native",
-    "native_to_walutomat",
-    "walutomat_to_native",
+    "native_to_zonda_ws",
+    "zonda_ws_to_native",
+    "native_to_walutomat_ws",
+    "walutomat_ws_to_native",
     "native_to_walutomat_rest",
     "walutomat_rest_to_native",
-    "native_to_polygon",
-    "polygon_to_native",
+    "native_to_polygon_rest",
+    "polygon_rest_to_native",
     "get_available_zonda_symbols",
     "get_available_walutomat_symbols",
     "get_available_polygon_symbols",
@@ -125,7 +125,7 @@ def native_to_kraken_websocket(native_symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.native_to_ws[native_symbol]
+        return mapper.native_to_kraken_ws[native_symbol]
     except KeyError as exc:
         raise ValueError(f"Unknown native symbol: {native_symbol}") from exc
 
@@ -144,7 +144,7 @@ def native_to_kraken_rest(native_symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.native_to_rest[native_symbol]
+        return mapper.native_to_kraken_rest[native_symbol]
     except KeyError as exc:
         raise ValueError(f"Unknown native symbol: {native_symbol}") from exc
 
@@ -182,7 +182,7 @@ def kraken_websocket_to_native(symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.ws_to_native[symbol]
+        return mapper.kraken_ws_to_native[symbol]
     except KeyError as exc:
         raise ValueError(f"Unknown Kraken WebSocket v2 symbol: {symbol}") from exc
 
@@ -201,7 +201,7 @@ def kraken_rest_to_native(symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.rest_to_native[symbol]
+        return mapper.kraken_rest_to_native[symbol]
     except KeyError as exc:
         raise ValueError(f"Unknown Kraken REST symbol: {symbol}") from exc
 
@@ -225,32 +225,32 @@ def ccxt_to_native(symbol: str) -> str:
         raise ValueError(f"Unknown CCXT symbol: {symbol}") from exc
 
 
-def native_to_zonda(native_symbol: str) -> str:
-    """Convert native symbol to Zonda exchange format.
+def native_to_zonda_ws(native_symbol: str) -> str:
+    """Convert native symbol to Zonda WebSocket format.
 
     Args:
         native_symbol: Native symbol (e.g., ``BTC-PLN``).
 
     Returns:
-        Zonda symbol (e.g., ``BTC-PLN``).
+        Zonda WebSocket symbol (e.g., ``BTC-PLN``).
 
     Raises:
         ValueError: If native symbol is not available on Zonda.
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.native_to_zonda[native_symbol]
+        return mapper.native_to_zonda_ws[native_symbol]
     except KeyError as exc:
         raise ValueError(
             f"Unknown native symbol (not available on Zonda): {native_symbol}"
         ) from exc
 
 
-def zonda_to_native(symbol: str) -> str:
-    """Convert Zonda symbol to native format.
+def zonda_ws_to_native(symbol: str) -> str:
+    """Convert Zonda WebSocket symbol to native format.
 
     Args:
-        symbol: Zonda symbol (e.g., ``BTC-PLN``).
+        symbol: Zonda WebSocket symbol (e.g., ``BTC-PLN``).
 
     Returns:
         Native symbol (e.g., ``BTC-PLN``).
@@ -260,12 +260,12 @@ def zonda_to_native(symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.zonda_to_native[symbol]
+        return mapper.zonda_ws_to_native[symbol]
     except KeyError as exc:
-        raise ValueError(f"Unknown Zonda symbol: {symbol}") from exc
+        raise ValueError(f"Unknown Zonda WebSocket symbol: {symbol}") from exc
 
 
-def native_to_walutomat(native_symbol: str) -> str:
+def native_to_walutomat_ws(native_symbol: str) -> str:
     """Convert native symbol to Walutomat WebSocket format.
 
     Args:
@@ -279,14 +279,14 @@ def native_to_walutomat(native_symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.native_to_walutomat[native_symbol]
+        return mapper.native_to_walutomat_ws[native_symbol]
     except KeyError as exc:
         raise ValueError(
-            f"Unknown native symbol (not available on Walutomat): {native_symbol}"
+            f"Unknown native symbol (not available on Walutomat WS): {native_symbol}"
         ) from exc
 
 
-def walutomat_to_native(symbol: str) -> str:
+def walutomat_ws_to_native(symbol: str) -> str:
     """Convert Walutomat WebSocket symbol to native format.
 
     Args:
@@ -296,13 +296,13 @@ def walutomat_to_native(symbol: str) -> str:
         Native symbol (e.g., ``EUR-PLN``).
 
     Raises:
-        ValueError: If Walutomat symbol is not recognized.
+        ValueError: If Walutomat WebSocket symbol is not recognized.
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.walutomat_to_native[symbol]
+        return mapper.walutomat_ws_to_native[symbol]
     except KeyError as exc:
-        raise ValueError(f"Unknown Walutomat symbol: {symbol}") from exc
+        raise ValueError(f"Unknown Walutomat WebSocket symbol: {symbol}") from exc
 
 
 def native_to_walutomat_rest(native_symbol: str) -> str:
@@ -345,8 +345,8 @@ def walutomat_rest_to_native(symbol: str) -> str:
         raise ValueError(f"Unknown Walutomat REST symbol: {symbol}") from exc
 
 
-def native_to_polygon(native_symbol: str) -> str:
-    """Convert native symbol to Polygon.io ticker format.
+def native_to_polygon_rest(native_symbol: str) -> str:
+    """Convert native symbol to Polygon.io REST ticker format.
 
     Args:
         native_symbol: Native symbol (e.g., ``BTC-USD``).
@@ -359,15 +359,15 @@ def native_to_polygon(native_symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.native_to_polygon[native_symbol]
+        return mapper.native_to_polygon_rest[native_symbol]
     except KeyError as exc:
         raise ValueError(
             f"Unknown native symbol (not available on Polygon): {native_symbol}"
         ) from exc
 
 
-def polygon_to_native(symbol: str) -> str:
-    """Convert Polygon.io ticker to native format.
+def polygon_rest_to_native(symbol: str) -> str:
+    """Convert Polygon.io REST ticker to native format.
 
     Args:
         symbol: Polygon ticker (e.g., ``C:BTCUSD`` or ``X:EURUSD``).
@@ -380,9 +380,9 @@ def polygon_to_native(symbol: str) -> str:
     """
     mapper = _get_db_mapper()
     try:
-        return mapper.polygon_to_native[symbol]
+        return mapper.polygon_rest_to_native[symbol]
     except KeyError as exc:
-        raise ValueError(f"Unknown Polygon symbol: {symbol}") from exc
+        raise ValueError(f"Unknown Polygon REST symbol: {symbol}") from exc
 
 
 def get_available_polygon_rest_symbols() -> list[str]:
@@ -392,7 +392,7 @@ def get_available_polygon_rest_symbols() -> list[str]:
         Sorted list of Polygon tickers (e.g., ``["C:BTCUSD", "X:EURUSD"]``).
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.polygon_to_native.keys())
+    return sorted(mapper.polygon_rest_to_native.keys())
 
 
 def validate_symbol(symbol: str) -> bool:
@@ -405,7 +405,7 @@ def validate_symbol(symbol: str) -> bool:
         True if symbol exists in Kraken WebSocket mappings, False otherwise.
     """
     mapper = _get_db_mapper()
-    return symbol in mapper.native_to_ws
+    return symbol in mapper.native_to_kraken_ws
 
 
 def get_available_ws_symbols() -> list[str]:
@@ -415,7 +415,7 @@ def get_available_ws_symbols() -> list[str]:
         Sorted list of Kraken WebSocket symbols (e.g., ``["XBT/USD", ...]``).
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.ws_to_native.keys())
+    return sorted(mapper.kraken_ws_to_native.keys())
 
 
 def get_available_kraken_rest_symbols() -> list[str]:
@@ -425,7 +425,7 @@ def get_available_kraken_rest_symbols() -> list[str]:
         Sorted list of Kraken REST symbols (e.g., ``["XBTUSD", ...]``).
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.rest_to_native.keys())
+    return sorted(mapper.kraken_rest_to_native.keys())
 
 
 def get_available_kraken_symbols() -> list[str]:
@@ -435,7 +435,7 @@ def get_available_kraken_symbols() -> list[str]:
         Sorted list of native symbols with Kraken support.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.native_to_ws.keys())
+    return sorted(mapper.native_to_kraken_ws.keys())
 
 
 def get_available_zonda_symbols() -> list[str]:
@@ -445,7 +445,7 @@ def get_available_zonda_symbols() -> list[str]:
         Sorted list of Zonda symbols (e.g., ``["BTC-PLN", ...]``).
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.zonda_to_native.keys())
+    return sorted(mapper.zonda_ws_to_native.keys())
 
 
 def get_available_walutomat_rest_symbols() -> list[str]:
@@ -465,7 +465,7 @@ def get_available_walutomat_symbols() -> list[str]:
         Sorted list of native symbols with Walutomat support.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.walutomat_to_native.values())
+    return sorted(mapper.walutomat_ws_to_native.values())
 
 
 def get_available_polygon_symbols() -> list[str]:
@@ -475,7 +475,7 @@ def get_available_polygon_symbols() -> list[str]:
         Sorted list of native symbols with Polygon support.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.polygon_to_native.values())
+    return sorted(mapper.polygon_rest_to_native.values())
 
 
 def get_available_symbols() -> list[str]:

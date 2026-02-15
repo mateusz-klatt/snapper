@@ -12,7 +12,7 @@ from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
-from snapper.infrastructure.symbols.functions import native_to_walutomat
+from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
 
@@ -56,7 +56,7 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
         seen_symbols: set[str] = set()
         for symbol in symbols:
             try:
-                native_to_walutomat(symbol)
+                native_to_walutomat_ws(symbol)
             except ValueError:
                 logger.warning(
                     f"WalutomatMarketDataPublisher: Skipping unknown native symbol {symbol}"

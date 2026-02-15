@@ -34,7 +34,7 @@ from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
-from snapper.infrastructure.symbols.functions import native_to_zonda
+from snapper.infrastructure.symbols.functions import native_to_zonda_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
 
@@ -118,7 +118,7 @@ class ZondaMarketDataPublisher(MarketDataPublisherService[ZondaExchangeClient]):
         seen_symbols: set[str] = set()
         for symbol in symbols:
             try:
-                native_to_zonda(symbol)
+                native_to_zonda_ws(symbol)
             except ValueError:
                 logger.warning(f"ZondaMarketDataPublisher: Skipping unknown native symbol {symbol}")
                 continue

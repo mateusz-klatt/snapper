@@ -641,7 +641,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         Returns:
             _SymbolContext or None.
         """
-        native_symbol = self._symbol_mapper.polygon_to_native.get(symbol)
+        native_symbol = self._symbol_mapper.polygon_rest_to_native.get(symbol)
         if native_symbol:
             return self._lookup_context_by_native(native_symbol)
         return None
@@ -660,7 +660,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         context = self._lookup_context_by_polygon_symbol(symbol)
         if context:
             return context
-        polygon_symbol = self._symbol_mapper.native_to_polygon.get(symbol)
+        polygon_symbol = self._symbol_mapper.native_to_polygon_rest.get(symbol)
         if polygon_symbol:
             return self._lookup_context_by_polygon_symbol(polygon_symbol)
         return None

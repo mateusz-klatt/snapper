@@ -100,13 +100,13 @@ _SINGLETONS_TO_CLEAR: tuple[type[Any], ...] = (
 )
 
 _EXCHANGE_MAP_ATTRS: tuple[tuple[str, str, str, str], ...] = (
-    ("native_to_ws", "ws_to_native", "kraken", "ws"),
-    ("native_to_rest", "rest_to_native", "kraken", "rest"),
+    ("native_to_kraken_ws", "kraken_ws_to_native", "kraken", "ws"),
+    ("native_to_kraken_rest", "kraken_rest_to_native", "kraken", "rest"),
     ("native_to_ccxt", "ccxt_to_native", "kraken", "ccxt"),
-    ("native_to_zonda", "zonda_to_native", "zonda", "ws"),
-    ("native_to_walutomat", "walutomat_to_native", "walutomat", "ws"),
+    ("native_to_zonda_ws", "zonda_ws_to_native", "zonda", "ws"),
+    ("native_to_walutomat_ws", "walutomat_ws_to_native", "walutomat", "ws"),
     ("native_to_walutomat_rest", "walutomat_rest_to_native", "walutomat", "rest"),
-    ("native_to_polygon", "polygon_to_native", "polygon", "rest"),
+    ("native_to_polygon_rest", "polygon_rest_to_native", "polygon", "rest"),
 )
 
 _TEST_EXCHANGE_CAPABILITIES: dict[str, tuple[bool, bool]] = {

@@ -89,24 +89,24 @@ def make_native_symbol(base: str, quote: str) -> str:
     return f"{base_clean}{NATIVE_SEPARATOR}{quote_clean}"
 
 
-_COMPAT_FORWARD: tuple[tuple[str, str, str], ...] = (
-    ("kraken", "ws", "native_to_ws"),
-    ("kraken", "rest", "native_to_rest"),
+_SHORTCUT_FORWARD: tuple[tuple[str, str, str], ...] = (
+    ("kraken", "ws", "native_to_kraken_ws"),
+    ("kraken", "rest", "native_to_kraken_rest"),
     ("kraken", "ccxt", "native_to_ccxt"),
-    ("zonda", "ws", "native_to_zonda"),
-    ("walutomat", "ws", "native_to_walutomat"),
+    ("zonda", "ws", "native_to_zonda_ws"),
+    ("walutomat", "ws", "native_to_walutomat_ws"),
     ("walutomat", "rest", "native_to_walutomat_rest"),
-    ("polygon", "rest", "native_to_polygon"),
+    ("polygon", "rest", "native_to_polygon_rest"),
 )
 
-_COMPAT_REVERSE: tuple[tuple[str, str, str], ...] = (
-    ("kraken", "ws", "ws_to_native"),
-    ("kraken", "rest", "rest_to_native"),
+_SHORTCUT_REVERSE: tuple[tuple[str, str, str], ...] = (
+    ("kraken", "ws", "kraken_ws_to_native"),
+    ("kraken", "rest", "kraken_rest_to_native"),
     ("kraken", "ccxt", "ccxt_to_native"),
-    ("zonda", "ws", "zonda_to_native"),
-    ("walutomat", "ws", "walutomat_to_native"),
+    ("zonda", "ws", "zonda_ws_to_native"),
+    ("walutomat", "ws", "walutomat_ws_to_native"),
     ("walutomat", "rest", "walutomat_rest_to_native"),
-    ("polygon", "rest", "polygon_to_native"),
+    ("polygon", "rest", "polygon_rest_to_native"),
 )
 
 
@@ -121,28 +121,29 @@ class SymbolMapperService:
     and efficient memory usage.
 
     The canonical data store is ``forward`` and ``reverse`` dicts keyed by
-    ``(exchange, channel)`` tuples. Legacy named attributes (``native_to_ws``,
-    ``ws_to_native``, etc.) are kept as direct references into those dicts
-    for backward compatibility with ``functions.py``.
+    ``(exchange, channel)`` tuples. Shortcut attributes follow the naming
+    convention ``native_to_{exchange}_{channel}`` / ``{exchange}_{channel}_to_native``
+    and provide direct references into those dicts so that callers in
+    ``functions.py`` can map symbols with minimal arguments.
 
     Attributes:
         repository: Database repository for loading symbol aliases.
         forward: Native-to-exchange maps keyed by ``(exchange, channel)``.
         reverse: Exchange-to-native maps keyed by ``(exchange, channel)``.
-        native_to_ws: Alias for ``forward[("kraken", "ws")]``.
-        native_to_rest: Alias for ``forward[("kraken", "rest")]``.
+        native_to_kraken_ws: Alias for ``forward[("kraken", "ws")]``.
+        native_to_kraken_rest: Alias for ``forward[("kraken", "rest")]``.
         native_to_ccxt: Alias for ``forward[("kraken", "ccxt")]``.
-        native_to_zonda: Alias for ``forward[("zonda", "ws")]``.
-        native_to_walutomat: Alias for ``forward[("walutomat", "ws")]``.
+        native_to_zonda_ws: Alias for ``forward[("zonda", "ws")]``.
+        native_to_walutomat_ws: Alias for ``forward[("walutomat", "ws")]``.
         native_to_walutomat_rest: Alias for ``forward[("walutomat", "rest")]``.
-        native_to_polygon: Alias for ``forward[("polygon", "rest")]``.
-        ws_to_native: Alias for ``reverse[("kraken", "ws")]``.
-        rest_to_native: Alias for ``reverse[("kraken", "rest")]``.
+        native_to_polygon_rest: Alias for ``forward[("polygon", "rest")]``.
+        kraken_ws_to_native: Alias for ``reverse[("kraken", "ws")]``.
+        kraken_rest_to_native: Alias for ``reverse[("kraken", "rest")]``.
         ccxt_to_native: Alias for ``reverse[("kraken", "ccxt")]``.
-        zonda_to_native: Alias for ``reverse[("zonda", "ws")]``.
-        walutomat_to_native: Alias for ``reverse[("walutomat", "ws")]``.
+        zonda_ws_to_native: Alias for ``reverse[("zonda", "ws")]``.
+        walutomat_ws_to_native: Alias for ``reverse[("walutomat", "ws")]``.
         walutomat_rest_to_native: Alias for ``reverse[("walutomat", "rest")]``.
-        polygon_to_native: Alias for ``reverse[("polygon", "rest")]``.
+        polygon_rest_to_native: Alias for ``reverse[("polygon", "rest")]``.
 
     Example:
         >>> mapper = SymbolMapperService.get_instance()
@@ -182,25 +183,27 @@ class SymbolMapperService:
         self.repository = DatabaseRepository(settings.db_url)
         self.forward: dict[tuple[str, str], dict[str, str]] = {}
         self.reverse: dict[tuple[str, str], dict[str, str]] = {}
-        self.native_to_ws: dict[str, str] = {}
-        self.native_to_rest: dict[str, str] = {}
+        self.native_to_kraken_ws: dict[str, str] = {}
+        self.native_to_kraken_rest: dict[str, str] = {}
         self.native_to_ccxt: dict[str, str] = {}
-        self.ws_to_native: dict[str, str] = {}
-        self.rest_to_native: dict[str, str] = {}
+        self.kraken_ws_to_native: dict[str, str] = {}
+        self.kraken_rest_to_native: dict[str, str] = {}
         self.ccxt_to_native: dict[str, str] = {}
-        self.native_to_zonda: dict[str, str] = {}
-        self.zonda_to_native: dict[str, str] = {}
-        self.native_to_walutomat: dict[str, str] = {}
-        self.walutomat_to_native: dict[str, str] = {}
+        self.native_to_zonda_ws: dict[str, str] = {}
+        self.zonda_ws_to_native: dict[str, str] = {}
+        self.native_to_walutomat_ws: dict[str, str] = {}
+        self.walutomat_ws_to_native: dict[str, str] = {}
         self.native_to_walutomat_rest: dict[str, str] = {}
         self.walutomat_rest_to_native: dict[str, str] = {}
-        self.native_to_polygon: dict[str, str] = {}
-        self.polygon_to_native: dict[str, str] = {}
+        self.native_to_polygon_rest: dict[str, str] = {}
+        self.polygon_rest_to_native: dict[str, str] = {}
         self.capabilities: dict[tuple[str, str], CapabilityInfo] = {}
         self._cache_loaded = False
         try:
             self.trigger_cache_invalidation(fail_fast=True)
-            logger.info(f"SymbolMapperService warm-up: loaded {len(self.native_to_ws)} symbols")
+            logger.info(
+                f"SymbolMapperService warm-up: loaded {len(self.native_to_kraken_ws)} symbols"
+            )
         except Exception as e:
             logger.error(f"SymbolMapperService warm-up failed: {e}")
             raise
@@ -240,7 +243,7 @@ class SymbolMapperService:
         """Populate all bidirectional mapping dicts from alias rows.
 
         Builds fresh forward and reverse dicts keyed by ``(exchange, channel)``
-        and updates backward-compatible named attributes atomically.
+        and updates shortcut named attributes atomically.
 
         Args:
             aliases: List of SymbolAlias ORM objects.
@@ -253,9 +256,9 @@ class SymbolMapperService:
             rev.setdefault(key, {})[alias.exchange_symbol] = alias.native_symbol
         self.forward = fwd
         self.reverse = rev
-        for exchange, channel, attr_name in _COMPAT_FORWARD:
+        for exchange, channel, attr_name in _SHORTCUT_FORWARD:
             setattr(self, attr_name, fwd.get((exchange, channel), {}))
-        for exchange, channel, attr_name in _COMPAT_REVERSE:
+        for exchange, channel, attr_name in _SHORTCUT_REVERSE:
             setattr(self, attr_name, rev.get((exchange, channel), {}))
 
     def load_capabilities_from_db(self) -> list[SymbolExchangeCapability]:
@@ -363,7 +366,7 @@ class SymbolMapperService:
             capabilities = self.load_capabilities_from_db()
             self._populate_capabilities_from_rows(capabilities)
             logger.info(
-                f"Loaded symbol maps cache with {len(self.native_to_ws)} native symbols "
+                f"Loaded symbol maps cache with {len(self.native_to_kraken_ws)} native symbols "
                 f"and {len(self.capabilities)} capabilities"
             )
         except Exception as e:

@@ -45,15 +45,15 @@ from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
-from snapper.infrastructure.symbols.functions import native_to_polygon
-from snapper.infrastructure.symbols.functions import native_to_walutomat
+from snapper.infrastructure.symbols.functions import native_to_polygon_rest
 from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
-from snapper.infrastructure.symbols.functions import native_to_zonda
-from snapper.infrastructure.symbols.functions import polygon_to_native
+from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
+from snapper.infrastructure.symbols.functions import native_to_zonda_ws
+from snapper.infrastructure.symbols.functions import polygon_rest_to_native
 from snapper.infrastructure.symbols.functions import validate_symbol
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
-from snapper.infrastructure.symbols.functions import walutomat_to_native
-from snapper.infrastructure.symbols.functions import zonda_to_native
+from snapper.infrastructure.symbols.functions import walutomat_ws_to_native
+from snapper.infrastructure.symbols.functions import zonda_ws_to_native
 from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.infrastructure.symbols.mapper import make_native_symbol
@@ -72,7 +72,7 @@ class TestDatabaseSymbolMapper:
         mapper = SymbolMapperService()
         assert mapper is not None
         assert mapper.repository is not None
-        assert mapper.native_to_ws is not None
+        assert mapper.native_to_kraken_ws is not None
 
     def test_cache_invalidation_pattern(self) -> None:
         """Cache invalidation preserves existing mappings.
@@ -82,9 +82,9 @@ class TestDatabaseSymbolMapper:
         Then: Cache count remains unchanged.
         """
         mapper = SymbolMapperService()
-        initial_count = len(mapper.native_to_ws)
+        initial_count = len(mapper.native_to_kraken_ws)
         mapper.trigger_cache_invalidation(fail_fast=False)
-        assert len(mapper.native_to_ws) == initial_count
+        assert len(mapper.native_to_kraken_ws) == initial_count
 
     def test_load_cache_if_needed_simple(self) -> None:
         """Cache loading is idempotent.
@@ -95,9 +95,9 @@ class TestDatabaseSymbolMapper:
         """
         mapper = SymbolMapperService()
         mapper.load_cache_if_needed()
-        first_count = len(mapper.native_to_ws)
+        first_count = len(mapper.native_to_kraken_ws)
         mapper.load_cache_if_needed()
-        second_count = len(mapper.native_to_ws)
+        second_count = len(mapper.native_to_kraken_ws)
         assert second_count == first_count
 
     def test_safe_zmq_invalidation(self) -> None:
@@ -109,9 +109,9 @@ class TestDatabaseSymbolMapper:
         """
         mapper = SymbolMapperService()
         mapper.load_cache_if_needed()
-        first_count = len(mapper.native_to_ws)
+        first_count = len(mapper.native_to_kraken_ws)
         mapper.trigger_cache_invalidation(fail_fast=False)
-        second_count = len(mapper.native_to_ws)
+        second_count = len(mapper.native_to_kraken_ws)
         assert second_count == first_count
 
     def test_load_mappings_from_db_empty(self) -> None:
@@ -133,10 +133,10 @@ class TestDatabaseSymbolMapper:
         Then: Returns dictionary objects.
         """
         mapper = SymbolMapperService()
-        assert isinstance(mapper.native_to_ws, dict)
-        assert isinstance(mapper.native_to_rest, dict)
-        assert isinstance(mapper.ws_to_native, dict)
-        assert isinstance(mapper.rest_to_native, dict)
+        assert isinstance(mapper.native_to_kraken_ws, dict)
+        assert isinstance(mapper.native_to_kraken_rest, dict)
+        assert isinstance(mapper.kraken_ws_to_native, dict)
+        assert isinstance(mapper.kraken_rest_to_native, dict)
 
 
 class TestMakeNativeSymbol:
@@ -456,13 +456,13 @@ class TestSymbolMapperServiceErrorHandling:
             mock_result.scalars.return_value.all.return_value = sample_aliases
             mock_session.execute.return_value = mock_result
             mapper = SymbolMapperService()
-            assert "BTC-USD" in mapper.native_to_ws
-            old_cache_size = len(mapper.native_to_ws)
+            assert "BTC-USD" in mapper.native_to_kraken_ws
+            old_cache_size = len(mapper.native_to_kraken_ws)
             mapper._cache_loaded = False
             mock_session.execute.side_effect = RuntimeError("Database connection failed")
             mapper.load_cache_if_needed(fail_fast=False)
-            assert "BTC-USD" in mapper.native_to_ws
-            assert len(mapper.native_to_ws) == old_cache_size
+            assert "BTC-USD" in mapper.native_to_kraken_ws
+            assert len(mapper.native_to_kraken_ws) == old_cache_size
 
 
 class TestSymbolMapperAdditionalBranches:
@@ -551,20 +551,20 @@ def _make_mapper_with_empty_cache() -> SymbolMapperService:
     mapper.repository = MagicMock()
     mapper.forward = {}
     mapper.reverse = {}
-    mapper.native_to_ws = {}
-    mapper.native_to_rest = {}
+    mapper.native_to_kraken_ws = {}
+    mapper.native_to_kraken_rest = {}
     mapper.native_to_ccxt = {}
-    mapper.ws_to_native = {}
-    mapper.rest_to_native = {}
+    mapper.kraken_ws_to_native = {}
+    mapper.kraken_rest_to_native = {}
     mapper.ccxt_to_native = {}
-    mapper.native_to_zonda = {}
-    mapper.zonda_to_native = {}
-    mapper.native_to_walutomat = {}
-    mapper.walutomat_to_native = {}
+    mapper.native_to_zonda_ws = {}
+    mapper.zonda_ws_to_native = {}
+    mapper.native_to_walutomat_ws = {}
+    mapper.walutomat_ws_to_native = {}
     mapper.native_to_walutomat_rest = {}
     mapper.walutomat_rest_to_native = {}
-    mapper.native_to_polygon = {}
-    mapper.polygon_to_native = {}
+    mapper.native_to_polygon_rest = {}
+    mapper.polygon_rest_to_native = {}
     mapper.capabilities = {}
     mapper._cache_loaded = False
     mapper.context = None
@@ -649,10 +649,10 @@ class TestDatabaseSymbolMapperCore:
         ):
             mapper = SymbolMapperService()
             assert mapper.repository is mock_repository
-            assert isinstance(mapper.native_to_ws, dict)
-            assert isinstance(mapper.native_to_rest, dict)
-            assert isinstance(mapper.ws_to_native, dict)
-            assert isinstance(mapper.rest_to_native, dict)
+            assert isinstance(mapper.native_to_kraken_ws, dict)
+            assert isinstance(mapper.native_to_kraken_rest, dict)
+            assert isinstance(mapper.kraken_ws_to_native, dict)
+            assert isinstance(mapper.kraken_rest_to_native, dict)
             assert hasattr(mapper, "_cache_loaded")
 
     def test_load_mappings_from_db_success(
@@ -719,9 +719,9 @@ class TestDatabaseSymbolMapperCore:
         ):
             mapper = SymbolMapperService()
             mapper.load_cache_if_needed()
-            assert mapper.native_to_ws is not None
+            assert mapper.native_to_kraken_ws is not None
             mapper.trigger_cache_invalidation(fail_fast=False)
-            assert mapper.native_to_ws is not None
+            assert mapper.native_to_kraken_ws is not None
 
     def test_load_cache_if_needed_populates_mappings(self) -> None:
         """Cache loading populates all mapping dictionaries.
@@ -778,14 +778,14 @@ class TestDatabaseSymbolMapperCore:
         assert mapper._cache_loaded is False
         _call_original_load_cache_if_needed(mapper)
         mock_loader.assert_called_once()
-        assert "ETH-USD" in mapper.native_to_polygon
-        assert mapper.native_to_ws["ETH-USD"] == "ETH/USD"
-        assert mapper.ws_to_native["ETH/USD"] == "ETH-USD"
-        assert mapper.native_to_rest["ETH-USD"] == "XETHZUSD"
+        assert "ETH-USD" in mapper.native_to_polygon_rest
+        assert mapper.native_to_kraken_ws["ETH-USD"] == "ETH/USD"
+        assert mapper.kraken_ws_to_native["ETH/USD"] == "ETH-USD"
+        assert mapper.native_to_kraken_rest["ETH-USD"] == "XETHZUSD"
         assert mapper.native_to_ccxt["ETH-USD"] == "ETH/USD"
-        assert mapper.native_to_polygon["ETH-USD"] == "X:ETHUSD"
-        assert mapper.native_to_polygon["AAPL"] == "AAPL"
-        assert mapper.native_to_walutomat["ETH-USD"] == "ETH_USD"
+        assert mapper.native_to_polygon_rest["ETH-USD"] == "X:ETHUSD"
+        assert mapper.native_to_polygon_rest["AAPL"] == "AAPL"
+        assert mapper.native_to_walutomat_ws["ETH-USD"] == "ETH_USD"
         assert mapper.native_to_walutomat_rest["ETH-USD"] == "ETHUSD"
         assert mapper.forward[("kraken", "ws")]["ETH-USD"] == "ETH/USD"
         assert mapper.reverse[("polygon", "rest")]["AAPL"] == "AAPL"
@@ -897,11 +897,11 @@ class TestDatabaseSymbolMapperFunctions:
     def mock_global_mapper(self) -> MagicMock:
         """Create mock mapper with sample cache data."""
         mapper = MagicMock()
-        mapper.native_to_ws = {"BTC-USD": "BTC-USD", "ETH-USD": "ETH-USD"}
-        mapper.native_to_rest = {"BTC-USD": "XXBTZUSD", "ETH-USD": "XETHZUSD"}
+        mapper.native_to_kraken_ws = {"BTC-USD": "BTC-USD", "ETH-USD": "ETH-USD"}
+        mapper.native_to_kraken_rest = {"BTC-USD": "XXBTZUSD", "ETH-USD": "XETHZUSD"}
         mapper.native_to_ccxt = {"BTC-USD": "BTC-USD", "ETH-USD": "ETH-USD"}
-        mapper.ws_to_native = {"BTC-USD": "BTC-USD", "ETH-USD": "ETH-USD"}
-        mapper.rest_to_native = {"XXBTZUSD": "BTC-USD", "XETHZUSD": "ETH-USD"}
+        mapper.kraken_ws_to_native = {"BTC-USD": "BTC-USD", "ETH-USD": "ETH-USD"}
+        mapper.kraken_rest_to_native = {"XXBTZUSD": "BTC-USD", "XETHZUSD": "ETH-USD"}
         mapper.ccxt_to_native = {
             "BTC-USD": "BTC-USD",
             "ETH-USD": "ETH-USD",
@@ -1120,7 +1120,7 @@ class TestDatabaseSymbolMapperFunctions:
     def test_get_available_ws_symbols(self, mock_global_mapper: MagicMock) -> None:
         """Get sorted list of WebSocket symbols.
 
-        Given: Mapper with native_to_ws cache,
+        Given: Mapper with native_to_kraken_ws cache,
         When: get_available_ws_symbols is called,
         Then: Returns sorted list of native symbols.
         """
@@ -1135,7 +1135,7 @@ class TestDatabaseSymbolMapperFunctions:
     def test_get_available_kraken_rest_symbols(self, mock_global_mapper: MagicMock) -> None:
         """Get sorted list of Kraken REST symbols.
 
-        Given: Mapper with native_to_rest cache,
+        Given: Mapper with native_to_kraken_rest cache,
         When: get_available_kraken_rest_symbols is called,
         Then: Returns sorted list of REST symbols.
         """
@@ -1155,7 +1155,7 @@ class TestDatabaseSymbolMapperFunctions:
         Then: Returns sorted list of native symbols.
         """
         mock_mapper = mock_global_mapper.return_value
-        mock_mapper.native_to_ws = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
+        mock_mapper.native_to_kraken_ws = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
         with patch("snapper.infrastructure.symbols.functions._get_db_mapper", mock_global_mapper):
             result = get_available_kraken_symbols()
             expected = ["BTC-USD", "ETH-USD"]
@@ -1169,7 +1169,7 @@ class TestDatabaseSymbolMapperFunctions:
         Then: Returns sorted list of native symbols.
         """
         mock_mapper = mock_global_mapper.return_value
-        mock_mapper.walutomat_to_native = {"EUR_PLN": "EUR-PLN", "USD_PLN": "USD-PLN"}
+        mock_mapper.walutomat_ws_to_native = {"EUR_PLN": "EUR-PLN", "USD_PLN": "USD-PLN"}
         with patch("snapper.infrastructure.symbols.functions._get_db_mapper", mock_global_mapper):
             result = get_available_walutomat_symbols()
             expected = ["EUR-PLN", "USD-PLN"]
@@ -1183,7 +1183,7 @@ class TestDatabaseSymbolMapperFunctions:
         Then: Returns sorted list of native symbols.
         """
         mock_mapper = mock_global_mapper.return_value
-        mock_mapper.polygon_to_native = {
+        mock_mapper.polygon_rest_to_native = {
             "X:BTCUSD": "BTC-USD",
             "C:EURUSD": "EUR-USD",
             "AAPL": "AAPL",
@@ -1321,16 +1321,16 @@ class TestSymbolMapperEdgeCases:
 def mock_mapper() -> MagicMock:
     """Provide mock SymbolMapperService with preconfigured mappings."""
     mapper = MagicMock(spec=SymbolMapperService)
-    mapper.native_to_zonda = {"BTC-PLN": "BTC-PLN", "ETH-PLN": "ETH-PLN"}
-    mapper.zonda_to_native = {"BTC-PLN": "BTC-PLN", "ETH-PLN": "ETH-PLN"}
-    mapper.native_to_walutomat = {"EUR-PLN": "EUR_PLN", "USD-PLN": "USD_PLN"}
-    mapper.walutomat_to_native = {"EUR_PLN": "EUR-PLN", "USD_PLN": "USD-PLN"}
+    mapper.native_to_zonda_ws = {"BTC-PLN": "BTC-PLN", "ETH-PLN": "ETH-PLN"}
+    mapper.zonda_ws_to_native = {"BTC-PLN": "BTC-PLN", "ETH-PLN": "ETH-PLN"}
+    mapper.native_to_walutomat_ws = {"EUR-PLN": "EUR_PLN", "USD-PLN": "USD_PLN"}
+    mapper.walutomat_ws_to_native = {"EUR_PLN": "EUR-PLN", "USD_PLN": "USD-PLN"}
     mapper.native_to_walutomat_rest = {"EUR-PLN": "EURPLN", "USD-PLN": "USDPLN"}
     mapper.walutomat_rest_to_native = {"EURPLN": "EUR-PLN", "USDPLN": "USD-PLN"}
-    mapper.native_to_polygon = {"BTC-USD": "X:BTCUSD", "EUR-USD": "C:EURUSD"}
-    mapper.polygon_to_native = {"X:BTCUSD": "BTC-USD", "C:EURUSD": "EUR-USD"}
-    mapper.native_to_ws = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
-    mapper.ws_to_native = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
+    mapper.native_to_polygon_rest = {"BTC-USD": "X:BTCUSD", "EUR-USD": "C:EURUSD"}
+    mapper.polygon_rest_to_native = {"X:BTCUSD": "BTC-USD", "C:EURUSD": "EUR-USD"}
+    mapper.native_to_kraken_ws = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
+    mapper.kraken_ws_to_native = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
     mapper.native_to_ccxt = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
     mapper.ccxt_to_native = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
     return mapper
@@ -1339,27 +1339,27 @@ def mock_mapper() -> MagicMock:
 class TestZondaHelpers:
     """Tests for Zonda symbol conversion helpers."""
 
-    def test_native_to_zonda_success(self, mock_mapper: MagicMock) -> None:
+    def test_native_to_zonda_ws_success(self, mock_mapper: MagicMock) -> None:
         """Convert native symbol to Zonda format.
 
         Given: Native symbol in Zonda mapping cache,
-        When: native_to_zonda is called,
+        When: native_to_zonda_ws is called,
         Then: Returns Zonda format symbol.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
         ):
-            result = native_to_zonda("BTC-PLN")
+            result = native_to_zonda_ws("BTC-PLN")
             assert result == "BTC-PLN"
 
-    def test_native_to_zonda_unknown_symbol_raises_value_error(
+    def test_native_to_zonda_ws_unknown_symbol_raises_value_error(
         self, mock_mapper: MagicMock
     ) -> None:
         """Reject unknown native symbol for Zonda.
 
         Given: Native symbol not in Zonda mapping,
-        When: native_to_zonda is called,
+        When: native_to_zonda_ws is called,
         Then: Raises ValueError.
         """
         with patch(
@@ -1369,36 +1369,36 @@ class TestZondaHelpers:
             ValueError,
             match=r"Unknown native symbol \(not available on Zonda\): INVALID-SYMBOL",
         ):
-            native_to_zonda("INVALID-SYMBOL")
+            native_to_zonda_ws("INVALID-SYMBOL")
 
-    def test_zonda_to_native_success(self, mock_mapper: MagicMock) -> None:
+    def test_zonda_ws_to_native_success(self, mock_mapper: MagicMock) -> None:
         """Convert Zonda symbol to native format.
 
         Given: Zonda symbol in mapping cache,
-        When: zonda_to_native is called,
+        When: zonda_ws_to_native is called,
         Then: Returns native format symbol.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
         ):
-            result = zonda_to_native("BTC-PLN")
+            result = zonda_ws_to_native("BTC-PLN")
             assert result == "BTC-PLN"
 
-    def test_zonda_to_native_unknown_symbol_raises_value_error(
+    def test_zonda_ws_to_native_unknown_symbol_raises_value_error(
         self, mock_mapper: MagicMock
     ) -> None:
         """Reject unknown Zonda symbol.
 
         Given: Zonda symbol not in mapping cache,
-        When: zonda_to_native is called,
+        When: zonda_ws_to_native is called,
         Then: Raises ValueError.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Zonda symbol: INVALID-SYMBOL"):
-            zonda_to_native("INVALID-SYMBOL")
+        ), pytest.raises(ValueError, match=r"Unknown Zonda WebSocket symbol: INVALID-SYMBOL"):
+            zonda_ws_to_native("INVALID-SYMBOL")
 
     def test_get_available_zonda_symbols_returns_sorted_list(self, mock_mapper: MagicMock) -> None:
         """Get sorted list of Zonda native symbols.
@@ -1418,27 +1418,27 @@ class TestZondaHelpers:
 class TestWalutomatHelpers:
     """Tests for Walutomat symbol conversion helpers."""
 
-    def test_native_to_walutomat_success(self, mock_mapper: MagicMock) -> None:
+    def test_native_to_walutomat_ws_success(self, mock_mapper: MagicMock) -> None:
         """Convert native symbol to Walutomat format.
 
         Given: Native symbol in Walutomat mapping,
-        When: native_to_walutomat is called,
+        When: native_to_walutomat_ws is called,
         Then: Returns Walutomat format symbol.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
         ):
-            result = native_to_walutomat("EUR-PLN")
+            result = native_to_walutomat_ws("EUR-PLN")
             assert result == "EUR_PLN"
 
-    def test_native_to_walutomat_unknown_symbol_raises_value_error(
+    def test_native_to_walutomat_ws_unknown_symbol_raises_value_error(
         self, mock_mapper: MagicMock
     ) -> None:
         """Reject unknown native symbol for Walutomat.
 
         Given: Native symbol not in Walutomat mapping,
-        When: native_to_walutomat is called,
+        When: native_to_walutomat_ws is called,
         Then: Raises ValueError.
         """
         with patch(
@@ -1446,38 +1446,38 @@ class TestWalutomatHelpers:
             return_value=mock_mapper,
         ), pytest.raises(
             ValueError,
-            match=r"Unknown native symbol \(not available on Walutomat\): INVALID-SYMBOL",
+            match=r"Unknown native symbol \(not available on Walutomat WS\): INVALID-SYMBOL",
         ):
-            native_to_walutomat("INVALID-SYMBOL")
+            native_to_walutomat_ws("INVALID-SYMBOL")
 
-    def test_walutomat_to_native_success(self, mock_mapper: MagicMock) -> None:
+    def test_walutomat_ws_to_native_success(self, mock_mapper: MagicMock) -> None:
         """Convert Walutomat symbol to native format.
 
         Given: Walutomat symbol in mapping cache,
-        When: walutomat_to_native is called,
+        When: walutomat_ws_to_native is called,
         Then: Returns native format symbol.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
         ):
-            result = walutomat_to_native("EUR_PLN")
+            result = walutomat_ws_to_native("EUR_PLN")
             assert result == "EUR-PLN"
 
-    def test_walutomat_to_native_unknown_symbol_raises_value_error(
+    def test_walutomat_ws_to_native_unknown_symbol_raises_value_error(
         self, mock_mapper: MagicMock
     ) -> None:
         """Reject unknown Walutomat symbol.
 
         Given: Walutomat symbol not in mapping cache,
-        When: walutomat_to_native is called,
+        When: walutomat_ws_to_native is called,
         Then: Raises ValueError.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Walutomat symbol: INVALID_SYMBOL"):
-            walutomat_to_native("INVALID_SYMBOL")
+        ), pytest.raises(ValueError, match=r"Unknown Walutomat WebSocket symbol: INVALID_SYMBOL"):
+            walutomat_ws_to_native("INVALID_SYMBOL")
 
     def test_native_to_walutomat_rest_success(self, mock_mapper: MagicMock) -> None:
         """Convert native symbol to Walutomat REST format.
@@ -1576,27 +1576,27 @@ class TestWalutomatHelpers:
 class TestPolygonHelpers:
     """Tests for Polygon symbol conversion helpers."""
 
-    def test_native_to_polygon_success(self, mock_mapper: MagicMock) -> None:
+    def test_native_to_polygon_rest_success(self, mock_mapper: MagicMock) -> None:
         """Convert native symbol to Polygon format.
 
         Given: Native symbol in Polygon mapping,
-        When: native_to_polygon is called,
+        When: native_to_polygon_rest is called,
         Then: Returns Polygon format symbol.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
         ):
-            result = native_to_polygon("BTC-USD")
+            result = native_to_polygon_rest("BTC-USD")
             assert result == "X:BTCUSD"
 
-    def test_native_to_polygon_unknown_symbol_raises_value_error(
+    def test_native_to_polygon_rest_unknown_symbol_raises_value_error(
         self, mock_mapper: MagicMock
     ) -> None:
         """Reject unknown native symbol for Polygon.
 
         Given: Native symbol not in Polygon mapping,
-        When: native_to_polygon is called,
+        When: native_to_polygon_rest is called,
         Then: Raises ValueError.
         """
         with patch(
@@ -1606,36 +1606,36 @@ class TestPolygonHelpers:
             ValueError,
             match=r"Unknown native symbol \(not available on Polygon\): INVALID-SYMBOL",
         ):
-            native_to_polygon("INVALID-SYMBOL")
+            native_to_polygon_rest("INVALID-SYMBOL")
 
-    def test_polygon_to_native_success(self, mock_mapper: MagicMock) -> None:
+    def test_polygon_rest_to_native_success(self, mock_mapper: MagicMock) -> None:
         """Convert Polygon symbol to native format.
 
         Given: Polygon symbol in mapping cache,
-        When: polygon_to_native is called,
+        When: polygon_rest_to_native is called,
         Then: Returns native format symbol.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
         ):
-            result = polygon_to_native("X:BTCUSD")
+            result = polygon_rest_to_native("X:BTCUSD")
             assert result == "BTC-USD"
 
-    def test_polygon_to_native_unknown_symbol_raises_value_error(
+    def test_polygon_rest_to_native_unknown_symbol_raises_value_error(
         self, mock_mapper: MagicMock
     ) -> None:
         """Reject unknown Polygon symbol.
 
         Given: Polygon symbol not in mapping cache,
-        When: polygon_to_native is called,
+        When: polygon_rest_to_native is called,
         Then: Raises ValueError.
         """
         with patch(
             "snapper.infrastructure.symbols.functions._get_db_mapper",
             return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Polygon symbol: INVALID:SYMBOL"):
-            polygon_to_native("INVALID:SYMBOL")
+        ), pytest.raises(ValueError, match=r"Unknown Polygon REST symbol: INVALID:SYMBOL"):
+            polygon_rest_to_native("INVALID:SYMBOL")
 
     def test_get_available_polygon_rest_symbols_returns_sorted_list(
         self, mock_mapper: MagicMock
@@ -1927,7 +1927,7 @@ class TestLoadCacheIfNeededCapabilities:
         cast(Any, mapper).load_capabilities_from_db = MagicMock(return_value=[cap_row])
         mapper._cache_loaded = False
         _call_original_load_cache_if_needed(mapper)
-        assert mapper.native_to_ws["BTC-USD"] == "BTC/USD"
+        assert mapper.native_to_kraken_ws["BTC-USD"] == "BTC/USD"
         assert ("BTC-USD", "kraken") in mapper.capabilities
         assert mapper.capabilities[("BTC-USD", "kraken")].can_trade is True
         SymbolMapperService.clear_instance()

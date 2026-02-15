@@ -103,8 +103,8 @@ class _StubSymbolMapper:
     """Test stub for symbol mapper service."""
 
     def __init__(self) -> None:
-        self.native_to_polygon: dict[str, str] = {}
-        self.polygon_to_native: dict[str, str] = {}
+        self.native_to_polygon_rest: dict[str, str] = {}
+        self.polygon_rest_to_native: dict[str, str] = {}
 
     def load_cache_if_needed(self) -> None:
         return None
@@ -192,7 +192,7 @@ def test_resolve_symbol_context_polygon_symbol(service: PolygonAggregatesBackfil
     alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
     cast(Any, service)._db_sync = _StubSyncRepo([[catalog], [alias]])
     mapper = cast(_StubSymbolMapper, cast(Any, service)._symbol_mapper)
-    mapper.polygon_to_native["X:BTCUSD"] = "BTC-USD"
+    mapper.polygon_rest_to_native["X:BTCUSD"] = "BTC-USD"
     resolve_context = cast(Callable[[str], Any], cast(Any, service)._resolve_symbol_context)
     context = resolve_context("X:BTCUSD")
     assert context is not None
@@ -211,7 +211,7 @@ def test_resolve_symbol_context_native_symbol(service: PolygonAggregatesBackfill
     catalog = SimpleNamespace(native_symbol="AAPL", base="AAPL", quote=None)
     cast(Any, service)._db_sync = _StubSyncRepo([[alias], [catalog]])
     mapper = cast(_StubSymbolMapper, cast(Any, service)._symbol_mapper)
-    mapper.native_to_polygon["AAPL"] = "AAPL"
+    mapper.native_to_polygon_rest["AAPL"] = "AAPL"
     resolve_context = cast(Callable[[str], Any], cast(Any, service)._resolve_symbol_context)
     context = resolve_context("AAPL")
     assert context is not None
@@ -749,9 +749,9 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
 
 
 def test_resolve_symbol_context_with_polygon_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _resolve_symbol_context uses polygon_to_native cache.
+    """Verify _resolve_symbol_context uses polygon_rest_to_native cache.
 
-    Given: Symbol in polygon_to_native cache,
+    Given: Symbol in polygon_rest_to_native cache,
     When: _resolve_symbol_context called,
     Then: Context with mapped native symbol returned.
     """
@@ -778,8 +778,8 @@ def test_resolve_symbol_context_with_polygon_cache(monkeypatch: pytest.MonkeyPat
     svc._symbol_mapper = cast(
         Any,
         SimpleNamespace(
-            polygon_to_native={"X:BTCUSD": "BTC-USD"},
-            native_to_polygon={},
+            polygon_rest_to_native={"X:BTCUSD": "BTC-USD"},
+            native_to_polygon_rest={},
             load_cache_if_needed=lambda: None,
         ),
     )
@@ -789,9 +789,9 @@ def test_resolve_symbol_context_with_polygon_cache(monkeypatch: pytest.MonkeyPat
 
 
 def test_resolve_symbol_context_with_native_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _resolve_symbol_context uses native_to_polygon cache.
+    """Verify _resolve_symbol_context uses native_to_polygon_rest cache.
 
-    Given: Symbol in native_to_polygon cache,
+    Given: Symbol in native_to_polygon_rest cache,
     When: _resolve_symbol_context called,
     Then: Context with mapped polygon symbol returned.
     """
@@ -820,8 +820,8 @@ def test_resolve_symbol_context_with_native_cache(monkeypatch: pytest.MonkeyPatc
     svc._symbol_mapper = cast(
         Any,
         SimpleNamespace(
-            polygon_to_native={},
-            native_to_polygon={"BTC-USD": "X:BTCUSD"},
+            polygon_rest_to_native={},
+            native_to_polygon_rest={"BTC-USD": "X:BTCUSD"},
             load_cache_if_needed=lambda: None,
         ),
     )
@@ -857,8 +857,8 @@ def test_resolve_symbol_context_not_found(monkeypatch: pytest.MonkeyPatch) -> No
     svc._symbol_mapper = cast(
         Any,
         SimpleNamespace(
-            polygon_to_native={},
-            native_to_polygon={},
+            polygon_rest_to_native={},
+            native_to_polygon_rest={},
             load_cache_if_needed=lambda: None,
         ),
     )
@@ -880,8 +880,8 @@ def test_resolve_symbol_context_polygon_prefix_not_in_cache(
     svc._symbol_mapper = cast(
         Any,
         SimpleNamespace(
-            polygon_to_native={},
-            native_to_polygon={},
+            polygon_rest_to_native={},
+            native_to_polygon_rest={},
             load_cache_if_needed=lambda: None,
         ),
     )
@@ -918,8 +918,8 @@ def test_resolve_symbol_context_polygon_prefix_mapping_none_in_db(
     svc._symbol_mapper = cast(
         Any,
         SimpleNamespace(
-            polygon_to_native={"C:EURUSD": "EUR-USD"},
-            native_to_polygon={},
+            polygon_rest_to_native={"C:EURUSD": "EUR-USD"},
+            native_to_polygon_rest={},
             load_cache_if_needed=lambda: None,
         ),
     )
@@ -959,8 +959,8 @@ def test_resolve_symbol_context_stock_fallback_mapping_none(
     svc._symbol_mapper = cast(
         Any,
         SimpleNamespace(
-            polygon_to_native={},
-            native_to_polygon={"AAPL": "AAPL"},
+            polygon_rest_to_native={},
+            native_to_polygon_rest={"AAPL": "AAPL"},
             load_cache_if_needed=lambda: None,
         ),
     )
@@ -1736,8 +1736,8 @@ def test_resolve_symbol_context_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
 
     class _Mapper:
         def __init__(self) -> None:
-            self.native_to_polygon: dict[str, str] = {}
-            self.polygon_to_native = {"X:ETHUSD": "ETH-USD"}
+            self.native_to_polygon_rest: dict[str, str] = {}
+            self.polygon_rest_to_native = {"X:ETHUSD": "ETH-USD"}
 
         def load_cache_if_needed(self) -> None:
             return None
@@ -1769,8 +1769,8 @@ def test_resolve_symbol_context_missing_v2(monkeypatch: pytest.MonkeyPatch) -> N
     service = PolygonAggregatesBackfillService()
 
     class _Mapper:
-        polygon_to_native: dict[str, str] = {}
-        native_to_polygon: dict[str, str] = {}
+        polygon_rest_to_native: dict[str, str] = {}
+        native_to_polygon_rest: dict[str, str] = {}
 
         def load_cache_if_needed(self) -> None:
             return None
@@ -1801,8 +1801,8 @@ def test_resolve_symbol_context_stock_direct_lookup(monkeypatch: pytest.MonkeyPa
     service = PolygonAggregatesBackfillService()
 
     class _Mapper:
-        polygon_to_native: dict[str, str] = {}
-        native_to_polygon: dict[str, str] = {}
+        polygon_rest_to_native: dict[str, str] = {}
+        native_to_polygon_rest: dict[str, str] = {}
 
         def load_cache_if_needed(self) -> None:
             return None
@@ -1833,7 +1833,9 @@ def test_resolve_symbol_context_stock_direct_lookup(monkeypatch: pytest.MonkeyPa
     assert context.quote_currency == "USD"
 
 
-def test_resolve_symbol_context_native_to_polygon_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_symbol_context_native_to_polygon_rest_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Resolve symbol context uses native to polygon cache.
 
     Given a backfill service with native to polygon mapping in cache,
@@ -1843,8 +1845,8 @@ def test_resolve_symbol_context_native_to_polygon_cache(monkeypatch: pytest.Monk
     service = PolygonAggregatesBackfillService()
 
     class _Mapper:
-        polygon_to_native: dict[str, str] = {}
-        native_to_polygon: dict[str, str] = {"AAPL": "NAS:AAPL"}
+        polygon_rest_to_native: dict[str, str] = {}
+        native_to_polygon_rest: dict[str, str] = {"AAPL": "NAS:AAPL"}
 
         def load_cache_if_needed(self) -> None:
             return None
@@ -1881,8 +1883,8 @@ class _MockSymbolMapper:
     """Test mock for symbol mapper."""
 
     def __init__(self) -> None:
-        self.polygon_to_native: dict[str, str] = {}
-        self.native_to_polygon: dict[str, str] = {}
+        self.polygon_rest_to_native: dict[str, str] = {}
+        self.native_to_polygon_rest: dict[str, str] = {}
         self.cache_loaded = False
 
     def load_cache_if_needed(self) -> None:
@@ -2021,7 +2023,7 @@ def test_resolve_symbol_context_polygon_path(
     Then the context is resolved via the polygon symbol lookup path.
     """
     service, mapper = service_and_mapper
-    mapper.polygon_to_native["X:BTCUSD"] = "BTC-USD"
+    mapper.polygon_rest_to_native["X:BTCUSD"] = "BTC-USD"
     catalog = SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD")
     alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
     catalog_result = MagicMock()
@@ -2056,7 +2058,7 @@ def test_resolve_symbol_context_native_fallback(
     Then the context is resolved via the native symbol fallback path.
     """
     service, mapper = service_and_mapper
-    mapper.native_to_polygon["ETH-USD"] = "X:ETHUSD"
+    mapper.native_to_polygon_rest["ETH-USD"] = "X:ETHUSD"
     none_result = MagicMock()
     none_result.scalar_one_or_none.return_value = None
     alias = SimpleNamespace(native_symbol="ETH-USD", exchange_symbol="X:ETHUSD")
