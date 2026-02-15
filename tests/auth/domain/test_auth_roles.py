@@ -1,13 +1,11 @@
 """Tests for authentication roles and permissions."""
 
-import hashlib
 from datetime import UTC
 from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-import bcrypt
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -161,7 +159,6 @@ class TestUserService:
         db_user.username = "testuser"
         db_user.email = "test@example.com"
         db_user.password_hash = "hashed_password"
-        db_user.salt = "test_salt"
         db_user.role = "viewer"
         db_user.is_active = True
         db_user.created_at = datetime.now(UTC)
@@ -176,21 +173,17 @@ class TestUserService:
             mock_get_repo.return_value = mock_repo
             return UserService()
 
-    def test_hash_password_with_salt(self, user_service: UserService) -> None:
-        """Test password hashing generates unique bcrypt hash and salt each time.
+    def test_hash_password(self, user_service: UserService) -> None:
+        """Test password hashing generates unique bcrypt hash each time.
 
         Given: A UserService instance and a plain text password.
-        When: hash_password_with_salt is called twice with the same password.
-        Then: Different bcrypt hashes and placeholder salts are generated,
-            each salt being 32 chars and each hash starting with ``$2b$``.
+        When: hash_password is called twice with the same password.
+        Then: Different bcrypt hashes starting with ``$2b$`` are generated.
         """
         password = "testpassword123"
-        hash1, salt1 = user_service.hash_password_with_salt(password)
-        hash2, salt2 = user_service.hash_password_with_salt(password)
+        hash1 = user_service.hash_password(password)
+        hash2 = user_service.hash_password(password)
         assert hash1 != hash2
-        assert salt1 != salt2
-        assert len(salt1) == 32
-        assert len(salt2) == 32
         assert hash1.startswith("$2b$")
         assert hash2.startswith("$2b$")
 
@@ -397,7 +390,7 @@ class TestUserService:
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
-        with patch.object(user_service, "hash_password_with_salt", return_value=("hash", "salt")):
+        with patch.object(user_service, "hash_password", return_value="hash"):
             await user_service.create_user(
                 username="newuser",
                 password="password",
@@ -445,7 +438,7 @@ class TestUserService:
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
-        with patch.object(user_service, "hash_password_with_salt", return_value=("hash", "salt")):
+        with patch.object(user_service, "hash_password", return_value="hash"):
             await user_service.create_user("newuser", "password")
         assert mock_session.add.called
 
@@ -567,9 +560,7 @@ class TestUserService:
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         with (
             patch.object(user_service, "_verify_password", return_value=True),
-            patch.object(
-                user_service, "hash_password_with_salt", return_value=("new_hash", "new_salt")
-            ),
+            patch.object(user_service, "hash_password", return_value="new_hash"),
         ):
             result = await user_service.change_password("test_user", "old_password", "new_password")
         assert result is True
@@ -648,95 +639,21 @@ class TestUserService:
     def test_verify_password_bcrypt(self, user_service: UserService) -> None:
         """Test bcrypt password verification succeeds with correct password.
 
-        Given: A password hashed with bcrypt via hash_password_with_salt.
+        Given: A password hashed with bcrypt via hash_password.
         When: _verify_password is called with the correct password.
         Then: True is returned.
         """
         password = "secure_password_123"
-        hashed, salt = user_service.hash_password_with_salt(password)
-        assert user_service._verify_password(password, hashed, salt) is True
+        hashed = user_service.hash_password(password)
+        assert user_service._verify_password(password, hashed) is True
 
     def test_verify_password_bcrypt_wrong(self, user_service: UserService) -> None:
         """Test bcrypt password verification fails with wrong password.
 
-        Given: A password hashed with bcrypt via hash_password_with_salt.
+        Given: A password hashed with bcrypt via hash_password.
         When: _verify_password is called with an incorrect password.
         Then: False is returned.
         """
         password = "secure_password_123"
-        hashed, salt = user_service.hash_password_with_salt(password)
-        assert user_service._verify_password("wrong_password", hashed, salt) is False
-
-    def test_verify_password_legacy_sha256(self, user_service: UserService) -> None:
-        """Test legacy SHA-256 password verification succeeds with correct password.
-
-        Given: A password hashed with the legacy SHA-256 algorithm.
-        When: _verify_password is called with the correct password and salt.
-        Then: True is returned.
-        """
-        password = "legacy_password"
-        salt = "abcdef1234567890abcdef1234567890"
-        legacy_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-        assert user_service._verify_password(password, legacy_hash, salt) is True
-
-    def test_verify_password_legacy_sha256_wrong(self, user_service: UserService) -> None:
-        """Test legacy SHA-256 password verification fails with wrong password.
-
-        Given: A password hashed with the legacy SHA-256 algorithm.
-        When: _verify_password is called with an incorrect password.
-        Then: False is returned.
-        """
-        password = "legacy_password"
-        salt = "abcdef1234567890abcdef1234567890"
-        legacy_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-        assert user_service._verify_password("wrong_password", legacy_hash, salt) is False
-
-    def test_is_legacy_hash_sha256(self, user_service: UserService) -> None:
-        """Test _is_legacy_hash identifies SHA-256 hex digest correctly.
-
-        Given: A 64-character hex string representing a SHA-256 digest.
-        When: _is_legacy_hash is called with the hash.
-        Then: True is returned.
-        """
-        sha256_hash = "a" * 64
-        assert user_service._is_legacy_hash(sha256_hash) is True
-
-    def test_is_legacy_hash_bcrypt(self, user_service: UserService) -> None:
-        """Test _is_legacy_hash correctly identifies bcrypt hashes as non-legacy.
-
-        Given: A bcrypt hash string starting with ``$2b$``.
-        When: _is_legacy_hash is called with the hash.
-        Then: False is returned.
-        """
-        bcrypt_hash = bcrypt.hashpw(b"test", bcrypt.gensalt()).decode()
-        assert user_service._is_legacy_hash(bcrypt_hash) is False
-
-    @pytest.mark.asyncio
-    async def test_authenticate_user_legacy_sha256_rehash(
-        self, user_service: UserService, mock_db_user: User
-    ) -> None:
-        """Test authentication with legacy SHA-256 hash triggers bcrypt rehash.
-
-        Given: A user stored with a legacy SHA-256 password hash.
-        When: authenticate_user is called with the correct password.
-        Then: Authentication succeeds, the password hash is upgraded to
-            bcrypt, and the new hash starts with ``$2b$``.
-        """
-        password = "testpassword"
-        legacy_salt = "abcdef1234567890abcdef1234567890"
-        legacy_hash = hashlib.sha256((password + legacy_salt).encode()).hexdigest()
-        mock_db_user.password_hash = legacy_hash
-        mock_db_user.salt = legacy_salt
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_db_user
-        mock_session.execute.return_value = mock_result
-        user_service.repository.session = MagicMock()
-        user_service.repository.session.return_value = AsyncMock()
-        user_service.repository.session.return_value.__aenter__.return_value = mock_session
-        auth_user = await user_service.authenticate_user("testuser", password)
-        assert auth_user is not None
-        assert auth_user.username == "testuser"
-        assert mock_db_user.password_hash.startswith("$2b$")
-        assert mock_db_user.password_hash != legacy_hash
-        assert mock_session.commit.called
+        hashed = user_service.hash_password(password)
+        assert user_service._verify_password("wrong_password", hashed) is False

@@ -508,9 +508,7 @@ async def admin_reset_user_password(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="User not found",
                 )
-            password_hash, salt = user_service.hash_password_with_salt(password_data.new_password)
-            db_user.password_hash = password_hash
-            db_user.salt = salt
+            db_user.password_hash = user_service.hash_password(password_data.new_password)
             await session.commit()
             return MessageResponse(
                 message=f"Password reset successfully for user {db_user.username}"

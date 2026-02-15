@@ -5,11 +5,11 @@ instruments, candles, trades, orders, users, and market snapshots.
 Also seeds demo users and symbol catalog with aliases.
 """
 
-import hashlib
 from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
 
+import bcrypt
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
@@ -28,7 +28,6 @@ DEMO_USERS = [
         "username": "admin",
         "email": "admin@snapper.local",
         "password": "AdminSnapper2026!",
-        "salt": "11111111111111111111111111111111",
         "role": "admin",
     },
     {
@@ -36,7 +35,6 @@ DEMO_USERS = [
         "username": "operator",
         "email": "operator@snapper.local",
         "password": "OpSnapper2026!",
-        "salt": "22222222222222222222222222222222",
         "role": "operator",
     },
     {
@@ -44,7 +42,6 @@ DEMO_USERS = [
         "username": "viewer",
         "email": "viewer@snapper.local",
         "password": "ViewSnapper2026!",
-        "salt": "33333333333333333333333333333333",
         "role": "viewer",
     },
 ]
@@ -120,8 +117,9 @@ for _alias in SYMBOL_ALIASES:
         SYMBOL_CAPABILITIES.append((_alias[0], _alias[1], _can_md, _can_trade))
 
 
-def _hash_password(password: str, salt: str) -> str:
-    return hashlib.sha256((password + salt).encode()).hexdigest()
+def _hash_password(password: str) -> str:
+    hashed: bytes = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+    return hashed.decode()
 
 
 def upgrade() -> None:
@@ -363,7 +361,6 @@ def upgrade() -> None:
         sa.Column("username", sa.String(64), nullable=False),
         sa.Column("email", sa.String(255), nullable=True),
         sa.Column("password_hash", sa.String(255), nullable=False),
-        sa.Column("salt", sa.String(32), nullable=False),
         sa.Column("role", sa.String(32), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -455,18 +452,17 @@ def upgrade() -> None:
     conn = op.get_bind()
     demo_created_at = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
     for user in DEMO_USERS:
-        password_hash = _hash_password(user["password"], user["salt"])
+        password_hash = _hash_password(user["password"])
         conn.execute(
             text("""
-                INSERT INTO users (id, username, email, password_hash, salt, role, is_active, created_at)
-                VALUES (:id, :username, :email, :password_hash, :salt, :role, 1, :created_at)
+                INSERT INTO users (id, username, email, password_hash, role, is_active, created_at)
+                VALUES (:id, :username, :email, :password_hash, :role, 1, :created_at)
                 """),
             {
                 "id": user["id"],
                 "username": user["username"],
                 "email": user["email"],
                 "password_hash": password_hash,
-                "salt": user["salt"],
                 "role": user["role"],
                 "created_at": demo_created_at,
             },

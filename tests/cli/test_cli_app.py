@@ -1834,9 +1834,7 @@ class TestAdminCommands:
         """
         with patch("snapper.cli.app.UserService") as mock_service_class:
             mock_service = MagicMock()
-            mock_service.hash_password_with_salt = MagicMock(
-                return_value=("hashed_password", "salt")
-            )
+            mock_service.hash_password = MagicMock(return_value="hashed_password")
             mock_session = MagicMock()
             mock_session.__aenter__ = MagicMock(return_value=mock_session)
             mock_session.__aexit__ = MagicMock(return_value=None)
@@ -1874,9 +1872,7 @@ class TestAdminCommands:
         ):
             mock_prompt.side_effect = ["newpass123", "newpass123"]
             mock_service = MagicMock()
-            mock_service.hash_password_with_salt = MagicMock(
-                return_value=("hashed_password", "salt")
-            )
+            mock_service.hash_password = MagicMock(return_value="hashed_password")
             mock_session = MagicMock()
             mock_session.__aenter__ = MagicMock(return_value=mock_session)
             mock_session.__aexit__ = MagicMock(return_value=None)
@@ -2933,7 +2929,7 @@ def mock_user_service() -> MagicMock:
     service.get_user_by_username = AsyncMock()
     service.create_user = AsyncMock()
     service.get_all_users = AsyncMock()
-    service.hash_password_with_salt = MagicMock(return_value=("hashed_password", "salt"))
+    service.hash_password = MagicMock(return_value="hashed_password")
     return service
 
 
@@ -3042,7 +3038,6 @@ def test_reset_password_updates_user_password(
     mock_db_user = MagicMock()
     mock_db_user.username = "testuser"
     mock_db_user.password_hash = "old_hash"
-    mock_db_user.salt = "old_salt"
     mock_session = AsyncMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock()

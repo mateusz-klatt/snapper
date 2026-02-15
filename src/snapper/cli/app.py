@@ -537,9 +537,7 @@ def reset_password(
                 if not db_user:
                     typer.echo(f"User '{username}' not found!")
                     return
-                password_hash, salt = user_service.hash_password_with_salt(new_password)
-                db_user.password_hash = password_hash
-                db_user.salt = salt
+                db_user.password_hash = user_service.hash_password(new_password)
                 await session.commit()
                 typer.echo(f"Password reset for user '{username}'")
                 typer.echo(f"Username: {username}")

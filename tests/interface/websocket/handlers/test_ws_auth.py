@@ -3524,8 +3524,8 @@ async def test_admin_reset_password_handles_repository_error(
             super().__init__()
             self.repository = BrokenRepository()
 
-        def hash_password_with_salt(self, password: str) -> tuple[str, str]:
-            return "hash", "salt"
+        def hash_password(self, password: str) -> str:
+            return "hash"
 
     stub_service = BrokenUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
@@ -3545,7 +3545,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
 
     Given: Valid admin and target user,
     When: Resetting password,
-    Then: Updates hash and salt and commits.
+    Then: Updates hash and commits.
     """
 
     class FakeDBUser:
@@ -3553,7 +3553,6 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
             self.id = "user-1"
             self.username = "target"
             self.password_hash = "old"
-            self.salt = "old-salt"
 
     class FakeResult:
         def __init__(self, user: FakeDBUser) -> None:
@@ -3599,9 +3598,9 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
             self.repository = FakeRepository(user)
             self.hashed_passwords: list[str] = []
 
-        def hash_password_with_salt(self, password: str) -> tuple[str, str]:
+        def hash_password(self, password: str) -> str:
             self.hashed_passwords.append(password)
-            return "hashed", "salt"
+            return "hashed"
 
     fake_db_user = FakeDBUser()
     stub_service = ResetUserService(fake_db_user)
@@ -3615,7 +3614,6 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
     assert result.message == "Password reset successfully for user target"
     assert stub_service.hashed_passwords == ["super-secret"]
     assert fake_db_user.password_hash == "hashed"
-    assert fake_db_user.salt == "salt"
     assert stub_service.repository.session().committed is True
 
 
@@ -3659,8 +3657,8 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
             super().__init__()
             self.repository = EmptyRepository()
 
-        def hash_password_with_salt(self, password: str) -> tuple[str, str]:
-            return "hash", "salt"
+        def hash_password(self, password: str) -> str:
+            return "hash"
 
     stub_service = EmptyUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
