@@ -495,7 +495,7 @@ def normalize_to_xcode_format(content: str) -> str:
         content,
     )
     content = re.sub(
-        r"\s*DevelopmentTeam = [^;]*;\n",
+        r"[ \t]*DevelopmentTeam = [^;]+;\n",
         "\n",
         content,
     )
