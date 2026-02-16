@@ -25,6 +25,7 @@ targets:
       path: Snapper/Info.plist
       properties:
         CFBundleDisplayName: Snapper
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen:
           UIColorName: SystemBackground
           UIImageName: AppIcon
