@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 
 @MainActor
 class WebSocketManager: ObservableObject {
@@ -8,6 +9,8 @@ class WebSocketManager: ObservableObject {
     @Published var connectionState: ConnectionState = .disconnected
     @Published var lastMessage: ServerMessage?
     @Published var availableTopics: [String] = []
+
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "WebSocket")
 
     private var webSocketTask: URLSessionWebSocketTask?
     private var pingTimer: Timer?
@@ -69,7 +72,7 @@ class WebSocketManager: ObservableObject {
         let message = URLSessionWebSocketTask.Message.string(text)
         webSocketTask?.send(message) { error in
             if let error = error {
-                print("WebSocket send error: \(error)")
+                self.logger.error("WebSocket send error: \(error)")
             }
         }
     }
@@ -94,7 +97,7 @@ class WebSocketManager: ObservableObject {
                     self.listenForMessages()
                 case .failure(let error):
                     if !self.intentionalDisconnect {
-                        print("WebSocket receive error: \(error)")
+                        self.logger.error("WebSocket receive error: \(error)")
                     }
                     self.handleDisconnection()
                 }
@@ -137,7 +140,7 @@ class WebSocketManager: ObservableObject {
 
         case "auth_failed":
             let reason = json["reason"] as? String ?? "unknown"
-            print("WebSocket auth failed: \(reason)")
+            logger.error("WebSocket auth failed: \(reason)")
             connectionState = .error("Auth failed: \(reason)")
             webSocketTask?.cancel(with: .normalClosure, reason: nil)
             webSocketTask = nil
@@ -149,7 +152,7 @@ class WebSocketManager: ObservableObject {
             break
 
         case "auth_expired":
-            print("WebSocket auth expired")
+            logger.warning("WebSocket auth expired")
             handleDisconnection()
 
         case "pong":
@@ -163,7 +166,7 @@ class WebSocketManager: ObservableObject {
 
     private func performAuthentication() async {
         guard let token = await AuthService.shared.fetchFreshWsToken() else {
-            print("Failed to get ws_token for WebSocket auth")
+            logger.error("Failed to get ws_token for WebSocket auth")
             connectionState = .error("No ws_token")
             webSocketTask?.cancel(with: .normalClosure, reason: nil)
             webSocketTask = nil
@@ -174,7 +177,7 @@ class WebSocketManager: ObservableObject {
 
     private func performReauthentication() async {
         guard let token = await AuthService.shared.fetchFreshWsToken() else {
-            print("Failed to get ws_token for reauth")
+            logger.error("Failed to get ws_token for reauth")
             return
         }
         sendJSON(["type": "reauth", "ws_token": token])

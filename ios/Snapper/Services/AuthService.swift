@@ -1,9 +1,12 @@
 import Foundation
 import Combine
+import os
 
 @MainActor
 class AuthService: ObservableObject {
     static let shared = AuthService()
+
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "Auth")
 
     @Published var isAuthenticated = false
     @Published var currentUser: UserProfile?
@@ -103,7 +106,7 @@ class AuthService: ObservableObject {
             wsToken = refreshResponse.wsToken
             return refreshResponse.wsToken
         } catch {
-            print("Failed to fetch fresh ws_token: \(error)")
+            logger.error("Failed to fetch fresh ws_token: \(error)")
             return nil
         }
     }

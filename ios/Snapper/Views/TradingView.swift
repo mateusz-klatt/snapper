@@ -1,6 +1,8 @@
 import SwiftUI
+import os
 
 struct TradingView: View {
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "Trading")
     @State private var orders: [OrderStatus] = []
     @State private var positions: [PositionSnapshot] = []
     @State private var signals: [TradingSignal] = []
@@ -65,19 +67,19 @@ struct TradingView: View {
         do {
             orders = try await ordersResult
         } catch {
-            print("Failed to fetch orders: \(error)")
+            logger.error("Failed to fetch orders: \(error)")
         }
 
         do {
             positions = try await positionsResult
         } catch {
-            print("Failed to fetch positions: \(error)")
+            logger.error("Failed to fetch positions: \(error)")
         }
 
         do {
             signals = try await signalsResult
         } catch {
-            print("Failed to fetch signals: \(error)")
+            logger.error("Failed to fetch signals: \(error)")
         }
 
         isLoading = false

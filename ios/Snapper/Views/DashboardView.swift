@@ -1,6 +1,8 @@
 import SwiftUI
+import os
 
 struct DashboardView: View {
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "Dashboard")
     @EnvironmentObject var webSocketManager: WebSocketManager
     @State private var systemStatus: SystemStatus?
     @State private var positions: [PositionSnapshot] = []
@@ -229,13 +231,13 @@ struct DashboardView: View {
         do {
             positions = try await positionsResult
         } catch {
-            print("Failed to fetch positions: \(error)")
+            logger.error("Failed to fetch positions: \(error)")
         }
 
         do {
             orders = try await ordersResult
         } catch {
-            print("Failed to fetch orders: \(error)")
+            logger.error("Failed to fetch orders: \(error)")
         }
 
         isLoading = false
