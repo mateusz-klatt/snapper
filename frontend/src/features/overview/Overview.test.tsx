@@ -7,14 +7,9 @@ vi.mock('../../hooks/queries', () => ({
   usePositionsSummary: vi.fn(() => ({ data: null, isLoading: false })),
   useLatestSignals: vi.fn(() => ({ data: [], isLoading: false })),
   useOrdersGrouped: vi.fn(() => ({ data: null })),
-  useConfiguredProcesses: vi.fn(() => ({ isLoading: false })),
-}))
-vi.mock('../../stores/process', () => ({
-  useProcessStore: vi.fn(() => ({
-    feeds: {},
-    strategies: {},
-    executors: {},
-    brokers: {},
+  useConfiguredProcesses: vi.fn(() => ({
+    isLoading: false,
+    data: { processes: [], count: 0 },
   })),
 }))
 vi.mock('../../stores/trade', () => ({
@@ -22,6 +17,19 @@ vi.mock('../../stores/trade', () => ({
     executions: [],
   })),
 }))
+
+const mockProcess = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  name: 'test_process',
+  enabled: true,
+  running: false,
+  mode: 'live',
+  class_path: 'test.Process',
+  method: 'run',
+  role: 'core',
+  lifecycle: 'long_running',
+  tags: [],
+  ...overrides,
+})
 
 const renderWithMocks = (ui: ReactNode) => {
   return render(ui)
@@ -70,14 +78,12 @@ describe('Overview', () => {
     expect(screen.getByText('No recent executions')).toBeInTheDocument()
   })
   it('handles undefined store values with defaults', async () => {
-    const processModule = await import('../../stores/process')
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
     const tradeModule = await import('../../stores/trade')
 
-    vi.mocked(processModule.useProcessStore).mockReturnValue({
-      feeds: undefined,
-      strategies: undefined,
-      executors: undefined,
-      brokers: undefined,
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      isLoading: false,
+      data: undefined,
     } as never)
     vi.mocked(tradeModule.useTradeStore).mockReturnValue({
       executions: undefined,
@@ -131,69 +137,62 @@ describe('Overview', () => {
     expect(screen.getByText('Total Value')).toBeInTheDocument()
   })
   it('displays running feeds status', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({ isLoading: false, data: null } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {
-        feed1: { running: true },
-        feed2: { running: false },
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      isLoading: false,
+      data: {
+        processes: [
+          mockProcess({ name: 'btc_feed_publisher', running: true }),
+          mockProcess({ name: 'eth_feed_publisher', running: false }),
+        ],
+        count: 2,
       },
-      strategies: {},
-      executors: {},
-      brokers: {},
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('1 Running')).toBeInTheDocument()
   })
   it('displays running strategies status', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({ isLoading: false, data: null } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {
-        strat1: { running: true },
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      isLoading: false,
+      data: {
+        processes: [mockProcess({ name: 'momentum', role: 'strategy', running: true })],
+        count: 1,
       },
-      executors: {},
-      brokers: {},
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('1 Active')).toBeInTheDocument()
   })
   it('displays executor status', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({ isLoading: false, data: null } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: { default: { running: true } },
-      brokers: {},
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      isLoading: false,
+      data: {
+        processes: [mockProcess({ name: 'executor_default', running: true })],
+        count: 1,
+      },
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('1/1 Running')).toBeInTheDocument()
   })
   it('displays broker status', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({ isLoading: false, data: null } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: { default: { running: true } },
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      isLoading: false,
+      data: {
+        processes: [mockProcess({ name: 'zmq_broker', running: true })],
+        count: 1,
+      },
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getAllByText('1/1 Running').length).toBeGreaterThan(0)
   })
   it('displays recent signals when available', async () => {
     const { useLatestSignals } = await import('../../hooks/queries')
-    const { useProcessStore } = await import('../../stores/process')
 
     vi.mocked(useLatestSignals).mockReturnValue({
       isLoading: false,
@@ -206,25 +205,12 @@ describe('Overview', () => {
         },
       ],
     } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('BTC/USD')).toBeInTheDocument()
   })
   it('displays recent executions when available', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useTradeStore } = await import('../../stores/trade')
 
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     vi.mocked(useTradeStore).mockReturnValue({
       executions: [
         {
@@ -241,15 +227,8 @@ describe('Overview', () => {
     expect(screen.getByText('ETH/USD')).toBeInTheDocument()
   })
   it('counts today executions correctly', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useTradeStore } = await import('../../stores/trade')
 
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     const today = new Date()
     const yesterday = new Date(Date.now() - 86400000)
 
@@ -286,7 +265,6 @@ describe('Overview', () => {
   })
   it('displays sell signal with error status', async () => {
     const { useLatestSignals } = await import('../../hooks/queries')
-    const { useProcessStore } = await import('../../stores/process')
 
     vi.mocked(useLatestSignals).mockReturnValue({
       isLoading: false,
@@ -299,25 +277,12 @@ describe('Overview', () => {
         },
       ],
     } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     renderWithMocks(<Overview />)
     expect(screen.getAllByText('SELL').length).toBeGreaterThan(0)
   })
   it('displays execution with sell side', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useTradeStore } = await import('../../stores/trade')
 
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     vi.mocked(useTradeStore).mockReturnValue({
       executions: [
         {
@@ -351,7 +316,6 @@ describe('Overview', () => {
   })
   it('uses timestamp as key when signal id is null', async () => {
     const { useLatestSignals } = await import('../../hooks/queries')
-    const { useProcessStore } = await import('../../stores/process')
 
     vi.mocked(useLatestSignals).mockReturnValue({
       isLoading: false,
@@ -364,18 +328,11 @@ describe('Overview', () => {
         },
       ],
     } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('XRP/USD')).toBeInTheDocument()
   })
   it('uses index as key when signal id is null and timestamp is undefined', async () => {
     const { useLatestSignals } = await import('../../hooks/queries')
-    const { useProcessStore } = await import('../../stores/process')
 
     vi.mocked(useLatestSignals).mockReturnValue({
       isLoading: false,
@@ -388,18 +345,11 @@ describe('Overview', () => {
         },
       ],
     } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('AVAX/USD')).toBeInTheDocument()
   })
   it('shows N/A when signal timestamp is undefined', async () => {
     const { useLatestSignals } = await import('../../hooks/queries')
-    const { useProcessStore } = await import('../../stores/process')
 
     vi.mocked(useLatestSignals).mockReturnValue({
       isLoading: false,
@@ -412,30 +362,17 @@ describe('Overview', () => {
         },
       ],
     } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
-    } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('ADA/USD')).toBeInTheDocument()
     expect(screen.getByText('N/A')).toBeInTheDocument()
   })
   it('shows N/A when execution executedAt is undefined', async () => {
-    const { useProcessStore } = await import('../../stores/process')
     const { useTradeStore } = await import('../../stores/trade')
     const { useLatestSignals } = await import('../../hooks/queries')
 
     vi.mocked(useLatestSignals).mockReturnValue({
       isLoading: false,
       data: [],
-    } as never)
-    vi.mocked(useProcessStore).mockReturnValue({
-      feeds: {},
-      strategies: {},
-      executors: {},
-      brokers: {},
     } as never)
     vi.mocked(useTradeStore).mockReturnValue({
       executions: [

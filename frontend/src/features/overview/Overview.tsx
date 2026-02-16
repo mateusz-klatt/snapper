@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useMemo } from 'react'
 import { Card, MetricCard, StatusBadge } from '../../components/ui'
 import { CardSkeleton } from '../../components/Skeleton'
 import {
@@ -7,10 +7,9 @@ import {
   useOrdersGrouped,
   useConfiguredProcesses,
 } from '../../hooks/queries'
-import { useProcessStore } from '../../stores/process'
 import { useTradeStore } from '../../stores/trade'
-import type { ProcessStatus } from '../../types/ui'
 import type { Signal, Fill } from '../../types/entities'
+import type { ConfiguredProcess } from '../../types/api'
 
 const CURRENCY_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
 
@@ -24,11 +23,13 @@ const runningBadgeStatus = (count: number): 'connected' | 'disconnected' =>
 const countChangeType = (count: number): 'positive' | 'neutral' =>
   count > 0 ? 'positive' : 'neutral'
 
-const countRunning = (processes: Record<string, ProcessStatus>): number =>
-  Object.values(processes).filter(p => p.running).length
+const isFeedProcess = (p: ConfiguredProcess): boolean => p.name.includes('feed_publisher')
 
-const countTotal = (processes: Record<string, ProcessStatus>): number =>
-  Object.keys(processes).length
+const isExecutorProcess = (p: ConfiguredProcess): boolean => p.name.startsWith('executor_')
+
+const isStrategyProcess = (p: ConfiguredProcess): boolean => p.role === 'strategy'
+
+const isBrokerProcess = (p: ConfiguredProcess): boolean => p.name === 'zmq_broker'
 
 const sideStatus = (side: string): 'connected' | 'error' => (side === 'buy' ? 'connected' : 'error')
 
@@ -167,20 +168,27 @@ const SignalsCardContent: React.FC<
 }
 
 export const Overview: React.FC = () => {
-  const { isLoading: processLoading } = useConfiguredProcesses()
+  const { data: configuredProcesses, isLoading: processLoading } = useConfiguredProcesses()
   const { data: positionsSummary, isLoading: positionsLoading } = usePositionsSummary()
   const { data: latestSignals, isLoading: signalsLoading } = useLatestSignals(5)
   const { data: ordersGrouped } = useOrdersGrouped({ limit: 50 })
-  const { feeds = {}, strategies = {}, executors = {}, brokers = {} } = useProcessStore()
   const { executions = [] } = useTradeStore()
-  const runningFeeds = countRunning(feeds)
-  const totalFeeds = countTotal(feeds)
-  const runningStrategies = countRunning(strategies)
-  const totalStrategies = countTotal(strategies)
-  const runningExecutors = countRunning(executors)
-  const totalExecutors = countTotal(executors)
-  const runningBrokers = countRunning(brokers)
-  const totalBrokers = countTotal(brokers)
+  const processCounts = useMemo(() => {
+    const procs = configuredProcesses?.processes ?? []
+
+    const count = (filter: (p: ConfiguredProcess) => boolean) => {
+      const matched = procs.filter(filter)
+
+      return { running: matched.filter(p => p.running).length, total: matched.length }
+    }
+
+    return {
+      feeds: count(isFeedProcess),
+      strategies: count(isStrategyProcess),
+      executors: count(isExecutorProcess),
+      brokers: count(isBrokerProcess),
+    }
+  }, [configuredProcesses])
   const recentExecutions = executions.slice(0, 5)
   const openOrdersCount = ordersGrouped?.open?.length || 0
   const todayStr = new Date().toDateString()
@@ -195,13 +203,13 @@ export const Overview: React.FC = () => {
       <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>
         <MetricCard
           label='Feeds Running'
-          value={`${runningFeeds}/${totalFeeds}`}
-          changeType={countChangeType(runningFeeds)}
+          value={`${processCounts.feeds.running}/${processCounts.feeds.total}`}
+          changeType={countChangeType(processCounts.feeds.running)}
         />
         <MetricCard
           label='Strategies Active'
-          value={`${runningStrategies}/${totalStrategies}`}
-          changeType={countChangeType(runningStrategies)}
+          value={`${processCounts.strategies.running}/${processCounts.strategies.total}`}
+          changeType={countChangeType(processCounts.strategies.running)}
         />
         <MetricCard label='Open Orders' value={openOrdersCount} changeType='neutral' />
         <MetricCard label="Today's Executions" value={todayExecutionsCount} changeType='positive' />
@@ -213,22 +221,26 @@ export const Overview: React.FC = () => {
             <CardSkeleton showTitle={false} contentLines={4} className='border-0 p-0' />
           ) : (
             <div className='space-y-3'>
-              <ProcessStatusRow label='Feeds' running={runningFeeds} activeLabel='Running' />
+              <ProcessStatusRow
+                label='Feeds'
+                running={processCounts.feeds.running}
+                activeLabel='Running'
+              />
               <ProcessStatusRow
                 label='Strategies'
-                running={runningStrategies}
+                running={processCounts.strategies.running}
                 activeLabel='Active'
               />
               <ProcessStatusRow
                 label='Executors'
-                running={runningExecutors}
-                total={totalExecutors}
+                running={processCounts.executors.running}
+                total={processCounts.executors.total}
                 activeLabel='Running'
               />
               <ProcessStatusRow
                 label='Brokers'
-                running={runningBrokers}
-                total={totalBrokers}
+                running={processCounts.brokers.running}
+                total={processCounts.brokers.total}
                 activeLabel='Running'
               />
             </div>
