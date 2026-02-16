@@ -61,14 +61,14 @@ describe('LightweightChart', () => {
       })
     )
   })
-  it('creates chart with dark theme', () => {
+  it('creates chart with alpine theme', () => {
     render(<LightweightChart data={sampleData} />)
     expect(mockCreateChart).toHaveBeenCalledWith(
       expect.any(HTMLDivElement),
       expect.objectContaining({
         layout: expect.objectContaining({
-          background: { color: '#1e293b' },
-          textColor: '#e2e8f0',
+          background: { color: '#fdf8f0' },
+          textColor: '#6f695f',
         }),
       })
     )
@@ -78,8 +78,8 @@ describe('LightweightChart', () => {
     expect(mockAddSeries).toHaveBeenCalledWith(
       'CandlestickSeries',
       expect.objectContaining({
-        upColor: '#10b981',
-        downColor: '#ef4444',
+        upColor: '#3cb67a',
+        downColor: '#d8062a',
       })
     )
   })
@@ -118,8 +118,8 @@ describe('LightweightChart', () => {
       expect.any(HTMLDivElement),
       expect.objectContaining({
         grid: expect.objectContaining({
-          vertLines: { color: '#374151' },
-          horzLines: { color: '#374151' },
+          vertLines: { color: '#ece8df' },
+          horzLines: { color: '#ece8df' },
         }),
       })
     )

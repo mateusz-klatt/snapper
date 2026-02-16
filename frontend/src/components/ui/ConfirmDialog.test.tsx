@@ -52,7 +52,7 @@ describe('ConfirmDialog', () => {
     const onCancel = vi.fn()
 
     render(<ConfirmDialog {...defaultProps} onCancel={onCancel} />)
-    const backdrop = document.querySelector('.bg-black.bg-opacity-50')
+    const backdrop = screen.getByRole('button', { name: 'Close modal' })
 
     expect(backdrop).toBeInTheDocument()
 
@@ -72,7 +72,7 @@ describe('ConfirmDialog', () => {
     render(<ConfirmDialog {...defaultProps} variant='danger' />)
     const confirmButton = screen.getByText('Confirm')
 
-    expect(confirmButton.className).toContain('bg-red-600')
+    expect(confirmButton.className).toContain('bg-loss-600')
   })
   it('applies danger variant to custom confirm button text', () => {
     render(
@@ -80,6 +80,6 @@ describe('ConfirmDialog', () => {
     )
     const confirmButton = screen.getByText('Delete')
 
-    expect(confirmButton.className).toContain('bg-red-600')
+    expect(confirmButton.className).toContain('bg-loss-600')
   })
 })

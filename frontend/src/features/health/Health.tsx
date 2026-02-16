@@ -28,17 +28,17 @@ const StatusIndicator: React.FC<{ status: string; showLabel: boolean }> = ({
   const getStatusConfig = (status: string) => {
     switch (status.toLowerCase()) {
       case 'running':
-        return { color: 'bg-green-400', label: 'Running', textColor: 'text-green-400' }
+        return { color: 'bg-accent-500', label: 'Running', textColor: 'text-gain-600' }
       case 'stopped':
       case 'not_running':
-        return { color: 'bg-gray-400', label: 'Stopped', textColor: 'text-gray-400' }
+        return { color: 'bg-muted-400', label: 'Stopped', textColor: 'text-muted-600' }
       case 'error':
       case 'failed':
-        return { color: 'bg-red-400', label: 'Error', textColor: 'text-red-400' }
+        return { color: 'bg-loss-500', label: 'Error', textColor: 'text-loss-600' }
       case 'completed':
-        return { color: 'bg-blue-400', label: 'Completed', textColor: 'text-blue-400' }
+        return { color: 'bg-info-500', label: 'Completed', textColor: 'text-info-600' }
       default:
-        return { color: 'bg-yellow-400', label: 'Unknown', textColor: 'text-yellow-400' }
+        return { color: 'bg-warning-500', label: 'Unknown', textColor: 'text-warning-600' }
     }
   }
 
@@ -105,34 +105,34 @@ const ProcessCard: React.FC<{
   }
 
   return (
-    <div className='bg-dark-800 border border-dark-700 rounded-lg p-4'>
+    <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-5'>
       <div className='flex items-center justify-between mb-3'>
         <div className='flex items-center space-x-3'>
-          <div className='text-dark-400'>{getProcessIcon(name, type)}</div>
+          <div className='text-muted-500'>{getProcessIcon(name, type)}</div>
           <div>
-            <h3 className='font-medium text-white'>{name}</h3>
-            <p className='text-xs text-dark-400 capitalize'>{type}</p>
+            <h3 className='font-medium text-alpine-900'>{name}</h3>
+            <p className='text-xs capitalize text-muted-500'>{type}</p>
           </div>
         </div>
         <StatusIndicator status={status.status} showLabel />
       </div>
       <div className='grid grid-cols-2 gap-4 text-sm'>
         <div>
-          <div className='text-dark-400'>PID</div>
-          <div className='text-white font-mono'>{status.pid || 'N/A'}</div>
+          <div className='text-muted-500'>PID</div>
+          <div className='font-mono text-alpine-900'>{status.pid || 'N/A'}</div>
         </div>
         <div>
-          <div className='text-dark-400'>Uptime</div>
-          <div className='text-white'>{formatUptime(status.started_at ?? undefined)}</div>
+          <div className='text-muted-500'>Uptime</div>
+          <div className='text-alpine-900'>{formatUptime(status.started_at ?? undefined)}</div>
         </div>
       </div>
       {status.error && (
-        <div className='mt-3 p-2 bg-red-900/20 border border-red-800 rounded-sm text-xs text-red-400'>
+        <div className='mt-3 rounded-lg border border-loss-100 bg-loss-50 p-2 text-xs text-loss-700'>
           {status.error}
         </div>
       )}
       {status.exit_code !== undefined && status.status !== 'running' && (
-        <div className='mt-2 text-xs text-dark-400'>Exit code: {status.exit_code}</div>
+        <div className='mt-2 text-xs text-muted-500'>Exit code: {status.exit_code}</div>
       )}
     </div>
   )
@@ -140,9 +140,9 @@ const ProcessCard: React.FC<{
 
 const MetricCard: React.FC<{ metric: HealthMetric }> = ({ metric }) => {
   const statusColors: Record<HealthMetric['status'], string> = {
-    healthy: 'text-green-400 border-green-800 bg-green-900/20',
-    warning: 'text-yellow-400 border-yellow-800 bg-yellow-900/20',
-    error: 'text-red-400 border-red-800 bg-red-900/20',
+    healthy: 'border-accent-100 bg-accent-50 text-accent-700',
+    warning: 'border-warning-100 bg-warning-50 text-warning-700',
+    error: 'border-loss-100 bg-loss-50 text-loss-700',
   }
   const getStatusColor = (status: HealthMetric['status']) => statusColors[status]
 
@@ -211,34 +211,25 @@ export const Health: React.FC = () => {
   const overallHealth = resolveOverallHealth()
 
   return (
-    <div className='p-4 space-y-6'>
-      {}
+    <div className='space-y-6'>
       <div className='flex items-center justify-between'>
-        <h2 className='text-xl font-bold text-white'>System Health</h2>
-        <div className='flex items-center space-x-2'>
-          <StatusIndicator status={overallHealth} showLabel />
-          <span className='text-sm text-dark-400'>
-            Last updated: {new Date().toLocaleTimeString()}
-          </span>
-        </div>
+        <h2 className='text-xl font-semibold text-alpine-900'>System Health</h2>
+        <StatusIndicator status={overallHealth} showLabel />
       </div>
-      {}
       <div>
-        <h3 className='text-lg font-medium text-white mb-4'>Health Metrics</h3>
-        <div className='grid grid-cols-2 lg:grid-cols-4 gap-4'>
+        <h3 className='mb-4 text-lg font-medium text-alpine-900'>Health Metrics</h3>
+        <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
           {healthMetrics.map(metric => (
             <MetricCard key={metric.name} metric={metric} />
           ))}
         </div>
       </div>
-      {}
       <div>
-        <h3 className='text-lg font-medium text-white mb-4'>Process Status</h3>
+        <h3 className='mb-4 text-lg font-medium text-alpine-900'>Process Status</h3>
         {isLoading ? (
           <HealthSkeleton className='mt-0 p-0' />
         ) : (
           <div className='grid gap-4'>
-            {}
             <div className='grid grid-cols-1 md:grid-cols-2 gap-4'>
               <ProcessCard
                 name='Trading Engine'
@@ -246,10 +237,9 @@ export const Health: React.FC = () => {
                 type='service'
               />
             </div>
-            {}
             {systemStatus?.backtests && Object.keys(systemStatus.backtests).length > 0 && (
               <div>
-                <h4 className='text-md font-medium text-white mb-3'>Active Backtests</h4>
+                <h4 className='mb-3 text-md font-medium text-alpine-900'>Active Backtests</h4>
                 <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'>
                   {Object.entries(systemStatus.backtests).map(([id, status]) => (
                     <ProcessCard
@@ -265,35 +255,34 @@ export const Health: React.FC = () => {
           </div>
         )}
       </div>
-      {}
-      <div className='bg-dark-800 border border-dark-700 rounded-lg p-4'>
-        <h3 className='text-lg font-medium text-white mb-3'>Quick Actions</h3>
+      <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-5'>
+        <h3 className='mb-3 text-lg font-medium text-alpine-900'>Quick Actions</h3>
         <div className='flex flex-wrap gap-3'>
           <button
             disabled
             title='Feature not yet implemented'
-            className='px-4 py-2 bg-blue-600/50 text-white/50 text-sm rounded-sm cursor-not-allowed'
+            className='cursor-not-allowed rounded-md border border-dark-600 bg-dark-700 px-4 py-2 text-sm text-muted-500'
           >
             Restart Services
           </button>
           <button
             disabled
             title='Feature not yet implemented'
-            className='px-4 py-2 bg-green-600/50 text-white/50 text-sm rounded-sm cursor-not-allowed'
+            className='cursor-not-allowed rounded-md border border-dark-600 bg-dark-700 px-4 py-2 text-sm text-muted-500'
           >
             Run Health Check
           </button>
           <button
             disabled
             title='Feature not yet implemented'
-            className='px-4 py-2 bg-orange-600/50 text-white/50 text-sm rounded-sm cursor-not-allowed'
+            className='cursor-not-allowed rounded-md border border-dark-600 bg-dark-700 px-4 py-2 text-sm text-muted-500'
           >
             View Logs
           </button>
           <button
             disabled
             title='Feature not yet implemented'
-            className='px-4 py-2 bg-purple-600/50 text-white/50 text-sm rounded-sm cursor-not-allowed'
+            className='cursor-not-allowed rounded-md border border-dark-600 bg-dark-700 px-4 py-2 text-sm text-muted-500'
           >
             Export Report
           </button>

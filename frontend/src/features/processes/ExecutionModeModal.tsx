@@ -36,14 +36,14 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
   return (
     <Modal open={open} onClose={onClose} title={`Start ${componentName}`} size='md'>
       <div className='space-y-6'>
-        <p className='text-gray-300'>{description}</p>
+        <p className='text-muted-600'>{description}</p>
         <div className='space-y-4'>
-          <h4 className='text-sm font-medium text-gray-200'>Execution Mode:</h4>
+          <h4 className='text-sm font-medium text-muted-700'>Execution Mode:</h4>
           <div className='space-y-3'>
             <label
               htmlFor='exec-mode-thread'
               aria-label='Thread Mode'
-              className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'
+              className='flex items-start cursor-pointer p-3 rounded border border-dark-600 hover:border-muted-400'
             >
               <input
                 id='exec-mode-thread'
@@ -56,8 +56,8 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
                 className='mr-3 mt-1'
               />
               <div>
-                <div className='text-white font-medium'>Thread Mode</div>
-                <div className='text-sm text-gray-400'>
+                <div className='text-alpine-900 font-medium'>Thread Mode</div>
+                <div className='text-sm text-muted-500'>
                   Runs as embedded task within web server. Faster startup, shared memory.
                 </div>
               </div>
@@ -65,7 +65,7 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
             <label
               htmlFor='exec-mode-process'
               aria-label='Process Mode'
-              className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'
+              className='flex items-start cursor-pointer p-3 rounded border border-dark-600 hover:border-muted-400'
             >
               <input
                 id='exec-mode-process'
@@ -78,8 +78,8 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
                 className='mr-3 mt-1'
               />
               <div>
-                <div className='text-white font-medium'>Process Mode</div>
-                <div className='text-sm text-gray-400'>
+                <div className='text-alpine-900 font-medium'>Process Mode</div>
+                <div className='text-sm text-muted-500'>
                   Runs as separate Python process. Isolated, fault-tolerant, detailed monitoring.
                 </div>
               </div>
@@ -87,11 +87,11 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
           </div>
         </div>
         <div className='space-y-2'>
-          <h4 className='text-sm font-medium text-gray-200'>Autostart:</h4>
+          <h4 className='text-sm font-medium text-muted-700'>Autostart:</h4>
           <label
             htmlFor='exec-mode-autostart'
             aria-label='Enable automatic restart'
-            className='flex items-start cursor-pointer p-3 rounded border border-gray-600 hover:border-gray-500'
+            className='flex items-start cursor-pointer p-3 rounded border border-dark-600 hover:border-muted-400'
           >
             <input
               id='exec-mode-autostart'
@@ -103,8 +103,8 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
               className='mr-3 mt-1'
             />
             <div>
-              <div className='text-white font-medium'>Enable automatic restart</div>
-              <div className='text-sm text-gray-400'>
+              <div className='text-alpine-900 font-medium'>Enable automatic restart</div>
+              <div className='text-sm text-muted-500'>
                 Keep this process enabled so it starts automatically with the server.
               </div>
             </div>
@@ -113,7 +113,7 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
         <div className='flex justify-end space-x-3 pt-4'>
           <button
             onClick={onClose}
-            className='px-4 py-2 text-gray-300 hover:text-white transition-colors'
+            className='px-4 py-2 text-muted-600 hover:text-alpine-900 transition-colors'
           >
             Cancel
           </button>

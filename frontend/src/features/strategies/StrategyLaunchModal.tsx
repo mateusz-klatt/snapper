@@ -141,13 +141,13 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
   return (
     <Modal open={open} onClose={onClose} title='Register Strategy Process' size='lg'>
       {templates.length === 0 ? (
-        <div className='space-y-3 text-sm text-dark-300'>
+        <div className='space-y-3 text-sm text-muted-600'>
           <p>No strategy templates registered in backend. Define at least one strategy process.</p>
           <div className='flex justify-end pt-2'>
             <button
               type='button'
               onClick={onClose}
-              className='px-4 py-2 text-sm text-dark-300 hover:text-white'
+              className='px-4 py-2 text-sm text-muted-600 hover:text-alpine-900'
             >
               Close
             </button>
@@ -158,7 +158,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
           <div>
             <label
               htmlFor='strategy-template'
-              className='block text-sm font-medium text-dark-200 mb-2'
+              className='block text-sm font-medium text-muted-700 mb-2'
             >
               Strategy template
             </label>
@@ -170,7 +170,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 setProcessName('')
                 setStrategyName('')
               }}
-              className='w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500'
+              className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
               required
             >
               <option value=''>Choose template...</option>
@@ -181,16 +181,16 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
               ))}
             </select>
             {selectedTemplate && (
-              <p className='mt-1 text-xs text-dark-400'>
+              <p className='mt-1 text-xs text-muted-500'>
                 {sortedTemplates.find(template => template.name === selectedTemplate)
                   ?.description || 'Strategy registered in backend'}
               </p>
             )}
             {processSchema.isLoading && (
-              <p className='mt-2 text-xs text-dark-500'>Loading template defaults…</p>
+              <p className='mt-2 text-xs text-muted-400'>Loading template defaults…</p>
             )}
             {processSchema.error && (
-              <p className='mt-2 text-xs text-orange-400'>
+              <p className='mt-2 text-xs text-warning-400'>
                 Unable to load template defaults. Please check backend logs.
               </p>
             )}
@@ -199,7 +199,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
             <div>
               <label
                 htmlFor='process-name'
-                className='block text-sm font-medium text-dark-200 mb-2'
+                className='block text-sm font-medium text-muted-700 mb-2'
               >
                 Process name
               </label>
@@ -209,17 +209,17 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 value={processName}
                 onChange={e => setProcessName(e.target.value)}
                 placeholder='strategy_macd_custom'
-                className='w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500'
+                className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
                 required
               />
-              <p className='mt-1 text-xs text-dark-500'>
+              <p className='mt-1 text-xs text-muted-400'>
                 Allowed characters: lowercase letters, numbers, underscores
               </p>
             </div>
             <div>
               <label
                 htmlFor='strategy-instance-name'
-                className='block text-sm font-medium text-dark-200 mb-2'
+                className='block text-sm font-medium text-muted-700 mb-2'
               >
                 Strategy instance name
               </label>
@@ -229,10 +229,10 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 value={strategyName}
                 onChange={e => setStrategyName(e.target.value)}
                 placeholder='macd_custom'
-                className='w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500'
+                className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
                 required
               />
-              <p className='mt-1 text-xs text-dark-500'>
+              <p className='mt-1 text-xs text-muted-400'>
                 Used within strategy configuration and output topics
               </p>
             </div>
@@ -241,7 +241,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
             <div>
               <label
                 htmlFor='execution-mode'
-                className='block text-sm font-medium text-dark-200 mb-2'
+                className='block text-sm font-medium text-muted-700 mb-2'
               >
                 Execution mode
               </label>
@@ -249,30 +249,30 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 id='execution-mode'
                 value={executionMode}
                 onChange={e => setExecutionMode(e.target.value as 'thread' | 'process')}
-                className='w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500'
+                className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
               >
                 <option value='thread'>Embedded thread</option>
                 <option value='process'>Isolated process</option>
               </select>
-              <p className='mt-1 text-xs text-dark-500'>
+              <p className='mt-1 text-xs text-muted-400'>
                 Threads share memory, processes provide stronger isolation.
               </p>
             </div>
             <div className='space-y-2'>
-              <span className='block text-sm font-medium text-dark-200 mb-2'>Flags</span>
-              <label className='flex items-center text-sm text-dark-300'>
+              <span className='block text-sm font-medium text-muted-700 mb-2'>Flags</span>
+              <label className='flex items-center text-sm text-muted-600'>
                 <input
                   type='checkbox'
-                  className='mr-2 text-blue-500 focus:ring-blue-500'
+                  className='mr-2 text-info-500 focus:ring-brand-500'
                   checked={autostart}
                   onChange={e => setAutostart(e.target.checked)}
                 />{' '}
                 Autostart on server boot
               </label>
-              <label className='flex items-center text-sm text-dark-300'>
+              <label className='flex items-center text-sm text-muted-600'>
                 <input
                   type='checkbox'
-                  className='mr-2 text-blue-500 focus:ring-blue-500'
+                  className='mr-2 text-info-500 focus:ring-brand-500'
                   checked={startImmediately}
                   onChange={e => setStartImmediately(e.target.checked)}
                 />{' '}
@@ -281,7 +281,10 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
             </div>
           </div>
           <div>
-            <label htmlFor='strategy-note' className='block text-sm font-medium text-dark-200 mb-2'>
+            <label
+              htmlFor='strategy-note'
+              className='block text-sm font-medium text-muted-700 mb-2'
+            >
               Note (optional)
             </label>
             <textarea
@@ -290,10 +293,10 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
               onChange={e => setNote(e.target.value)}
               maxLength={512}
               rows={2}
-              className='w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500'
+              className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
               placeholder='Describe purpose or parameters of this strategy instance.'
             />
-            <p className='mt-1 text-xs text-dark-500'>
+            <p className='mt-1 text-xs text-muted-400'>
               Stored alongside configuration to help identify this process.
             </p>
           </div>
@@ -301,7 +304,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
             <button
               type='button'
               onClick={onClose}
-              className='px-4 py-2 text-sm text-dark-300 hover:text-white'
+              className='px-4 py-2 text-sm text-muted-600 hover:text-alpine-900'
               disabled={isSubmitting}
             >
               Cancel
@@ -316,7 +319,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 !processName.trim() ||
                 !strategyName.trim()
               }
-              className='px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed'
+              className='px-4 py-2 bg-info-600 text-white text-sm font-medium rounded-md hover:bg-info-700 disabled:opacity-50 disabled:cursor-not-allowed'
             >
               {isSubmitting ? 'Registering…' : 'Register strategy'}
             </button>

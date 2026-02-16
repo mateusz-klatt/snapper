@@ -34,33 +34,33 @@ export const LightweightChart = ({
       width: width || chartContainerRef.current.clientWidth,
       height,
       layout: {
-        background: { color: '#1e293b' },
-        textColor: '#e2e8f0',
+        background: { color: '#fdf8f0' },
+        textColor: '#6f695f',
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: '#374151' },
-        horzLines: { color: '#374151' },
+        vertLines: { color: '#ece8df' },
+        horzLines: { color: '#ece8df' },
       },
       crosshair: {
         mode: 1,
       },
       rightPriceScale: {
-        borderColor: '#374151',
+        borderColor: '#e6e3dc',
       },
       timeScale: {
-        borderColor: '#374151',
+        borderColor: '#e6e3dc',
         timeVisible: true,
         secondsVisible: false,
       },
     })
     const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#10b981',
-      downColor: '#ef4444',
-      borderUpColor: '#10b981',
-      borderDownColor: '#ef4444',
-      wickUpColor: '#10b981',
-      wickDownColor: '#ef4444',
+      upColor: '#3cb67a',
+      downColor: '#d8062a',
+      borderUpColor: '#3cb67a',
+      borderDownColor: '#d8062a',
+      wickUpColor: '#3cb67a',
+      wickDownColor: '#d8062a',
     })
 
     chartRef.current = chart

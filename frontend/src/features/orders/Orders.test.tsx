@@ -5,7 +5,41 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Orders } from './Orders'
 import type { OrderStatus, Fill } from '../../types/entities'
-import { useWebSocketStore } from '../../stores/websocket'
+
+vi.mock('../../components/ThemeSelect', () => ({
+  ThemeSelect: ({
+    id,
+    value,
+    onChange,
+    options,
+    placeholder,
+    className,
+    disabled,
+  }: {
+    id?: string
+    value: string
+    onChange: (v: string) => void
+    options: readonly { value: string; label: string }[]
+    placeholder?: string
+    className?: string
+    disabled?: boolean
+  }) => (
+    <select
+      id={id}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className={className}
+      disabled={disabled}
+    >
+      {placeholder && <option value=''>{placeholder}</option>}
+      {options.map(opt => (
+        <option key={opt.value} value={opt.value}>
+          {opt.label}
+        </option>
+      ))}
+    </select>
+  ),
+}))
 
 vi.mock('../../hooks/queries', () => ({
   useOrders: vi.fn(() => ({
@@ -33,7 +67,6 @@ const renderWithProviders = (ui: ReactNode) => {
 describe('Orders', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    useWebSocketStore.setState({ isConnected: false })
   })
   it('renders orders page', () => {
     renderWithProviders(<Orders />)
@@ -150,19 +183,6 @@ describe('Orders', () => {
     renderWithProviders(<Orders />)
     await waitFor(() => {
       expect(screen.getByText('Filter by status:')).toBeTruthy()
-    })
-  })
-  it('displays live updates indicator when connected', async () => {
-    useWebSocketStore.setState({ isConnected: true })
-    renderWithProviders(<Orders />)
-    await waitFor(() => {
-      expect(screen.getByText('Live updates via WebSocket')).toBeTruthy()
-    })
-  })
-  it('displays disconnected indicator when not connected', async () => {
-    renderWithProviders(<Orders />)
-    await waitFor(() => {
-      expect(screen.getByText('WebSocket disconnected')).toBeTruthy()
     })
   })
   it('shows order count in tab', async () => {

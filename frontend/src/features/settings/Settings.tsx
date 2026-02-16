@@ -3,6 +3,7 @@ import { apiClient } from '../../lib/apiClient'
 import type { SettingRead } from '../../types/api'
 import { SettingItem } from './SettingItem'
 import { AddSettingModal } from './AddSettingModal'
+import { ThemeSelect } from '../../components/ThemeSelect'
 
 export const Settings = () => {
   const [settings, setSettings] = useState<SettingRead[]>([])
@@ -117,17 +118,17 @@ export const Settings = () => {
   }
 
   return (
-    <div className='flex flex-col h-full'>
+    <div className='space-y-0'>
       {}
-      <div className='flex-shrink-0 p-4 border-b border-dark-600'>
+      <div className='pb-4 border-b border-dark-600'>
         <div className='mb-4 flex justify-between items-start'>
           <div>
-            <h1 className='text-2xl font-bold text-white mb-1'>Settings</h1>
-            <p className='text-dark-300 text-sm'>Configure application settings and parameters</p>
+            <h1 className='text-2xl font-bold text-alpine-900 mb-1'>Settings</h1>
+            <p className='text-muted-600 text-sm'>Configure application settings and parameters</p>
           </div>
           <button
             onClick={() => setShowAddModal(true)}
-            className='px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-1.5'
+            className='px-3 py-1.5 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg transition-colors flex items-center gap-1.5'
           >
             <svg className='w-4 h-4' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
               <path
@@ -141,11 +142,11 @@ export const Settings = () => {
           </button>
         </div>
         {error && (
-          <div className='mb-4 p-3 bg-red-900/50 border border-red-500 rounded-lg'>
-            <p className='text-red-200 text-sm'>{error}</p>
+          <div className='mb-4 p-3 bg-loss-50 border border-loss-500 rounded-lg'>
+            <p className='text-loss-700 text-sm'>{error}</p>
             <button
               onClick={() => setError(null)}
-              className='mt-1 text-red-300 hover:text-red-100 underline text-xs'
+              className='mt-1 text-loss-600 hover:text-loss-100 underline text-xs'
             >
               Dismiss
             </button>
@@ -159,31 +160,29 @@ export const Settings = () => {
               placeholder='Search settings...'
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              className='w-full px-3 py-1.5 text-sm bg-dark-700 border border-dark-600 rounded-lg text-white placeholder-dark-300 focus:outline-none focus:border-blue-500'
+              className='w-full px-3 py-1.5 text-sm bg-white border border-dark-600 rounded-lg text-alpine-900 placeholder-muted-400 focus:outline-none focus:border-brand-500'
             />
           </div>
           <div>
-            <select
+            <ThemeSelect
               value={selectedCategory}
-              onChange={e => setSelectedCategory(e.target.value)}
-              className='px-3 py-1.5 text-sm bg-dark-700 border border-dark-600 rounded-lg text-white focus:outline-none focus:border-blue-500'
-            >
-              {categories.map(category => (
-                <option key={category} value={category}>
-                  {category === 'all'
+              onChange={setSelectedCategory}
+              options={categories.map(category => ({
+                value: category,
+                label:
+                  category === 'all'
                     ? 'All Categories'
-                    : category.charAt(0).toUpperCase() + category.slice(1)}
-                </option>
-              ))}
-            </select>
+                    : category.charAt(0).toUpperCase() + category.slice(1),
+              }))}
+            />
           </div>
         </div>
       </div>
       {}
-      <div className='flex-1 overflow-y-auto p-4'>
-        <div className='grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3 max-w-7xl mx-auto'>
+      <div className='pt-4'>
+        <div className='grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3'>
           {filteredSettings.length === 0 ? (
-            <div className='col-span-full text-center py-12 text-dark-400'>
+            <div className='col-span-full text-center py-12 text-muted-500'>
               <p>No settings found matching your criteria.</p>
             </div>
           ) : (

@@ -36,21 +36,81 @@ export const isEncrypted = (value: string): boolean => {
 }
 
 export const CATEGORY_COLORS: Record<string, string> = {
-  trading: 'bg-green-900 text-green-200',
-  auth: 'bg-red-900 text-red-200',
-  risk: 'bg-yellow-900 text-yellow-200',
-  zmq: 'bg-blue-900 text-blue-200',
-  network: 'bg-purple-900 text-purple-200',
-  system: 'bg-gray-900 text-gray-200',
+  trading: 'bg-accent-50 text-accent-700',
+  auth: 'bg-loss-50 text-loss-700',
+  risk: 'bg-warning-50 text-warning-700',
+  zmq: 'bg-info-50 text-info-700',
+  network: 'bg-purple-50 text-purple-700',
+  system: 'bg-muted-100 text-muted-700',
 }
 
 export const getCategoryColor = (category: string): string =>
-  CATEGORY_COLORS[category] || 'bg-dark-600 text-dark-200'
+  CATEGORY_COLORS[category] || 'bg-muted-100 text-muted-600'
+
+export const SENSITIVE_MASK = '••••••••'
 
 export const getMaskedValue = (key: string, value: string): string => {
   if (isSensitive(key) && value) {
-    return '••••••••••••••••••••••••••••••••••••••••••••••••••'
+    return SENSITIVE_MASK
   }
 
-  return value || '(empty)'
+  if (!value) {
+    return '(empty)'
+  }
+
+  try {
+    const parsed = JSON.parse(value)
+
+    if (typeof parsed === 'object' && parsed !== null) {
+      return JSON.stringify(parsed, null, 2)
+    }
+  } catch {
+    /* not JSON — return as-is */
+  }
+
+  return value
+}
+
+export type JsonTokenType =
+  | 'key'
+  | 'string'
+  | 'number'
+  | 'boolean'
+  | 'null'
+  | 'punctuation'
+  | 'whitespace'
+
+interface JsonToken {
+  type: JsonTokenType
+  value: string
+}
+
+const JSON_TOKEN_SOURCE =
+  '("(?:[^"\\\\]|\\\\.)*")(?=\\s*:)|("(?:[^"\\\\]|\\\\.)*")|(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)|\\b(true|false)\\b|\\b(null)\\b|([{}\\[\\]:,])|(\\s+)'
+
+const TOKEN_GROUP_TYPES: JsonTokenType[] = [
+  'key',
+  'string',
+  'number',
+  'boolean',
+  'null',
+  'punctuation',
+  'whitespace',
+]
+
+export function tokenizeJson(json: string): JsonToken[] {
+  const tokens: JsonToken[] = []
+  const pattern = new RegExp(JSON_TOKEN_SOURCE, 'g')
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(json)) !== null) {
+    for (let i = 0; i < TOKEN_GROUP_TYPES.length; i++) {
+      if (match[i + 1] !== undefined) {
+        tokens.push({ type: TOKEN_GROUP_TYPES[i], value: match[i + 1] })
+        break
+      }
+    }
+  }
+
+  return tokens
 }

@@ -5,8 +5,8 @@ import type { BarEnvelope, TickEnvelope } from '../types/ws'
 describe('useMarketStore', () => {
   beforeEach(() => {
     useMarketStore.setState({
-      selectedExchange: null,
-      selectedInstrument: null,
+      selectedExchange: 'kraken',
+      selectedInstrument: 'EUR-USD',
       selectedTimeframe: '1h',
       lastPrice: null,
       candles: {},
@@ -18,8 +18,8 @@ describe('useMarketStore', () => {
     it('has correct default values', () => {
       const state = useMarketStore.getState()
 
-      expect(state.selectedExchange).toBeNull()
-      expect(state.selectedInstrument).toBeNull()
+      expect(state.selectedExchange).toBe('kraken')
+      expect(state.selectedInstrument).toBe('EUR-USD')
       expect(state.selectedTimeframe).toBe('1h')
       expect(state.lastPrice).toBeNull()
       expect(state.candles).toEqual({})

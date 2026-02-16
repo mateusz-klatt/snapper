@@ -57,14 +57,14 @@ describe('useAppStore', () => {
     })
   })
   describe('setConnectionLag', () => {
-    it('sets connectionLag to positive value', () => {
+    it('sets connectionLag directly', () => {
       useAppStore.getState().setConnectionLag(150)
       expect(useAppStore.getState().connectionLag).toBe(150)
     })
-    it('sets connectionLag to zero', () => {
+    it('overwrites previous value without smoothing', () => {
       useAppStore.getState().setConnectionLag(100)
-      useAppStore.getState().setConnectionLag(0)
-      expect(useAppStore.getState().connectionLag).toBe(0)
+      useAppStore.getState().setConnectionLag(200)
+      expect(useAppStore.getState().connectionLag).toBe(200)
     })
   })
   describe('addSubscribedTopic', () => {

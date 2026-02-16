@@ -2,31 +2,31 @@ import React, { useState } from 'react'
 import { useOrders, useExecutions } from '../../hooks/queries'
 import type { OrderStatus, Fill } from '../../types/entities'
 import { OrderCardSkeleton } from '../../components/Skeleton'
-import { useWebSocketStore } from '../../stores/websocket'
+import { ThemeSelect } from '../../components/ThemeSelect'
 import clsx from 'clsx'
 
 const OrderCard: React.FC<{ order: OrderStatus }> = ({ order }) => {
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
       case 'filled':
-        return 'text-green-400 bg-green-900/20'
+        return 'text-gain-400 bg-gain-900/20'
       case 'new':
       case 'open':
-        return 'text-blue-400 bg-blue-900/20'
+        return 'text-info-400 bg-info-900/20'
       case 'cancelled':
-        return 'text-gray-400 bg-gray-900/20'
+        return 'text-muted-400 bg-muted-900/20'
       case 'rejected':
       case 'error':
-        return 'text-red-400 bg-red-900/20'
+        return 'text-loss-400 bg-loss-900/20'
       case 'partially_filled':
-        return 'text-yellow-400 bg-yellow-900/20'
+        return 'text-warning-400 bg-warning-900/20'
       default:
-        return 'text-gray-400 bg-gray-900/20'
+        return 'text-muted-400 bg-muted-900/20'
     }
   }
 
   const getSideColor = (side: string) => {
-    return side === 'buy' ? 'text-green-400' : 'text-red-400'
+    return side === 'buy' ? 'text-gain-400' : 'text-loss-400'
   }
 
   const formatPrice = (price: number | null | undefined) => {
@@ -34,14 +34,14 @@ const OrderCard: React.FC<{ order: OrderStatus }> = ({ order }) => {
   }
 
   return (
-    <div className='bg-dark-800 border border-dark-700 rounded-lg p-4 hover:border-dark-600 transition-colors'>
+    <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-5 transition-colors hover:border-muted-400'>
       <div className='flex items-center justify-between mb-3'>
         <div className='flex items-center space-x-3'>
-          <span className='font-medium text-white'>{order.instrument}</span>
+          <span className='font-semibold text-alpine-900'>{order.instrument}</span>
           <span className={clsx('text-sm font-medium', order.side ? getSideColor(order.side) : '')}>
             {order.side?.toUpperCase() ?? 'N/A'}
           </span>
-          <span className='text-sm text-dark-400'>{order.orderType}</span>
+          <span className='text-sm text-muted-500'>{order.orderType}</span>
         </div>
         <span
           className={clsx(
@@ -54,22 +54,22 @@ const OrderCard: React.FC<{ order: OrderStatus }> = ({ order }) => {
       </div>
       <div className='grid grid-cols-2 gap-4 text-sm'>
         <div>
-          <div className='text-dark-400'>Quantity</div>
-          <div className='text-white font-mono'>{order.size.toFixed(4)}</div>
+          <div className='text-muted-500'>Quantity</div>
+          <div className='font-mono text-alpine-900'>{order.size.toFixed(4)}</div>
         </div>
         <div>
-          <div className='text-dark-400'>Price</div>
-          <div className='text-white font-mono'>{formatPrice(order.price)}</div>
+          <div className='text-muted-500'>Price</div>
+          <div className='font-mono text-alpine-900'>{formatPrice(order.price)}</div>
         </div>
         <div>
-          <div className='text-dark-400'>Created</div>
-          <div className='text-white text-xs'>
+          <div className='text-muted-500'>Created</div>
+          <div className='text-xs text-alpine-900'>
             {order.createdAt ? order.createdAt.toLocaleString() : 'N/A'}
           </div>
         </div>
         <div>
-          <div className='text-dark-400'>Order ID</div>
-          <div className='text-white text-xs font-mono'>{order.id}</div>
+          <div className='text-muted-500'>Order ID</div>
+          <div className='text-xs font-mono text-alpine-900'>{order.id}</div>
         </div>
       </div>
     </div>
@@ -81,39 +81,37 @@ const ExecutionCard: React.FC<{ execution: Fill }> = ({ execution }) => {
   const fees = execution.fee || 0
 
   return (
-    <div className='bg-dark-800 border border-dark-700 rounded-lg p-4 hover:border-dark-600 transition-colors'>
+    <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-5 transition-colors hover:border-muted-400'>
       <div className='flex items-center justify-between mb-3'>
         <div className='flex items-center space-x-3'>
-          <span className='font-medium text-white'>Order #{execution.orderId}</span>
-          <span className='text-xs text-green-400 bg-green-900/20 px-2 py-1 rounded-full'>
-            FILLED
-          </span>
+          <span className='font-semibold text-alpine-900'>Order #{execution.orderId}</span>
+          <span className='rounded-full bg-gain-50 px-2 py-1 text-xs text-gain-600'>FILLED</span>
         </div>
-        <div className='text-sm text-dark-400'>Exec ID {execution.id}</div>
+        <div className='text-sm text-muted-500'>Exec ID {execution.id}</div>
       </div>
       <div className='grid grid-cols-3 gap-4 text-sm'>
         <div>
-          <div className='text-dark-400'>Size</div>
-          <div className='text-white font-mono'>{execution.size.toFixed(4)}</div>
+          <div className='text-muted-500'>Size</div>
+          <div className='font-mono text-alpine-900'>{execution.size.toFixed(4)}</div>
         </div>
         <div>
-          <div className='text-dark-400'>Price</div>
-          <div className='text-white font-mono'>${execution.price.toFixed(2)}</div>
+          <div className='text-muted-500'>Price</div>
+          <div className='font-mono text-alpine-900'>${execution.price.toFixed(2)}</div>
         </div>
         <div>
-          <div className='text-dark-400'>Total</div>
-          <div className='text-white font-mono'>${totalCost.toFixed(2)}</div>
+          <div className='text-muted-500'>Total</div>
+          <div className='font-mono text-alpine-900'>${totalCost.toFixed(2)}</div>
         </div>
         <div className='col-span-2'>
-          <div className='text-dark-400'>Executed</div>
-          <div className='text-white text-xs'>
+          <div className='text-muted-500'>Executed</div>
+          <div className='text-xs text-alpine-900'>
             {execution.executedAt?.toLocaleString() ?? 'N/A'}
           </div>
         </div>
         {fees > 0 && (
           <div>
             <div className='text-dark-400'>Fees</div>
-            <div className='text-red-400 text-xs font-mono'>
+            <div className='text-loss-400 text-xs font-mono'>
               ${fees.toFixed(2)} {execution.feeAsset}
             </div>
           </div>
@@ -140,32 +138,20 @@ export const Orders: React.FC = () => {
     { value: 'cancelled', label: 'Cancelled' },
     { value: 'rejected', label: 'Rejected' },
   ]
-  const { isConnected } = useWebSocketStore()
 
   return (
-    <div className='p-4 space-y-6'>
-      {}
+    <div className='space-y-6'>
       <div className='flex items-center justify-between'>
-        <h2 className='text-xl font-bold text-white'>Orders & Executions</h2>
-        <div className='flex items-center space-x-2 text-sm text-dark-400'>
-          <div
-            className={clsx(
-              'w-2 h-2 rounded-full',
-              isConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'
-            )}
-          ></div>
-          <span>{isConnected ? 'Live updates via WebSocket' : 'WebSocket disconnected'}</span>
-        </div>
+        <h2 className='text-xl font-semibold text-alpine-900'>Orders & Executions</h2>
       </div>
-      {}
-      <div className='flex space-x-1 bg-dark-800 p-1 rounded-lg'>
+      <div className='flex space-x-1 rounded-xl border border-dark-600 bg-dark-700 p-1'>
         <button
           onClick={() => setActiveTab('orders')}
           className={clsx(
-            'flex-1 py-2 px-4 text-sm font-medium rounded-md transition-colors',
+            'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-colors',
             activeTab === 'orders'
-              ? 'bg-blue-600 text-white'
-              : 'text-dark-300 hover:text-white hover:bg-dark-700'
+              ? 'bg-brand-600 text-white'
+              : 'text-muted-600 hover:bg-alpine-50 hover:text-alpine-900'
           )}
         >
           Orders ({orders.length})
@@ -173,36 +159,29 @@ export const Orders: React.FC = () => {
         <button
           onClick={() => setActiveTab('executions')}
           className={clsx(
-            'flex-1 py-2 px-4 text-sm font-medium rounded-md transition-colors',
+            'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-colors',
             activeTab === 'executions'
-              ? 'bg-blue-600 text-white'
-              : 'text-dark-300 hover:text-white hover:bg-dark-700'
+              ? 'bg-brand-600 text-white'
+              : 'text-muted-600 hover:bg-alpine-50 hover:text-alpine-900'
           )}
         >
           Executions ({executions.length})
         </button>
       </div>
-      {}
       {activeTab === 'orders' && (
-        <div className='flex items-center space-x-4'>
-          <label htmlFor='status-filter' className='text-sm text-dark-400'>
+        <div className='flex items-center space-x-4 rounded-xl border border-dark-600 bg-alpine-50 px-4 py-3'>
+          <label htmlFor='status-filter' className='text-sm text-muted-600'>
             Filter by status:
           </label>
-          <select
+          <ThemeSelect
             id='status-filter'
             value={statusFilter}
-            onChange={e => setStatusFilter(e.target.value)}
-            className='px-3 py-1 bg-dark-800 border border-dark-600 rounded-sm text-white text-sm focus:outline-hidden focus:ring-2 focus:ring-blue-500'
-          >
-            {statusOptions.map(option => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+            onChange={setStatusFilter}
+            options={statusOptions}
+            className='max-w-56'
+          />
         </div>
       )}
-      {}
       <div className='space-y-4'>
         {activeTab === 'orders' && (
           <>
@@ -215,8 +194,8 @@ export const Orders: React.FC = () => {
               </div>
             )}
             {!ordersLoading && filteredOrders.length === 0 && (
-              <div className='text-center py-8 text-dark-400'>
-                <div className='w-12 h-12 bg-dark-700 rounded-full flex items-center justify-center mx-auto mb-3'>
+              <div className='py-8 text-center text-muted-500'>
+                <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
                   <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
                     <path
                       strokeLinecap='round'
@@ -227,7 +206,7 @@ export const Orders: React.FC = () => {
                   </svg>
                 </div>
                 <p>No orders found</p>
-                <p className='text-sm mt-1'>
+                <p className='mt-1 text-sm'>
                   {statusFilter === 'all'
                     ? 'Start trading to see orders here'
                     : `No ${statusFilter} orders`}
@@ -254,8 +233,8 @@ export const Orders: React.FC = () => {
               </div>
             )}
             {!executionsLoading && executions.length === 0 && (
-              <div className='text-center py-8 text-dark-400'>
-                <div className='w-12 h-12 bg-dark-700 rounded-full flex items-center justify-center mx-auto mb-3'>
+              <div className='py-8 text-center text-muted-500'>
+                <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
                   <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
                     <path
                       strokeLinecap='round'
@@ -266,7 +245,7 @@ export const Orders: React.FC = () => {
                   </svg>
                 </div>
                 <p>No executions found</p>
-                <p className='text-sm mt-1'>Trade executions will appear here</p>
+                <p className='mt-1 text-sm'>Trade executions will appear here</p>
               </div>
             )}
             {!executionsLoading && executions.length > 0 && (

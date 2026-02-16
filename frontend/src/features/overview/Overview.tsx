@@ -16,8 +16,6 @@ const CURRENCY_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
 
 const formatCurrency = (value: number): string => value.toLocaleString(undefined, CURRENCY_FORMAT)
 
-const pnlColorClass = (value: number): string => (value >= 0 ? 'text-green-400' : 'text-red-400')
-
 const pnlSign = (value: number): string => (value >= 0 ? '+' : '')
 
 const runningBadgeStatus = (count: number): 'connected' | 'disconnected' =>
@@ -68,31 +66,35 @@ const PortfolioContent: React.FC<PortfolioContentProps> = ({
   totalPnL,
   pnlPercent,
   count,
-}) => (
-  <div className='space-y-3'>
-    <div className='flex items-center justify-between'>
-      <span className='text-sm font-medium'>Total Value</span>
-      <span className='font-mono text-right'>${formatCurrency(totalValue)}</span>
+}) => {
+  const pnlColorClass = (value: number): string => (value >= 0 ? 'text-gain-600' : 'text-loss-600')
+
+  return (
+    <div className='space-y-3'>
+      <div className='flex items-center justify-between'>
+        <span className='text-sm font-medium'>Total Value</span>
+        <span className='font-mono text-right'>${formatCurrency(totalValue)}</span>
+      </div>
+      <div className='flex items-center justify-between'>
+        <span className='text-sm font-medium'>Unrealized P&L</span>
+        <span className={`font-mono text-right ${pnlColorClass(totalPnL)}`}>
+          {pnlSign(totalPnL)}${formatCurrency(totalPnL)}
+        </span>
+      </div>
+      <div className='flex items-center justify-between'>
+        <span className='text-sm font-medium'>P&L %</span>
+        <span className={`font-mono text-right ${pnlColorClass(pnlPercent)}`}>
+          {pnlSign(pnlPercent)}
+          {pnlPercent.toFixed(2)}%
+        </span>
+      </div>
+      <div className='flex items-center justify-between'>
+        <span className='text-sm font-medium'>Positions</span>
+        <span className='font-mono text-right'>{count} instruments</span>
+      </div>
     </div>
-    <div className='flex items-center justify-between'>
-      <span className='text-sm font-medium'>Unrealized P&L</span>
-      <span className={`font-mono text-right ${pnlColorClass(totalPnL)}`}>
-        {pnlSign(totalPnL)}${formatCurrency(totalPnL)}
-      </span>
-    </div>
-    <div className='flex items-center justify-between'>
-      <span className='text-sm font-medium'>P&L %</span>
-      <span className={`font-mono text-right ${pnlColorClass(pnlPercent)}`}>
-        {pnlSign(pnlPercent)}
-        {pnlPercent.toFixed(2)}%
-      </span>
-    </div>
-    <div className='flex items-center justify-between'>
-      <span className='text-sm font-medium'>Positions</span>
-      <span className='font-mono text-right'>{count} instruments</span>
-    </div>
-  </div>
-)
+  )
+}
 
 const signalKey = (signal: Signal, index: number): string | number =>
   signal.id ?? signal.timestamp?.getTime() ?? `signal-${index}`
@@ -187,78 +189,73 @@ export const Overview: React.FC = () => {
   ).length
 
   return (
-    <div className='h-full overflow-auto'>
-      <div className='space-y-6'>
+    <div className='space-y-6'>
+      <h2 className='text-xl font-semibold text-alpine-900'>Overview</h2>
+      {}
+      <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>
+        <MetricCard
+          label='Feeds Running'
+          value={`${runningFeeds}/${totalFeeds}`}
+          changeType={countChangeType(runningFeeds)}
+        />
+        <MetricCard
+          label='Strategies Active'
+          value={`${runningStrategies}/${totalStrategies}`}
+          changeType={countChangeType(runningStrategies)}
+        />
+        <MetricCard label='Open Orders' value={openOrdersCount} changeType='neutral' />
+        <MetricCard label="Today's Executions" value={todayExecutionsCount} changeType='positive' />
+      </div>
+      <div className='grid grid-cols-1 lg:grid-cols-2 gap-6'>
         {}
-        <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>
-          <MetricCard
-            label='Feeds Running'
-            value={`${runningFeeds}/${totalFeeds}`}
-            changeType={countChangeType(runningFeeds)}
-          />
-          <MetricCard
-            label='Strategies Active'
-            value={`${runningStrategies}/${totalStrategies}`}
-            changeType={countChangeType(runningStrategies)}
-          />
-          <MetricCard label='Open Orders' value={openOrdersCount} changeType='neutral' />
-          <MetricCard
-            label="Today's Executions"
-            value={todayExecutionsCount}
-            changeType='positive'
-          />
-        </div>
-        <div className='grid grid-cols-1 lg:grid-cols-2 gap-6'>
-          {}
-          <Card title='Process Status'>
-            {processLoading ? (
-              <CardSkeleton showTitle={false} contentLines={4} className='border-0 p-0' />
-            ) : (
-              <div className='space-y-3'>
-                <ProcessStatusRow label='Feeds' running={runningFeeds} activeLabel='Running' />
-                <ProcessStatusRow
-                  label='Strategies'
-                  running={runningStrategies}
-                  activeLabel='Active'
-                />
-                <ProcessStatusRow
-                  label='Executors'
-                  running={runningExecutors}
-                  total={totalExecutors}
-                  activeLabel='Running'
-                />
-                <ProcessStatusRow
-                  label='Brokers'
-                  running={runningBrokers}
-                  total={totalBrokers}
-                  activeLabel='Running'
-                />
-              </div>
-            )}
-          </Card>
-          {}
-          <Card title='Portfolio Summary'>
-            <PortfolioCardContent loading={positionsLoading} summary={positionsSummary ?? null} />
-          </Card>
-        </div>
-        <div className='grid grid-cols-1 lg:grid-cols-2 gap-6'>
-          {}
-          <Card title='Recent Signals'>
-            <SignalsCardContent loading={signalsLoading} signals={latestSignals} />
-          </Card>
-          {}
-          <Card title='Recent Executions'>
-            {recentExecutions.length > 0 ? (
-              <div className='space-y-2'>
-                {recentExecutions.map(execution => (
-                  <ExecutionRow key={execution.clientOrderId} execution={execution} />
-                ))}
-              </div>
-            ) : (
-              <div className='text-center py-8 text-dark-400'>No recent executions</div>
-            )}
-          </Card>
-        </div>
+        <Card title='Process Status'>
+          {processLoading ? (
+            <CardSkeleton showTitle={false} contentLines={4} className='border-0 p-0' />
+          ) : (
+            <div className='space-y-3'>
+              <ProcessStatusRow label='Feeds' running={runningFeeds} activeLabel='Running' />
+              <ProcessStatusRow
+                label='Strategies'
+                running={runningStrategies}
+                activeLabel='Active'
+              />
+              <ProcessStatusRow
+                label='Executors'
+                running={runningExecutors}
+                total={totalExecutors}
+                activeLabel='Running'
+              />
+              <ProcessStatusRow
+                label='Brokers'
+                running={runningBrokers}
+                total={totalBrokers}
+                activeLabel='Running'
+              />
+            </div>
+          )}
+        </Card>
+        {}
+        <Card title='Portfolio Summary'>
+          <PortfolioCardContent loading={positionsLoading} summary={positionsSummary ?? null} />
+        </Card>
+      </div>
+      <div className='grid grid-cols-1 lg:grid-cols-2 gap-6'>
+        {}
+        <Card title='Recent Signals'>
+          <SignalsCardContent loading={signalsLoading} signals={latestSignals} />
+        </Card>
+        {}
+        <Card title='Recent Executions'>
+          {recentExecutions.length > 0 ? (
+            <div className='space-y-2'>
+              {recentExecutions.map(execution => (
+                <ExecutionRow key={execution.clientOrderId} execution={execution} />
+              ))}
+            </div>
+          ) : (
+            <div className='text-center py-8 text-dark-400'>No recent executions</div>
+          )}
+        </Card>
       </div>
     </div>
   )

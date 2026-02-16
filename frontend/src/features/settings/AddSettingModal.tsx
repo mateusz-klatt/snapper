@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Modal } from '../../components/ui/Modal'
+import { ThemeSelect } from '../../components/ThemeSelect'
 
 interface AddSettingModalProps {
   open: boolean
@@ -73,13 +74,13 @@ export const AddSettingModal = ({
     <Modal open={open} onClose={handleClose} title='Add New Setting' size='md'>
       <div className='space-y-4'>
         {error && (
-          <div className='p-3 bg-red-900/50 border border-red-500 rounded-lg'>
-            <p className='text-red-200 text-sm'>{error}</p>
+          <div className='p-3 bg-loss-50 border border-loss-500 rounded-lg'>
+            <p className='text-loss-700 text-sm'>{error}</p>
           </div>
         )}
         <div>
-          <label htmlFor='setting-key' className='block text-sm font-medium text-dark-200 mb-1'>
-            Key <span className='text-red-400'>*</span>
+          <label htmlFor='setting-key' className='block text-sm font-medium text-muted-700 mb-1'>
+            Key <span className='text-loss-400'>*</span>
           </label>
           <input
             id='setting-key'
@@ -87,15 +88,15 @@ export const AddSettingModal = ({
             value={key}
             onChange={e => setKey(e.target.value)}
             placeholder='e.g., walutomat.api_key'
-            className='w-full px-3 py-2 text-sm bg-dark-700 border border-dark-600 rounded-lg text-white placeholder-dark-400 focus:outline-none focus:border-blue-500'
+            className='w-full px-3 py-2 text-sm bg-white border border-dark-600 rounded-lg text-alpine-900 placeholder-muted-400 focus:outline-none focus:border-brand-500'
           />
-          <p className='mt-1 text-xs text-dark-400'>
+          <p className='mt-1 text-xs text-muted-500'>
             Use dot notation for nested settings (e.g., category.subcategory.name)
           </p>
         </div>
         <div>
-          <label htmlFor='setting-value' className='block text-sm font-medium text-dark-200 mb-1'>
-            Value <span className='text-red-400'>*</span>
+          <label htmlFor='setting-value' className='block text-sm font-medium text-muted-700 mb-1'>
+            Value <span className='text-loss-400'>*</span>
           </label>
           <textarea
             id='setting-value'
@@ -103,33 +104,28 @@ export const AddSettingModal = ({
             onChange={e => setValue(e.target.value)}
             placeholder='Setting value'
             rows={3}
-            className='w-full px-3 py-2 text-sm bg-dark-700 border border-dark-600 rounded-lg text-white placeholder-dark-400 focus:outline-none focus:border-blue-500 font-mono'
+            className='w-full px-3 py-2 text-sm bg-white border border-dark-600 rounded-lg text-alpine-900 placeholder-muted-400 focus:outline-none focus:border-brand-500 font-mono'
           />
         </div>
         <div>
           <label
             htmlFor='setting-category'
-            className='block text-sm font-medium text-dark-200 mb-1'
+            className='block text-sm font-medium text-muted-700 mb-1'
           >
-            Category <span className='text-red-400'>*</span>
+            Category <span className='text-loss-400'>*</span>
           </label>
           <div className='flex gap-2'>
-            <select
+            <ThemeSelect
               id='setting-category'
               value={category}
-              onChange={e => {
-                setCategory(e.target.value)
-                if (e.target.value) setNewCategory('')
+              onChange={val => {
+                setCategory(val)
+                if (val) setNewCategory('')
               }}
-              className='flex-1 px-3 py-2 text-sm bg-dark-700 border border-dark-600 rounded-lg text-white focus:outline-none focus:border-blue-500'
-            >
-              <option value=''>Select existing or create new</option>
-              {existingCategories.map(cat => (
-                <option key={cat} value={cat}>
-                  {cat}
-                </option>
-              ))}
-            </select>
+              options={existingCategories.map(cat => ({ value: cat, label: cat }))}
+              placeholder='Select existing or create new'
+              className='flex-1'
+            />
           </div>
           <div className='mt-2'>
             <input
@@ -140,14 +136,14 @@ export const AddSettingModal = ({
                 if (e.target.value) setCategory('')
               }}
               placeholder='Or enter new category name'
-              className='w-full px-3 py-2 text-sm bg-dark-700 border border-dark-600 rounded-lg text-white placeholder-dark-400 focus:outline-none focus:border-blue-500'
+              className='w-full px-3 py-2 text-sm bg-white border border-dark-600 rounded-lg text-alpine-900 placeholder-muted-400 focus:outline-none focus:border-brand-500'
             />
           </div>
         </div>
         <div>
           <label
             htmlFor='setting-description'
-            className='block text-sm font-medium text-dark-200 mb-1'
+            className='block text-sm font-medium text-muted-700 mb-1'
           >
             Description
           </label>
@@ -157,20 +153,20 @@ export const AddSettingModal = ({
             onChange={e => setDescription(e.target.value)}
             placeholder='Optional description'
             rows={2}
-            className='w-full px-3 py-2 text-sm bg-dark-700 border border-dark-600 rounded-lg text-white placeholder-dark-400 focus:outline-none focus:border-blue-500'
+            className='w-full px-3 py-2 text-sm bg-white border border-dark-600 rounded-lg text-alpine-900 placeholder-muted-400 focus:outline-none focus:border-brand-500'
           />
         </div>
         <div className='flex justify-end gap-2 pt-2'>
           <button
             onClick={handleClose}
-            className='px-4 py-2 text-sm bg-dark-600 hover:bg-dark-500 text-white rounded-lg transition-colors'
+            className='px-4 py-2 text-sm bg-muted-100 hover:bg-muted-200 text-alpine-900 rounded-lg transition-colors'
           >
             Cancel
           </button>
           <button
             onClick={handleSave}
             disabled={saving}
-            className='px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors'
+            className='px-4 py-2 text-sm bg-brand-600 hover:bg-brand-700 disabled:bg-brand-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors'
           >
             {saving ? 'Creating...' : 'Create Setting'}
           </button>

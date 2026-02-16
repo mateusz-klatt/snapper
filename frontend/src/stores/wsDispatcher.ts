@@ -52,6 +52,7 @@ export class WSDispatcher {
       client.onMessage('tick', this.handleTickMessage.bind(this)),
       client.onMessage('trade', this.handleTradeMessage.bind(this)),
       client.onMessage('heartbeat', this.handleHeartbeatMessage.bind(this)),
+      client.onMessage('pong', this.handlePongMessage.bind(this)),
       client.onConnection((connected: boolean) => {
         if (connected && this.topics.length > 0) {
           client.subscribe(this.topics)
@@ -182,10 +183,6 @@ export class WSDispatcher {
   private handleHeartbeatMessage(message: WebSocketMessages): void {
     if (!isHeartbeat(message)) return
 
-    if (message.lag_ms !== undefined) {
-      useAppStore.getState().setConnectionLag(message.lag_ms)
-    }
-
     const component = message.component
 
     if (component) {
@@ -220,6 +217,13 @@ export class WSDispatcher {
     }
 
     useAppStore.getState().updateLastUpdate()
+  }
+  private handlePongMessage(message: WebSocketMessages): void {
+    const rtt = (message as WebSocketMessages & { rtt_ms?: number }).rtt_ms
+
+    if (rtt !== undefined) {
+      useAppStore.getState().setConnectionLag(rtt)
+    }
   }
   getClient(): WebSocketClient | null {
     return this.wsClient

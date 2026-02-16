@@ -8,37 +8,37 @@ describe('StatusBadge', () => {
     render(<StatusBadge status='connected'>Connected</StatusBadge>)
     const badge = screen.getByText('Connected')
 
-    expect(badge).toHaveClass('bg-green-100', 'text-green-800')
+    expect(badge).toHaveClass('bg-accent-50', 'text-accent-800', 'border-accent-200')
   })
   it('renders disconnected status', () => {
     render(<StatusBadge status='disconnected'>Disconnected</StatusBadge>)
     const badge = screen.getByText('Disconnected')
 
-    expect(badge).toHaveClass('bg-red-100', 'text-red-800')
+    expect(badge).toHaveClass('bg-loss-50', 'text-loss-800', 'border-loss-200')
   })
   it('renders pending status', () => {
     render(<StatusBadge status='pending'>Pending</StatusBadge>)
     const badge = screen.getByText('Pending')
 
-    expect(badge).toHaveClass('bg-yellow-100', 'text-yellow-800')
+    expect(badge).toHaveClass('bg-warning-50', 'text-warning-800', 'border-warning-200')
   })
   it('renders healthy status', () => {
     render(<StatusBadge status='healthy'>Healthy</StatusBadge>)
     const badge = screen.getByText('Healthy')
 
-    expect(badge).toHaveClass('bg-green-100', 'text-green-800')
+    expect(badge).toHaveClass('bg-accent-50', 'text-accent-800', 'border-accent-200')
   })
   it('renders stale status', () => {
     render(<StatusBadge status='stale'>Stale</StatusBadge>)
     const badge = screen.getByText('Stale')
 
-    expect(badge).toHaveClass('bg-gray-100', 'text-gray-800')
+    expect(badge).toHaveClass('bg-dark-700', 'text-muted-700', 'border-dark-600')
   })
   it('renders error status', () => {
     render(<StatusBadge status='error'>Error</StatusBadge>)
     const badge = screen.getByText('Error')
 
-    expect(badge).toHaveClass('bg-red-100', 'text-red-800')
+    expect(badge).toHaveClass('bg-loss-50', 'text-loss-800', 'border-loss-200')
   })
   it('applies custom className', () => {
     render(
@@ -129,19 +129,19 @@ describe('Button', () => {
 describe('Badge', () => {
   it('renders default variant', () => {
     render(<Badge>Default</Badge>)
-    expect(screen.getByText('Default')).toHaveClass('bg-primary-100', 'text-primary-800')
+    expect(screen.getByText('Default')).toHaveClass('bg-brand-50', 'text-brand-700')
   })
   it('renders secondary variant', () => {
     render(<Badge variant='secondary'>Secondary</Badge>)
-    expect(screen.getByText('Secondary')).toHaveClass('bg-gray-100', 'text-gray-800')
+    expect(screen.getByText('Secondary')).toHaveClass('bg-dark-700', 'text-muted-700')
   })
   it('renders outline variant', () => {
     render(<Badge variant='outline'>Outline</Badge>)
-    expect(screen.getByText('Outline')).toHaveClass('border', 'border-gray-300')
+    expect(screen.getByText('Outline')).toHaveClass('border', 'border-dark-600')
   })
   it('renders destructive variant', () => {
     render(<Badge variant='destructive'>Error</Badge>)
-    expect(screen.getByText('Error')).toHaveClass('bg-red-100', 'text-red-800')
+    expect(screen.getByText('Error')).toHaveClass('bg-loss-50', 'text-loss-700')
   })
   it('applies custom className', () => {
     render(<Badge className='custom-badge'>Badge</Badge>)
@@ -208,17 +208,17 @@ describe('MetricCard', () => {
   it('shows positive change', () => {
     render(<MetricCard label='Equity' value={10000} change={5.5} changeType='positive' />)
     expect(screen.getByText('+5.50%')).toBeInTheDocument()
-    expect(screen.getByText('+5.50%')).toHaveClass('text-green-400')
+    expect(screen.getByText('+5.50%')).toHaveClass('text-gain-600')
   })
   it('shows negative change', () => {
     render(<MetricCard label='Equity' value={9500} change={-3.2} changeType='negative' />)
     expect(screen.getByText('-3.20%')).toBeInTheDocument()
-    expect(screen.getByText('-3.20%')).toHaveClass('text-red-400')
+    expect(screen.getByText('-3.20%')).toHaveClass('text-loss-600')
   })
   it('shows neutral change', () => {
     render(<MetricCard label='Equity' value={10000} change={0} changeType='neutral' />)
     expect(screen.getByText('0.00%')).toBeInTheDocument()
-    expect(screen.getByText('0.00%')).toHaveClass('text-dark-300')
+    expect(screen.getByText('0.00%')).toHaveClass('text-muted-600')
   })
   it('handles string values', () => {
     render(<MetricCard label='Status' value='Active' />)

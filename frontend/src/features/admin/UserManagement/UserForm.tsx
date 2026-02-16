@@ -4,6 +4,7 @@ import { Save, X, Eye, EyeOff } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { Button } from '../../../components/ui'
 import { Modal } from '../../../components/ui/Modal'
+import { ThemeSelect } from '../../../components/ThemeSelect'
 import { api } from '../../../lib/apiClient'
 import type {
   UserProfile,
@@ -207,10 +208,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
       <form onSubmit={handleSubmit} className='space-y-6'>
         {}
         <div>
-          <label
-            htmlFor='username'
-            className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'
-          >
+          <label htmlFor='username' className='block text-sm font-medium text-alpine-900 mb-2'>
             Username
           </label>
           <input
@@ -219,14 +217,12 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
             value={formData.username}
             onChange={e => handleInputChange('username', e.target.value)}
             disabled={isEditing}
-            className={`w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white ${
-              errors.username ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
-            } ${isEditing ? 'bg-gray-100 dark:bg-gray-600 cursor-not-allowed' : ''}`}
+            className={`w-full rounded-md border bg-white px-3 py-2 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+              errors.username ? 'border-loss-500' : 'border-dark-600'
+            } ${isEditing ? 'bg-muted-100 cursor-not-allowed bg-muted-100' : ''}`}
             placeholder='Enter username'
           />
-          {errors.username && (
-            <p className='mt-1 text-sm text-red-600 dark:text-red-400'>{errors.username}</p>
-          )}
+          {errors.username && <p className='mt-1 text-sm text-loss-600 '>{errors.username}</p>}
         </div>
         {}
         {isEditing && (
@@ -237,12 +233,9 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
                 id='resetPassword'
                 checked={resetPassword}
                 onChange={e => setResetPassword(e.target.checked)}
-                className='rounded border-gray-300 text-blue-600 focus:ring-blue-500'
+                className='rounded border-alpine-200 text-brand-600 focus:ring-brand-500'
               />
-              <label
-                htmlFor='resetPassword'
-                className='text-sm font-medium text-gray-700 dark:text-gray-300'
-              >
+              <label htmlFor='resetPassword' className='text-sm font-medium text-alpine-900'>
                 Reset user password
               </label>
             </div>
@@ -250,7 +243,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
               <div>
                 <label
                   htmlFor='password'
-                  className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'
+                  className='block text-sm font-medium text-alpine-900 mb-2'
                 >
                   New Password
                 </label>
@@ -260,21 +253,21 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
                     id='password'
                     value={formData.password}
                     onChange={e => handleInputChange('password', e.target.value)}
-                    className={`w-full px-3 py-2 pr-10 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white ${
-                      errors.password ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                    className={`w-full rounded-md border bg-white px-3 py-2 pr-10 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+                      errors.password ? 'border-loss-500' : 'border-dark-600'
                     }`}
                     placeholder='Enter new password'
                   />
                   <button
                     type='button'
                     onClick={() => setShowPassword(!showPassword)}
-                    className='absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-gray-600'
+                    className='absolute inset-y-0 right-0 flex items-center pr-3 text-muted-400 hover:text-muted-600'
                   >
                     {showPassword ? <EyeOff className='w-4 h-4' /> : <Eye className='w-4 h-4' />}
                   </button>
                 </div>
                 {errors.password && (
-                  <p className='mt-1 text-sm text-red-600 dark:text-red-400'>{errors.password}</p>
+                  <p className='mt-1 text-sm text-loss-600 '>{errors.password}</p>
                 )}
               </div>
             )}
@@ -283,10 +276,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
         {}
         {!isEditing && (
           <div>
-            <label
-              htmlFor='password'
-              className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'
-            >
+            <label htmlFor='password' className='block text-sm font-medium text-alpine-900 mb-2'>
               Password
             </label>
             <div className='relative'>
@@ -295,30 +285,25 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
                 id='password'
                 value={formData.password}
                 onChange={e => handleInputChange('password', e.target.value)}
-                className={`w-full px-3 py-2 pr-10 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white ${
-                  errors.password ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                className={`w-full rounded-md border bg-white px-3 py-2 pr-10 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+                  errors.password ? 'border-loss-500' : 'border-dark-600'
                 }`}
                 placeholder='Enter password'
               />
               <button
                 type='button'
                 onClick={() => setShowPassword(!showPassword)}
-                className='absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-gray-600'
+                className='absolute inset-y-0 right-0 flex items-center pr-3 text-muted-400 hover:text-muted-600'
               >
                 {showPassword ? <EyeOff className='w-4 h-4' /> : <Eye className='w-4 h-4' />}
               </button>
             </div>
-            {errors.password && (
-              <p className='mt-1 text-sm text-red-600 dark:text-red-400'>{errors.password}</p>
-            )}
+            {errors.password && <p className='mt-1 text-sm text-loss-600 '>{errors.password}</p>}
           </div>
         )}
         {}
         <div>
-          <label
-            htmlFor='email'
-            className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'
-          >
+          <label htmlFor='email' className='block text-sm font-medium text-alpine-900 mb-2'>
             Email
           </label>
           <input
@@ -326,35 +311,28 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
             id='email'
             value={formData.email}
             onChange={e => handleInputChange('email', e.target.value)}
-            className={`w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white ${
-              errors.email ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+            className={`w-full rounded-md border bg-white px-3 py-2 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+              errors.email ? 'border-loss-500' : 'border-dark-600'
             }`}
             placeholder='Enter email'
           />
-          {errors.email && (
-            <p className='mt-1 text-sm text-red-600 dark:text-red-400'>{errors.email}</p>
-          )}
+          {errors.email && <p className='mt-1 text-sm text-loss-600 '>{errors.email}</p>}
         </div>
         {}
         <div>
-          <label
-            htmlFor='role'
-            className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'
-          >
+          <label htmlFor='role' className='block text-sm font-medium text-alpine-900 mb-2'>
             Role
           </label>
-          <select
+          <ThemeSelect
             id='role'
             value={formData.role}
-            onChange={e =>
-              handleInputChange('role', e.target.value as 'admin' | 'operator' | 'viewer')
-            }
-            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white'
-          >
-            <option value='viewer'>Viewer</option>
-            <option value='operator'>Operator</option>
-            <option value='admin'>Administrator</option>
-          </select>
+            onChange={val => handleInputChange('role', val as 'admin' | 'operator' | 'viewer')}
+            options={[
+              { value: 'viewer', label: 'Viewer' },
+              { value: 'operator', label: 'Operator' },
+              { value: 'admin', label: 'Administrator' },
+            ]}
+          />
         </div>
         {}
         <div className='flex items-center'>
@@ -363,23 +341,26 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
             id='is_active'
             checked={formData.is_active}
             onChange={e => handleInputChange('is_active', e.target.checked)}
-            className='h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 dark:border-gray-600 rounded'
+            className='h-4 w-4 text-brand-600 focus:ring-brand-500 border-dark-600 rounded'
           />
-          <label
-            htmlFor='is_active'
-            className='ml-2 block text-sm text-gray-700 dark:text-gray-300'
-          >
+          <label htmlFor='is_active' className='ml-2 block text-sm text-alpine-900'>
             Account active
           </label>
         </div>
         {}
-        <div className='flex justify-end space-x-3 pt-6 border-t border-gray-200 dark:border-gray-700'>
-          <Button type='button' variant='secondary' onClick={onClose} disabled={isPending}>
-            <X className='w-4 h-4 mr-2' />
+        <div className='flex justify-end space-x-3 pt-4 border-t border-dark-600'>
+          <Button
+            type='button'
+            variant='secondary'
+            size='sm'
+            onClick={onClose}
+            disabled={isPending}
+          >
+            <X className='w-3.5 h-3.5' />
             Cancel
           </Button>
-          <Button type='submit' variant='primary' loading={isPending}>
-            <Save className='w-4 h-4 mr-2' />
+          <Button type='submit' variant='primary' size='sm' loading={isPending}>
+            <Save className='w-3.5 h-3.5' />
             {isEditing ? 'Save Changes' : 'Create User'}
           </Button>
         </div>

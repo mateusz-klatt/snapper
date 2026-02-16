@@ -3,17 +3,46 @@ import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Signals } from './Signals'
 import { useAuth } from '../../stores/auth'
-import { useAppStore } from '../../stores/app'
+
+vi.mock('../../components/ThemeSelect', () => ({
+  ThemeSelect: ({
+    id,
+    value,
+    onChange,
+    options,
+    placeholder,
+    className,
+    disabled,
+  }: {
+    id?: string
+    value: string
+    onChange: (v: string) => void
+    options: readonly { value: string; label: string }[]
+    placeholder?: string
+    className?: string
+    disabled?: boolean
+  }) => (
+    <select
+      id={id}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className={className}
+      disabled={disabled}
+    >
+      {placeholder && <option value=''>{placeholder}</option>}
+      {options.map(opt => (
+        <option key={opt.value} value={opt.value}>
+          {opt.label}
+        </option>
+      ))}
+    </select>
+  ),
+}))
 
 vi.mock('../../stores/auth', () => ({
   useAuth: vi.fn(() => ({
     isAuthenticated: true,
   })),
-}))
-vi.mock('../../stores/app', () => ({
-  useAppStore: vi.fn((selector: (state: { isConnected: boolean }) => boolean) =>
-    selector({ isConnected: true })
-  ),
 }))
 vi.mock('../../lib/apiClient', () => ({
   apiClient: {
@@ -58,11 +87,8 @@ describe('Signals', () => {
     vi.mocked(useAuth).mockReturnValue({
       isAuthenticated: true,
     } as never)
-    vi.mocked(useAppStore).mockImplementation(((
-      selector: (state: { isConnected: boolean }) => boolean
-    ) => selector({ isConnected: true })) as never)
   })
-  it('renders header and stream indicator', () => {
+  it('renders header', () => {
     const queryClient = createTestQueryClient()
 
     render(
@@ -71,20 +97,6 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     expect(screen.getByText('Trading Signals')).toBeInTheDocument()
-    expect(screen.getByText('Live Stream Active')).toBeInTheDocument()
-  })
-  it('shows disconnected indicator when stream is inactive', () => {
-    vi.mocked(useAppStore).mockImplementation(((
-      selector: (state: { isConnected: boolean }) => boolean
-    ) => selector({ isConnected: false })) as never)
-    const queryClient = createTestQueryClient()
-
-    render(
-      <QueryClientProvider client={queryClient}>
-        <Signals />
-      </QueryClientProvider>
-    )
-    expect(screen.getByText('Stream Disconnected')).toBeInTheDocument()
   })
   it('displays stats cards with correct labels', () => {
     const queryClient = createTestQueryClient()

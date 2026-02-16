@@ -43,7 +43,7 @@ describe('Modal', () => {
         <div>Modal content</div>
       </Modal>
     )
-    const backdrop = document.querySelector('.bg-black.bg-opacity-50')
+    const backdrop = screen.getByRole('button', { name: 'Close modal' })
 
     expect(backdrop).toBeInTheDocument()
 

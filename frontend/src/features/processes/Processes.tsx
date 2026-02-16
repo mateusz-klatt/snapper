@@ -197,14 +197,14 @@ export const Processes: React.FC = () => {
   }
 
   return (
-    <div className='p-6 space-y-6'>
+    <div className='space-y-6'>
       <div className='flex items-center justify-between'>
-        <h1 className='text-2xl font-bold text-white'>Process Control</h1>
-        <div className='text-sm text-dark-300'>Real-time process monitoring and control</div>
+        <h1 className='text-2xl font-bold text-alpine-900'>Process Control</h1>
+        <div className='text-sm text-muted-600'>Real-time process monitoring and control</div>
       </div>
       {}
       <div className='space-y-4'>
-        <h2 className='text-lg font-semibold text-primary-400'>Long-Running Processes</h2>
+        <h2 className='text-lg font-semibold text-primary-600'>Long-Running Processes</h2>
         <div className='grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4'>
           {}
           <ProcessControlCard
@@ -310,7 +310,7 @@ export const Processes: React.FC = () => {
       {}
       {taskProcesses.length > 0 && (
         <div className='space-y-4'>
-          <h2 className='text-lg font-semibold text-primary-400'>Task Processes</h2>
+          <h2 className='text-lg font-semibold text-primary-600'>Task Processes</h2>
           <div className='grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4'>
             {taskProcesses.map(process => {
               const status: 'running' | 'stopped' | 'error' = process.running

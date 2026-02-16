@@ -46,7 +46,7 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
       {}
       <button
         type='button'
-        className='fixed inset-0 w-full h-full bg-black bg-opacity-50 transition-opacity cursor-default border-none'
+        className='fixed inset-0 w-full h-full bg-muted-900/40 transition-opacity cursor-default border-none'
         onClick={onClose}
         aria-label='Close modal'
       />
@@ -54,17 +54,17 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
       <div className='flex min-h-full items-center justify-center p-4'>
         <div
           className={clsx(
-            'relative w-full bg-dark-800 rounded-lg shadow-xl border border-dark-700',
+            'relative w-full rounded-2xl border border-dark-600 bg-white shadow-xl',
             sizeClasses[size]
           )}
         >
           {}
           {title && (
-            <div className='flex items-center justify-between p-6 border-b border-dark-700'>
-              <h3 className='text-lg font-semibold text-white'>{title}</h3>
+            <div className='flex items-center justify-between border-b border-dark-600 p-6'>
+              <h3 className='text-lg font-semibold text-alpine-900'>{title}</h3>
               <button
                 onClick={onClose}
-                className='text-dark-400 hover:text-dark-200 transition-colors'
+                className='text-muted-500 transition-colors hover:text-alpine-900'
                 aria-label='Close'
               >
                 <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>

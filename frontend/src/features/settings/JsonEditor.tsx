@@ -60,7 +60,7 @@ export const JsonEditor: React.FC<Readonly<JsonEditorProps>> = ({
     return (
       <div className={className}>
         <div className='flex items-center justify-between mb-3'>
-          <h3 className='text-sm font-medium text-dark-200 flex items-center gap-2'>
+          <h3 className='text-sm font-medium text-alpine-900 flex items-center gap-2'>
             <Code className='w-4 h-4' />
             Raw JSON Editor
           </h3>
@@ -74,14 +74,14 @@ export const JsonEditor: React.FC<Readonly<JsonEditorProps>> = ({
             </button>
             <button
               onClick={() => setMode('form')}
-              className='px-3 py-1 text-xs rounded bg-dark-700 text-dark-200 hover:bg-dark-600'
+              className='px-3 py-1 text-xs rounded bg-muted-100 text-alpine-900 hover:bg-muted-200'
             >
               Switch to Form
             </button>
           </div>
         </div>
         {parseError && (
-          <div className='mb-3 p-2 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs'>
+          <div className='mb-3 p-2 rounded bg-loss-500/10 border border-loss-500/30 text-loss-400 text-xs'>
             <div className='flex items-center gap-2'>
               <XCircle className='w-4 h-4' />
               <span>Parse error: {parseError}</span>
@@ -92,7 +92,7 @@ export const JsonEditor: React.FC<Readonly<JsonEditorProps>> = ({
           value={rawJson}
           onChange={handleRawChange}
           readOnly={readOnly}
-          className='w-full h-96 font-mono text-xs bg-dark-900 border border-dark-600 rounded p-3 text-dark-100 focus:outline-none focus:ring-2 focus:ring-primary-500'
+          className='w-full h-96 font-mono text-xs bg-white border border-dark-600 rounded p-3 text-alpine-900 focus:outline-none focus:ring-2 focus:ring-primary-500'
           spellCheck={false}
         />
       </div>
@@ -102,13 +102,13 @@ export const JsonEditor: React.FC<Readonly<JsonEditorProps>> = ({
   return (
     <div className={className}>
       <div className='flex items-center justify-between mb-3'>
-        <h3 className='text-sm font-medium text-dark-200 flex items-center gap-2'>
+        <h3 className='text-sm font-medium text-alpine-900 flex items-center gap-2'>
           <Edit3 className='w-4 h-4' />
           Form Editor
         </h3>
         <button
           onClick={() => setMode('raw')}
-          className='px-3 py-1 text-xs rounded bg-dark-700 text-dark-200 hover:bg-dark-600 flex items-center gap-1'
+          className='px-3 py-1 text-xs rounded bg-muted-100 text-alpine-900 hover:bg-muted-200 flex items-center gap-1'
         >
           <Code className='w-3 h-3' />
           Raw JSON
@@ -173,22 +173,22 @@ const ArrayEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
   return (
     <div className='space-y-2'>
       <div className='flex items-center justify-between'>
-        <span className='text-xs text-dark-400'>Array ({arrayValue.length} items)</span>
+        <span className='text-xs text-muted-500'>Array ({arrayValue.length} items)</span>
         {!readOnly && (
           <button
             onClick={handleAddItem}
-            className='text-xs px-2 py-1 rounded bg-dark-700 text-dark-200 hover:bg-dark-600 flex items-center gap-1'
+            className='text-xs px-2 py-1 rounded bg-muted-100 text-alpine-900 hover:bg-muted-200 flex items-center gap-1'
           >
             <Plus className='w-3 h-3' />
             Add Item
           </button>
         )}
       </div>
-      <div className='space-y-2 pl-4 border-l-2 border-dark-700'>
+      <div className='space-y-2 pl-4 border-l-2 border-muted-300'>
         {arrayValue.map((item, index) => (
           <div key={`${path}-array-item-${index}`} className='flex items-start gap-2'>
             <div className='flex-1'>
-              <div className='text-xs text-dark-500 mb-1'>[{index}]</div>
+              <div className='text-xs text-muted-500 mb-1'>[{index}]</div>
               <JsonValueEditor
                 value={item}
                 onChange={newValue => handleItemChange(index, newValue)}
@@ -199,7 +199,7 @@ const ArrayEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
             {!readOnly && (
               <button
                 onClick={() => handleRemoveItem(index)}
-                className='mt-6 text-xs px-2 py-1 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 flex items-center gap-1'
+                className='mt-6 text-xs px-2 py-1 rounded bg-loss-500/10 text-loss-400 hover:bg-loss-500/20 flex items-center gap-1'
               >
                 <Trash2 className='w-3 h-3' />
                 Remove
@@ -236,15 +236,15 @@ const ObjectEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
         const isExpanded = expanded[key] ?? true
 
         return (
-          <div key={key} className='border border-dark-700 rounded p-2'>
+          <div key={key} className='border border-dark-600 rounded p-2'>
             <div className='flex items-center justify-between mb-2'>
               <button
                 onClick={() => toggleExpanded(key)}
-                className='text-sm font-medium text-dark-200 hover:text-white flex items-center gap-2'
+                className='text-sm font-medium text-alpine-900 hover:text-alpine-900 flex items-center gap-2'
               >
-                {isComplex && <span className='text-dark-500'>{isExpanded ? '▼' : '▶'}</span>}
+                {isComplex && <span className='text-muted-500'>{isExpanded ? '▼' : '▶'}</span>}
                 <span>{key}</span>
-                <span className='text-xs text-dark-500'>
+                <span className='text-xs text-muted-500'>
                   {(() => {
                     if (Array.isArray(val)) return '(array)'
                     if (typeof val === 'object') return '(object)'
@@ -284,9 +284,9 @@ const PrimitiveEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
           checked={value}
           onChange={e => onChange(e.target.checked)}
           disabled={readOnly}
-          className='w-4 h-4 text-primary-500 bg-dark-700 border-dark-600 rounded focus:ring-primary-500'
+          className='w-4 h-4 text-primary-500 bg-white border-dark-600 rounded focus:ring-primary-500'
         />
-        <span className='text-sm text-dark-300'>{value ? 'true' : 'false'}</span>
+        <span className='text-sm text-muted-600'>{value ? 'true' : 'false'}</span>
       </label>
     )
   }
@@ -298,7 +298,7 @@ const PrimitiveEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
         value={value}
         onChange={e => onChange(Number(e.target.value))}
         readOnly={readOnly}
-        className='w-full px-3 py-2 bg-dark-700 border border-dark-600 rounded text-white placeholder-dark-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
+        className='w-full px-3 py-2 bg-white border border-dark-600 rounded text-alpine-900 placeholder-muted-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
       />
     )
   }
@@ -311,7 +311,7 @@ const PrimitiveEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
       value={stringValue}
       onChange={e => onChange(e.target.value)}
       readOnly={readOnly}
-      className='w-full px-3 py-2 bg-dark-700 border border-dark-600 rounded text-white placeholder-dark-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
+      className='w-full px-3 py-2 bg-white border border-dark-600 rounded text-alpine-900 placeholder-muted-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
     />
   )
 }

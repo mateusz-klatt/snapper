@@ -108,7 +108,7 @@ describe('UserProfile', () => {
   })
   it('displays correct role color for admin', () => {
     renderWithMocks(<UserProfile />)
-    expect(screen.getByText('Admin')).toHaveClass('bg-red-100')
+    expect(screen.getByText('Admin')).toHaveClass('bg-loss-100')
   })
   it('displays correct role color for operator', () => {
     mockUseAuth.mockReturnValue(
@@ -124,7 +124,7 @@ describe('UserProfile', () => {
       }) as never
     )
     renderWithMocks(<UserProfile />)
-    expect(screen.getByText('Operator')).toHaveClass('bg-blue-100')
+    expect(screen.getByText('Operator')).toHaveClass('bg-brand-100')
   })
   it('displays correct role color for viewer', () => {
     mockUseAuth.mockReturnValue(
@@ -140,7 +140,7 @@ describe('UserProfile', () => {
       }) as never
     )
     renderWithMocks(<UserProfile />)
-    expect(screen.getByText('Viewer')).toHaveClass('bg-green-100')
+    expect(screen.getByText('Viewer')).toHaveClass('bg-accent-100')
   })
   it('calls logout on sign out', async () => {
     const user = userEvent.setup()
@@ -184,7 +184,7 @@ describe('UserProfile', () => {
       }) as never
     )
     renderWithMocks(<UserProfile />)
-    expect(screen.getByText('Custom_role')).toHaveClass('bg-gray-100')
+    expect(screen.getByText('Custom_role')).toHaveClass('bg-muted-200')
   })
   it('handles logout error gracefully', async () => {
     const logoutError = new Error('Logout failed')

@@ -645,7 +645,7 @@ describe('WSDispatcher', () => {
 
       expect(heartbeatHandler).toBeDefined()
       heartbeatHandler?.(heartbeatMessage)
-      expect(useAppStore.getState().setConnectionLag).toHaveBeenCalledWith(50)
+      expect(useAppStore.getState().setConnectionLag).not.toHaveBeenCalled()
       expect(useAppStore.getState().updateLastUpdate).toHaveBeenCalled()
     })
     it('handles heartbeat with feed component and updates ProcessStore', () => {
@@ -1043,8 +1043,32 @@ describe('WSDispatcher', () => {
       const heartbeatHandler = messageHandlers.get('heartbeat')
 
       heartbeatHandler?.(heartbeatMessage)
-      expect(useAppStore.getState().setConnectionLag).toHaveBeenCalledWith(5)
+      expect(useAppStore.getState().setConnectionLag).not.toHaveBeenCalled()
       expect(useProcessStore.getState().updateFeedStatus).not.toHaveBeenCalled()
+    })
+    it('handles pong message with rtt_ms and updates connectionLag', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const pongHandler = messageHandlers.get('pong')
+
+      expect(pongHandler).toBeDefined()
+      pongHandler?.({
+        type: 'pong',
+        timestamp: new Date().toISOString(),
+        active_connections: 1,
+        rtt_ms: 12,
+      })
+      expect(useAppStore.getState().setConnectionLag).toHaveBeenCalledWith(12)
+    })
+    it('ignores pong message without rtt_ms', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const pongHandler = messageHandlers.get('pong')
+
+      pongHandler?.({ type: 'pong', timestamp: new Date().toISOString(), active_connections: 1 })
+      expect(useAppStore.getState().setConnectionLag).not.toHaveBeenCalled()
     })
     describe('type guard branches', () => {
       it('order handler ignores non-order messages', () => {

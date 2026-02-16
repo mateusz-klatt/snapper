@@ -8,6 +8,41 @@ import UserForm from './UserForm'
 import type { UserProfile } from '../../../types/api'
 import { api } from '../../../lib/apiClient'
 
+vi.mock('../../../components/ThemeSelect', () => ({
+  ThemeSelect: ({
+    id,
+    value,
+    onChange,
+    options,
+    placeholder,
+    className,
+    disabled,
+  }: {
+    id?: string
+    value: string
+    onChange: (v: string) => void
+    options: readonly { value: string; label: string }[]
+    placeholder?: string
+    className?: string
+    disabled?: boolean
+  }) => (
+    <select
+      id={id}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className={className}
+      disabled={disabled}
+    >
+      {placeholder && <option value=''>{placeholder}</option>}
+      {options.map(opt => (
+        <option key={opt.value} value={opt.value}>
+          {opt.label}
+        </option>
+      ))}
+    </select>
+  ),
+}))
+
 vi.mock('../../../lib/apiClient', () => ({
   api: vi.fn(),
 }))

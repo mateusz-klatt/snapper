@@ -235,24 +235,24 @@ export const Strategies: React.FC = () => {
   }
 
   return (
-    <div className='p-4 space-y-6'>
+    <div className='space-y-6'>
       <div className='flex items-center justify-between'>
-        <h2 className='text-xl font-bold text-white'>Strategy Management</h2>
+        <h2 className='text-xl font-bold text-alpine-900'>Strategy Management</h2>
         <button
           onClick={() => setStrategyModalOpen(true)}
           disabled={createProcessConfig.isPending || startProcess.isPending}
-          className='px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed'
+          className='px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed'
         >
           {createProcessConfig.isPending ? 'Saving…' : 'Register Strategy'}
         </button>
-        <p className='mt-2 text-xs text-dark-400'>
+        <p className='mt-2 text-xs text-muted-500'>
           Register new strategy processes directly from the UI. Autostart keeps the process enabled
           across restarts.
         </p>
       </div>
       {}
       <div className='space-y-4'>
-        <h3 className='text-lg font-medium text-white'>Configured Strategies</h3>
+        <h3 className='text-lg font-medium text-alpine-900'>Configured Strategies</h3>
         {strategies.length > 0 ? (
           <div className='grid grid-cols-1 lg:grid-cols-2 gap-4'>
             {strategies.map(strategy => (
@@ -271,9 +271,9 @@ export const Strategies: React.FC = () => {
             ))}
           </div>
         ) : (
-          <div className='bg-dark-800 border border-dark-700 rounded-lg p-6 text-center'>
-            <p className='text-dark-400'>No strategies configured</p>
-            <p className='text-sm text-dark-500 mt-1'>
+          <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-6 text-center'>
+            <p className='text-muted-500'>No strategies configured</p>
+            <p className='text-sm text-muted-400 mt-1'>
               Configure strategies in the database to see them here
             </p>
           </div>

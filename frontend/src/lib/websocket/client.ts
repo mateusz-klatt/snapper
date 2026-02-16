@@ -64,12 +64,13 @@ class WebSocketClient {
   private readonly subscribedTopics = new Set<string>()
   private readonly pendingMessages = new Map<string, WebSocketMessages>()
   private readonly lastMessageTime = new Map<string, number>()
+  private pingSentAt: number | null = null
   constructor(options: WebSocketClientOptions = {}) {
     this.secure = options.secure || false
     this.url = options.url || buildWebSocketUrl()
     this.reconnectInterval = options.reconnectInterval || 3000
     this.maxReconnectAttempts = options.maxReconnectAttempts || 10
-    this.heartbeatInterval = options.heartbeatInterval || 30000
+    this.heartbeatInterval = options.heartbeatInterval || 5000
     this.throttleInterval = options.throttleInterval || 200
     this.setupThrottling()
   }
@@ -178,6 +179,13 @@ class WebSocketClient {
       }
 
       if (message.type === 'pong') {
+        if (this.pingSentAt !== null) {
+          const rtt = Date.now() - this.pingSentAt
+
+          this.pingSentAt = null
+          this.notifyHandlers({ ...message, rtt_ms: rtt } as WebSocketMessages)
+        }
+
         return
       }
 
@@ -448,6 +456,7 @@ class WebSocketClient {
 
     this.heartbeatTimer = setInterval(() => {
       if (this.isConnected()) {
+        this.pingSentAt = Date.now()
         this.send(createHeartbeatMessage())
       }
     }, this.heartbeatInterval)

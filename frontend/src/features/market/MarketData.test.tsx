@@ -37,11 +37,6 @@ vi.mock('../../stores/market', () => ({
     setSelectedTimeframe: mockSetSelectedTimeframe,
   })),
 }))
-vi.mock('../../stores/app', () => ({
-  useAppStore: vi.fn(() => ({
-    isConnected: true,
-  })),
-}))
 vi.mock('../../components/LightweightChart', () => ({
   LightweightChart: ({ data }: { data: unknown[] }) => (
     <div data-testid='lightweight-chart'>Chart with {data.length} candles</div>
@@ -81,17 +76,6 @@ describe('MarketData', () => {
 
       expect(selectors.length).toBeGreaterThan(0)
     })
-  })
-  it('shows connected status when connected', async () => {
-    renderWithProviders(<MarketData />)
-    expect(screen.getByText('connected')).toBeInTheDocument()
-  })
-  it('shows disconnected status when not connected', async () => {
-    const { useAppStore } = await import('../../stores/app')
-
-    vi.mocked(useAppStore).mockReturnValueOnce({ isConnected: false })
-    renderWithProviders(<MarketData />)
-    expect(screen.getByText('disconnected')).toBeInTheDocument()
   })
   it('displays no data message when candles are empty', async () => {
     renderWithProviders(<MarketData />)
@@ -142,26 +126,6 @@ describe('MarketData', () => {
     await waitFor(() => {
       expect(screen.getAllByText('1 Hour').length).toBeGreaterThanOrEqual(2)
     })
-  })
-  it('displays refresh button', () => {
-    renderWithProviders(<MarketData />)
-    expect(screen.getByRole('button', { name: /Refresh/i })).toBeInTheDocument()
-  })
-  it('calls refetch when refresh is clicked', async () => {
-    const user = userEvent.setup()
-    const refetch = vi.fn()
-    const { useCandles } = await import('../../hooks/queries')
-
-    vi.mocked(useCandles).mockReturnValue({
-      data: [],
-      isLoading: false,
-      error: null,
-      isFetching: false,
-      refetch,
-    } as never)
-    renderWithProviders(<MarketData />)
-    await user.click(screen.getByRole('button', { name: /Refresh/i }))
-    expect(refetch).toHaveBeenCalled()
   })
   it('passes empty strings when no exchange or instrument selected', async () => {
     const { useMarketStore } = await import('../../stores/market')
@@ -273,7 +237,7 @@ describe('MarketData', () => {
       const changeElement = screen.getByText(/\+0\.00500/)
 
       expect(changeElement).toBeInTheDocument()
-      expect(changeElement).toHaveClass('text-green-600')
+      expect(changeElement).toHaveClass('text-gain-600')
     })
   })
   it('displays negative change with red color', async () => {
@@ -295,7 +259,7 @@ describe('MarketData', () => {
       const changeElement = screen.getByText(/-0\.00500/)
 
       expect(changeElement).toBeInTheDocument()
-      expect(changeElement).toHaveClass('text-red-600')
+      expect(changeElement).toHaveClass('text-loss-600')
     })
   })
   it('displays error message when error occurs', async () => {

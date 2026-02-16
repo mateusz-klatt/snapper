@@ -113,7 +113,7 @@ interface MetricCardSkeletonProps {
 export const MetricCardSkeleton: React.FC<Readonly<MetricCardSkeletonProps>> = ({ className }) => {
   return (
     <div
-      className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
+      className={clsx('bg-dark-800 border border-dark-700 rounded-xl p-4', className)}
       data-testid='metric-card-skeleton'
     >
       <Skeleton width={100} height={14} className='mb-2' />
@@ -194,7 +194,7 @@ export const ProcessCardSkeleton: React.FC<Readonly<ProcessCardSkeletonProps>> =
 }) => {
   return (
     <div
-      className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
+      className={clsx('bg-dark-800 border border-dark-700 rounded-xl p-4', className)}
       data-testid='process-card-skeleton'
     >
       <div className='flex items-start justify-between mb-3'>
@@ -221,7 +221,7 @@ export const StrategyCardSkeleton: React.FC<Readonly<StrategyCardSkeletonProps>>
 }) => {
   return (
     <div
-      className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
+      className={clsx('bg-dark-800 border border-dark-700 rounded-xl p-4', className)}
       data-testid='strategy-card-skeleton'
     >
       <div className='flex items-center justify-between mb-3'>
@@ -364,7 +364,7 @@ interface SignalCardSkeletonProps {
 export const SignalCardSkeleton: React.FC<Readonly<SignalCardSkeletonProps>> = ({ className }) => {
   return (
     <div
-      className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
+      className={clsx('bg-dark-800 border border-dark-700 rounded-xl p-4', className)}
       data-testid='signal-card-skeleton'
     >
       <div className='flex items-center justify-between mb-3'>
@@ -420,7 +420,7 @@ interface OrderCardSkeletonProps {
 export const OrderCardSkeleton: React.FC<Readonly<OrderCardSkeletonProps>> = ({ className }) => {
   return (
     <div
-      className={clsx('bg-dark-800 border border-dark-700 rounded-lg p-4', className)}
+      className={clsx('bg-dark-800 border border-dark-700 rounded-xl p-4', className)}
       data-testid='order-card-skeleton'
     >
       <div className='flex items-center justify-between mb-3'>

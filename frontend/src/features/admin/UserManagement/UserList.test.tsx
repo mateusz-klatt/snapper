@@ -587,7 +587,7 @@ describe('UserList', () => {
     const editButtons = screen.getAllByRole('button')
 
     for (const btn of editButtons) {
-      if (btn.classList.contains('text-blue-600')) {
+      if (btn.classList.contains('text-brand-600')) {
         await userEvent.click(btn)
         break
       }

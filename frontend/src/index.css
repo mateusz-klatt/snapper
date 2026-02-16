@@ -1,69 +1,197 @@
 @import 'tailwindcss';
 
-@theme {
-  --color-primary-50: #f0fdfa;
-  --color-primary-100: #ccfbf1;
-  --color-primary-200: #99f6e4;
-  --color-primary-300: #5eead4;
-  --color-primary-400: #2dd4bf;
-  --color-primary-500: #14b8a6;
-  --color-primary-600: #0d9488;
-  --color-primary-700: #0f766e;
-  --color-primary-800: #115e59;
-  --color-primary-900: #134e4a;
-
-  --color-dark-50: #f8fafc;
-  --color-dark-100: #f1f5f9;
-  --color-dark-200: #e2e8f0;
-  --color-dark-300: #cbd5e1;
-  --color-dark-400: #94a3b8;
-  --color-dark-500: #64748b;
-  --color-dark-600: #475569;
-  --color-dark-700: #334155;
-  --color-dark-800: #1e293b;
-  --color-dark-900: #0f172a;
-
-  --font-sans: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif;
-  --font-mono: Monaco, Menlo, Consolas, monospace;
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
 }
 
-/*
-  The default border color has changed to `currentcolor` in Tailwind CSS v4,
-  so we've added these compatibility styles to make sure everything still
-  looks the same as it did with Tailwind CSS v3.
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 
-  If we ever want to remove these styles, we need to add an explicit border
-  color utility to any element that depends on these defaults.
-*/
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@theme {
+  --color-brand-50: #fff1f4;
+  --color-brand-100: #ffdbe1;
+  --color-brand-200: #ffb7c4;
+  --color-brand-300: #ff8197;
+  --color-brand-400: #f33b5e;
+  --color-brand-500: #d8062a;
+  --color-brand-600: #b50524;
+  --color-brand-700: #90041e;
+  --color-brand-800: #6d0316;
+  --color-brand-900: #4d020f;
+  --color-brand-950: #2d0109;
+
+  --color-primary-50: #fff1f4;
+  --color-primary-100: #ffdbe1;
+  --color-primary-200: #ffb7c4;
+  --color-primary-300: #ff8197;
+  --color-primary-400: #f33b5e;
+  --color-primary-500: #d8062a;
+  --color-primary-600: #b50524;
+  --color-primary-700: #90041e;
+  --color-primary-800: #6d0316;
+  --color-primary-900: #4d020f;
+
+  --color-accent-50: #eefaf4;
+  --color-accent-100: #d6f2e2;
+  --color-accent-200: #b1e5ca;
+  --color-accent-300: #7fd2ab;
+  --color-accent-400: #3cb67a;
+  --color-accent-500: #0b8f4d;
+  --color-accent-600: #08753f;
+  --color-accent-700: #065b31;
+  --color-accent-800: #044425;
+  --color-accent-900: #032f19;
+  --color-accent-950: #022010;
+
+  --color-gain-50: #eefaf4;
+  --color-gain-100: #d6f2e2;
+  --color-gain-200: #b1e5ca;
+  --color-gain-300: #7fd2ab;
+  --color-gain-400: #3cb67a;
+  --color-gain-500: #0b8f4d;
+  --color-gain-600: #08753f;
+  --color-gain-700: #065b31;
+  --color-gain-800: #044425;
+  --color-gain-900: #032f19;
+
+  --color-loss-50: #fdf1f4;
+  --color-loss-100: #f9dfe6;
+  --color-loss-200: #f0bcca;
+  --color-loss-300: #e088a0;
+  --color-loss-400: #c95072;
+  --color-loss-500: #8b1025;
+  --color-loss-600: #760e20;
+  --color-loss-700: #5f0b19;
+  --color-loss-800: #470813;
+  --color-loss-900: #30050d;
+
+  --color-warning-50: #fff8eb;
+  --color-warning-100: #fcebc7;
+  --color-warning-200: #f7d896;
+  --color-warning-300: #efbc5a;
+  --color-warning-400: #df9b23;
+  --color-warning-500: #c97a00;
+  --color-warning-600: #a86300;
+  --color-warning-700: #854e00;
+  --color-warning-800: #643a00;
+  --color-warning-900: #452800;
+
+  --color-info-50: #f2f4f6;
+  --color-info-100: #dfe5ea;
+  --color-info-200: #c1ccd4;
+  --color-info-300: #9aaab8;
+  --color-info-400: #6d7f90;
+  --color-info-500: #2b3a4a;
+  --color-info-600: #212f3c;
+  --color-info-700: #1a2530;
+  --color-info-800: #131b22;
+  --color-info-900: #0d1117;
+
+  --color-muted-50: #fcfbf9;
+  --color-muted-100: #f7f5f1;
+  --color-muted-200: #ece8df;
+  --color-muted-300: #ddd8ce;
+  --color-muted-400: #bdb5a8;
+  --color-muted-500: #968d7f;
+  --color-muted-600: #6f695f;
+  --color-muted-700: #504c44;
+  --color-muted-800: #36332d;
+  --color-muted-900: #23211d;
+
+  --color-dark-50: #ffffff;
+  --color-dark-100: #fdfcf9;
+  --color-dark-200: #f7f6f2;
+  --color-dark-300: #eeece6;
+  --color-dark-400: #e6e3dc;
+  --color-dark-500: #d2cdc3;
+  --color-dark-600: #e6e3dc;
+  --color-dark-700: #f9f8f5;
+  --color-dark-800: #ffffff;
+  --color-dark-900: #f7f6f2;
+
+  --color-alpine-50: #ffffff;
+  --color-alpine-100: #f7f6f2;
+  --color-alpine-200: #ece8df;
+  --color-alpine-300: #ddd8ce;
+  --color-alpine-400: #bdb5a8;
+  --color-alpine-500: #968d7f;
+  --color-alpine-600: #6f695f;
+  --color-alpine-700: #504c44;
+  --color-alpine-800: #2e2b26;
+  --color-alpine-900: #111214;
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', Monaco, Menlo, Consolas, monospace;
+}
+
 @layer base {
   *,
   ::after,
   ::before,
   ::backdrop,
   ::file-selector-button {
-    border-color: var(--color-gray-200, currentcolor);
+    border-color: var(--color-dark-600, currentcolor);
   }
 }
 
 @layer utilities {
   .panel {
-    @apply bg-dark-800 border border-dark-700 rounded-lg p-4;
+    @apply rounded-2xl border border-dark-600 bg-alpine-50 p-5 shadow-sm;
   }
 
   .btn {
-    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900;
+    @apply inline-flex items-center gap-1.5 rounded-xl px-4 py-2 font-medium transition-all duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900;
   }
 
   .btn-primary {
-    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900 bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500;
+    @apply rounded-xl bg-brand-600 px-4 py-2 font-medium text-white transition-all duration-200 hover:bg-brand-700 focus:outline-hidden focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 focus:ring-offset-dark-900;
   }
 
   .btn-secondary {
-    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900 bg-dark-700 text-white hover:bg-dark-600 focus:ring-dark-500;
+    @apply rounded-xl border border-dark-600 bg-alpine-50 px-4 py-2 font-medium text-alpine-900 transition-all duration-200 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-dark-500 focus:ring-offset-2 focus:ring-offset-dark-900;
   }
 
   .btn-danger {
-    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-900 bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+    @apply rounded-xl bg-loss-600 px-4 py-2 font-medium text-white transition-all duration-200 hover:bg-loss-700 focus:outline-hidden focus:ring-2 focus:ring-loss-500 focus:ring-offset-2 focus:ring-offset-dark-900;
   }
 
   .btn-sm {
@@ -75,31 +203,31 @@
   }
 
   .status-connected {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800;
+    @apply inline-flex items-center rounded-full bg-accent-50 px-2.5 py-0.5 text-xs font-medium text-accent-800;
   }
 
   .status-disconnected {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800;
+    @apply inline-flex items-center rounded-full bg-loss-50 px-2.5 py-0.5 text-xs font-medium text-loss-800;
   }
 
   .status-pending {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800;
+    @apply inline-flex items-center rounded-full bg-warning-50 px-2.5 py-0.5 text-xs font-medium text-warning-800;
   }
 
   .table-auto th {
-    @apply bg-dark-700 text-primary-400 text-xs font-semibold uppercase tracking-wider px-4 py-2;
+    @apply bg-dark-700 px-4 py-2 text-xs font-semibold tracking-wider text-muted-700 uppercase;
   }
 
   .table-auto td {
-    @apply px-4 py-2 text-sm border-b border-dark-700;
+    @apply border-b border-dark-600 px-4 py-2 text-sm text-alpine-900;
   }
 
   .input {
-    @apply w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white placeholder-dark-400 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-transparent;
+    @apply w-full rounded-xl border border-dark-600 bg-alpine-50 px-3 py-2 text-alpine-900 placeholder-muted-500 focus:border-brand-500 focus:outline-hidden focus:ring-2 focus:ring-brand-500;
   }
 
   .select {
-    @apply w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded-md text-white placeholder-dark-400 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-transparent cursor-pointer;
+    @apply w-full cursor-pointer rounded-xl border border-dark-600 bg-alpine-50 px-3 py-2 text-alpine-900 placeholder-muted-500 focus:border-brand-500 focus:outline-hidden focus:ring-2 focus:ring-brand-500;
   }
 }
 
@@ -108,7 +236,13 @@
     @apply border-dark-600;
   }
 
+  ::selection {
+    background: var(--color-muted-400);
+    color: var(--color-alpine-900);
+  }
+
   body {
-    @apply bg-dark-900 text-white font-sans;
+    @apply bg-dark-900 font-sans text-alpine-900 antialiased;
+    font-variant-numeric: tabular-nums;
   }
 }

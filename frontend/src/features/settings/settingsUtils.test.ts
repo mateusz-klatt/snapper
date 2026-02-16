@@ -7,6 +7,8 @@ import {
   CATEGORY_COLORS,
   getCategoryColor,
   getMaskedValue,
+  SENSITIVE_MASK,
+  tokenizeJson,
 } from './settingsUtils'
 
 describe('isJsonString', () => {
@@ -70,20 +72,37 @@ describe('getCategoryColor', () => {
   )
 
   it('returns fallback color for unknown category', () => {
-    expect(getCategoryColor('unknown')).toBe('bg-dark-600 text-dark-200')
+    expect(getCategoryColor('unknown')).toBe('bg-muted-100 text-muted-600')
   })
 })
 
 describe('getMaskedValue', () => {
-  it('masks sensitive key value', () => {
+  it('masks sensitive key value with short mask', () => {
     const result = getMaskedValue('my_api_key', 'secret123')
 
-    expect(result).toContain('•')
+    expect(result).toBe(SENSITIVE_MASK)
+    expect(result).toHaveLength(8)
     expect(result).not.toContain('secret123')
   })
 
   it('returns value for non-sensitive key', () => {
     expect(getMaskedValue('trading_mode', 'paper')).toBe('paper')
+  })
+
+  it('pretty-prints JSON object value', () => {
+    expect(getMaskedValue('config', '{"a":1,"b":2}')).toBe(JSON.stringify({ a: 1, b: 2 }, null, 2))
+  })
+
+  it('pretty-prints JSON array value', () => {
+    expect(getMaskedValue('symbols', '["SPY","QQQ"]')).toBe(JSON.stringify(['SPY', 'QQQ'], null, 2))
+  })
+
+  it('returns plain string when value is not JSON', () => {
+    expect(getMaskedValue('mode', 'live')).toBe('live')
+  })
+
+  it('returns JSON primitive string as-is without formatting', () => {
+    expect(getMaskedValue('count', '42')).toBe('42')
   })
 
   it('returns (empty) for empty value on non-sensitive key', () => {
@@ -92,5 +111,77 @@ describe('getMaskedValue', () => {
 
   it('does not mask empty value on sensitive key', () => {
     expect(getMaskedValue('api_key', '')).toBe('(empty)')
+  })
+})
+
+describe('tokenizeJson', () => {
+  it('tokenizes object keys and string values', () => {
+    const tokens = tokenizeJson('{"name": "test"}')
+
+    expect(tokens).toEqual([
+      { type: 'punctuation', value: '{' },
+      { type: 'key', value: '"name"' },
+      { type: 'punctuation', value: ':' },
+      { type: 'whitespace', value: ' ' },
+      { type: 'string', value: '"test"' },
+      { type: 'punctuation', value: '}' },
+    ])
+  })
+
+  it('tokenizes numbers', () => {
+    const tokens = tokenizeJson('{"count": 42}')
+    const numberToken = tokens.find(t => t.type === 'number')
+
+    expect(numberToken).toEqual({ type: 'number', value: '42' })
+  })
+
+  it('tokenizes negative and decimal numbers', () => {
+    const tokens = tokenizeJson('{"val": -3.14}')
+    const numToken = tokens.find(t => t.type === 'number')
+
+    expect(numToken).toEqual({ type: 'number', value: '-3.14' })
+  })
+
+  it('tokenizes booleans', () => {
+    const tokens = tokenizeJson('{"enabled": true, "disabled": false}')
+    const boolTokens = tokens.filter(t => t.type === 'boolean')
+
+    expect(boolTokens).toEqual([
+      { type: 'boolean', value: 'true' },
+      { type: 'boolean', value: 'false' },
+    ])
+  })
+
+  it('tokenizes null', () => {
+    const tokens = tokenizeJson('{"value": null}')
+    const nullToken = tokens.find(t => t.type === 'null')
+
+    expect(nullToken).toEqual({ type: 'null', value: 'null' })
+  })
+
+  it('tokenizes arrays', () => {
+    const tokens = tokenizeJson('[1, 2]')
+
+    expect(tokens[0]).toEqual({ type: 'punctuation', value: '[' })
+    expect(tokens[tokens.length - 1]).toEqual({ type: 'punctuation', value: ']' })
+  })
+
+  it('returns empty array for empty string', () => {
+    expect(tokenizeJson('')).toEqual([])
+  })
+
+  it('handles pretty-printed JSON with whitespace tokens', () => {
+    const json = JSON.stringify({ a: 1 }, null, 2)
+    const tokens = tokenizeJson(json)
+    const wsTokens = tokens.filter(t => t.type === 'whitespace')
+
+    expect(wsTokens.length).toBeGreaterThan(0)
+  })
+
+  it('handles escaped quotes in strings', () => {
+    const tokens = tokenizeJson('{"msg": "say \\"hello\\""}')
+    const strToken = tokens.find(t => t.type === 'string')
+
+    expect(strToken?.value).toContain('\\"hello\\"')
   })
 })

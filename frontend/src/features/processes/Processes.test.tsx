@@ -918,7 +918,7 @@ describe('Processes', () => {
     await waitFor(() => {
       expect(screen.getByText('executor_kraken')).toBeTruthy()
     })
-    const executorCard = screen.getByText('executor_kraken').closest('.rounded-lg')
+    const executorCard = screen.getByText('executor_kraken').closest('.rounded-2xl')
     const startButton = executorCard?.querySelector('button')
 
     expect(startButton).toBeTruthy()
@@ -1080,7 +1080,7 @@ describe('Processes', () => {
       expect(screen.getByText('Task Processes')).toBeTruthy()
     })
     const taskTitle = screen.getByText('Data Sync Task')
-    const taskCard = taskTitle.closest('.rounded-lg')
+    const taskCard = taskTitle.closest('.rounded-2xl')
     const startButton = taskCard?.querySelector('button')
 
     expect(startButton).toBeTruthy()
@@ -1141,7 +1141,7 @@ describe('Processes', () => {
       expect(screen.getByText('Task Processes')).toBeTruthy()
     })
     const taskTitle = screen.getByText('Data Sync Task')
-    const taskCard = taskTitle.closest('.rounded-lg')
+    const taskCard = taskTitle.closest('.rounded-2xl')
     const stopButton = taskCard?.querySelector('button')
 
     expect(stopButton).toBeTruthy()
@@ -1344,7 +1344,7 @@ describe('Processes', () => {
     await waitFor(() => {
       expect(screen.getByText('ZMQ Broker')).toBeTruthy()
     })
-    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-lg')
+    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-2xl')
     const startButton = zmqCard?.querySelector('button')
 
     expect(startButton).toBeTruthy()
@@ -1404,7 +1404,7 @@ describe('Processes', () => {
     await waitFor(() => {
       expect(screen.getByText('ZMQ Broker')).toBeTruthy()
     })
-    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-lg')
+    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-2xl')
     const stopButton = zmqCard?.querySelector('button')
 
     expect(stopButton).toBeTruthy()

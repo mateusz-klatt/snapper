@@ -24,7 +24,7 @@ export const ConfirmDialog: React.FC<Readonly<ConfirmDialogProps>> = ({
 }) => {
   const confirmButtonClasses =
     variant === 'danger'
-      ? 'bg-red-600 hover:bg-red-700 focus:ring-red-500'
+      ? 'bg-loss-600 hover:bg-loss-700 focus:ring-loss-500'
       : 'bg-primary-600 hover:bg-primary-700 focus:ring-primary-500'
 
   return (

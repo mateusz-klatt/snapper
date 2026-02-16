@@ -56,13 +56,13 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
   const getRoleBadgeColor = (role: string): string => {
     switch (role) {
       case 'admin':
-        return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'
+        return 'bg-loss-100 text-loss-800 border-loss-200'
       case 'operator':
-        return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300'
+        return 'bg-brand-100 text-brand-800 border-brand-200'
       case 'viewer':
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+        return 'bg-muted-200 text-muted-700 border-muted-300'
       default:
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+        return 'bg-muted-200 text-muted-700 border-muted-300'
     }
   }
 
@@ -92,7 +92,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
   if (isLoading) {
     return (
       <div className='flex items-center justify-center p-8'>
-        <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600'></div>
+        <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-brand-600'></div>
       </div>
     )
   }
@@ -101,7 +101,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
 
     return (
-      <div className='p-4 text-red-600 bg-red-50 dark:bg-red-900/20 rounded-lg'>
+      <div className='p-4 text-loss-600 bg-loss-50 rounded-lg'>
         Error loading users: {errorMessage}
       </div>
     )
@@ -114,7 +114,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
       {}
       <div className='flex items-center justify-between'>
         <div className='flex items-center space-x-4'>
-          <h2 className='text-2xl font-bold text-gray-900 dark:text-gray-100'>User Management</h2>
+          <h2 className='text-2xl font-bold text-alpine-900'>User Management</h2>
           <Badge variant='outline' className='text-sm'>
             {userListData?.total_count || 0} users
           </Badge>
@@ -136,66 +136,63 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
         </div>
       </div>
       {}
-      <div className='bg-white dark:bg-gray-800 shadow-sm rounded-lg overflow-hidden'>
+      <div className='bg-alpine-50 shadow-sm rounded-lg border border-dark-600 overflow-hidden'>
         <div className='overflow-x-auto'>
-          <table className='min-w-full divide-y divide-gray-200 dark:divide-gray-700'>
-            <thead className='bg-gray-50 dark:bg-gray-700'>
+          <table className='min-w-full divide-y divide-dark-600'>
+            <thead className='bg-dark-700'>
               <tr>
-                <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider'>
+                <th className='px-6 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   User
                 </th>
-                <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider'>
+                <th className='px-6 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   Role
                 </th>
-                <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider'>
+                <th className='px-6 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   Status
                 </th>
-                <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider'>
+                <th className='px-6 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   Last Login
                 </th>
-                <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider'>
+                <th className='px-6 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   Created At
                 </th>
-                <th className='px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider'>
+                <th className='px-6 py-3 text-right text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   Actions
                 </th>
               </tr>
             </thead>
-            <tbody className='bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700'>
+            <tbody className='bg-alpine-50 divide-y divide-dark-600'>
               {users.map(user => (
-                <tr key={user.id} className='hover:bg-gray-50 dark:hover:bg-gray-700'>
+                <tr key={user.id} className='hover:bg-dark-700'>
                   <td className='px-6 py-4 whitespace-nowrap'>
                     <div>
-                      <div className='text-sm font-medium text-gray-900 dark:text-gray-100'>
-                        {user.username}
-                      </div>
-                      <div className='text-sm text-gray-500 dark:text-gray-400'>{user.email}</div>
+                      <div className='text-sm font-medium text-alpine-900'>{user.username}</div>
+                      <div className='text-sm text-muted-500'>{user.email}</div>
                     </div>
                   </td>
                   <td className='px-6 py-4 whitespace-nowrap'>
-                    <Badge
-                      className={`inline-flex items-center space-x-1 ${getRoleBadgeColor(user.role)}`}
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium ${getRoleBadgeColor(user.role)}`}
                     >
                       {getRoleIcon(user.role)}
                       <span className='capitalize'>{user.role}</span>
-                    </Badge>
+                    </span>
                   </td>
                   <td className='px-6 py-4 whitespace-nowrap'>
-                    <Badge
-                      variant={user.is_active ? 'default' : 'secondary'}
+                    <span
                       className={
                         user.is_active
-                          ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300'
-                          : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+                          ? 'inline-flex items-center rounded-full border border-accent-200 bg-accent-100 px-2.5 py-0.5 text-xs font-medium text-accent-800'
+                          : 'inline-flex items-center rounded-full border border-muted-300 bg-muted-200 px-2.5 py-0.5 text-xs font-medium text-muted-700'
                       }
                     >
                       {user.is_active ? 'Active' : 'Inactive'}
-                    </Badge>
+                    </span>
                   </td>
-                  <td className='px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400'>
+                  <td className='px-6 py-4 whitespace-nowrap text-sm text-muted-500'>
                     {user.last_login ? formatDate(user.last_login) : 'Never'}
                   </td>
-                  <td className='px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400'>
+                  <td className='px-6 py-4 whitespace-nowrap text-sm text-muted-500'>
                     {user.created_at ? formatDate(user.created_at) : 'Unknown'}
                   </td>
                   <td className='px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2'>
@@ -203,7 +200,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                       variant='secondary'
                       size='sm'
                       onClick={() => onEditUser(user)}
-                      className='text-blue-600 hover:text-blue-900'
+                      className='text-brand-600 hover:text-brand-900'
                     >
                       <Edit className='w-4 h-4' />
                     </Button>
@@ -212,7 +209,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                       size='sm'
                       onClick={() => handleDeleteUser(user)}
                       disabled={deleteUserMutation.isPending}
-                      className='text-red-600 hover:text-red-900'
+                      className='text-loss-600 hover:text-loss-900'
                     >
                       <Trash2 className='w-4 h-4' />
                     </Button>
@@ -224,11 +221,9 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
         </div>
         {users.length === 0 && (
           <div className='text-center py-12'>
-            <Users className='mx-auto h-12 w-12 text-gray-400' />
-            <h3 className='mt-2 text-sm font-medium text-gray-900 dark:text-gray-100'>
-              No users found
-            </h3>
-            <p className='mt-1 text-sm text-gray-500 dark:text-gray-400'>
+            <Users className='mx-auto h-12 w-12 text-muted-400' />
+            <h3 className='mt-2 text-sm font-medium text-alpine-900'>No users found</h3>
+            <p className='mt-1 text-sm text-muted-500'>
               {includeInactive ? 'No users found.' : 'No active users found.'}
             </p>
           </div>

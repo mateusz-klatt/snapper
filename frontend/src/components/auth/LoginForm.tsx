@@ -25,27 +25,25 @@ const LoginForm: React.FC<Readonly<LoginFormProps>> = ({ onSuccess, className = 
 
   return (
     <div
-      className={`max-w-md mx-auto bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 ${className}`}
+      className={`mx-auto w-full max-w-md rounded-2xl border border-dark-600 bg-alpine-50 p-7 shadow-sm ${className}`}
     >
-      <div className='mb-6'>
-        <h2 className='text-2xl font-bold text-gray-900 dark:text-white text-center'>
+      <div className='mb-7'>
+        <img src='/logo.png' alt='Snapper' className='mx-auto mb-4 h-14 w-14 rounded-2xl' />
+        <h2 className='text-center text-2xl font-semibold text-alpine-900'>
           Snapper Trading Login
         </h2>
-        <p className='text-gray-600 dark:text-gray-300 text-center mt-2'>
+        <p className='mt-2 text-center text-sm text-muted-600'>
           Sign in to access the trading dashboard
         </p>
       </div>
       {error && (
-        <div className='mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-sm'>
+        <div className='mb-4 rounded-lg border border-loss-200 bg-loss-50 p-3 text-sm text-loss-800'>
           {error}
         </div>
       )}
       <form onSubmit={handleSubmit} className='space-y-4'>
         <div>
-          <label
-            htmlFor='username'
-            className='block text-sm font-medium text-gray-700 dark:text-gray-300'
-          >
+          <label htmlFor='username' className='block text-sm font-medium text-muted-700'>
             Username
           </label>
           <input
@@ -55,15 +53,12 @@ const LoginForm: React.FC<Readonly<LoginFormProps>> = ({ onSuccess, className = 
             onChange={e => setUsername(e.target.value)}
             required
             disabled={isLoading}
-            className='mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-xs focus:outline-hidden focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 dark:bg-gray-700 dark:border-gray-600 dark:text-white'
+            className='mt-1 block w-full rounded-xl border border-dark-600 bg-alpine-50 px-3 py-2 text-alpine-900 shadow-xs focus:border-brand-500 focus:outline-hidden focus:ring-2 focus:ring-brand-500 disabled:bg-dark-700'
             placeholder='Enter your username'
           />
         </div>
         <div>
-          <label
-            htmlFor='password'
-            className='block text-sm font-medium text-gray-700 dark:text-gray-300'
-          >
+          <label htmlFor='password' className='block text-sm font-medium text-muted-700'>
             Password
           </label>
           <input
@@ -73,18 +68,18 @@ const LoginForm: React.FC<Readonly<LoginFormProps>> = ({ onSuccess, className = 
             onChange={e => setPassword(e.target.value)}
             required
             disabled={isLoading}
-            className='mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-xs focus:outline-hidden focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 dark:bg-gray-700 dark:border-gray-600 dark:text-white'
+            className='mt-1 block w-full rounded-xl border border-dark-600 bg-alpine-50 px-3 py-2 text-alpine-900 shadow-xs focus:border-brand-500 focus:outline-hidden focus:ring-2 focus:ring-brand-500 disabled:bg-dark-700'
             placeholder='Enter your password'
           />
         </div>
         <button
           type='submit'
           disabled={isLoading || !username || !password}
-          className='w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-xs text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:cursor-not-allowed'
+          className='flex w-full items-center justify-center rounded-xl border border-transparent bg-brand-600 px-4 py-2.5 text-sm font-medium text-white transition-all duration-200 hover:bg-brand-700 focus:outline-hidden focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-muted-400'
         >
           {isLoading ? (
-            <div className='flex items-center'>
-              <div className='animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2'></div>
+            <div className='flex items-center gap-2'>
+              <div className='h-2.5 w-10 rounded-full bg-white/60 animate-pulse' />
               Signing in...
             </div>
           ) : (

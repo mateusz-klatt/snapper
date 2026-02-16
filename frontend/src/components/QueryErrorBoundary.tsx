@@ -36,8 +36,8 @@ export function QueryErrorFallback({
   }
 
   return (
-    <div className='flex flex-col items-center justify-center p-6 bg-yellow-500/10 border border-yellow-500/30 rounded-lg min-h-[150px]'>
-      <div className='text-yellow-400 mb-2'>
+    <div className='flex flex-col items-center justify-center p-6 bg-warning-500/10 border border-warning-500/30 rounded-lg min-h-[150px]'>
+      <div className='text-warning-400 mb-2'>
         <svg
           className='w-10 h-10'
           fill='none'
@@ -53,11 +53,11 @@ export function QueryErrorFallback({
           />
         </svg>
       </div>
-      <h3 className='text-base font-semibold text-yellow-400 mb-1'>{title}</h3>
-      <p className='text-sm text-gray-400 mb-4 text-center max-w-md'>{getMessage()}</p>
+      <h3 className='text-base font-semibold text-warning-400 mb-1'>{title}</h3>
+      <p className='text-sm text-muted-400 mb-4 text-center max-w-md'>{getMessage()}</p>
       <button
         onClick={() => refetch()}
-        className='px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-md transition-colors text-sm font-medium'
+        className='px-4 py-2 bg-warning-600 hover:bg-warning-700 text-white rounded-md transition-colors text-sm font-medium'
       >
         Retry
       </button>
@@ -94,7 +94,7 @@ export function QueryStateWrapper<T>({
     return (
       loadingFallback || (
         <div className='flex items-center justify-center p-6 min-h-[150px]'>
-          <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500' />
+          <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500' />
         </div>
       )
     )
@@ -106,7 +106,7 @@ export function QueryStateWrapper<T>({
 
   if (data === undefined || data === null) {
     return (
-      <div className='flex items-center justify-center p-6 text-gray-500 min-h-[150px]'>
+      <div className='flex items-center justify-center p-6 text-muted-500 min-h-[150px]'>
         {emptyMessage || 'No data available'}
       </div>
     )
@@ -114,7 +114,7 @@ export function QueryStateWrapper<T>({
 
   if (isEmpty?.(data)) {
     return (
-      <div className='flex items-center justify-center p-6 text-gray-500 min-h-[150px]'>
+      <div className='flex items-center justify-center p-6 text-muted-500 min-h-[150px]'>
         {emptyMessage || 'No data available'}
       </div>
     )

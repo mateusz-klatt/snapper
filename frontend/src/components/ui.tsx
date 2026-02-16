@@ -14,12 +14,12 @@ export const StatusBadge: React.FC<Readonly<StatusBadgeProps>> = ({
 }) => {
   const baseClasses = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium'
   const statusClasses = {
-    connected: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300',
-    healthy: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300',
-    disconnected: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300',
-    error: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300',
-    pending: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300',
-    stale: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300',
+    connected: 'bg-accent-50 text-accent-800 border border-accent-200',
+    healthy: 'bg-accent-50 text-accent-800 border border-accent-200',
+    disconnected: 'bg-loss-50 text-loss-800 border border-loss-200',
+    error: 'bg-loss-50 text-loss-800 border border-loss-200',
+    pending: 'bg-warning-50 text-warning-800 border border-warning-200',
+    stale: 'bg-dark-700 text-muted-700 border border-dark-600',
   }
 
   return <span className={clsx(baseClasses, statusClasses[status], className)}>{children}</span>
@@ -36,7 +36,7 @@ export const Card: React.FC<Readonly<CardProps>> = ({ title, children, className
   return (
     <div className={clsx('panel', className)}>
       <div className='flex items-center justify-between mb-4'>
-        <h3 className='text-lg font-semibold text-primary-400'>{title}</h3>
+        <h3 className='text-lg font-semibold text-alpine-900'>{title}</h3>
         {actions && <div className='flex gap-2'>{actions}</div>}
       </div>
       {children}
@@ -110,10 +110,10 @@ export const Badge: React.FC<Readonly<BadgeProps>> = ({
 }) => {
   const baseClasses = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium'
   const variantClasses = {
-    default: 'bg-primary-100 text-primary-800 dark:bg-primary-900 dark:text-primary-300',
-    secondary: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300',
-    outline: 'border border-gray-300 text-gray-700 dark:border-gray-600 dark:text-gray-300',
-    destructive: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300',
+    default: 'bg-brand-50 text-brand-700 border border-brand-200',
+    secondary: 'bg-dark-700 text-muted-700 border border-dark-600',
+    outline: 'border border-dark-600 text-muted-700',
+    destructive: 'bg-loss-50 text-loss-700 border border-loss-200',
   }
 
   return <span className={clsx(baseClasses, variantClasses[variant], className)}>{children}</span>
@@ -161,25 +161,25 @@ export const ConnectionBar: React.FC<Readonly<ConnectionBarProps>> = ({
       className={clsx(
         'flex items-center justify-between px-4 py-2 text-sm border-b',
         isConnected
-          ? 'bg-dark-800 border-dark-600 text-green-400'
-          : 'bg-red-900 border-red-700 text-red-300'
+          ? 'bg-dark-700 border-dark-600 text-accent-800'
+          : 'bg-loss-50 border-loss-200 text-loss-800'
       )}
     >
       <div className='flex items-center gap-4'>
         <div className='flex items-center gap-2'>
           <div
-            className={clsx('w-2 h-2 rounded-full', isConnected ? 'bg-green-400' : 'bg-red-400')}
+            className={clsx('w-2 h-2 rounded-full', isConnected ? 'bg-accent-400' : 'bg-loss-400')}
           />
           <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
         </div>
         {isConnected && (
           <>
-            <div className='text-dark-300'>Lag: {lag >= 0 ? `${lag}ms` : 'Unknown'}</div>
-            <div className='text-dark-300'>Topics: {subscribedTopicsCount}</div>
+            <div className='text-muted-700'>Lag: {lag >= 0 ? `${lag}ms` : 'Unknown'}</div>
+            <div className='text-muted-700'>Topics: {subscribedTopicsCount}</div>
           </>
         )}
       </div>
-      <div className='text-xs text-dark-400'>Last update: {new Date().toLocaleTimeString()}</div>
+      <div className='text-xs text-muted-500'>Last update: {new Date().toLocaleTimeString()}</div>
     </div>
   )
 }
@@ -200,18 +200,18 @@ export const MetricCard: React.FC<Readonly<MetricCardProps>> = ({
   suffix,
 }) => {
   const changeColors = {
-    positive: 'text-green-400',
-    negative: 'text-red-400',
-    neutral: 'text-dark-300',
+    positive: 'text-gain-600',
+    negative: 'text-loss-600',
+    neutral: 'text-muted-600',
   }
 
   return (
-    <div className='bg-dark-800 border border-dark-700 rounded-lg p-4'>
-      <div className='text-sm text-dark-300 mb-1'>{label}</div>
+    <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-4'>
+      <div className='text-sm text-muted-600 mb-1'>{label}</div>
       <div className='flex items-baseline gap-2'>
-        <span className='text-2xl font-bold text-white'>
+        <span className='text-2xl font-bold text-alpine-900'>
           {value}
-          {suffix && <span className='text-lg text-dark-300'>{suffix}</span>}
+          {suffix && <span className='text-lg text-muted-600'>{suffix}</span>}
         </span>
         {change !== undefined && (
           <span className={clsx('text-sm', changeColors[changeType])}>

@@ -1,3 +1,16 @@
+import type { LucideIcon } from 'lucide-react'
+import {
+  Bell,
+  ChartCandlestick,
+  ClipboardList,
+  Gauge,
+  HeartPulse,
+  LayoutDashboard,
+  Settings,
+  Shield,
+  Workflow,
+} from 'lucide-react'
+
 type TabType =
   | 'overview'
   | 'market'
@@ -11,17 +24,17 @@ type TabType =
 interface TabConfig {
   id: TabType
   label: string
-  icon: string
+  icon: LucideIcon
 }
 
 export const ALL_TABS: readonly TabConfig[] = [
-  { id: 'overview', label: 'Overview', icon: '📊' },
-  { id: 'market', label: 'Market Data', icon: '📈' },
-  { id: 'processes', label: 'Processes', icon: '⚙️' },
-  { id: 'strategies', label: 'Strategies', icon: '🎯' },
-  { id: 'orders', label: 'Orders & Fills', icon: '📋' },
-  { id: 'signals', label: 'Signals', icon: '🔔' },
-  { id: 'health', label: 'Health', icon: '❤️' },
-  { id: 'admin', label: 'Administration', icon: '👨‍💼' },
-  { id: 'settings', label: 'Settings', icon: '🔧' },
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'market', label: 'Market Data', icon: ChartCandlestick },
+  { id: 'processes', label: 'Processes', icon: Workflow },
+  { id: 'strategies', label: 'Strategies', icon: Gauge },
+  { id: 'orders', label: 'Orders & Fills', icon: ClipboardList },
+  { id: 'signals', label: 'Signals', icon: Bell },
+  { id: 'health', label: 'Health', icon: HeartPulse },
+  { id: 'admin', label: 'Administration', icon: Shield },
+  { id: 'settings', label: 'Settings', icon: Settings },
 ] as const

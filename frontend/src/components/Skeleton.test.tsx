@@ -121,7 +121,7 @@ describe('MetricCardSkeleton', () => {
     const card = screen.getByTestId('metric-card-skeleton')
 
     expect(card).toBeInTheDocument()
-    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-lg', 'p-4')
+    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-xl', 'p-4')
   })
   it('applies custom className', () => {
     render(<MetricCardSkeleton className='custom-metric' />)
@@ -199,7 +199,7 @@ describe('ProcessCardSkeleton', () => {
     const card = screen.getByTestId('process-card-skeleton')
 
     expect(card).toBeInTheDocument()
-    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-lg', 'p-4')
+    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-xl', 'p-4')
   })
   it('applies custom className', () => {
     render(<ProcessCardSkeleton className='custom-process' />)
@@ -214,7 +214,7 @@ describe('StrategyCardSkeleton', () => {
     const card = screen.getByTestId('strategy-card-skeleton')
 
     expect(card).toBeInTheDocument()
-    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-lg', 'p-4')
+    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-xl', 'p-4')
   })
   it('applies custom className', () => {
     render(<StrategyCardSkeleton className='custom-strategy' />)
@@ -314,7 +314,7 @@ describe('SignalCardSkeleton', () => {
     const card = screen.getByTestId('signal-card-skeleton')
 
     expect(card).toBeInTheDocument()
-    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-lg', 'p-4')
+    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-xl', 'p-4')
   })
   it('applies custom className', () => {
     render(<SignalCardSkeleton className='custom-signal' />)
@@ -346,7 +346,7 @@ describe('OrderCardSkeleton', () => {
     const card = screen.getByTestId('order-card-skeleton')
 
     expect(card).toBeInTheDocument()
-    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-lg', 'p-4')
+    expect(card).toHaveClass('bg-dark-800', 'border', 'border-dark-700', 'rounded-xl', 'p-4')
   })
   it('applies custom className', () => {
     render(<OrderCardSkeleton className='custom-order' />)

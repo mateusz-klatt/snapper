@@ -12,8 +12,8 @@ interface MarketDataStore extends MarketDataState {
 
 export const useMarketStore = create<MarketDataStore>()(
   subscribeWithSelector((set, _get) => ({
-    selectedExchange: null,
-    selectedInstrument: null,
+    selectedExchange: 'kraken',
+    selectedInstrument: 'EUR-USD',
     selectedTimeframe: '1m',
     lastPrice: null,
     candles: {},

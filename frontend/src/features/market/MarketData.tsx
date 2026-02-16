@@ -1,9 +1,8 @@
 import { useMemo } from 'react'
-import { Card, Button, LoadingSpinner } from '../../components/ui'
+import { Card, LoadingSpinner } from '../../components/ui'
 import { LightweightChart } from '../../components/LightweightChart'
 import { useCandles, useExchanges, useExchangeInstruments } from '../../hooks/queries'
 import { useMarketStore } from '../../stores/market'
-import { useAppStore } from '../../stores/app'
 import * as Select from '@radix-ui/react-select'
 import { ChevronDownIcon } from 'lucide-react'
 import { Time } from 'lightweight-charts'
@@ -34,7 +33,6 @@ export function MarketData() {
     setSelectedInstrument,
     setSelectedTimeframe,
   } = useMarketStore()
-  const { isConnected } = useAppStore()
   const { data: exchanges } = useExchanges()
   const { data: instruments } = useExchangeInstruments(selectedExchange)
   const {
@@ -42,7 +40,6 @@ export function MarketData() {
     isLoading,
     error,
     isFetching,
-    refetch,
   } = useCandles(selectedInstrument ?? '', selectedExchange ?? '', selectedTimeframe)
   const chartData: FormattedCandle[] = useMemo(() => {
     if (!candles || isFetching) return []
@@ -80,14 +77,6 @@ export function MarketData() {
     return deduped
   }, [candles, isFetching])
 
-  const getConnectionStatusColor = () => {
-    if (isConnected) {
-      return 'bg-green-500'
-    } else {
-      return 'bg-red-500'
-    }
-  }
-
   const stats = useMemo(() => {
     if (!chartData.length) return null
     const latest = chartData[chartData.length - 1]
@@ -108,32 +97,23 @@ export function MarketData() {
   }, [chartData])
 
   return (
-    <div className='h-full flex flex-col space-y-6'>
+    <div className='flex flex-col space-y-6'>
       {}
       <div className='flex items-center justify-between'>
         <div className='flex items-center space-x-3'>
           <h2 className='text-xl font-bold'>Market Data</h2>
-          <div className='flex items-center space-x-2'>
-            <div className={`w-2 h-2 rounded-full ${getConnectionStatusColor()}`}></div>
-            <span className='text-sm text-gray-500 capitalize'>
-              {isConnected ? 'connected' : 'disconnected'}
-            </span>
-          </div>
         </div>
-        <Button variant='secondary' size='sm' onClick={() => refetch()}>
-          Refresh
-        </Button>
       </div>
       {}
-      <div className='flex items-center space-x-4'>
-        <div className='flex items-center space-x-2'>
-          <label htmlFor='exchange-select' className='text-sm font-medium text-dark-300'>
+      <div className='flex flex-wrap items-center gap-4'>
+        <div className='flex items-center gap-2'>
+          <label htmlFor='exchange-select' className='text-sm font-medium text-muted-600'>
             Exchange:
           </label>
           <Select.Root value={selectedExchange ?? undefined} onValueChange={setSelectedExchange}>
             <Select.Trigger
               id='exchange-select'
-              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-white border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
             >
               <Select.Value placeholder='Select exchange' />
               <Select.Icon className='ml-2'>
@@ -141,13 +121,13 @@ export function MarketData() {
               </Select.Icon>
             </Select.Trigger>
             <Select.Portal>
-              <Select.Content className='overflow-hidden bg-dark-800 rounded-md shadow-lg border border-dark-600'>
+              <Select.Content className='overflow-hidden bg-white rounded-md shadow-lg border border-dark-600'>
                 <Select.Viewport className='p-1'>
                   {(exchanges ?? []).map(ex => (
                     <Select.Item
                       key={ex}
                       value={ex}
-                      className='flex select-none items-center px-3 py-2 text-sm text-white rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
+                      className='flex select-none items-center px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
                     >
                       <Select.ItemText>{ex}</Select.ItemText>
                     </Select.Item>
@@ -157,8 +137,8 @@ export function MarketData() {
             </Select.Portal>
           </Select.Root>
         </div>
-        <div className='flex items-center space-x-2'>
-          <label htmlFor='instrument-select' className='text-sm font-medium text-dark-300'>
+        <div className='flex items-center gap-2'>
+          <label htmlFor='instrument-select' className='text-sm font-medium text-muted-600'>
             Instrument:
           </label>
           <Select.Root
@@ -168,7 +148,7 @@ export function MarketData() {
           >
             <Select.Trigger
               id='instrument-select'
-              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-white border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50'
             >
               <Select.Value placeholder='Select instrument' />
               <Select.Icon className='ml-2'>
@@ -176,13 +156,13 @@ export function MarketData() {
               </Select.Icon>
             </Select.Trigger>
             <Select.Portal>
-              <Select.Content className='overflow-hidden bg-dark-800 rounded-md shadow-lg border border-dark-600'>
+              <Select.Content className='overflow-hidden bg-white rounded-md shadow-lg border border-dark-600'>
                 <Select.Viewport className='p-1'>
                   {(instruments ?? []).map(inst => (
                     <Select.Item
                       key={inst}
                       value={inst}
-                      className='flex select-none items-center px-3 py-2 text-sm text-white rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
+                      className='flex select-none items-center px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
                     >
                       <Select.ItemText>{inst}</Select.ItemText>
                     </Select.Item>
@@ -192,14 +172,14 @@ export function MarketData() {
             </Select.Portal>
           </Select.Root>
         </div>
-        <div className='flex items-center space-x-2'>
-          <label htmlFor='timeframe-select' className='text-sm font-medium text-dark-300'>
+        <div className='flex items-center gap-2'>
+          <label htmlFor='timeframe-select' className='text-sm font-medium text-muted-600'>
             Timeframe:
           </label>
           <Select.Root value={selectedTimeframe} onValueChange={setSelectedTimeframe}>
             <Select.Trigger
               id='timeframe-select'
-              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-dark-800 border border-dark-600 text-white hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-white border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
             >
               <Select.Value />
               <Select.Icon className='ml-2'>
@@ -207,13 +187,13 @@ export function MarketData() {
               </Select.Icon>
             </Select.Trigger>
             <Select.Portal>
-              <Select.Content className='overflow-hidden bg-dark-800 rounded-md shadow-lg border border-dark-600'>
+              <Select.Content className='overflow-hidden bg-white rounded-md shadow-lg border border-dark-600'>
                 <Select.Viewport className='p-1'>
                   {timeframes.map(timeframe => (
                     <Select.Item
                       key={timeframe.value}
                       value={timeframe.value}
-                      className='flex select-none items-center px-3 py-2 text-sm text-white rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
+                      className='flex select-none items-center px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
                     >
                       <Select.ItemText>{timeframe.label}</Select.ItemText>
                     </Select.Item>
@@ -229,16 +209,16 @@ export function MarketData() {
         <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>
           <Card title='Current Price' className='p-4'>
             <div>
-              <p className='text-sm text-gray-500'>Current Price</p>
+              <p className='text-sm text-muted-500'>Current Price</p>
               <p className='text-lg font-semibold'>{stats.price.toFixed(5)}</p>
             </div>
           </Card>
           <Card title='24h Change' className='p-4'>
             <div className='flex items-center justify-between'>
               <div>
-                <p className='text-sm text-gray-500'>24h Change</p>
+                <p className='text-sm text-muted-500'>24h Change</p>
                 <p
-                  className={`text-lg font-semibold ${stats.change >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                  className={`text-lg font-semibold ${stats.change >= 0 ? 'text-gain-600' : 'text-loss-600'}`}
                 >
                   {stats.change >= 0 ? '+' : ''}
                   {stats.change.toFixed(5)} ({stats.changePercent.toFixed(2)}%)
@@ -248,14 +228,14 @@ export function MarketData() {
           </Card>
           <Card title='24h High' className='p-4'>
             <div>
-              <p className='text-sm text-gray-500'>24h High</p>
-              <p className='text-lg font-semibold text-green-600'>{stats.high24h.toFixed(5)}</p>
+              <p className='text-sm text-muted-500'>24h High</p>
+              <p className='text-lg font-semibold text-gain-600'>{stats.high24h.toFixed(5)}</p>
             </div>
           </Card>
           <Card title='24h Low' className='p-4'>
             <div>
-              <p className='text-sm text-gray-500'>24h Low</p>
-              <p className='text-lg font-semibold text-red-600'>{stats.low24h.toFixed(5)}</p>
+              <p className='text-sm text-muted-500'>24h Low</p>
+              <p className='text-lg font-semibold text-loss-600'>{stats.low24h.toFixed(5)}</p>
             </div>
           </Card>
         </div>
@@ -269,7 +249,7 @@ export function MarketData() {
         )}
         {!isLoading && error && (
           <div className='flex items-center justify-center h-full'>
-            <p className='text-red-600'>
+            <p className='text-loss-600'>
               Error loading chart data: {error?.message || 'Unknown error'}
             </p>
           </div>
@@ -280,8 +260,8 @@ export function MarketData() {
         {!isLoading && !error && chartData.length === 0 && (
           <div className='flex items-center justify-center h-full'>
             <div className='text-center'>
-              <p className='text-gray-500 mb-2'>No data available for {selectedInstrument}</p>
-              <p className='text-sm text-gray-400'>
+              <p className='text-muted-500 mb-2'>No data available for {selectedInstrument}</p>
+              <p className='text-sm text-muted-400'>
                 The instrument may not exist or has no{' '}
                 {timeframes.find(t => t.value === selectedTimeframe)?.label.toLowerCase()} data
               </p>

@@ -563,7 +563,7 @@ describe('WebSocketClient', () => {
       mockWs.onmessage?.({ data: JSON.stringify(createAuthRequired()) })
       expect(handler).toHaveBeenCalled()
     })
-    it('ignores JSON pong message', async () => {
+    it('ignores pong when no ping was sent', async () => {
       const handler = vi.fn()
 
       client.onMessage('*', handler)
@@ -573,6 +573,21 @@ describe('WebSocketClient', () => {
 
       mockWs.onmessage?.({ data: JSON.stringify(createPong()) })
       expect(handler).not.toHaveBeenCalled()
+    })
+    it('computes RTT from pong when ping was sent', async () => {
+      const handler = vi.fn()
+
+      client.onMessage('pong', handler)
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      ;(client as any).pingSentAt = Date.now() - 42
+      const mockWs = (client as any).ws
+
+      mockWs.onmessage?.({ data: JSON.stringify(createPong()) })
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'pong', rtt_ms: expect.any(Number) })
+      )
+      expect((client as any).pingSentAt).toBeNull()
     })
     it('handles non-string message data gracefully', async () => {
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -669,6 +684,14 @@ describe('WebSocketClient', () => {
         data: JSON.stringify(createPong()),
       } as MessageEvent)
       expect(notifySpy).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pong' }))
+      ;(secureClient as any).pingSentAt = Date.now() - 10
+      ;(secureClient as any).handleMessage({
+        data: JSON.stringify(createPong()),
+      } as MessageEvent)
+      expect(notifySpy).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'pong', rtt_ms: expect.any(Number) })
+      )
+      notifySpy.mockClear()
       ;(secureClient as any).handleMessage({
         data: JSON.stringify(createAuthRequired()),
       } as MessageEvent)
@@ -1133,15 +1156,22 @@ describe('WebSocketClient', () => {
       const mockWs = (client as any).ws
 
       mockWs.send.mockClear()
-      await vi.advanceTimersByTimeAsync(31000)
+      await vi.advanceTimersByTimeAsync(6000)
       expect(mockWs.send).toHaveBeenCalled()
+    })
+    it('sets pingSentAt when sending heartbeat', async () => {
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      ;(client as any).pingSentAt = null
+      await vi.advanceTimersByTimeAsync(6000)
+      expect((client as any).pingSentAt).toBeTypeOf('number')
     })
     it('does not send heartbeat when not connected', async () => {
       ;(client as any).startHeartbeat()
       ;(client as any).ws = null
       const sendSpy = vi.spyOn(client, 'send')
 
-      await vi.advanceTimersByTimeAsync(31000)
+      await vi.advanceTimersByTimeAsync(6000)
       expect(sendSpy).not.toHaveBeenCalled()
       sendSpy.mockRestore()
     })
@@ -1160,8 +1190,8 @@ describe('WebSocketClient', () => {
 
       ;(client as any).heartbeatTimer = setInterval(() => {}, 1000)
       ;(client as any).startHeartbeat()
-      await vi.advanceTimersByTimeAsync(31000)
-      await vi.advanceTimersByTimeAsync(31000)
+      await vi.advanceTimersByTimeAsync(6000)
+      await vi.advanceTimersByTimeAsync(6000)
       expect(clearIntervalSpy).toHaveBeenCalled()
       expect(sendSpy).toHaveBeenCalled()
       expect((client as any).heartbeatTimer).not.toBe(firstTimer)
