@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-clean docker-build docker-migrate docker-push docker-run docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build docker-migrate docker-push docker-run docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -83,6 +83,9 @@ help:
 	$(info ios-build     Build iOS app)
 	$(info ios-test      Run iOS unit tests)
 	$(info ios-clean     Clean iOS build artifacts)
+	$(info ios-archive   Archive iOS app [Release, generic iOS device])
+	$(info ios-export    Export IPA from xcarchive [App Store Connect options])
+	$(info ios-ipa       Build IPA [archive + export])
 	$(info )
 	$(info Docker:)
 	$(info docker-build   Build Docker image)
@@ -120,6 +123,13 @@ IMAGE_NAME := klattm/snapper
 IMAGE_TAG := latest
 UI_DIR := frontend
 ROOT_DIR := $(CURDIR)
+IOS_DIR := ios
+IOS_PROJECT := $(IOS_DIR)/Snapper.xcodeproj
+IOS_SCHEME ?= Snapper
+IOS_SIMULATOR_DESTINATION ?= platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2
+IOS_ARCHIVE_PATH ?= $(IOS_DIR)/build/$(IOS_SCHEME).xcarchive
+IOS_EXPORT_PATH ?= $(IOS_DIR)/build/export
+IOS_EXPORT_OPTIONS ?= $(IOS_DIR)/ExportOptions.plist
 
 system-deps:
 ifeq ($(OS),Windows_NT)
@@ -403,15 +413,29 @@ ios-gen-types:
 
 ios-build:
 	$(info Building iOS app...)
-	cd ios && xcodebuild -scheme Snapper -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2' build
+	cd "$(IOS_DIR)" && xcodebuild -scheme "$(IOS_SCHEME)" -destination '$(IOS_SIMULATOR_DESTINATION)' build
 
 ios-test:
 	$(info Running iOS tests...)
-	cd ios && xcodebuild -scheme Snapper -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2' test
+	cd "$(IOS_DIR)" && xcodebuild -scheme "$(IOS_SCHEME)" -destination '$(IOS_SIMULATOR_DESTINATION)' test
+
+ios-archive:
+	$(info Archiving iOS app [Release]...)
+	rm -rf "$(IOS_ARCHIVE_PATH)"
+	xcodebuild -project "$(IOS_PROJECT)" -scheme "$(IOS_SCHEME)" -configuration Release -destination 'generic/platform=iOS' -archivePath "$(IOS_ARCHIVE_PATH)" archive
+
+ios-export:
+	$(info Exporting IPA from archive...)
+	rm -rf "$(IOS_EXPORT_PATH)"
+	xcodebuild -exportArchive -archivePath "$(IOS_ARCHIVE_PATH)" -exportPath "$(IOS_EXPORT_PATH)" -exportOptionsPlist "$(IOS_EXPORT_OPTIONS)"
+
+ios-ipa: ios-archive ios-export
+	$(info IPA exported to $(IOS_EXPORT_PATH))
+	ls -1 "$(IOS_EXPORT_PATH)"/*.ipa
 
 ios-clean:
 	$(info Cleaning iOS build artifacts...)
-	cd ios && rm -rf DerivedData build
+	rm -rf "$(IOS_DIR)/DerivedData" "$(IOS_DIR)/build"
 
 docker-build:
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
