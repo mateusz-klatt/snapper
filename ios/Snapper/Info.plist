@@ -29,5 +29,9 @@
 		<key>UIImageName</key>
 		<string>AppIcon</string>
 	</dict>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
 </dict>
 </plist>

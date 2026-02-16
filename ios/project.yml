@@ -29,6 +29,8 @@ targets:
         UILaunchScreen:
           UIColorName: SystemBackground
           UIImageName: AppIcon
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: ie.klatt.snapper
       INFOPLIST_FILE: Snapper/Info.plist
