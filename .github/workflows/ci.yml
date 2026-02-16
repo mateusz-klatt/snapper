@@ -103,6 +103,3 @@ jobs:
 
       - name: Run iOS tests
         run: make ios-test
-
-      - name: Archive iOS app
-        run: make ios-archive
