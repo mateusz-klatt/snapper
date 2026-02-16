@@ -25,7 +25,9 @@ targets:
       path: Snapper/Info.plist
       properties:
         CFBundleDisplayName: Snapper
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: SystemBackground
+          UIImageName: AppIcon
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: ie.klatt.snapper
       INFOPLIST_FILE: Snapper/Info.plist
