@@ -5,62 +5,69 @@ struct LoginView: View {
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 24) {
+            ZStack {
+                Color.bgBase
+                    .ignoresSafeArea()
 
-                VStack(spacing: 8) {
-                    Image(systemName: "chart.line.uptrend.xyaxis")
-                        .font(.system(size: 60))
-                        .foregroundColor(.blue)
+                VStack(spacing: 24) {
 
-                    Text("Snapper")
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
+                    VStack(spacing: 8) {
+                        Image(systemName: "chart.line.uptrend.xyaxis")
+                            .font(.system(size: 60))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundColor(.brandRed)
 
-                    Text("Trading Platform")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.bottom, 32)
+                        Text("Snapper")
+                            .font(.largeTitle)
+                            .fontWeight(.bold)
+                            .foregroundColor(.textPrimary)
 
-                VStack(spacing: 16) {
-                    TextField("Username", text: $viewModel.username)
-                        .textFieldStyle(.roundedBorder)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    SecureField("Password", text: $viewModel.password)
-                        .textFieldStyle(.roundedBorder)
-
-                    if let errorMessage = viewModel.errorMessage {
-                        Text(errorMessage)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Trading Platform")
+                            .font(.subheadline)
+                            .foregroundColor(.textSecondary)
                     }
+                    .padding(.bottom, 32)
 
-                    Button(action: { Task { await viewModel.login() } }) {
-                        Group {
-                            if viewModel.isLoading {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                            } else {
-                                Text("Login")
-                                    .fontWeight(.semibold)
-                            }
+                    VStack(spacing: 16) {
+                        TextField("Username", text: $viewModel.username)
+                            .textFieldStyle(.roundedBorder)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+
+                        SecureField("Password", text: $viewModel.password)
+                            .textFieldStyle(.roundedBorder)
+
+                        if let errorMessage = viewModel.errorMessage {
+                            Text(errorMessage)
+                                .font(.caption)
+                                .foregroundColor(Color.lossRed)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                    }
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-                    .disabled(!viewModel.isLoginEnabled)
-                }
-                .padding(.horizontal, 32)
 
-                Spacer()
+                        Button(action: { Task { await viewModel.login() } }) {
+                            Group {
+                                if viewModel.isLoading {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                } else {
+                                    Text("Sign In")
+                                        .fontWeight(.semibold)
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                        }
+                        .background(Color.brandRed)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                        .disabled(!viewModel.isLoginEnabled)
+                    }
+                    .padding(.horizontal, 32)
+
+                    Spacer()
+                }
+                .padding(.top, 80)
             }
-            .padding(.top, 80)
             .navigationBarHidden(true)
         }
     }

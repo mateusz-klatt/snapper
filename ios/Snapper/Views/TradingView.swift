@@ -97,7 +97,7 @@ struct PositionRowView: View {
                 Spacer()
                 Text(position.quantity > 0 ? "Long" : "Short")
                     .font(.caption)
-                    .foregroundColor(position.quantity > 0 ? .green : .red)
+                    .foregroundColor(position.quantity > 0 ? .profitGreen : .lossRed)
             }
             HStack {
                 Text("Qty: \(position.quantity, specifier: "%.4f")")
@@ -108,7 +108,7 @@ struct PositionRowView: View {
             .foregroundColor(.secondary)
             HStack {
                 Text("P&L: \(position.unrealizedPnl, specifier: "%.2f")")
-                    .foregroundColor(position.unrealizedPnl >= 0 ? .green : .red)
+                    .foregroundColor(position.unrealizedPnl >= 0 ? .profitGreen : .lossRed)
             }
             .font(.caption)
         }
@@ -129,7 +129,7 @@ struct OrderRowView: View {
                     .font(.caption)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.blue.opacity(0.2))
+                    .background(Color.brandRed.opacity(0.2))
                     .cornerRadius(4)
             }
             HStack {
@@ -155,7 +155,7 @@ struct SignalRowView: View {
                 Spacer()
                 Text(signal.side)
                     .font(.caption)
-                    .foregroundColor(signal.side == "buy" ? .green : .red)
+                    .foregroundColor(signal.side == "buy" ? .profitGreen : .lossRed)
             }
             Text(signal.reason)
                 .font(.caption)

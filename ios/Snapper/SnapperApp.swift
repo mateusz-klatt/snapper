@@ -7,14 +7,17 @@ struct SnapperApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if authService.isAuthenticated {
-                MainTabView()
-                    .environmentObject(authService)
-                    .environmentObject(webSocketManager)
-            } else {
-                LoginView()
-                    .environmentObject(authService)
+            Group {
+                if authService.isAuthenticated {
+                    MainTabView()
+                        .environmentObject(authService)
+                        .environmentObject(webSocketManager)
+                } else {
+                    LoginView()
+                        .environmentObject(authService)
+                }
             }
+            .tint(.brandRed)
         }
     }
 }

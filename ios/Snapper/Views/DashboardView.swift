@@ -56,7 +56,7 @@ struct DashboardView: View {
 
             Text(connectionText)
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(.textSecondary)
 
             Spacer()
         }
@@ -66,11 +66,11 @@ struct DashboardView: View {
     private var connectionColor: Color {
         switch webSocketManager.connectionState {
         case .connected:
-            return .green
+            return .brandGreen
         case .connecting, .authenticating:
             return .orange
         case .disconnected, .error:
-            return .red
+            return .brandRed
         }
     }
 
@@ -99,7 +99,7 @@ struct DashboardView: View {
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(status.trader.status == "running" ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
+                    .background(status.trader.status == "running" ? Color.brandGreen.opacity(0.2) : Color.brandRed.opacity(0.2))
                     .cornerRadius(4)
             }
 
@@ -123,15 +123,15 @@ struct DashboardView: View {
             }
         }
         .padding()
-        .background(Color(uiColor: .systemGray6))
+        .background(Color.bgSurface)
         .cornerRadius(12)
     }
 
-    private func statView(title: String, value: String, color: Color = .primary) -> some View {
+    private func statView(title: String, value: String, color: Color = .textPrimary) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(.textSecondary)
 
             Text(value)
                 .font(.headline)
@@ -162,7 +162,7 @@ struct DashboardView: View {
                     VStack(alignment: .trailing, spacing: 4) {
                         Text(String(format: "$%.2f", position.unrealizedPnl))
                             .font(.subheadline)
-                            .foregroundColor(position.unrealizedPnl >= 0 ? .green : .red)
+                            .foregroundColor(position.unrealizedPnl >= 0 ? .profitGreen : .lossRed)
 
                         Text("Unrealized P&L")
                             .font(.caption2)
@@ -174,7 +174,7 @@ struct DashboardView: View {
             }
         }
         .padding()
-        .background(Color(uiColor: .systemGray6))
+        .background(Color.bgSurface)
         .cornerRadius(12)
     }
 
@@ -210,7 +210,7 @@ struct DashboardView: View {
             }
         }
         .padding()
-        .background(Color(uiColor: .systemGray6))
+        .background(Color.bgSurface)
         .cornerRadius(12)
     }
 
@@ -246,15 +246,15 @@ struct DashboardView: View {
     private func statusColor(for status: String) -> Color {
         switch status.lowercased() {
         case "filled":
-            return .green
+            return .brandGreen
         case "pending", "open":
-            return .blue
+            return .brandRed
         case "cancelled", "rejected":
-            return .red
+            return .lossRed
         case "partially_filled":
             return .orange
         default:
-            return .gray
+            return .textSecondary
         }
     }
 }

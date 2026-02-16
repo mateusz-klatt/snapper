@@ -105,11 +105,11 @@ struct SettingsView: View {
     private var connectionColor: Color {
         switch webSocketManager.connectionState {
         case .connected:
-            return .green
+            return .brandGreen
         case .connecting, .authenticating:
             return .orange
         case .disconnected, .error:
-            return .red
+            return .brandRed
         }
     }
 
