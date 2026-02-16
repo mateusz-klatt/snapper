@@ -38,6 +38,7 @@ struct DashboardView: View {
                 }
                 .padding()
             }
+            .background(Color.bgBase)
             .navigationTitle("Dashboard")
             .refreshable {
                 await loadData()

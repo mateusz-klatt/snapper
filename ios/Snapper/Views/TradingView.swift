@@ -46,6 +46,8 @@ struct TradingView: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(Color.bgBase)
             .navigationTitle("Trading")
             .refreshable {
                 await loadData()

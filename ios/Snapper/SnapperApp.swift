@@ -17,7 +17,7 @@ struct SnapperApp: App {
                         .environmentObject(authService)
                 }
             }
-            .tint(.brandRed)
+            .tint(.brandGreen)
         }
     }
 }
