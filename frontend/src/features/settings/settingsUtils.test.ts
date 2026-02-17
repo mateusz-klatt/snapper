@@ -119,12 +119,12 @@ describe('tokenizeJson', () => {
     const tokens = tokenizeJson('{"name": "test"}')
 
     expect(tokens).toEqual([
-      { type: 'punctuation', value: '{' },
-      { type: 'key', value: '"name"' },
-      { type: 'punctuation', value: ':' },
-      { type: 'whitespace', value: ' ' },
-      { type: 'string', value: '"test"' },
-      { type: 'punctuation', value: '}' },
+      expect.objectContaining({ type: 'punctuation', value: '{' }),
+      expect.objectContaining({ type: 'key', value: '"name"' }),
+      expect.objectContaining({ type: 'punctuation', value: ':' }),
+      expect.objectContaining({ type: 'whitespace', value: ' ' }),
+      expect.objectContaining({ type: 'string', value: '"test"' }),
+      expect.objectContaining({ type: 'punctuation', value: '}' }),
     ])
   })
 
@@ -132,14 +132,14 @@ describe('tokenizeJson', () => {
     const tokens = tokenizeJson('{"count": 42}')
     const numberToken = tokens.find(t => t.type === 'number')
 
-    expect(numberToken).toEqual({ type: 'number', value: '42' })
+    expect(numberToken).toEqual(expect.objectContaining({ type: 'number', value: '42' }))
   })
 
   it('tokenizes negative and decimal numbers', () => {
     const tokens = tokenizeJson('{"val": -3.14}')
     const numToken = tokens.find(t => t.type === 'number')
 
-    expect(numToken).toEqual({ type: 'number', value: '-3.14' })
+    expect(numToken).toEqual(expect.objectContaining({ type: 'number', value: '-3.14' }))
   })
 
   it('tokenizes booleans', () => {
@@ -147,8 +147,8 @@ describe('tokenizeJson', () => {
     const boolTokens = tokens.filter(t => t.type === 'boolean')
 
     expect(boolTokens).toEqual([
-      { type: 'boolean', value: 'true' },
-      { type: 'boolean', value: 'false' },
+      expect.objectContaining({ type: 'boolean', value: 'true' }),
+      expect.objectContaining({ type: 'boolean', value: 'false' }),
     ])
   })
 
@@ -156,14 +156,16 @@ describe('tokenizeJson', () => {
     const tokens = tokenizeJson('{"value": null}')
     const nullToken = tokens.find(t => t.type === 'null')
 
-    expect(nullToken).toEqual({ type: 'null', value: 'null' })
+    expect(nullToken).toEqual(expect.objectContaining({ type: 'null', value: 'null' }))
   })
 
   it('tokenizes arrays', () => {
     const tokens = tokenizeJson('[1, 2]')
 
-    expect(tokens[0]).toEqual({ type: 'punctuation', value: '[' })
-    expect(tokens[tokens.length - 1]).toEqual({ type: 'punctuation', value: ']' })
+    expect(tokens[0]).toEqual(expect.objectContaining({ type: 'punctuation', value: '[' }))
+    expect(tokens[tokens.length - 1]).toEqual(
+      expect.objectContaining({ type: 'punctuation', value: ']' })
+    )
   })
 
   it('returns empty array for empty string', () => {
@@ -176,6 +178,12 @@ describe('tokenizeJson', () => {
     const wsTokens = tokens.filter(t => t.type === 'whitespace')
 
     expect(wsTokens.length).toBeGreaterThan(0)
+  })
+
+  it('skips unrecognized characters', () => {
+    const tokens = tokenizeJson('~42')
+
+    expect(tokens).toEqual([expect.objectContaining({ type: 'number', value: '42' })])
   })
 
   it('handles escaped quotes in strings', () => {

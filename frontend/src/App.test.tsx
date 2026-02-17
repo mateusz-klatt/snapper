@@ -188,7 +188,7 @@ describe('App', () => {
     fireEvent.click(screen.getByLabelText('Open sidebar'))
     const backdrop = screen
       .getAllByLabelText('Close sidebar')
-      .find(el => el.getAttribute('role') === 'button')
+      .find(el => el.className.includes('fixed inset-0'))
 
     expect(backdrop).toBeDefined()
     fireEvent.click(backdrop as HTMLElement)
@@ -204,7 +204,7 @@ describe('App', () => {
     fireEvent.click(screen.getByLabelText('Open sidebar'))
     const backdrop = screen
       .getAllByLabelText('Close sidebar')
-      .find(el => el.getAttribute('role') === 'button')
+      .find(el => el.className.includes('fixed inset-0'))
 
     expect(backdrop).toBeDefined()
     fireEvent.keyDown(backdrop as HTMLElement, { key: 'Escape' })
@@ -218,7 +218,9 @@ describe('App', () => {
       expect(screen.getByLabelText('Open sidebar')).toBeInTheDocument()
     })
     fireEvent.click(screen.getByLabelText('Open sidebar'))
-    const closeBtn = screen.getAllByLabelText('Close sidebar').find(el => el.tagName === 'BUTTON')
+    const closeBtn = screen
+      .getAllByLabelText('Close sidebar')
+      .find(el => el.tagName === 'BUTTON' && !el.className.includes('fixed inset-0'))
 
     expect(closeBtn).toBeDefined()
     fireEvent.click(closeBtn as HTMLElement)
@@ -247,7 +249,7 @@ describe('App', () => {
     fireEvent.click(screen.getByLabelText('Open sidebar'))
     const backdrop = screen
       .getAllByLabelText('Close sidebar')
-      .find(el => el.getAttribute('role') === 'button')
+      .find(el => el.className.includes('fixed inset-0'))
 
     expect(backdrop).toBeDefined()
     fireEvent.keyDown(backdrop as HTMLElement, { key: 'Enter' })

@@ -44,8 +44,8 @@ const JsonSyntaxHighlight: React.FC<JsonSyntaxHighlightProps> = ({ value }) => {
 
   return (
     <pre className='text-xs whitespace-pre-wrap break-all font-mono'>
-      {tokens.map((token, index) => (
-        <span key={index} className={JSON_TOKEN_COLORS[token.type]}>
+      {tokens.map(token => (
+        <span key={token.id} className={JSON_TOKEN_COLORS[token.type]}>
           {token.value}
         </span>
       ))}

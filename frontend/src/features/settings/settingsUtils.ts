@@ -81,34 +81,43 @@ export type JsonTokenType =
   | 'whitespace'
 
 interface JsonToken {
+  id: string
   type: JsonTokenType
   value: string
 }
 
-const JSON_TOKEN_SOURCE =
-  '("(?:[^"\\\\]|\\\\.)*")(?=\\s*:)|("(?:[^"\\\\]|\\\\.)*")|(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)|\\b(true|false)\\b|\\b(null)\\b|([{}\\[\\]:,])|(\\s+)'
-
-const TOKEN_GROUP_TYPES: JsonTokenType[] = [
-  'key',
-  'string',
-  'number',
-  'boolean',
-  'null',
-  'punctuation',
-  'whitespace',
+const TOKEN_PATTERNS: [JsonTokenType, RegExp][] = [
+  ['key', /"(?:[^"\\]|\\.)*"(?=\s*:)/y],
+  ['string', /"(?:[^"\\]|\\.)*"/y],
+  ['number', /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y],
+  ['boolean', /(?:true|false)\b/y],
+  ['null', /null\b/y],
+  ['punctuation', /[{}[\]:,]/y],
+  ['whitespace', /\s+/y],
 ]
 
 export function tokenizeJson(json: string): JsonToken[] {
   const tokens: JsonToken[] = []
-  const pattern = new RegExp(JSON_TOKEN_SOURCE, 'g')
-  let match: RegExpExecArray | null
+  let pos = 0
+  let id = 0
 
-  while ((match = pattern.exec(json)) !== null) {
-    for (let i = 0; i < TOKEN_GROUP_TYPES.length; i++) {
-      if (match[i + 1] !== undefined) {
-        tokens.push({ type: TOKEN_GROUP_TYPES[i], value: match[i + 1] })
+  while (pos < json.length) {
+    let matched = false
+
+    for (const [type, pattern] of TOKEN_PATTERNS) {
+      pattern.lastIndex = pos
+      const match = pattern.exec(json)
+
+      if (match) {
+        tokens.push({ id: `t${id++}`, type, value: match[0] })
+        pos = pattern.lastIndex
+        matched = true
         break
       }
+    }
+
+    if (!matched) {
+      pos++
     }
   }
 

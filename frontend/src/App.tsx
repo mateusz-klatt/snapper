@@ -23,14 +23,13 @@ function App() {
   return (
     <div className='flex h-screen bg-dark-900 text-alpine-900'>
       {sidebarOpen && (
-        <div
-          className='fixed inset-0 z-40 bg-black/40 md:hidden'
+        <button
+          type='button'
+          className='fixed inset-0 z-40 bg-black/40 md:hidden appearance-none border-none cursor-default'
           onClick={() => setSidebarOpen(false)}
           onKeyDown={e => {
             if (e.key === 'Escape') setSidebarOpen(false)
           }}
-          role='button'
-          tabIndex={0}
           aria-label='Close sidebar'
         />
       )}
