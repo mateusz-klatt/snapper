@@ -90,13 +90,13 @@ class DummySymbolUpdater(SymbolUpdaterService[Any]):
         """Expose _fetch_symbols for testing."""
         return await self._fetch_symbols(client)
 
-    async def setup_zmq_public(self) -> None:
+    def setup_zmq_public(self) -> None:
         """Expose _setup_zmq for testing."""
-        await self._setup_zmq()
+        self._setup_zmq()
 
-    async def cleanup_zmq_public(self) -> None:
+    def cleanup_zmq_public(self) -> None:
         """Expose _cleanup_zmq for testing."""
-        await self._cleanup_zmq()
+        self._cleanup_zmq()
 
 
 class StubSocket:
@@ -341,12 +341,12 @@ async def test_setup_and_cleanup_zmq_manage_resources(
 
     factory = ContextFactory()
     monkeypatch.setattr("snapper.application.updaters.symbols.base.zmq.asyncio.Context", factory)
-    await updater.setup_zmq_public()
+    updater.setup_zmq_public()
     assert factory.created is not None
     assert updater.context is not None
     assert updater.publisher is not None
     assert socket.connected_to == updater.settings.zmq_broker_xsub
-    await updater.cleanup_zmq_public()
+    updater.cleanup_zmq_public()
     assert socket.closed is True
     assert factory.created.terminated is True
     assert updater.publisher is None
@@ -367,7 +367,7 @@ async def test_broadcast_cache_invalidation_uses_socket(
     updater = updater_factory(2, False)
     socket = StubSocket()
 
-    async def fake_setup() -> None:
+    def fake_setup() -> None:
         updater.publisher = cast(Any, socket)
 
     monkeypatch.setattr(updater, "_setup_zmq", fake_setup)
@@ -396,7 +396,7 @@ async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
     socket = StubSocket()
     setup_called = False
 
-    async def fake_setup() -> None:
+    def fake_setup() -> None:
         nonlocal setup_called
         setup_called = True
 
@@ -422,7 +422,7 @@ async def test_cleanup_safe_when_no_resources(
     Then: No error and attributes remain None.
     """
     updater = updater_factory(1, False)
-    await updater.cleanup_zmq_public()
+    updater.cleanup_zmq_public()
     assert updater.context is None
     assert updater.publisher is None
 
@@ -481,11 +481,11 @@ async def test_start_performs_full_update_workflow(
     zmq_setup_called = False
     zmq_cleanup_called = False
 
-    async def mock_setup_zmq() -> None:
+    def mock_setup_zmq() -> None:
         nonlocal zmq_setup_called
         zmq_setup_called = True
 
-    async def mock_cleanup_zmq() -> None:
+    def mock_cleanup_zmq() -> None:
         nonlocal zmq_cleanup_called
         zmq_cleanup_called = True
 
@@ -556,7 +556,7 @@ async def test_start_cleans_up_on_exception(
     zmq_cleanup_called = False
     client_disconnected = False
 
-    async def mock_cleanup_zmq() -> None:
+    def mock_cleanup_zmq() -> None:
         nonlocal zmq_cleanup_called
         zmq_cleanup_called = True
 
@@ -664,9 +664,9 @@ async def test_setup_zmq_skips_when_already_setup(
 
     factory = ContextFactory()
     monkeypatch.setattr("snapper.application.updaters.symbols.base.zmq.asyncio.Context", factory)
-    await updater.setup_zmq_public()
+    updater.setup_zmq_public()
     assert factory.call_count == 1
-    await updater.setup_zmq_public()
+    updater.setup_zmq_public()
     assert factory.call_count == 1, "Context should not be created again"
 
 
@@ -683,7 +683,7 @@ async def test_broadcast_cache_invalidation_handles_missing_publisher(
     """
     updater = updater_factory(1, False)
 
-    async def mock_setup_fails() -> None:
+    def mock_setup_fails() -> None:
         updater.publisher = None
 
     monkeypatch.setattr(updater, "_setup_zmq", mock_setup_fails)

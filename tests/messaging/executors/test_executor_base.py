@@ -406,7 +406,7 @@ async def test_handle_symbol_alias_update_invalid_json() -> None:
     Then: The method handles the error gracefully.
     """
     ex: Any = MergedDummyExecutor()
-    await ex._handle_symbol_alias_update("{bad json")
+    ex._handle_symbol_alias_update("{bad json")
 
 
 @pytest.mark.asyncio
@@ -512,11 +512,11 @@ async def test_order_handler_settings_message(monkeypatch: pytest.MonkeyPatch) -
             )
 
     ex.subscriber = OneShotSubscriber()
-    handle_mock = AsyncMock()
+    handle_mock = MagicMock()
     ex._handle_settings_update = handle_mock
     task = asyncio.create_task(ex._order_handler())
     await task
-    handle_mock.assert_awaited_once()
+    handle_mock.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1639,7 +1639,7 @@ class TestSymbolAliasUpdate:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        await service_any._handle_symbol_alias_update("not valid json {{{")
+        service_any._handle_symbol_alias_update("not valid json {{{")
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1665,7 +1665,7 @@ class TestSymbolAliasUpdate:
         ) as mock_mapper:
             mock_instance = MagicMock()
             mock_mapper.return_value = mock_instance
-            await service_any._handle_symbol_alias_update(payload)
+            service_any._handle_symbol_alias_update(payload)
             mock_instance.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
 
 
@@ -1692,7 +1692,7 @@ class TestSettingsUpdate:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        await service_any._handle_settings_update("not valid json {{{")
+        service_any._handle_settings_update("not valid json {{{")
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1718,7 +1718,7 @@ class TestSettingsUpdate:
             mock_instance._parse_value.return_value = "test_value"
             mock_instance._cache = {}
             mock_service.return_value = mock_instance
-            await service_any._handle_settings_update(payload)
+            service_any._handle_settings_update(payload)
             mock_instance._parse_value.assert_called_once_with("test_value")
             assert mock_instance._cache["test_key"] == "test_value"
 
@@ -1743,7 +1743,7 @@ class TestSettingsUpdate:
         payload = envelope.to_json()
         with patch("snapper.messaging.executors.base.SettingsService.get_instance") as mock_service:
             mock_service.return_value = None
-            await service_any._handle_settings_update(payload)
+            service_any._handle_settings_update(payload)
 
 
 class TestPublishOrderStatus:
@@ -2933,7 +2933,7 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         payload = json.dumps({"event": "symbol_aliases_updated", "action": "clear_cache"})
-        await service_any._handle_symbol_alias_update(payload)
+        service_any._handle_symbol_alias_update(payload)
         mock_db_mapper.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
 
     @pytest.mark.asyncio
@@ -3081,7 +3081,7 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.subscriber = AsyncMock()
-        service_any._handle_symbol_alias_update = AsyncMock()
+        service_any._handle_symbol_alias_update = MagicMock()
         payload_bytes = json.dumps(
             {"event": "symbol_aliases_updated", "action": "clear_cache"}
         ).encode("utf-8")
@@ -3092,7 +3092,7 @@ class TestExecutorCoverage:
 
         service_any.subscriber.recv_multipart = AsyncMock(side_effect=fake_recv)
         await service_any._order_handler()
-        service_any._handle_symbol_alias_update.assert_awaited_once_with(
+        service_any._handle_symbol_alias_update.assert_called_once_with(
             payload_bytes.decode("utf-8")
         )
 
@@ -3115,7 +3115,7 @@ class TestExecutorCoverage:
         service_any.running = True
         service_any.subscriber = AsyncMock()
         service_any._process_order = AsyncMock()
-        service_any._handle_symbol_alias_update = AsyncMock()
+        service_any._handle_symbol_alias_update = MagicMock()
 
         async def fake_recv() -> tuple[str, bytes]:
             service_any.running = False
@@ -3128,7 +3128,7 @@ class TestExecutorCoverage:
         ):
             await service_any._order_handler()
         service_any._process_order.assert_not_awaited()
-        service_any._handle_symbol_alias_update.assert_not_awaited()
+        service_any._handle_symbol_alias_update.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3304,7 +3304,7 @@ class TestExecutorCoverage:
             "snapper.infrastructure.symbols.mapper.SymbolMapperService.get_instance",
             side_effect=AssertionError("should not fetch mapper"),
         ):
-            await service_any._handle_symbol_alias_update(json.dumps({"event": "other"}))
+            service_any._handle_symbol_alias_update(json.dumps({"event": "other"}))
 
 
 class TestExecutor:

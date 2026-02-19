@@ -316,7 +316,7 @@ export const Strategies: React.FC = () => {
       {}
       <div className='space-y-4'>
         <h3 className='text-lg font-medium text-alpine-900'>Configured Strategies</h3>
-        {filteredStrategies.length > 0 ? (
+        {filteredStrategies.length > 0 && (
           <div className='grid grid-cols-1 lg:grid-cols-2 gap-4'>
             {filteredStrategies.map(strategy => (
               <StrategyCard
@@ -333,7 +333,8 @@ export const Strategies: React.FC = () => {
               />
             ))}
           </div>
-        ) : strategies.length > 0 ? (
+        )}
+        {filteredStrategies.length === 0 && strategies.length > 0 && (
           <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-6 text-center'>
             <p className='text-muted-500'>No strategies match your filters</p>
             <button
@@ -346,7 +347,8 @@ export const Strategies: React.FC = () => {
               Clear filters
             </button>
           </div>
-        ) : (
+        )}
+        {filteredStrategies.length === 0 && strategies.length === 0 && (
           <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-8 text-center'>
             <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
               <Gauge className='text-muted-500' size={24} />

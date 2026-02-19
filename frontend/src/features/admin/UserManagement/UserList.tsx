@@ -245,11 +245,9 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
             <Users className='mx-auto h-12 w-12 text-muted-400' />
             <h3 className='mt-2 text-sm font-medium text-alpine-900'>No users found</h3>
             <p className='mt-1 text-sm text-muted-500'>
-              {searchTerm
-                ? 'No users match your search criteria.'
-                : includeInactive
-                  ? 'No users found.'
-                  : 'No active users found.'}
+              {searchTerm && 'No users match your search criteria.'}
+              {!searchTerm && includeInactive && 'No users found.'}
+              {!searchTerm && !includeInactive && 'No active users found.'}
             </p>
           </div>
         )}

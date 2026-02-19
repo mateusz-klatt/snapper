@@ -229,9 +229,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 parsed.suffix, payload_str, exchange_name, parsed.instrument
             )
         elif topic_str == "system.symbol_aliases":
-            await self._handle_symbol_alias_update(payload_str)
+            self._handle_symbol_alias_update(payload_str)
         elif topic_str == "system.settings":
-            await self._handle_settings_update(payload_str)
+            self._handle_settings_update(payload_str)
         else:
             logger.warning(f"Received message on unexpected topic: {topic_str}")
 
@@ -862,7 +862,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"Error publishing heartbeat: {e}")
 
-    async def _handle_symbol_alias_update(self, payload: str) -> None:
+    def _handle_symbol_alias_update(self, payload: str) -> None:
         """Handle symbol alias cache invalidation message.
 
         Args:
@@ -877,7 +877,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error handling symbol alias update: {e}")
 
-    async def _handle_settings_update(self, payload: str) -> None:
+    def _handle_settings_update(self, payload: str) -> None:
         """Handle settings update message and refresh cached settings.
 
         Args:

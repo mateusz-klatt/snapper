@@ -62,6 +62,29 @@ def load_versions(pyproject_path: Path = DEFAULT_PYPROJECT_PATH) -> dict[str, st
     }
 
 
+def _validate_config_path(config_path: Path) -> Path:
+    """Resolve and validate the config file path.
+
+    Args:
+        config_path: Path to the .pre-commit-config.yaml file.
+
+    Returns:
+        The resolved absolute path.
+
+    Raises:
+        FileNotFoundError: If config file does not exist.
+        ValueError: If path contains traversal or targets wrong filename.
+    """
+    if ".." in config_path.parts:
+        raise ValueError(f"Config path must not contain '..' components: {config_path}")
+    resolved = config_path.resolve()
+    if resolved.name != ".pre-commit-config.yaml":
+        raise ValueError(f"Config path must target .pre-commit-config.yaml: {config_path}")
+    if not resolved.exists():
+        raise FileNotFoundError(".pre-commit-config.yaml not found")
+    return resolved
+
+
 def update_config(
     expected_revs: dict[str, str],
     config_path: Path = DEFAULT_CONFIG_PATH,
@@ -74,13 +97,9 @@ def update_config(
 
     Raises:
         FileNotFoundError: If config file does not exist.
-        ValueError: If resolved path contains path traversal.
+        ValueError: If path contains traversal or targets wrong filename.
     """
-    resolved = config_path.resolve()
-    if ".." in config_path.parts:
-        raise ValueError(f"Config path must not contain '..' components: {config_path}")
-    if not resolved.exists():
-        raise FileNotFoundError(".pre-commit-config.yaml not found")
+    resolved = _validate_config_path(config_path)
     lines = resolved.read_text(encoding="utf-8").splitlines()
     updated_lines: list[str] = []
     active_repo: str | None = None

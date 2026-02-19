@@ -80,7 +80,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         ...
 
-    async def _setup_zmq(self) -> None:
+    def _setup_zmq(self) -> None:
         """Initialize ZMQ context and publisher socket for cache invalidation."""
         if self.context is not None:
             return
@@ -90,7 +90,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.publisher = ValidatedPublisher(raw_pub_socket)
         logger.info(f"SymbolUpdater: Connected to broker {self.settings.zmq_broker_xsub}")
 
-    async def _cleanup_zmq(self) -> None:
+    def _cleanup_zmq(self) -> None:
         """Close ZMQ publisher socket and terminate context."""
         if self.publisher:
             self.publisher.setsockopt(zmq.LINGER, 0)
@@ -104,7 +104,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def broadcast_cache_invalidation(self) -> None:
         """Broadcast cache invalidation message via ZMQ to all subscribers."""
         if not self.publisher:
-            await self._setup_zmq()
+            self._setup_zmq()
         if self.publisher:
             envelope = SymbolAliasUpdateEnvelope()
             topic = "system.symbol_aliases"
@@ -483,7 +483,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if not self.should_update():
                 logger.info("Skipping update")
                 return
-            await self._setup_zmq()
+            self._setup_zmq()
             client = self._create_exchange_client()
             await client.connect()
             logger.info(f"Exchange client connected: {type(client).__name__}")
@@ -500,6 +500,6 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"Symbol mapping update failed: {e}")
             raise
         finally:
-            await self._cleanup_zmq()
+            self._cleanup_zmq()
             if self.repository is not None:
                 self.repository = None

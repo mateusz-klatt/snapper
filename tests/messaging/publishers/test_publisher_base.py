@@ -361,10 +361,10 @@ async def test_symbol_aliases_loop_invokes_invalidation(monkeypatch: pytest.Monk
     subscriber.recv_multipart.side_effect = recv
     pub.subscriber = subscriber
     pub.running = True
-    invalidate_mock = AsyncMock()
+    invalidate_mock = MagicMock()
     monkeypatch.setattr(pub, "_invalidate_symbol_cache", invalidate_mock)
     await pub._symbol_aliases_loop()
-    invalidate_mock.assert_awaited_once()
+    invalidate_mock.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -749,7 +749,7 @@ async def test_invalidate_symbol_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         "snapper.messaging.publishers.base.SymbolMapperService.get_instance",
         lambda: SimpleNamespace(trigger_cache_invalidation=triggered),
     )
-    await pub._invalidate_symbol_cache()
+    pub._invalidate_symbol_cache()
     triggered.assert_called_once_with(fail_fast=False)
 
 
@@ -1101,10 +1101,10 @@ async def test_symbol_aliases_loop_handles_settings_update(
     subscriber.recv_multipart.side_effect = recv
     pub.subscriber = subscriber
     pub.running = True
-    handle_mock = AsyncMock()
+    handle_mock = MagicMock()
     monkeypatch.setattr(pub, "_handle_settings_update", handle_mock)
     await pub._symbol_aliases_loop()
-    handle_mock.assert_awaited_once()
+    handle_mock.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1123,7 +1123,7 @@ async def test_handle_settings_update_success(monkeypatch: pytest.MonkeyPatch) -
         "snapper.messaging.publishers.base.SettingsService.get_instance",
         lambda: mock_instance,
     )
-    await pub._handle_settings_update(payload, "kraken")
+    pub._handle_settings_update(payload, "kraken")
     assert mock_instance._cache["test_key"] == "test_value"
 
 
@@ -1136,7 +1136,7 @@ async def test_handle_settings_update_invalid_json() -> None:
     Then no exception is raised.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    await pub._handle_settings_update(b"not-json", "kraken")
+    pub._handle_settings_update(b"not-json", "kraken")
 
 
 @pytest.mark.asyncio
@@ -1154,7 +1154,7 @@ async def test_handle_settings_update_no_instance(monkeypatch: pytest.MonkeyPatc
         "snapper.messaging.publishers.base.SettingsService.get_instance",
         lambda: None,
     )
-    await pub._handle_settings_update(payload, "kraken")
+    pub._handle_settings_update(payload, "kraken")
 
 
 class TestFeedPublisherCoverage:

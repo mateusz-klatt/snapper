@@ -399,9 +399,9 @@ class TestTraderSignalHandling:
         trader = TraderCoordinator(
             signal_topics=["signals."],
         )
-        await trader._setup_external_execution()
+        trader._setup_external_execution()
         _replace_execution_publisher_with_async_stub(trader)
-        await trader._setup_trading_components()
+        trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
@@ -461,9 +461,9 @@ class TestTraderSignalHandling:
         trader = TraderCoordinator(
             signal_topics=["signals."],
         )
-        await trader._setup_external_execution()
+        trader._setup_external_execution()
         _replace_execution_publisher_with_async_stub(trader)
-        await trader._setup_trading_components()
+        trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
@@ -516,9 +516,9 @@ class TestTraderSignalHandling:
         trader = TraderCoordinator(
             signal_topics=["signals."],
         )
-        await trader._setup_external_execution()
+        trader._setup_external_execution()
         _replace_execution_publisher_with_async_stub(trader)
-        await trader._setup_trading_components()
+        trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
@@ -577,8 +577,8 @@ class TestTraderSignalHandling:
         trader = TraderCoordinator(
             signal_topics=["signals."],
         )
-        await trader._setup_external_execution()
-        await trader._setup_trading_components()
+        trader._setup_external_execution()
+        trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine

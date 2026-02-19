@@ -288,6 +288,18 @@ class TestUpdateConfig:
         with pytest.raises(ValueError, match="must not contain"):
             update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
 
+    def test_raises_for_wrong_filename(self, tmp_path: Path) -> None:
+        """Verify raises for wrong target filename.
+
+        Given: A config path that does not target .pre-commit-config.yaml,
+        When: update_config is called with this path,
+        Then: Raises ValueError indicating wrong filename.
+        """
+        config = tmp_path / "other.yaml"
+
+        with pytest.raises(ValueError, match="must target .pre-commit-config.yaml"):
+            update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+
     def test_handles_repo_without_dash(self, tmp_path: Path) -> None:
         """Verify handles repo without dash.
 

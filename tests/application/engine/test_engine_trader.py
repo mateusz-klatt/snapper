@@ -213,7 +213,7 @@ class TestTraderCoverage:
             mock_context.socket.return_value = mock_socket
             mock_zmq_context_class.return_value = mock_context
             trader = TraderCoordinator()
-            await trader._setup_external_execution()
+            trader._setup_external_execution()
             assert trader.execution_context is not None
             assert trader.execution_publisher is not None
             mock_context.socket.assert_called_once()
@@ -251,7 +251,7 @@ class TestTraderCoverage:
             mock_context.socket.return_value = mock_socket
             mock_zmq_context_class.return_value = mock_context
             trader = TraderCoordinator(signal_topics=["signals.kraken.BTC-USD.live"])
-            await trader._setup_signal_subscriber()
+            trader._setup_signal_subscriber()
             assert trader.zmq_context is not None
             assert trader.signal_subscriber is not None
             mock_context.socket.assert_called_once()
@@ -763,9 +763,9 @@ async def test_trader_coordinator_start_calls_setup_sequence(
         calls.append(name)
 
     coordinator_any = cast(Any, coordinator)
-    coordinator_any._setup_external_execution = AsyncMock(side_effect=lambda: _record("external"))
-    coordinator_any._setup_trading_components = AsyncMock(side_effect=lambda: _record("components"))
-    coordinator_any._setup_signal_subscriber = AsyncMock(side_effect=lambda: _record("subscriber"))
+    coordinator_any._setup_external_execution = MagicMock(side_effect=lambda: _record("external"))
+    coordinator_any._setup_trading_components = MagicMock(side_effect=lambda: _record("components"))
+    coordinator_any._setup_signal_subscriber = MagicMock(side_effect=lambda: _record("subscriber"))
     coordinator_any._run_trading_loop = AsyncMock(side_effect=lambda: _record("loop"))
     await coordinator.start()
     assert calls == ["external", "components", "subscriber", "loop"]
@@ -827,9 +827,9 @@ async def test_setup_trading_components_requires_publisher(monkeypatch: pytest.M
     coord_any = cast(Any, coord)
     coord.execution_publisher = None
     with pytest.raises(RuntimeError):
-        await coord_any._setup_trading_components()
+        coord_any._setup_trading_components()
     coord.execution_publisher = cast(Any, _PublisherStub(_SocketStub()))
-    await coord_any._setup_trading_components()
+    coord_any._setup_trading_components()
 
 
 @pytest.mark.asyncio
@@ -869,7 +869,7 @@ async def test_setup_external_execution_uses_context(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(trader_module, "ValidatedPublisher", _PublisherStub, raising=True)
     coord = TraderCoordinator()
     coord_any = cast(Any, coord)
-    await coord_any._setup_external_execution()
+    coord_any._setup_external_execution()
     assert pub_socket.connected == [coord.settings.zmq_broker_xsub]
     assert isinstance(coord.execution_publisher, _PublisherStub)
 
@@ -901,7 +901,7 @@ async def test_setup_signal_subscriber_subscribes_topics(monkeypatch: pytest.Mon
     )
     coord = TraderCoordinator(signal_topics=["signals.kraken.", "signals.paper."])
     coord_any = cast(Any, coord)
-    await coord_any._setup_signal_subscriber()
+    coord_any._setup_signal_subscriber()
     assert broker_socket.connected == ["tcp://broker.xpub"]
     assert subscriber.topics == [
         "signals.kraken.",

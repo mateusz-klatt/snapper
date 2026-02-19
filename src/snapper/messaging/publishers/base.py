@@ -101,7 +101,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         ...
 
-    async def _invalidate_symbol_cache(self) -> None:
+    def _invalidate_symbol_cache(self) -> None:
         """Trigger cache invalidation for symbol mapper."""
         SymbolMapperService.get_instance().trigger_cache_invalidation(fail_fast=False)
 
@@ -466,9 +466,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                             f"{exchange}_feed_publisher: Received symbol_aliases update, "
                             "refreshing cache"
                         )
-                        await self._invalidate_symbol_cache()
+                        self._invalidate_symbol_cache()
                     elif topic == "system.settings":
-                        await self._handle_settings_update(payload, exchange)
+                        self._handle_settings_update(payload, exchange)
                 except TimeoutError:
                     continue
                 except Exception as e:
@@ -477,7 +477,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         except Exception as e:
             logger.error(f"{exchange}_feed_publisher system messages loop crashed: {e}")
 
-    async def _handle_settings_update(self, payload: bytes, exchange: str) -> None:
+    def _handle_settings_update(self, payload: bytes, exchange: str) -> None:
         """Handle settings update message and refresh cached settings.
 
         Args:

@@ -133,9 +133,9 @@ class TraderCoordinator(RegisterableProcess):
         """
         logger.info("Starting ZMQ Signal TraderCoordinator (Central - ONE per system)")
         logger.info(f"Signal Topics: {self.signal_topics}")
-        await self._setup_external_execution()
-        await self._setup_trading_components()
-        await self._setup_signal_subscriber()
+        self._setup_external_execution()
+        self._setup_trading_components()
+        self._setup_signal_subscriber()
         await self._run_trading_loop()
 
     def _handle_settings_update(self, payload: bytes) -> None:
@@ -316,7 +316,7 @@ class TraderCoordinator(RegisterableProcess):
         if self.execution_context:
             self.execution_context.term()
 
-    async def _setup_trading_components(self) -> None:
+    def _setup_trading_components(self) -> None:
         """Initialize trading components.
 
         Validates that execution publisher is ready. Engines are created
@@ -349,7 +349,7 @@ class TraderCoordinator(RegisterableProcess):
             lot_size=0.0001,
         )
 
-    async def _setup_external_execution(self) -> None:
+    def _setup_external_execution(self) -> None:
         """Set up ZMQ publisher for order execution.
 
         Connects to the broker XSUB endpoint for publishing order requests.
@@ -362,7 +362,7 @@ class TraderCoordinator(RegisterableProcess):
             f"ZMQTrader: Connected to broker for order publishing: {self.settings.zmq_broker_xsub}"
         )
 
-    async def _setup_signal_subscriber(self) -> None:
+    def _setup_signal_subscriber(self) -> None:
         """Set up ZMQ subscriber for signals and system events.
 
         Subscribes to:
