@@ -6,14 +6,7 @@ import App from './App'
 import { useAppStore } from './stores/app'
 
 vi.mock('./stores/app', () => ({
-  useAppStore: vi.fn(() => ({
-    isConnected: false,
-    connectionLag: 0,
-    subscribedTopics: [],
-    setConnected: vi.fn(),
-    setConnectionLag: vi.fn(),
-    updateLastUpdate: vi.fn(),
-  })),
+  useAppStore: vi.fn(),
 }))
 vi.mock('./stores/process', () => ({
   useProcessStore: vi.fn(() => ({
@@ -49,6 +42,18 @@ vi.mock('./stores/auth', () => ({
     isAuthenticated: false,
     canAccess: vi.fn(() => true),
   })),
+  RESOURCE_ACCESS: {
+    overview: ['viewer', 'operator', 'admin'],
+    market: ['viewer', 'operator', 'admin'],
+    processes: ['operator', 'admin'],
+    strategies: ['operator', 'admin'],
+    orders: ['operator', 'admin'],
+    signals: ['operator', 'admin'],
+    health: ['operator', 'admin'],
+    admin: ['admin'],
+    charts: ['viewer', 'operator', 'admin'],
+    settings: ['admin'],
+  },
 }))
 vi.mock('./stores/websocket', () => ({
   useWebSocketConnection: vi.fn(() => ({
@@ -84,18 +89,34 @@ const renderWithProviders = (ui: ReactNode) => {
   return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
 }
 
+const defaultAppState = {
+  isConnected: false,
+  connectionLag: 0,
+  subscribedTopics: [] as string[],
+  setConnected: vi.fn(),
+  setConnectionLag: vi.fn(),
+  updateLastUpdate: vi.fn(),
+  isDarkMode: false,
+  toggleDarkMode: vi.fn(),
+}
+
+type AppState = typeof defaultAppState
+
+const mockAppStore = (overrides: Partial<AppState> = {}) => {
+  const state = { ...defaultAppState, ...overrides }
+
+  vi.mocked(useAppStore).mockImplementation((selector?: unknown) => {
+    if (typeof selector === 'function') return (selector as (s: AppState) => unknown)(state)
+
+    return state
+  })
+}
+
 describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     globalThis.localStorage.clear()
-    vi.mocked(useAppStore).mockReturnValue({
-      isConnected: false,
-      connectionLag: 0,
-      subscribedTopics: [],
-      setConnected: vi.fn(),
-      setConnectionLag: vi.fn(),
-      updateLastUpdate: vi.fn(),
-    })
+    mockAppStore()
   })
   it('renders app', async () => {
     const { container } = renderWithProviders(<App />)
@@ -138,13 +159,10 @@ describe('App', () => {
     expect(mockNavigate).toHaveBeenCalledWith('processes')
   })
   it('renders connected status when app shell is connected', async () => {
-    vi.mocked(useAppStore).mockReturnValue({
+    mockAppStore({
       isConnected: true,
       connectionLag: 10,
       subscribedTopics: ['a', 'b', 'c', 'd'],
-      setConnected: vi.fn(),
-      setConnectionLag: vi.fn(),
-      updateLastUpdate: vi.fn(),
     })
     renderWithProviders(<App />)
 
@@ -153,13 +171,10 @@ describe('App', () => {
     })
   })
   it('shows unknown lag when lag value is negative', async () => {
-    vi.mocked(useAppStore).mockReturnValue({
+    mockAppStore({
       isConnected: true,
       connectionLag: -1,
       subscribedTopics: ['a'],
-      setConnected: vi.fn(),
-      setConnectionLag: vi.fn(),
-      updateLastUpdate: vi.fn(),
     })
     renderWithProviders(<App />)
 
@@ -257,5 +272,19 @@ describe('App', () => {
 
     expect(sidebar?.className).toContain('translate-x-0')
     expect(sidebar?.className).not.toContain('-translate-x-full')
+  })
+  it('renders light mode toggle when dark mode is active', async () => {
+    mockAppStore({ isDarkMode: true })
+    renderWithProviders(<App />)
+    await waitFor(() => {
+      expect(screen.getByLabelText('Switch to light mode')).toBeInTheDocument()
+    })
+  })
+  it('renders dark mode toggle when light mode is active', async () => {
+    mockAppStore({ isDarkMode: false })
+    renderWithProviders(<App />)
+    await waitFor(() => {
+      expect(screen.getByLabelText('Switch to dark mode')).toBeInTheDocument()
+    })
   })
 })

@@ -170,7 +170,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 setProcessName('')
                 setStrategyName('')
               }}
-              className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
+              className='w-full px-3 py-2 bg-alpine-50 border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
               required
             >
               <option value=''>Choose template...</option>
@@ -209,7 +209,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 value={processName}
                 onChange={e => setProcessName(e.target.value)}
                 placeholder='strategy_macd_custom'
-                className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
+                className='w-full px-3 py-2 bg-alpine-50 border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
                 required
               />
               <p className='mt-1 text-xs text-muted-400'>
@@ -229,7 +229,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 value={strategyName}
                 onChange={e => setStrategyName(e.target.value)}
                 placeholder='macd_custom'
-                className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
+                className='w-full px-3 py-2 bg-alpine-50 border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
                 required
               />
               <p className='mt-1 text-xs text-muted-400'>
@@ -249,7 +249,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
                 id='execution-mode'
                 value={executionMode}
                 onChange={e => setExecutionMode(e.target.value as 'thread' | 'process')}
-                className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
+                className='w-full px-3 py-2 bg-alpine-50 border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
               >
                 <option value='thread'>Embedded thread</option>
                 <option value='process'>Isolated process</option>
@@ -293,7 +293,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
               onChange={e => setNote(e.target.value)}
               maxLength={512}
               rows={2}
-              className='w-full px-3 py-2 bg-white border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
+              className='w-full px-3 py-2 bg-alpine-50 border border-dark-600 rounded-md text-alpine-900 focus:outline-hidden focus:ring-2 focus:ring-brand-500'
               placeholder='Describe purpose or parameters of this strategy instance.'
             />
             <p className='mt-1 text-xs text-muted-400'>

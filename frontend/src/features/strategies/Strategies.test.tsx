@@ -98,7 +98,7 @@ describe('Strategies', () => {
   it('renders strategies page', () => {
     renderWithProviders(<Strategies />)
     expect(screen.getByText('Strategy Management')).toBeTruthy()
-    expect(screen.getByText('Register Strategy')).toBeTruthy()
+    expect(screen.getAllByText('Register Strategy').length).toBeGreaterThanOrEqual(1)
   })
   it('shows saving state when create process config is pending', async () => {
     const { useCreateProcessConfig } = await import('../../hooks/queries')
@@ -483,6 +483,10 @@ describe('Strategies', () => {
     const startButtons = screen.getAllByRole('button', { name: /start/i })
 
     await user.click(startButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalledWith(
       { name: 'strategy_test', mode: 'thread' },
       expect.any(Object)
@@ -528,6 +532,10 @@ describe('Strategies', () => {
     const startButton = screen.getByLabelText('Start TEST strategy')
 
     await user.click(startButton)
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalledWith(
       { name: 'strategy_test', mode: 'thread' },
       expect.any(Object)
@@ -587,6 +595,10 @@ describe('Strategies', () => {
     const startButton = screen.getByLabelText('Start TEST strategy')
 
     await user.click(startButton)
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     startPending = true
     rerender(
       <QueryClientProvider client={queryClient}>
@@ -637,6 +649,10 @@ describe('Strategies', () => {
     const startButtons = screen.getAllByRole('button', { name: /start/i })
 
     await user.click(startButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles start strategy error - not found', async () => {
@@ -681,6 +697,10 @@ describe('Strategies', () => {
     const startButtons = screen.getAllByRole('button', { name: /start/i })
 
     await user.click(startButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles start strategy error - network error', async () => {
@@ -725,6 +745,10 @@ describe('Strategies', () => {
     const startButtons = screen.getAllByRole('button', { name: /start/i })
 
     await user.click(startButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles stop strategy with success', async () => {
@@ -769,6 +793,10 @@ describe('Strategies', () => {
     const stopButtons = screen.getAllByRole('button', { name: /stop/i })
 
     await user.click(stopButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalledWith({ name: 'strategy_test' }, expect.any(Object))
   })
   it('disables stop button while stop mutation is pending for active strategy', async () => {
@@ -826,6 +854,10 @@ describe('Strategies', () => {
     const startButton = screen.getByLabelText('Start TEST strategy')
 
     await user.click(startButton)
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     stopPending = true
     rerender(
       <QueryClientProvider client={queryClient}>
@@ -876,6 +908,10 @@ describe('Strategies', () => {
     const stopButtons = screen.getAllByRole('button', { name: /stop/i })
 
     await user.click(stopButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles stop strategy error - network error', async () => {
@@ -920,6 +956,10 @@ describe('Strategies', () => {
     const stopButtons = screen.getAllByRole('button', { name: /stop/i })
 
     await user.click(stopButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles opening and closing strategy launch modal', async () => {
@@ -1264,6 +1304,10 @@ describe('Strategies', () => {
     const stopButtons = screen.getAllByRole('button', { name: /stop/i })
 
     await user.click(stopButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles start strategy error - generic error', async () => {
@@ -1308,6 +1352,10 @@ describe('Strategies', () => {
     const startButtons = screen.getAllByRole('button', { name: /start/i })
 
     await user.click(startButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles heartbeat message for warn status', async () => {
@@ -1553,6 +1601,10 @@ describe('Strategies', () => {
     const startButton = screen.getByLabelText('Start TEST strategy')
 
     await user.click(startButton)
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     mockStrategies = [
       {
         ...mockStrategies[0],
@@ -1567,6 +1619,10 @@ describe('Strategies', () => {
     const stopButton = await screen.findByLabelText('Stop TEST strategy')
 
     await user.click(stopButton)
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Confirm'))
     expect(mockStopMutate).toHaveBeenCalled()
     stopPending = true
     rerender(
@@ -1809,5 +1865,218 @@ describe('Strategies', () => {
     if (storedHeartbeatCallback) {
       storedHeartbeatCallback(createHeartbeat('executor_kraken', 'healthy', 10, 1))
     }
+  })
+  it('filters strategies by status filter', async () => {
+    const mockStrategies: ConfiguredProcess[] = [
+      {
+        name: 'strategy_running',
+        enabled: true,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.running',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: 'Running',
+        lifecycle: 'long_running',
+        role: 'strategy',
+        tags: [],
+        is_one_shot: false,
+      },
+      {
+        name: 'strategy_stopped',
+        enabled: true,
+        running: false,
+        mode: 'thread',
+        class_path: 'snapper.stopped',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: 'Stopped',
+        lifecycle: 'long_running',
+        role: 'strategy',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockStrategies },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    const user = (await import('@testing-library/user-event')).default.setup()
+
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('RUNNING')).toBeTruthy()
+    })
+    const select = screen.getByRole('combobox')
+
+    await user.click(select)
+    await user.click(screen.getByText('Running'))
+    expect(screen.getByText('RUNNING')).toBeTruthy()
+  })
+  it('filters strategies by stopped status filter', async () => {
+    const mockStrategies: ConfiguredProcess[] = [
+      {
+        name: 'strategy_running',
+        enabled: true,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.running',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: 'Running',
+        lifecycle: 'long_running',
+        role: 'strategy',
+        tags: [],
+        is_one_shot: false,
+      },
+      {
+        name: 'strategy_stopped',
+        enabled: true,
+        running: false,
+        mode: 'thread',
+        class_path: 'snapper.stopped',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: 'Stopped',
+        lifecycle: 'long_running',
+        role: 'strategy',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockStrategies },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    const user = (await import('@testing-library/user-event')).default.setup()
+
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('RUNNING')).toBeTruthy()
+      expect(screen.getByText('STOPPED')).toBeTruthy()
+    })
+    const select = screen.getByRole('combobox')
+
+    await user.click(select)
+    await user.click(screen.getByText('Stopped'))
+    expect(screen.getByText('STOPPED')).toBeTruthy()
+    expect(screen.queryByText('RUNNING')).toBeNull()
+  })
+  it('shows no match state and clears filters', async () => {
+    const mockStrategies: ConfiguredProcess[] = [
+      {
+        name: 'strategy_test',
+        enabled: true,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.strategy_test',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: 'Test',
+        lifecycle: 'long_running',
+        role: 'strategy',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockStrategies },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    const user = (await import('@testing-library/user-event')).default.setup()
+
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('TEST')).toBeTruthy()
+    })
+    const searchInput = screen.getByPlaceholderText('Search strategies...')
+
+    await user.type(searchInput, 'nonexistent')
+    await waitFor(() => {
+      expect(screen.getByText('No strategies match your filters')).toBeTruthy()
+    })
+    const clearButton = screen.getByText('Clear filters')
+
+    await user.click(clearButton)
+    await waitFor(() => {
+      expect(screen.getByText('TEST')).toBeTruthy()
+    })
+  })
+  it('cancels confirm dialog', async () => {
+    const mockStrategies: ConfiguredProcess[] = [
+      {
+        name: 'strategy_test',
+        enabled: true,
+        running: false,
+        mode: 'thread',
+        class_path: 'snapper.strategy_test',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: 'Test',
+        lifecycle: 'long_running',
+        role: 'strategy',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockStrategies },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    const user = (await import('@testing-library/user-event')).default.setup()
+
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('TEST')).toBeTruthy()
+    })
+    const startButtons = screen.getAllByRole('button', { name: /start/i })
+
+    await user.click(startButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText('Confirm')).toBeTruthy()
+    })
+    await user.click(screen.getByText('Cancel'))
+    await waitFor(() => {
+      expect(screen.queryByText('Confirm')).toBeNull()
+    })
+  })
+  it('opens register modal from empty state button', async () => {
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: [] },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    const user = (await import('@testing-library/user-event')).default.setup()
+
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('No strategies configured')).toBeTruthy()
+    })
+    const registerButtons = screen.getAllByText('Register Strategy')
+
+    await user.click(registerButtons[registerButtons.length - 1])
+    await waitFor(() => {
+      expect(screen.getByText('Register Strategy Process')).toBeTruthy()
+    })
   })
 })

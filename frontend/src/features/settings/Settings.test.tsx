@@ -1516,4 +1516,34 @@ describe('Settings', () => {
       })
     })
   })
+  it('toggles Show more and Show less for long JSON values', async () => {
+    const longJson = JSON.stringify(
+      { key1: 'value1', key2: 'value2', key3: 'value3', key4: 'value4' },
+      null,
+      2
+    )
+    const mockSettings = [
+      {
+        key: 'config.long_json',
+        value: longJson,
+        category: 'config',
+        description: 'Long JSON config',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['config'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('config.long_json')).toBeTruthy()
+    })
+    const showMoreButton = screen.getByText('Show more')
+
+    await userEvent.click(showMoreButton)
+    expect(screen.getByText('Show less')).toBeTruthy()
+    await userEvent.click(screen.getByText('Show less'))
+    expect(screen.getByText('Show more')).toBeTruthy()
+  })
 })

@@ -28,13 +28,16 @@ const StatusIndicator: React.FC<{ status: string; showLabel: boolean }> = ({
   const getStatusConfig = (status: string) => {
     switch (status.toLowerCase()) {
       case 'running':
-        return { color: 'bg-accent-500', label: 'Running', textColor: 'text-gain-600' }
+      case 'healthy':
+        return { color: 'bg-accent-500', label: 'Healthy', textColor: 'text-gain-600' }
       case 'stopped':
       case 'not_running':
         return { color: 'bg-muted-400', label: 'Stopped', textColor: 'text-muted-600' }
       case 'error':
       case 'failed':
         return { color: 'bg-loss-500', label: 'Error', textColor: 'text-loss-600' }
+      case 'warning':
+        return { color: 'bg-warning-500', label: 'Warning', textColor: 'text-warning-600' }
       case 'completed':
         return { color: 'bg-info-500', label: 'Completed', textColor: 'text-info-600' }
       default:

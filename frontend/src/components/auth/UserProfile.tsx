@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useAuth } from '../../stores/auth'
 import { apiClient } from '../../lib/apiClient'
+import { Modal } from '../ui/Modal'
 
 interface UserProfileProps {
   className?: string
@@ -9,6 +10,7 @@ interface UserProfileProps {
 const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) => {
   const [showDropdown, setShowDropdown] = useState(false)
   const [showPasswordForm, setShowPasswordForm] = useState(false)
+  const [showHelpDialog, setShowHelpDialog] = useState(false)
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -165,6 +167,15 @@ const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) =
                 Change password
               </button>
               <button
+                onClick={() => {
+                  setShowHelpDialog(true)
+                  setShowDropdown(false)
+                }}
+                className='w-full text-left px-4 py-2 text-sm text-muted-600 hover:bg-dark-700'
+              >
+                Help &amp; Documentation
+              </button>
+              <button
                 onClick={handleLogout}
                 disabled={isLoading}
                 className='w-full text-left px-4 py-2 text-sm text-loss-600 hover:bg-loss-50 disabled:opacity-50 disabled:cursor-not-allowed'
@@ -271,6 +282,50 @@ const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) =
           </div>
         </div>
       )}
+      {}
+      <Modal
+        open={showHelpDialog}
+        onClose={() => setShowHelpDialog(false)}
+        title='Help & Documentation'
+      >
+        <div className='space-y-4 text-sm'>
+          <section>
+            <h4 className='font-semibold text-alpine-900 mb-2'>Role Capabilities</h4>
+            <div className='space-y-2 text-muted-600'>
+              <div>
+                <span className='font-medium text-loss-600'>Admin</span> — Full system access
+                including user management, system settings, and all Operator permissions.
+              </div>
+              <div>
+                <span className='font-medium text-brand-600'>Operator</span> — Trading operations,
+                strategy execution, process management, and system health monitoring.
+              </div>
+              <div>
+                <span className='font-medium text-accent-600'>Viewer</span> — Read-only access to
+                Overview and Market Data.
+              </div>
+            </div>
+          </section>
+          <section>
+            <h4 className='font-semibold text-alpine-900 mb-2'>Quick Reference</h4>
+            <ul className='list-disc list-inside text-muted-600 space-y-1'>
+              <li>Use the sidebar menu to navigate between sections</li>
+              <li>Dark mode toggle is available in the header bar</li>
+              <li>Export data to CSV from Orders and Signals pages</li>
+              <li>Strategy start/stop actions require confirmation</li>
+            </ul>
+          </section>
+          <section>
+            <h4 className='font-semibold text-alpine-900 mb-2'>API Documentation</h4>
+            <p className='text-muted-600'>
+              Interactive API documentation is available at{' '}
+              <code className='text-xs bg-dark-700 px-1.5 py-0.5 rounded'>/api/docs</code> (Swagger
+              UI) and <code className='text-xs bg-dark-700 px-1.5 py-0.5 rounded'>/api/redoc</code>{' '}
+              (ReDoc).
+            </p>
+          </section>
+        </div>
+      </Modal>
       {}
       {showDropdown && (
         <button

@@ -70,6 +70,7 @@ help:
 	$(info ui-gen-zod       Generate Zod schemas from WebSocket)
 	$(info ui-gen-api-zod   Generate Zod schemas from OpenAPI)
 	$(info ui-gen-entities  Generate entity types from WebSocket)
+	$(info ui-gen-permissions Generate permissions types from backend)
 	$(info ui-gen-types     Generate all frontend types)
 	$(info ui-check-types   Check for uncommitted type drift [CI])
 	$(info ui-test          Run UI tests [vitest])
@@ -381,7 +382,13 @@ ui-gen-entities:
 	@cd $(UI_DIR) && pnpm exec prettier --write src/types/entities.ts
 	$(info Generated frontend/src/types/entities.ts)
 
-ui-gen-types: ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities
+ui-gen-permissions:
+	$(info Generating permissions types...)
+	@$(VENV_PY) scripts/generate_types.py --permissions
+	@cd $(UI_DIR) && pnpm exec prettier --write src/types/permissions.generated.ts
+	$(info Generated frontend/src/types/permissions.generated.ts)
+
+ui-gen-types: ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions
 	$(info All types generated successfully)
 
 ui-check-types:

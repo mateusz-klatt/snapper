@@ -7,6 +7,21 @@ import {
   Time,
   createChart,
 } from 'lightweight-charts'
+import { useAppStore } from '../stores/app'
+
+const LIGHT_THEME = {
+  background: '#fdf8f0',
+  text: '#6f695f',
+  grid: '#ece8df',
+  border: '#e6e3dc',
+}
+
+const DARK_THEME = {
+  background: '#181a1e',
+  text: '#9aa4b4',
+  grid: '#262a30',
+  border: '#3a4048',
+}
 
 interface LightweightChartProps {
   data: CandlestickData<Time>[]
@@ -24,6 +39,7 @@ export const LightweightChart = ({
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const isDarkMode = useAppStore(s => s.isDarkMode)
 
   useEffect(() => {
     if (!chartContainerRef.current) {
@@ -34,22 +50,22 @@ export const LightweightChart = ({
       width: width || chartContainerRef.current.clientWidth,
       height,
       layout: {
-        background: { color: '#fdf8f0' },
-        textColor: '#6f695f',
+        background: { color: LIGHT_THEME.background },
+        textColor: LIGHT_THEME.text,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: '#ece8df' },
-        horzLines: { color: '#ece8df' },
+        vertLines: { color: LIGHT_THEME.grid },
+        horzLines: { color: LIGHT_THEME.grid },
       },
       crosshair: {
         mode: 1,
       },
       rightPriceScale: {
-        borderColor: '#e6e3dc',
+        borderColor: LIGHT_THEME.border,
       },
       timeScale: {
-        borderColor: '#e6e3dc',
+        borderColor: LIGHT_THEME.border,
         timeVisible: true,
         secondsVisible: false,
       },
@@ -83,6 +99,30 @@ export const LightweightChart = ({
       seriesRef.current = null
     }
   }, [height, width])
+  useEffect(() => {
+    if (!chartRef.current) {
+      return
+    }
+
+    const theme = isDarkMode ? DARK_THEME : LIGHT_THEME
+
+    chartRef.current.applyOptions({
+      layout: {
+        background: { color: theme.background },
+        textColor: theme.text,
+      },
+      grid: {
+        vertLines: { color: theme.grid },
+        horzLines: { color: theme.grid },
+      },
+      rightPriceScale: {
+        borderColor: theme.border,
+      },
+      timeScale: {
+        borderColor: theme.border,
+      },
+    })
+  }, [isDarkMode])
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) {
       return

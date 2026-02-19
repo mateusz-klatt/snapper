@@ -245,4 +245,91 @@
     @apply bg-dark-900 font-sans text-alpine-900 antialiased;
     font-variant-numeric: tabular-nums;
   }
+
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  textarea:-webkit-autofill,
+  select:-webkit-autofill {
+    -webkit-text-fill-color: var(--color-alpine-900);
+    -webkit-box-shadow: 0 0 0px 1000px var(--color-alpine-50) inset;
+    transition: background-color 5000s ease-in-out 0s;
+  }
+}
+
+html.dark {
+  --color-dark-50: #111214;
+  --color-dark-100: #181a1e;
+  --color-dark-200: #1e2126;
+  --color-dark-300: #262a30;
+  --color-dark-400: #2e333a;
+  --color-dark-500: #3a4048;
+  --color-dark-600: #3a4048;
+  --color-dark-700: #262a30;
+  --color-dark-800: #1e2126;
+  --color-dark-900: #111214;
+
+  --color-alpine-50: #181a1e;
+  --color-alpine-100: #1e2126;
+  --color-alpine-200: #262a30;
+  --color-alpine-300: #3a4048;
+  --color-alpine-400: #5a6270;
+  --color-alpine-500: #7a8494;
+  --color-alpine-600: #9aa4b4;
+  --color-alpine-700: #bcc4d0;
+  --color-alpine-800: #dde1e8;
+  --color-alpine-900: #eef0f4;
+
+  --color-muted-50: #14161a;
+  --color-muted-100: #1a1e24;
+  --color-muted-200: #262a30;
+  --color-muted-300: #343a44;
+  --color-muted-400: #4a5260;
+  --color-muted-500: #6a7484;
+  --color-muted-600: #8a94a4;
+  --color-muted-700: #aab4c0;
+  --color-muted-800: #ccd2dc;
+  --color-muted-900: #e8ecf0;
+
+  --color-brand-50: #2a1018;
+  --color-brand-100: #3a1520;
+  --color-brand-200: #5a1a2e;
+
+  --color-accent-50: #0e2818;
+  --color-accent-100: #143820;
+  --color-accent-200: #1a4a2a;
+
+  --color-gain-50: #0e2818;
+  --color-gain-100: #143820;
+  --color-gain-200: #1a4a2a;
+
+  --color-loss-50: #2a1018;
+  --color-loss-100: #3a1520;
+  --color-loss-200: #5a1a2e;
+
+  --color-brand-600: #f33b5e;
+  --color-brand-700: #ff8197;
+  --color-brand-800: #ffb7c4;
+
+  --color-accent-600: #3cb67a;
+  --color-accent-700: #7fd2ab;
+  --color-accent-800: #b1e5ca;
+
+  --color-gain-600: #3cb67a;
+  --color-gain-700: #7fd2ab;
+  --color-gain-800: #b1e5ca;
+
+  --color-loss-600: #c95072;
+  --color-loss-700: #e088a0;
+  --color-loss-800: #f0bcca;
+
+  --color-warning-50: #2a1e08;
+  --color-warning-100: #3a2a10;
+  --color-warning-200: #4a3618;
+  --color-warning-700: #efbc5a;
+  --color-warning-800: #f7d896;
+
+  --color-info-50: #0d1117;
+  --color-info-100: #131b22;
+  --color-info-200: #1a2530;
 }

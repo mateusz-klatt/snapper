@@ -6,6 +6,10 @@ import type { ReactNode } from 'react'
 import { Orders } from './Orders'
 import type { OrderStatus, Fill } from '../../types/entities'
 
+vi.mock('../../lib/csvExport', () => ({
+  exportToCSV: vi.fn(),
+}))
+
 vi.mock('../../components/ThemeSelect', () => ({
   ThemeSelect: ({
     id,
@@ -837,5 +841,165 @@ describe('Orders', () => {
       expect(screen.getByText('Order #200')).toBeInTheDocument()
       expect(screen.getByText('N/A')).toBeInTheDocument()
     })
+  })
+  it('exports orders to CSV when export button clicked', async () => {
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const user = userEvent.setup()
+    const mockOrders: OrderStatus[] = [
+      {
+        id: 1,
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1.5,
+        filledSize: 0,
+        price: 50000,
+        status: 'open',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByText('BTC/USD')).toBeInTheDocument()
+    })
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'orders.csv',
+      ['Instrument', 'Side', 'Type', 'Status', 'Quantity', 'Price', 'Created'],
+      expect.arrayContaining([expect.arrayContaining(['BTC/USD', 'buy', 'limit', 'open'])])
+    )
+  })
+  it('exports executions to CSV when export button clicked on executions tab', async () => {
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const user = userEvent.setup()
+    const mockExecutions: Fill[] = [
+      {
+        id: 1,
+        orderId: 10,
+        clientOrderId: 'client-10',
+        size: 1.5,
+        price: 50000,
+        fee: 25,
+        feeAsset: 'USD',
+        executedAt: new Date('2024-01-01T12:00:00Z'),
+        instrument: 'BTC/USD',
+        side: 'buy',
+        exchange: 'kraken',
+        status: 'filled',
+      },
+    ]
+    const { useExecutions } = await import('../../hooks/queries')
+
+    vi.mocked(useExecutions).mockReturnValue({
+      data: mockExecutions,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    const executionsTab = screen.getByRole('button', { name: /Executions/i })
+
+    await user.click(executionsTab)
+    await waitFor(() => {
+      expect(screen.getByText('Order #10')).toBeInTheDocument()
+    })
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'executions.csv',
+      ['Order ID', 'Instrument', 'Side', 'Size', 'Price', 'Total', 'Fee', 'Fee Asset', 'Executed'],
+      expect.arrayContaining([expect.arrayContaining(['client-10', 'BTC/USD', 'buy'])])
+    )
+  })
+  it('exports orders with null fields using fallback values', async () => {
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const user = userEvent.setup()
+    const mockOrders: OrderStatus[] = [
+      {
+        id: 9,
+        instrument: 'ETH/USD',
+        exchange: 'kraken',
+        side: null as unknown as OrderStatus['side'],
+        orderType: 'market',
+        size: 2,
+        filledSize: 0,
+        price: null,
+        status: 'open',
+        createdAt: null as unknown as Date,
+        updatedAt: null,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByText('ETH/USD')).toBeInTheDocument()
+    })
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'orders.csv',
+      ['Instrument', 'Side', 'Type', 'Status', 'Quantity', 'Price', 'Created'],
+      [['ETH/USD', '', 'market', 'open', '2.0000', 'Market', '']]
+    )
+  })
+  it('exports executions with null fee and missing executedAt', async () => {
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const user = userEvent.setup()
+    const mockExecutions: Fill[] = [
+      {
+        id: 2,
+        orderId: 20,
+        clientOrderId: 'client-20',
+        size: 1,
+        price: 30000,
+        fee: 0,
+        feeAsset: null as unknown as string,
+        executedAt: undefined,
+        instrument: 'BTC/USD',
+        side: 'sell',
+        exchange: 'kraken',
+        status: 'filled',
+      },
+    ]
+    const { useExecutions } = await import('../../hooks/queries')
+
+    vi.mocked(useExecutions).mockReturnValue({
+      data: mockExecutions,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    const executionsTab = screen.getByRole('button', { name: /Executions/i })
+
+    await user.click(executionsTab)
+    await waitFor(() => {
+      expect(screen.getByText('Order #20')).toBeInTheDocument()
+    })
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'executions.csv',
+      ['Order ID', 'Instrument', 'Side', 'Size', 'Price', 'Total', 'Fee', 'Fee Asset', 'Executed'],
+      [['client-20', 'BTC/USD', 'sell', '1.0000', '30000.00', '30000.00', '0', '', '']]
+    )
   })
 })

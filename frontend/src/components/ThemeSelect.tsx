@@ -32,7 +32,7 @@ export const ThemeSelect: React.FC<Readonly<ThemeSelectProps>> = ({
       id={id}
       className={clsx(
         'inline-flex cursor-pointer items-center justify-between rounded-xl border border-dark-600 bg-alpine-50 px-3 py-2 text-sm text-alpine-900',
-        'hover:bg-white focus:border-brand-500 focus:outline-hidden focus:ring-2 focus:ring-brand-500',
+        'hover:bg-dark-50 focus:border-brand-500 focus:outline-hidden focus:ring-2 focus:ring-brand-500',
         'disabled:cursor-not-allowed disabled:opacity-50',
         className
       )}
@@ -44,7 +44,7 @@ export const ThemeSelect: React.FC<Readonly<ThemeSelectProps>> = ({
     </Select.Trigger>
     <Select.Portal>
       <Select.Content
-        className='z-50 overflow-hidden rounded-xl border border-dark-600 bg-white shadow-lg'
+        className='z-50 overflow-hidden rounded-xl border border-dark-600 bg-alpine-50 shadow-lg'
         position='popper'
         sideOffset={4}
       >

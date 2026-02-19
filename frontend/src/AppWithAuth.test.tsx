@@ -3,6 +3,7 @@ import { render, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import AppWithAuth from './AppWithAuth'
 import * as stores from './stores/auth'
+import { useAppStore } from './stores/app'
 import { apiClient } from './lib/apiClient'
 
 vi.mock('./App', () => ({
@@ -21,6 +22,9 @@ vi.mock('./components/auth/AuthErrorBoundary', () => ({
 vi.mock('./stores/auth', () => ({
   useAuth: vi.fn(),
 }))
+vi.mock('./stores/app', () => ({
+  useAppStore: vi.fn(),
+}))
 vi.mock('./lib/apiClient', () => ({
   apiClient: {
     hasAuthCookies: vi.fn(),
@@ -29,6 +33,14 @@ vi.mock('./lib/apiClient', () => ({
 describe('AppWithAuth', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    document.documentElement.classList.remove('dark')
+    vi.mocked(useAppStore).mockImplementation((selector?: unknown) => {
+      const state = { isDarkMode: false }
+
+      if (typeof selector === 'function') return (selector as (s: typeof state) => unknown)(state)
+
+      return state
+    })
   })
   it('renders wrapped app structure', () => {
     vi.mocked(stores.useAuth).mockReturnValue({
@@ -177,6 +189,38 @@ describe('AppWithAuth', () => {
     render(<AppWithAuth />)
     await waitFor(() => {
       expect(refreshToken).toHaveBeenCalledTimes(1)
+    })
+  })
+  it('adds dark class when isDarkMode is true', async () => {
+    vi.mocked(useAppStore).mockImplementation((selector?: unknown) => {
+      const state = { isDarkMode: true }
+
+      if (typeof selector === 'function') return (selector as (s: typeof state) => unknown)(state)
+
+      return state
+    })
+    vi.mocked(stores.useAuth).mockReturnValue({
+      isAuthenticated: false,
+      refreshToken: vi.fn(),
+      silentLogout: vi.fn(),
+    } as never)
+    vi.mocked(apiClient.hasAuthCookies).mockReturnValue(false)
+    render(<AppWithAuth />)
+    await waitFor(() => {
+      expect(document.documentElement.classList.contains('dark')).toBe(true)
+    })
+  })
+  it('removes dark class when isDarkMode is false', async () => {
+    document.documentElement.classList.add('dark')
+    vi.mocked(stores.useAuth).mockReturnValue({
+      isAuthenticated: false,
+      refreshToken: vi.fn(),
+      silentLogout: vi.fn(),
+    } as never)
+    vi.mocked(apiClient.hasAuthCookies).mockReturnValue(false)
+    render(<AppWithAuth />)
+    await waitFor(() => {
+      expect(document.documentElement.classList.contains('dark')).toBe(false)
     })
   })
 })

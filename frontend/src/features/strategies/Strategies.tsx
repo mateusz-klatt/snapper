@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
+import { Gauge } from 'lucide-react'
+import { ThemeSelect } from '../../components/ThemeSelect'
 import {
   useStartProcessByName,
   useStopProcessByName,
@@ -12,6 +14,8 @@ import { useWebSocketStore } from '../../stores/websocket'
 import { StrategyLaunchModal, type StrategyLaunchData } from './StrategyLaunchModal'
 import { StrategyCard } from './StrategyCard'
 import { StrategiesSkeleton } from '../../components/Skeleton'
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
+import { noop } from '../../lib/noop'
 
 interface FeedHealth {
   status: 'healthy' | 'warning' | 'error'
@@ -33,6 +37,15 @@ export const Strategies: React.FC = () => {
   const [strategyModalOpen, setStrategyModalOpen] = useState(false)
   const [activeStrategyProcess, setActiveStrategyProcess] = useState<string | null>(null)
   const [healthStatuses, setHealthStatuses] = useState<Record<string, HealthStatus>>({})
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean
+    title: string
+    message: string
+    onConfirm: () => void
+    variant: 'default' | 'danger'
+  }>({ open: false, title: '', message: '', onConfirm: noop, variant: 'default' })
+  const [searchTerm, setSearchTerm] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'stopped'>('all')
   const queryClient = useQueryClient()
   const { wsClient } = useWebSocketStore()
   const startProcess = useStartProcessByName()
@@ -141,6 +154,26 @@ export const Strategies: React.FC = () => {
     }
   }
 
+  const requestStartStrategy = (processName: string, mode: string) => {
+    setConfirmDialog({
+      open: true,
+      title: `Start ${processName}`,
+      message: `This will start the ${processName} strategy. It may begin live trading operations.`,
+      variant: 'default',
+      onConfirm: () => handleStartStrategy(processName, mode),
+    })
+  }
+
+  const requestStopStrategy = (processName: string) => {
+    setConfirmDialog({
+      open: true,
+      title: `Stop ${processName}`,
+      message: `This will stop the ${processName} strategy. Active positions will not be automatically closed.`,
+      variant: 'danger',
+      onConfirm: () => handleStopStrategy(processName),
+    })
+  }
+
   const handleStartStrategy = (processName: string, mode: string) => {
     setActiveStrategyProcess(processName)
     startProcess.mutate(
@@ -234,6 +267,14 @@ export const Strategies: React.FC = () => {
     )
   }
 
+  const filteredStrategies = strategies.filter(s => {
+    const nameMatch = searchTerm === '' || s.name.toLowerCase().includes(searchTerm.toLowerCase())
+    const statusMatch =
+      statusFilter === 'all' || (statusFilter === 'running' ? s.running : !s.running)
+
+    return nameMatch && statusMatch
+  })
+
   return (
     <div className='space-y-6'>
       <div className='flex items-center justify-between'>
@@ -251,11 +292,33 @@ export const Strategies: React.FC = () => {
         </p>
       </div>
       {}
+      <div className='flex items-center gap-3'>
+        <div className='flex-1'>
+          <input
+            type='text'
+            placeholder='Search strategies...'
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className='input'
+          />
+        </div>
+        <ThemeSelect
+          value={statusFilter}
+          onChange={value => setStatusFilter(value as 'all' | 'running' | 'stopped')}
+          options={[
+            { value: 'all', label: 'All statuses' },
+            { value: 'running', label: 'Running' },
+            { value: 'stopped', label: 'Stopped' },
+          ]}
+          className='max-w-48'
+        />
+      </div>
+      {}
       <div className='space-y-4'>
         <h3 className='text-lg font-medium text-alpine-900'>Configured Strategies</h3>
-        {strategies.length > 0 ? (
+        {filteredStrategies.length > 0 ? (
           <div className='grid grid-cols-1 lg:grid-cols-2 gap-4'>
-            {strategies.map(strategy => (
+            {filteredStrategies.map(strategy => (
               <StrategyCard
                 key={strategy.name}
                 name={strategy.name}
@@ -263,23 +326,56 @@ export const Strategies: React.FC = () => {
                 autoStartEnabled={strategy.enabled}
                 mode={strategy.mode}
                 health={healthStatuses[strategy.name]}
-                onStart={() => handleStartStrategy(strategy.name, strategy.mode)}
-                onStop={() => handleStopStrategy(strategy.name)}
+                onStart={() => requestStartStrategy(strategy.name, strategy.mode)}
+                onStop={() => requestStopStrategy(strategy.name)}
                 isStarting={startProcess.isPending && activeStrategyProcess === strategy.name}
                 isStopping={stopProcess.isPending && activeStrategyProcess === strategy.name}
               />
             ))}
           </div>
-        ) : (
+        ) : strategies.length > 0 ? (
           <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-6 text-center'>
-            <p className='text-muted-500'>No strategies configured</p>
+            <p className='text-muted-500'>No strategies match your filters</p>
+            <button
+              onClick={() => {
+                setSearchTerm('')
+                setStatusFilter('all')
+              }}
+              className='mt-2 text-sm text-brand-600 hover:text-brand-700'
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : (
+          <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-8 text-center'>
+            <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
+              <Gauge className='text-muted-500' size={24} />
+            </div>
+            <p className='text-muted-500 font-medium'>No strategies configured</p>
             <p className='text-sm text-muted-400 mt-1'>
-              Configure strategies in the database to see them here
+              Register a strategy to start algorithmic trading
             </p>
+            <button
+              onClick={() => setStrategyModalOpen(true)}
+              className='mt-3 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700'
+            >
+              Register Strategy
+            </button>
           </div>
         )}
       </div>
       {}
+      <ConfirmDialog
+        open={confirmDialog.open}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        variant={confirmDialog.variant}
+        onConfirm={() => {
+          confirmDialog.onConfirm()
+          setConfirmDialog(prev => ({ ...prev, open: false }))
+        }}
+        onCancel={() => setConfirmDialog(prev => ({ ...prev, open: false }))}
+      />
       <StrategyLaunchModal
         open={strategyModalOpen}
         onClose={() => setStrategyModalOpen(false)}

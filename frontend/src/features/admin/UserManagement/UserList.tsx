@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Trash2, Edit, UserPlus, Eye, EyeOff, Shield, Users } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { Button, Badge } from '../../../components/ui'
+import { ConfirmDialog } from '../../../components/ui/ConfirmDialog'
 import { api } from '../../../lib/apiClient'
 import type { UserProfile, UserListResponse } from '../../../types/api'
 
@@ -13,6 +14,8 @@ interface UserListProps {
 
 const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser }) => {
   const [includeInactive, setIncludeInactive] = useState(false)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null)
   const queryClient = useQueryClient()
   const {
     data: userListData,
@@ -48,9 +51,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
   })
 
   const handleDeleteUser = (user: UserProfile) => {
-    if (confirm(`Are you sure you want to deactivate user "${user.username}"?`)) {
-      deleteUserMutation.mutate(user.id)
-    }
+    setUserToDelete(user)
   }
 
   const getRoleBadgeColor = (role: string): string => {
@@ -107,7 +108,17 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
     )
   }
 
-  const users = userListData?.users || []
+  const allUsers = userListData?.users || []
+  const users = allUsers.filter(user => {
+    if (searchTerm === '') return true
+    const term = searchTerm.toLowerCase()
+
+    return (
+      user.username.toLowerCase().includes(term) ||
+      user.email.toLowerCase().includes(term) ||
+      user.role.toLowerCase().includes(term)
+    )
+  })
 
   return (
     <div className='space-y-4'>
@@ -134,6 +145,16 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
             <span>Add User</span>
           </Button>
         </div>
+      </div>
+      {}
+      <div>
+        <input
+          type='text'
+          placeholder='Search by username, email, or role...'
+          value={searchTerm}
+          onChange={e => setSearchTerm(e.target.value)}
+          className='input'
+        />
       </div>
       {}
       <div className='bg-alpine-50 shadow-sm rounded-lg border border-dark-600 overflow-hidden'>
@@ -224,11 +245,28 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
             <Users className='mx-auto h-12 w-12 text-muted-400' />
             <h3 className='mt-2 text-sm font-medium text-alpine-900'>No users found</h3>
             <p className='mt-1 text-sm text-muted-500'>
-              {includeInactive ? 'No users found.' : 'No active users found.'}
+              {searchTerm
+                ? 'No users match your search criteria.'
+                : includeInactive
+                  ? 'No users found.'
+                  : 'No active users found.'}
             </p>
           </div>
         )}
       </div>
+      {}
+      <ConfirmDialog
+        open={userToDelete !== null}
+        title='Deactivate User'
+        message={`Are you sure you want to deactivate user "${userToDelete?.username ?? ''}"? They will no longer be able to sign in.`}
+        confirmText='Deactivate'
+        variant='danger'
+        onConfirm={() => {
+          deleteUserMutation.mutate((userToDelete as UserProfile).id)
+          setUserToDelete(null)
+        }}
+        onCancel={() => setUserToDelete(null)}
+      />
     </div>
   )
 }

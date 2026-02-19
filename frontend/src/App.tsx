@@ -1,16 +1,19 @@
 import { useState } from 'react'
 import { useAuth } from './stores/auth'
+import { useAppStore } from './stores/app'
 import { useTabRouting, type ValidTab } from './hooks/useHashRouting'
 import { useAppShell } from './hooks/useAppShell'
 import { AppRoutes } from './components/AppRoutes'
 import { ALL_TABS } from './components/tabs'
 import UserProfile from './components/auth/UserProfile'
-import { Menu, Wifi, WifiOff, X } from 'lucide-react'
+import { Menu, Wifi, WifiOff, X, Sun, Moon } from 'lucide-react'
 
 function App() {
   const [activeTab, navigateToTab] = useTabRouting()
   const { canAccess } = useAuth()
   const { isConnected, connectionLag, subscribedTopicsCount } = useAppShell()
+  const isDarkMode = useAppStore(s => s.isDarkMode)
+  const toggleDarkMode = useAppStore(s => s.toggleDarkMode)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const tabs = ALL_TABS.filter(tab => canAccess(tab.id))
   const lagValue = connectionLag >= 0 ? `${connectionLag} ms` : 'Unknown'
@@ -87,10 +90,16 @@ function App() {
               <Menu size={20} />
             </button>
             <div className='ml-auto flex items-center gap-3'>
-              <span className='hidden text-sm tabular-nums text-muted-600 sm:inline'>
+              <span
+                className='hidden text-sm tabular-nums text-muted-600 sm:inline'
+                title='Round-trip latency to the WebSocket server'
+              >
                 Lag: {lagValue}
               </span>
-              <span className='hidden text-sm tabular-nums text-muted-600 sm:inline'>
+              <span
+                className='hidden text-sm tabular-nums text-muted-600 sm:inline'
+                title='Number of subscribed WebSocket topics'
+              >
                 Topics: {subscribedTopicsCount}
               </span>
               <span
@@ -103,6 +112,14 @@ function App() {
                 {isConnected ? <Wifi size={13} /> : <WifiOff size={13} />}
                 {isConnected ? 'Connected' : 'Disconnected'}
               </span>
+              <button
+                onClick={toggleDarkMode}
+                className='rounded-lg p-2 text-muted-600 hover:bg-dark-700 transition-colors'
+                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+              </button>
               <UserProfile />
             </div>
           </div>

@@ -179,5 +179,29 @@ describe('useAppStore', () => {
       useAppStore.getState().toggleDarkMode()
       expect(useAppStore.getState().isDarkMode).toBe(false)
     })
+    it('persists dark mode preference to localStorage', () => {
+      useAppStore.setState({ isDarkMode: false })
+      useAppStore.getState().toggleDarkMode()
+      expect(localStorage.getItem('snapper-dark-mode')).toBe('true')
+      useAppStore.getState().toggleDarkMode()
+      expect(localStorage.getItem('snapper-dark-mode')).toBe('false')
+    })
+  })
+  describe('loadDarkModePreference', () => {
+    it('reads dark mode preference from localStorage on module load', async () => {
+      localStorage.setItem('snapper-dark-mode', 'true')
+      vi.resetModules()
+      const { useAppStore: freshStore } = await import('./app')
+
+      expect(freshStore.getState().isDarkMode).toBe(true)
+      localStorage.removeItem('snapper-dark-mode')
+    })
+    it('defaults to false when localStorage has no value', async () => {
+      localStorage.removeItem('snapper-dark-mode')
+      vi.resetModules()
+      const { useAppStore: freshStore } = await import('./app')
+
+      expect(freshStore.getState().isDarkMode).toBe(false)
+    })
   })
 })

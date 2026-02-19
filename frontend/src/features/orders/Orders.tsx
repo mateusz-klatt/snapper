@@ -1,8 +1,10 @@
 import React, { useState } from 'react'
+import { Download } from 'lucide-react'
 import { useOrders, useExecutions } from '../../hooks/queries'
 import type { OrderStatus, Fill } from '../../types/entities'
 import { OrderCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
+import { exportToCSV } from '../../lib/csvExport'
 import clsx from 'clsx'
 
 const OrderCard: React.FC<{ order: OrderStatus }> = ({ order }) => {
@@ -129,6 +131,49 @@ export const Orders: React.FC = () => {
   const filteredOrders = orders.filter(
     (order: OrderStatus) => statusFilter === 'all' || order.status.toLowerCase() === statusFilter
   )
+
+  const handleExportOrders = () => {
+    const headers = ['Instrument', 'Side', 'Type', 'Status', 'Quantity', 'Price', 'Created']
+    const rows = filteredOrders.map((o: OrderStatus) => [
+      o.instrument,
+      o.side ?? '',
+      o.orderType,
+      o.status,
+      o.size.toFixed(4),
+      o.price ? o.price.toFixed(2) : 'Market',
+      o.createdAt ? o.createdAt.toLocaleString() : '',
+    ])
+
+    exportToCSV('orders.csv', headers, rows)
+  }
+
+  const handleExportExecutions = () => {
+    const headers = [
+      'Order ID',
+      'Instrument',
+      'Side',
+      'Size',
+      'Price',
+      'Total',
+      'Fee',
+      'Fee Asset',
+      'Executed',
+    ]
+    const rows = executions.map((e: Fill) => [
+      e.clientOrderId,
+      e.instrument,
+      e.side,
+      e.size.toFixed(4),
+      e.price.toFixed(2),
+      (e.price * e.size).toFixed(2),
+      e.fee ? e.fee.toFixed(2) : '0',
+      e.feeAsset ?? '',
+      e.executedAt ? e.executedAt.toLocaleString() : '',
+    ])
+
+    exportToCSV('executions.csv', headers, rows)
+  }
+
   const statusOptions = [
     { value: 'all', label: 'All Orders' },
     { value: 'new', label: 'New' },
@@ -143,6 +188,14 @@ export const Orders: React.FC = () => {
     <div className='space-y-6'>
       <div className='flex items-center justify-between'>
         <h2 className='text-xl font-semibold text-alpine-900'>Orders & Executions</h2>
+        <button
+          onClick={activeTab === 'orders' ? handleExportOrders : handleExportExecutions}
+          disabled={activeTab === 'orders' ? filteredOrders.length === 0 : executions.length === 0}
+          className='flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-dark-600 bg-alpine-50 hover:bg-muted-200 disabled:opacity-50 disabled:cursor-not-allowed text-alpine-900 rounded-lg transition-colors'
+        >
+          <Download size={14} />
+          Export CSV
+        </button>
       </div>
       <div className='flex space-x-1 rounded-xl border border-dark-600 bg-dark-700 p-1'>
         <button

@@ -1,9 +1,11 @@
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Download } from 'lucide-react'
 import { useAuth } from '../../stores/auth'
 import { apiClient } from '../../lib/apiClient'
 import { SignalCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
+import { exportToCSV } from '../../lib/csvExport'
 import type { TradingSignal } from '../../types/api'
 import clsx from 'clsx'
 import {
@@ -121,10 +123,43 @@ export const Signals: React.FC = () => {
         totalSignals
       : 0
 
+  const handleExportSignals = () => {
+    const headers = [
+      'ID',
+      'Instrument',
+      'Side',
+      'Strength',
+      'Price',
+      'Strategy',
+      'Reason',
+      'Timestamp',
+    ]
+    const rows = filteredSignals.map((s: TradingSignal) => [
+      String(s.id),
+      s.instrument,
+      s.side,
+      (s.strength * 100).toFixed(0) + '%',
+      s.price ? s.price.toFixed(2) : '',
+      s.strategy_name ?? '',
+      s.reason ?? '',
+      s.timestamp,
+    ])
+
+    exportToCSV('signals.csv', headers, rows)
+  }
+
   return (
     <div className='space-y-6'>
       <div className='flex items-center justify-between'>
         <h2 className='text-xl font-semibold text-alpine-900'>Trading Signals</h2>
+        <button
+          onClick={handleExportSignals}
+          disabled={filteredSignals.length === 0}
+          className='flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-dark-600 bg-alpine-50 hover:bg-muted-200 disabled:opacity-50 disabled:cursor-not-allowed text-alpine-900 rounded-lg transition-colors'
+        >
+          <Download size={14} />
+          Export CSV
+        </button>
       </div>
       <div className='grid grid-cols-2 gap-4 sm:grid-cols-4'>
         <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-4'>

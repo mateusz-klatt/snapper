@@ -160,7 +160,7 @@ export const Settings = () => {
               placeholder='Search settings...'
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              className='w-full px-3 py-1.5 text-sm bg-white border border-dark-600 rounded-lg text-alpine-900 placeholder-muted-400 focus:outline-none focus:border-brand-500'
+              className='input text-sm'
             />
           </div>
           <div>

@@ -31,12 +31,12 @@ export const ConfirmDialog: React.FC<Readonly<ConfirmDialogProps>> = ({
     <Modal open={open} onClose={onCancel} title={title} size='sm'>
       <div className='space-y-6'>
         {}
-        <p className='text-dark-200 leading-relaxed'>{message}</p>
+        <p className='text-muted-600 leading-relaxed'>{message}</p>
         {}
-        <div className='flex space-x-3 pt-4 border-t border-dark-700'>
+        <div className='flex space-x-3 pt-4 border-t border-dark-600'>
           <button
             onClick={onCancel}
-            className='flex-1 px-4 py-2 text-sm font-medium text-dark-300 bg-dark-700 border border-dark-600 rounded-md hover:bg-dark-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-800 focus:ring-primary-500 transition-colors'
+            className='flex-1 px-4 py-2 text-sm font-medium text-alpine-900 bg-alpine-50 border border-dark-600 rounded-md hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-alpine-50 focus:ring-primary-500 transition-colors'
           >
             {cancelText}
           </button>

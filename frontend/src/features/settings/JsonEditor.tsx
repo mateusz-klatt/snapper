@@ -92,7 +92,7 @@ export const JsonEditor: React.FC<Readonly<JsonEditorProps>> = ({
           value={rawJson}
           onChange={handleRawChange}
           readOnly={readOnly}
-          className='w-full h-96 font-mono text-xs bg-white border border-dark-600 rounded p-3 text-alpine-900 focus:outline-none focus:ring-2 focus:ring-primary-500'
+          className='w-full h-96 font-mono text-xs bg-alpine-50 border border-dark-600 rounded p-3 text-alpine-900 focus:outline-none focus:ring-2 focus:ring-primary-500'
           spellCheck={false}
         />
       </div>
@@ -284,7 +284,7 @@ const PrimitiveEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
           checked={value}
           onChange={e => onChange(e.target.checked)}
           disabled={readOnly}
-          className='w-4 h-4 text-primary-500 bg-white border-dark-600 rounded focus:ring-primary-500'
+          className='w-4 h-4 text-primary-500 bg-alpine-50 border-dark-600 rounded focus:ring-primary-500'
         />
         <span className='text-sm text-muted-600'>{value ? 'true' : 'false'}</span>
       </label>
@@ -298,7 +298,7 @@ const PrimitiveEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
         value={value}
         onChange={e => onChange(Number(e.target.value))}
         readOnly={readOnly}
-        className='w-full px-3 py-2 bg-white border border-dark-600 rounded text-alpine-900 placeholder-muted-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
+        className='w-full px-3 py-2 bg-alpine-50 border border-dark-600 rounded text-alpine-900 placeholder-muted-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
       />
     )
   }
@@ -311,7 +311,7 @@ const PrimitiveEditor: React.FC<Readonly<JsonValueEditorProps>> = ({
       value={stringValue}
       onChange={e => onChange(e.target.value)}
       readOnly={readOnly}
-      className='w-full px-3 py-2 bg-white border border-dark-600 rounded text-alpine-900 placeholder-muted-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
+      className='w-full px-3 py-2 bg-alpine-50 border border-dark-600 rounded text-alpine-900 placeholder-muted-400 focus:outline-none focus:ring-2 focus:ring-primary-500'
     />
   )
 }

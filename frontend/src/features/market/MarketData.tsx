@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState, useRef, useEffect } from 'react'
 import { Card, LoadingSpinner } from '../../components/ui'
 import { LightweightChart } from '../../components/LightweightChart'
 import { useCandles, useExchanges, useExchangeInstruments } from '../../hooks/queries'
@@ -41,6 +41,33 @@ export function MarketData() {
     error,
     isFetching,
   } = useCandles(selectedInstrument ?? '', selectedExchange ?? '', selectedTimeframe)
+  const [instrumentSearch, setInstrumentSearch] = useState('')
+  const [instrumentDropdownOpen, setInstrumentDropdownOpen] = useState(false)
+  const instrumentRef = useRef<HTMLDivElement>(null)
+  const filteredInstruments = useMemo(() => {
+    const list = instruments ?? []
+
+    if (!instrumentSearch) return list
+
+    return list.filter(inst => inst.toLowerCase().includes(instrumentSearch.toLowerCase()))
+  }, [instruments, instrumentSearch])
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (instrumentRef.current && !instrumentRef.current.contains(e.target as Node)) {
+        setInstrumentDropdownOpen(false)
+      }
+    }
+
+    if (instrumentDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [instrumentDropdownOpen])
+
   const chartData: FormattedCandle[] = useMemo(() => {
     if (!candles || isFetching) return []
     const sortedCandles = [...candles].sort((a, b) => {
@@ -113,7 +140,7 @@ export function MarketData() {
           <Select.Root value={selectedExchange ?? undefined} onValueChange={setSelectedExchange}>
             <Select.Trigger
               id='exchange-select'
-              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-white border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-alpine-50 border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
             >
               <Select.Value placeholder='Select exchange' />
               <Select.Icon className='ml-2'>
@@ -121,7 +148,7 @@ export function MarketData() {
               </Select.Icon>
             </Select.Trigger>
             <Select.Portal>
-              <Select.Content className='overflow-hidden bg-white rounded-md shadow-lg border border-dark-600'>
+              <Select.Content className='z-50 overflow-hidden bg-alpine-50 rounded-md shadow-lg border border-dark-600'>
                 <Select.Viewport className='p-1'>
                   {(exchanges ?? []).map(ex => (
                     <Select.Item
@@ -138,39 +165,46 @@ export function MarketData() {
           </Select.Root>
         </div>
         <div className='flex items-center gap-2'>
-          <label htmlFor='instrument-select' className='text-sm font-medium text-muted-600'>
+          <label htmlFor='instrument-search' className='text-sm font-medium text-muted-600'>
             Instrument:
           </label>
-          <Select.Root
-            value={selectedInstrument ?? undefined}
-            onValueChange={setSelectedInstrument}
-            disabled={!selectedExchange}
-          >
-            <Select.Trigger
-              id='instrument-select'
-              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-white border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50'
-            >
-              <Select.Value placeholder='Select instrument' />
-              <Select.Icon className='ml-2'>
-                <ChevronDownIcon size={16} />
-              </Select.Icon>
-            </Select.Trigger>
-            <Select.Portal>
-              <Select.Content className='overflow-hidden bg-white rounded-md shadow-lg border border-dark-600'>
-                <Select.Viewport className='p-1'>
-                  {(instruments ?? []).map(inst => (
-                    <Select.Item
+          <div ref={instrumentRef} className='relative'>
+            <input
+              id='instrument-search'
+              type='text'
+              value={instrumentDropdownOpen ? instrumentSearch : (selectedInstrument ?? '')}
+              onChange={e => setInstrumentSearch(e.target.value)}
+              onFocus={() => {
+                setInstrumentDropdownOpen(true)
+                setInstrumentSearch('')
+              }}
+              placeholder='Search instrument...'
+              disabled={!selectedExchange}
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-alpine-50 border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50'
+            />
+            {instrumentDropdownOpen && (
+              <div className='absolute top-full left-0 mt-1 w-full min-w-48 max-h-60 overflow-y-auto z-50 bg-alpine-50 rounded-md shadow-lg border border-dark-600'>
+                {filteredInstruments.length > 0 ? (
+                  filteredInstruments.map(inst => (
+                    <button
                       key={inst}
-                      value={inst}
-                      className='flex select-none items-center px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 focus:bg-dark-700 cursor-pointer'
+                      type='button'
+                      onClick={() => {
+                        setSelectedInstrument(inst)
+                        setInstrumentDropdownOpen(false)
+                        setInstrumentSearch('')
+                      }}
+                      className='flex w-full select-none items-center px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 cursor-pointer'
                     >
-                      <Select.ItemText>{inst}</Select.ItemText>
-                    </Select.Item>
-                  ))}
-                </Select.Viewport>
-              </Select.Content>
-            </Select.Portal>
-          </Select.Root>
+                      {inst}
+                    </button>
+                  ))
+                ) : (
+                  <div className='px-3 py-2 text-sm text-muted-500'>No instruments found</div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
         <div className='flex items-center gap-2'>
           <label htmlFor='timeframe-select' className='text-sm font-medium text-muted-600'>
@@ -179,7 +213,7 @@ export function MarketData() {
           <Select.Root value={selectedTimeframe} onValueChange={setSelectedTimeframe}>
             <Select.Trigger
               id='timeframe-select'
-              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-white border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
+              className='inline-flex items-center justify-center rounded-sm px-3 py-2 text-sm bg-alpine-50 border border-dark-600 text-alpine-900 hover:bg-dark-700 focus:outline-hidden focus:ring-2 focus:ring-primary-500 focus:border-primary-500'
             >
               <Select.Value />
               <Select.Icon className='ml-2'>
@@ -187,7 +221,7 @@ export function MarketData() {
               </Select.Icon>
             </Select.Trigger>
             <Select.Portal>
-              <Select.Content className='overflow-hidden bg-white rounded-md shadow-lg border border-dark-600'>
+              <Select.Content className='z-50 overflow-hidden bg-alpine-50 rounded-md shadow-lg border border-dark-600'>
                 <Select.Viewport className='p-1'>
                   {timeframes.map(timeframe => (
                     <Select.Item

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -66,7 +66,7 @@ describe('MarketData', () => {
   it('displays instrument selector', async () => {
     renderWithProviders(<MarketData />)
     await waitFor(() => {
-      expect(document.querySelector('select, [role="combobox"]')).toBeInTheDocument()
+      expect(screen.getByLabelText('Instrument:')).toBeInTheDocument()
     })
   })
   it('displays timeframe selector', async () => {
@@ -109,11 +109,13 @@ describe('MarketData', () => {
     const user = userEvent.setup()
 
     renderWithProviders(<MarketData />)
-    const trigger = screen.getAllByRole('combobox')[1]
+    const input = screen.getByLabelText('Instrument:')
 
-    await user.click(trigger)
+    await user.click(input)
     await waitFor(() => {
-      expect(screen.getAllByText('EUR-USD').length).toBeGreaterThanOrEqual(2)
+      expect(screen.getByText('EUR-USD')).toBeInTheDocument()
+      expect(screen.getByText('GBP-USD')).toBeInTheDocument()
+      expect(screen.getByText('BTC-USD')).toBeInTheDocument()
     })
   })
   it('displays timeframe dropdown with options', async () => {
@@ -122,7 +124,7 @@ describe('MarketData', () => {
     renderWithProviders(<MarketData />)
     const triggers = screen.getAllByRole('combobox')
 
-    await user.click(triggers[2])
+    await user.click(triggers[1])
     await waitFor(() => {
       expect(screen.getAllByText('1 Hour').length).toBeGreaterThanOrEqual(2)
     })
@@ -309,9 +311,9 @@ describe('MarketData', () => {
     const user = userEvent.setup()
 
     renderWithProviders(<MarketData />)
-    const triggers = screen.getAllByRole('combobox')
+    const input = screen.getByLabelText('Instrument:')
 
-    await user.click(triggers[1])
+    await user.click(input)
     await waitFor(() => {
       expect(screen.getByText('GBP-USD')).toBeInTheDocument()
     })
@@ -324,7 +326,7 @@ describe('MarketData', () => {
     renderWithProviders(<MarketData />)
     const triggers = screen.getAllByRole('combobox')
 
-    await user.click(triggers[2])
+    await user.click(triggers[1])
     await waitFor(() => {
       expect(screen.getByText('15 Minutes')).toBeInTheDocument()
     })
@@ -386,5 +388,81 @@ describe('MarketData', () => {
     await waitFor(() => {
       expect(screen.getAllByText('Current Price').length).toBeGreaterThan(0)
     })
+  })
+  it('filters instruments on typing', async () => {
+    const user = userEvent.setup()
+
+    renderWithProviders(<MarketData />)
+    const input = screen.getByLabelText('Instrument:')
+
+    await user.click(input)
+    await user.type(input, 'BTC')
+    await waitFor(() => {
+      expect(screen.getByText('BTC-USD')).toBeInTheDocument()
+      expect(screen.queryByText('EUR-USD')).not.toBeInTheDocument()
+      expect(screen.queryByText('GBP-USD')).not.toBeInTheDocument()
+    })
+  })
+  it('shows all instruments when input is focused with no search', async () => {
+    const user = userEvent.setup()
+
+    renderWithProviders(<MarketData />)
+    const input = screen.getByLabelText('Instrument:')
+
+    await user.click(input)
+    await waitFor(() => {
+      expect(screen.getByText('EUR-USD')).toBeInTheDocument()
+      expect(screen.getByText('GBP-USD')).toBeInTheDocument()
+      expect(screen.getByText('BTC-USD')).toBeInTheDocument()
+    })
+  })
+  it('closes instrument dropdown on click outside', async () => {
+    const user = userEvent.setup()
+
+    renderWithProviders(<MarketData />)
+    const input = screen.getByLabelText('Instrument:')
+
+    await user.click(input)
+    await waitFor(() => {
+      expect(screen.getByText('GBP-USD')).toBeInTheDocument()
+    })
+    fireEvent.mouseDown(document.body)
+    await waitFor(() => {
+      expect(screen.queryByText('GBP-USD')).not.toBeInTheDocument()
+    })
+  })
+  it('shows no instruments found when search matches nothing', async () => {
+    const user = userEvent.setup()
+
+    renderWithProviders(<MarketData />)
+    const input = screen.getByLabelText('Instrument:')
+
+    await user.click(input)
+    await user.type(input, 'ZZZZZ')
+    await waitFor(() => {
+      expect(screen.getByText('No instruments found')).toBeInTheDocument()
+    })
+  })
+  it('shows selected instrument in input when dropdown is closed', async () => {
+    renderWithProviders(<MarketData />)
+    const input = screen.getByLabelText('Instrument:') as HTMLInputElement
+
+    expect(input.value).toBe('EUR-USD')
+  })
+  it('disables instrument input when no exchange selected', async () => {
+    const { useMarketStore } = await import('../../stores/market')
+
+    vi.mocked(useMarketStore).mockReturnValueOnce({
+      selectedExchange: null,
+      selectedInstrument: null,
+      selectedTimeframe: '1h',
+      setSelectedExchange: mockSetSelectedExchange,
+      setSelectedInstrument: mockSetSelectedInstrument,
+      setSelectedTimeframe: mockSetSelectedTimeframe,
+    })
+    renderWithProviders(<MarketData />)
+    const input = screen.getByLabelText('Instrument:')
+
+    expect(input).toBeDisabled()
   })
 })

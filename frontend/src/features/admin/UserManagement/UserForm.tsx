@@ -217,7 +217,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
             value={formData.username}
             onChange={e => handleInputChange('username', e.target.value)}
             disabled={isEditing}
-            className={`w-full rounded-md border bg-white px-3 py-2 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+            className={`w-full rounded-md border bg-alpine-50 px-3 py-2 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
               errors.username ? 'border-loss-500' : 'border-dark-600'
             } ${isEditing ? 'bg-muted-100 cursor-not-allowed bg-muted-100' : ''}`}
             placeholder='Enter username'
@@ -253,7 +253,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
                     id='password'
                     value={formData.password}
                     onChange={e => handleInputChange('password', e.target.value)}
-                    className={`w-full rounded-md border bg-white px-3 py-2 pr-10 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+                    className={`w-full rounded-md border bg-alpine-50 px-3 py-2 pr-10 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
                       errors.password ? 'border-loss-500' : 'border-dark-600'
                     }`}
                     placeholder='Enter new password'
@@ -285,7 +285,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
                 id='password'
                 value={formData.password}
                 onChange={e => handleInputChange('password', e.target.value)}
-                className={`w-full rounded-md border bg-white px-3 py-2 pr-10 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+                className={`w-full rounded-md border bg-alpine-50 px-3 py-2 pr-10 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
                   errors.password ? 'border-loss-500' : 'border-dark-600'
                 }`}
                 placeholder='Enter password'
@@ -311,7 +311,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
             id='email'
             value={formData.email}
             onChange={e => handleInputChange('email', e.target.value)}
-            className={`w-full rounded-md border bg-white px-3 py-2 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
+            className={`w-full rounded-md border bg-alpine-50 px-3 py-2 text-alpine-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500  ${
               errors.email ? 'border-loss-500' : 'border-dark-600'
             }`}
             placeholder='Enter email'

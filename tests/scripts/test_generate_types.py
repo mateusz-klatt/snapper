@@ -26,6 +26,7 @@ from scripts.generate_types import fix_refs_pydantic
 from scripts.generate_types import generate_entities
 from scripts.generate_types import generate_entity_interface
 from scripts.generate_types import generate_ios_types
+from scripts.generate_types import generate_permissions
 from scripts.generate_types import generate_swift_enum
 from scripts.generate_types import generate_swift_struct
 from scripts.generate_types import generate_swift_types
@@ -1750,6 +1751,7 @@ class TestMain:
             patch("scripts.generate_types.generate_zod_ws") as mock_zod_ws,
             patch("scripts.generate_types.generate_zod_api") as mock_zod_api,
             patch("scripts.generate_types.generate_entities") as mock_entities,
+            patch("scripts.generate_types.generate_permissions") as mock_permissions,
             patch("scripts.generate_types.generate_ios_types") as mock_ios,
             patch.object(Path, "parent", tmp_path),
         ):
@@ -1762,6 +1764,7 @@ class TestMain:
             mock_zod_ws.assert_called_once()
             mock_zod_api.assert_called_once()
             mock_entities.assert_called_once()
+            mock_permissions.assert_called_once()
             mock_ios.assert_called_once()
 
     def test_runs_only_openapi(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1817,6 +1820,7 @@ class TestMain:
             patch("scripts.generate_types.generate_zod_ws"),
             patch("scripts.generate_types.generate_zod_api"),
             patch("scripts.generate_types.generate_entities"),
+            patch("scripts.generate_types.generate_permissions"),
             patch("scripts.generate_types.generate_ios_types"),
         ):
             result = main()
@@ -1890,6 +1894,63 @@ class TestMain:
 
         assert result == 0
         assert test_file.read_text(encoding="utf-8") == original_content
+
+
+class TestGeneratePermissions:
+    """Tests for generate_permissions function."""
+
+    def test_generates_permissions_file(self, tmp_path: Path, capsys: Any) -> None:
+        """Generates permissions TypeScript module from backend source of truth."""
+        generate_permissions(tmp_path)
+
+        output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
+        assert output.exists()
+        content = output.read_text()
+        assert "export const Permission" in content
+        assert "export type Permission" in content
+        assert "ROLE_PERMISSIONS" in content
+        assert "read:market_data" in content
+        assert "manage:users" in content
+        captured = capsys.readouterr()
+        assert "Generated" in captured.out
+        assert "14 permissions" in captured.out
+        assert "3 roles" in captured.out
+
+    def test_includes_all_roles(self, tmp_path: Path) -> None:
+        """Generated file includes viewer, operator, and admin roles."""
+        generate_permissions(tmp_path)
+
+        output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
+        content = output.read_text()
+        assert "viewer:" in content
+        assert "operator:" in content
+        assert "admin:" in content
+
+    def test_user_role_type_not_exported(self, tmp_path: Path) -> None:
+        """UserRole type is file-local, not exported."""
+        generate_permissions(tmp_path)
+
+        output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
+        content = output.read_text()
+        assert "type UserRole = " in content
+        assert "export type UserRole" not in content
+
+    def test_permissions_flag_triggers_generation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI --permissions flag calls generate_permissions.
+
+        Given: argv includes --permissions,
+        When: main() is called,
+        Then: generate_permissions is invoked.
+        """
+        monkeypatch.setattr(sys, "argv", ["prog", "--permissions"])
+
+        with patch("scripts.generate_types.generate_permissions") as mock_perms:
+            result = main()
+
+            assert result == 0
+            mock_perms.assert_called_once()
 
 
 class TestConstants:

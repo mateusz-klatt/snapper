@@ -214,9 +214,7 @@ describe('UserList', () => {
       expect(screen.getByText('testuser')).toBeTruthy()
     })
   })
-  it('cancels user deletion when not confirmed', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-
+  it('cancels user deletion when cancel clicked in dialog', async () => {
     vi.mocked(api).mockResolvedValueOnce({
       ok: true,
       json: () =>
@@ -245,12 +243,13 @@ describe('UserList', () => {
       await userEvent.click(deleteButton)
     }
 
+    await waitFor(() => {
+      expect(screen.getByText('Deactivate User')).toBeTruthy()
+    })
+    await userEvent.click(screen.getByText('Cancel'))
     expect(vi.mocked(api)).toHaveBeenCalledTimes(1)
-    confirmSpy.mockRestore()
   })
   it('calls delete API when user confirms deletion', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-
     vi.mocked(api).mockReset()
     vi.mocked(api).mockResolvedValueOnce({
       ok: true,
@@ -286,13 +285,14 @@ describe('UserList', () => {
     }
 
     await waitFor(() => {
+      expect(screen.getByText('Deactivate User')).toBeTruthy()
+    })
+    await userEvent.click(screen.getByText('Deactivate'))
+    await waitFor(() => {
       expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/del-user', { method: 'DELETE' })
     })
-    confirmSpy.mockRestore()
   })
   it('handles delete API error', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-
     vi.mocked(api).mockReset()
     vi.mocked(api).mockResolvedValueOnce({
       ok: true,
@@ -328,9 +328,12 @@ describe('UserList', () => {
     }
 
     await waitFor(() => {
+      expect(screen.getByText('Deactivate User')).toBeTruthy()
+    })
+    await userEvent.click(screen.getByText('Deactivate'))
+    await waitFor(() => {
       expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/fail-del', { method: 'DELETE' })
     })
-    confirmSpy.mockRestore()
   })
   it('falls back to empty users list when response has no users field', async () => {
     vi.mocked(api).mockResolvedValue({
@@ -343,8 +346,6 @@ describe('UserList', () => {
     })
   })
   it('handles delete error with empty message', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-
     vi.mocked(api).mockReset()
     vi.mocked(api).mockResolvedValueOnce({
       ok: true,
@@ -376,9 +377,12 @@ describe('UserList', () => {
     }
 
     await waitFor(() => {
+      expect(screen.getByText('Deactivate User')).toBeTruthy()
+    })
+    await userEvent.click(screen.getByText('Deactivate'))
+    await waitFor(() => {
       expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/empty-error', { method: 'DELETE' })
     })
-    confirmSpy.mockRestore()
   })
   it('displays operator role badge', async () => {
     vi.mocked(api).mockResolvedValue({
@@ -617,6 +621,74 @@ describe('UserList', () => {
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('Unknown')).toBeTruthy()
+    })
+  })
+  it('filters users by search term', async () => {
+    vi.mocked(api).mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          users: [
+            {
+              id: '1',
+              username: 'alice',
+              email: 'alice@example.com',
+              role: 'admin',
+              is_active: true,
+              created_at: '2024-01-01T00:00:00Z',
+            },
+            {
+              id: '2',
+              username: 'bob',
+              email: 'bob@example.com',
+              role: 'viewer',
+              is_active: true,
+              created_at: '2024-01-01T00:00:00Z',
+            },
+          ],
+          total_count: 2,
+        }),
+    } as Response)
+    renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    await waitFor(() => {
+      expect(screen.getByText('alice')).toBeTruthy()
+      expect(screen.getByText('bob')).toBeTruthy()
+    })
+    const searchInput = screen.getByPlaceholderText('Search by username, email, or role...')
+
+    await userEvent.type(searchInput, 'alice')
+    await waitFor(() => {
+      expect(screen.getByText('alice')).toBeTruthy()
+      expect(screen.queryByText('bob')).toBeNull()
+    })
+  })
+  it('shows no match message when search finds nothing', async () => {
+    vi.mocked(api).mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          users: [
+            {
+              id: '1',
+              username: 'alice',
+              email: 'alice@example.com',
+              role: 'admin',
+              is_active: true,
+              created_at: '2024-01-01T00:00:00Z',
+            },
+          ],
+          total_count: 1,
+        }),
+    } as Response)
+    renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    await waitFor(() => {
+      expect(screen.getByText('alice')).toBeTruthy()
+    })
+    const searchInput = screen.getByPlaceholderText('Search by username, email, or role...')
+
+    await userEvent.type(searchInput, 'zzzzz')
+    await waitFor(() => {
+      expect(screen.getByText('No users match your search criteria.')).toBeTruthy()
     })
   })
 })

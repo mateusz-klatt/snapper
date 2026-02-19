@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { Components } from '../types/api.generated'
 import type { LoginRequest } from '../types/api'
+import { ROLE_PERMISSIONS } from '../types/permissions.generated'
+import type { Permission } from '../types/permissions.generated'
 import { apiClient } from '../lib/apiClient'
 import { storeWsTicket } from '../lib/wsTicketCache'
 
@@ -24,7 +26,7 @@ interface AuthState {
   clearError: () => void
   setLoading: (loading: boolean) => void
   hasRole: (role: UserRole) => boolean
-  hasPermission: (permission: string) => boolean
+  hasPermission: (permission: Permission) => boolean
   canAccess: (resource: string) => boolean
 }
 const ROLE_HIERARCHY: Record<UserRole, number> = {
@@ -32,30 +34,8 @@ const ROLE_HIERARCHY: Record<UserRole, number> = {
   operator: 2,
   admin: 3,
 }
-const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
-  viewer: [
-    'read:market_data',
-    'read:orders',
-    'read:positions',
-    'read:strategies',
-    'read:system_status',
-  ],
-  operator: [
-    'read:market_data',
-    'read:orders',
-    'create:orders',
-    'cancel:orders',
-    'read:positions',
-    'manage:positions',
-    'read:strategies',
-    'start:strategies',
-    'stop:strategies',
-    'read:system_status',
-    'manage:processes',
-  ],
-  admin: [],
-}
-const RESOURCE_ACCESS: Record<string, UserRole[]> = {
+
+export const RESOURCE_ACCESS: Record<string, UserRole[]> = {
   overview: ['viewer', 'operator', 'admin'],
   market: ['viewer', 'operator', 'admin'],
   processes: ['operator', 'admin'],
@@ -225,7 +205,7 @@ export const useAuthStore = create<AuthState>()(
 
           return ROLE_HIERARCHY[user.role] >= ROLE_HIERARCHY[role]
         },
-        hasPermission: (permission: string) => {
+        hasPermission: (permission: Permission) => {
           const { user } = get()
 
           if (!user) return false
@@ -234,7 +214,7 @@ export const useAuthStore = create<AuthState>()(
             return true
           }
 
-          const userPermissions = ROLE_PERMISSIONS[user.role] || []
+          const userPermissions: readonly Permission[] = ROLE_PERMISSIONS[user.role] || []
 
           return userPermissions.includes(permission)
         },

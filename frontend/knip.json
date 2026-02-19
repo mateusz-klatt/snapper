@@ -8,6 +8,7 @@
     "src/types/ws.ts",
     "src/types/ui.ts",
     "src/types/entities.generated.ts",
+    "src/types/permissions.generated.ts",
     "src/lib/websocket/client.ts",
     "src/lib/websocket/instance.ts",
     "src/lib/websocket/types.ts",
@@ -25,7 +26,8 @@
     "src/types/entities.ts",
     "src/types/entities.generated.ts",
     "src/lib/schemas/ws.generated.zod.ts",
-    "src/lib/schemas/api.generated.zod.ts"
+    "src/lib/schemas/api.generated.zod.ts",
+    "src/types/permissions.generated.ts"
   ],
   "ignoreDependencies": [
     "tailwindcss",

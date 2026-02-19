@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { Admin } from './Admin'
 
 vi.mock('./UserManagement/UserManagement', () => ({
@@ -26,5 +27,37 @@ describe('Admin', () => {
     const heading = screen.getByRole('heading', { level: 1 })
 
     expect(heading).toHaveTextContent('Administration')
+  })
+  it('expands and collapses role permissions panel', async () => {
+    const user = userEvent.setup()
+
+    render(<Admin />)
+    expect(screen.getByText('Role Permissions')).toBeInTheDocument()
+    expect(screen.queryByText('Overview')).not.toBeInTheDocument()
+    const toggleButton = screen.getByText('Role Permissions').closest('button') as HTMLButtonElement
+
+    await user.click(toggleButton)
+    expect(screen.getAllByText('Viewer').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('Operator').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('Admin').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('Overview')).toBeInTheDocument()
+    expect(screen.getByText('Market Data')).toBeInTheDocument()
+    expect(screen.getByText('Processes')).toBeInTheDocument()
+    expect(screen.getByText('Strategies')).toBeInTheDocument()
+    expect(screen.getByText('Orders & Fills')).toBeInTheDocument()
+    expect(screen.getByText('Signals')).toBeInTheDocument()
+    expect(screen.getByText('Health')).toBeInTheDocument()
+    expect(screen.getByText('Settings')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Read-only access to Overview and Market Data. Cannot manage processes, strategies, or system settings.'
+      )
+    ).toBeInTheDocument()
+    await user.click(toggleButton)
+    expect(
+      screen.queryByText(
+        'Read-only access to Overview and Market Data. Cannot manage processes, strategies, or system settings.'
+      )
+    ).not.toBeInTheDocument()
   })
 })

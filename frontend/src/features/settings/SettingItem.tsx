@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { SettingRead } from '../../types/api'
 import { JsonEditor } from './JsonEditor'
 import {
@@ -119,7 +120,7 @@ const EditingView: React.FC<EditingViewProps> = ({
       <textarea
         value={localValue}
         onChange={e => setLocalValue(e.target.value)}
-        className='w-full px-2 py-1.5 text-sm bg-white border border-dark-600 rounded text-alpine-900 focus:outline-none focus:border-brand-500 resize-vertical min-h-[60px]'
+        className='w-full px-2 py-1.5 text-sm bg-alpine-50 border border-dark-600 rounded text-alpine-900 focus:outline-none focus:border-brand-500 resize-vertical min-h-[60px]'
         placeholder='Enter setting value...'
       />
       <SaveCancelButtons onSave={onSave} onCancel={onCancel} isSaving={isSaving} />
@@ -143,62 +144,101 @@ const DisplayView: React.FC<DisplayViewProps> = ({
   setIsEditing,
   onDelete,
   isSaving,
-}) => (
-  <div className='space-y-2'>
-    <div className='bg-white border border-dark-600 rounded p-2'>
-      {isJsonString(setting.value) && !isSensitive(setting.key) ? (
-        <JsonSyntaxHighlight value={setting.value} />
+}) => {
+  const [isCollapsed, setIsCollapsed] = useState(true)
+  const isJson = isJsonString(setting.value) && !isSensitive(setting.key)
+  const lineCount = isJson
+    ? (() => {
+        try {
+          const parsed = JSON.parse(setting.value)
+
+          if (typeof parsed === 'object' && parsed !== null) {
+            return JSON.stringify(parsed, null, 2).split('\n').length
+          }
+        } catch {
+          /* not valid JSON */
+        }
+
+        return 1
+      })()
+    : 0
+  const isLongJson = isJson && lineCount > 3
+
+  return (
+    <div className='space-y-2'>
+      <div className='bg-dark-700 border border-dark-600 rounded p-2'>
+        {isJson ? (
+          <div className={isLongJson && isCollapsed ? 'max-h-[72px] overflow-hidden' : ''}>
+            <JsonSyntaxHighlight value={setting.value} />
+          </div>
+        ) : (
+          <pre className='text-xs text-alpine-900 whitespace-pre-wrap break-all'>
+            {getMaskedValue(setting.key, setting.value)}
+          </pre>
+        )}
+        {isLongJson && (
+          <button
+            onClick={() => setIsCollapsed(prev => !prev)}
+            className='flex items-center gap-1 mt-1 text-xs text-brand-600 hover:text-brand-700 transition-colors'
+          >
+            {isCollapsed ? (
+              <>
+                <ChevronDown size={14} /> Show more
+              </>
+            ) : (
+              <>
+                <ChevronUp size={14} /> Show less
+              </>
+            )}
+          </button>
+        )}
+      </div>
+      {showDeleteConfirm ? (
+        <div className='flex items-center gap-2 p-2 bg-loss-50 border border-loss-700 rounded'>
+          <span className='text-xs text-loss-700'>Delete this setting?</span>
+          <button
+            onClick={async () => {
+              await onDelete(setting.key)
+              setShowDeleteConfirm(false)
+            }}
+            disabled={isSaving}
+            className='px-2 py-1 text-xs bg-loss-600 hover:bg-loss-700 disabled:bg-loss-800 disabled:cursor-not-allowed text-white rounded transition-colors'
+          >
+            {isSaving ? 'Deleting...' : 'Yes, Delete'}
+          </button>
+          <button
+            onClick={() => setShowDeleteConfirm(false)}
+            disabled={isSaving}
+            className='px-2 py-1 text-xs border border-dark-600 bg-alpine-50 hover:bg-muted-200 disabled:cursor-not-allowed text-alpine-900 rounded transition-colors'
+          >
+            Cancel
+          </button>
+        </div>
       ) : (
-        <pre className='text-xs text-alpine-900 whitespace-pre-wrap break-all'>
-          {getMaskedValue(setting.key, setting.value)}
-        </pre>
+        <div className='flex justify-between items-center'>
+          <div className='flex gap-2'>
+            <button
+              onClick={() => setIsEditing(true)}
+              className='px-3 py-1 text-xs border border-dark-600 bg-alpine-50 hover:bg-muted-200 text-alpine-900 rounded transition-colors'
+            >
+              Edit
+            </button>
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className='px-3 py-1 text-xs bg-loss-50 hover:bg-loss-800 text-loss-700 hover:text-white rounded transition-colors'
+            >
+              Delete
+            </button>
+          </div>
+          <div className='text-xs text-muted-500'>
+            {new Date(setting.updated_at).toLocaleString()}
+            {setting.updated_by && ` • ${setting.updated_by}`}
+          </div>
+        </div>
       )}
     </div>
-    {showDeleteConfirm ? (
-      <div className='flex items-center gap-2 p-2 bg-loss-50 border border-loss-700 rounded'>
-        <span className='text-xs text-loss-700'>Delete this setting?</span>
-        <button
-          onClick={async () => {
-            await onDelete(setting.key)
-            setShowDeleteConfirm(false)
-          }}
-          disabled={isSaving}
-          className='px-2 py-1 text-xs bg-loss-600 hover:bg-loss-700 disabled:bg-loss-800 disabled:cursor-not-allowed text-white rounded transition-colors'
-        >
-          {isSaving ? 'Deleting...' : 'Yes, Delete'}
-        </button>
-        <button
-          onClick={() => setShowDeleteConfirm(false)}
-          disabled={isSaving}
-          className='px-2 py-1 text-xs border border-dark-600 bg-alpine-50 hover:bg-muted-200 disabled:cursor-not-allowed text-alpine-900 rounded transition-colors'
-        >
-          Cancel
-        </button>
-      </div>
-    ) : (
-      <div className='flex justify-between items-center'>
-        <div className='flex gap-2'>
-          <button
-            onClick={() => setIsEditing(true)}
-            className='px-3 py-1 text-xs border border-dark-600 bg-alpine-50 hover:bg-muted-200 text-alpine-900 rounded transition-colors'
-          >
-            Edit
-          </button>
-          <button
-            onClick={() => setShowDeleteConfirm(true)}
-            className='px-3 py-1 text-xs bg-loss-50 hover:bg-loss-800 text-loss-700 hover:text-white rounded transition-colors'
-          >
-            Delete
-          </button>
-        </div>
-        <div className='text-xs text-muted-500'>
-          {new Date(setting.updated_at).toLocaleString()}
-          {setting.updated_by && ` • ${setting.updated_by}`}
-        </div>
-      </div>
-    )}
-  </div>
-)
+  )
+}
 
 interface SettingItemProps {
   setting: SettingRead

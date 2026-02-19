@@ -39,6 +39,9 @@ vi.mock('../../components/ThemeSelect', () => ({
   ),
 }))
 
+vi.mock('../../lib/csvExport', () => ({
+  exportToCSV: vi.fn(),
+}))
 vi.mock('../../stores/auth', () => ({
   useAuth: vi.fn(() => ({
     isAuthenticated: true,
@@ -606,5 +609,78 @@ describe('Signals', () => {
     await screen.findByText('BTC-USD')
     expect(screen.queryByText('macd')).not.toBeInTheDocument()
     expect(screen.queryByText('rsi')).not.toBeInTheDocument()
+  })
+  it('exports signals to CSV when export button clicked', async () => {
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const userEventModule = await import('@testing-library/user-event')
+    const user = userEventModule.default.setup()
+    const queryClient = createTestQueryClient()
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Signals />
+      </QueryClientProvider>
+    )
+    await screen.findByText('BTC-USD')
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'signals.csv',
+      ['ID', 'Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Timestamp'],
+      expect.arrayContaining([expect.arrayContaining(['1', 'BTC-USD', 'buy'])])
+    )
+  })
+  it('disables export button when no signals', async () => {
+    const { apiClient } = await import('../../lib/apiClient')
+
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([])
+    const queryClient = createTestQueryClient()
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Signals />
+      </QueryClientProvider>
+    )
+    await screen.findByText('No signals found')
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    expect(exportButton).toBeDisabled()
+  })
+  it('exports signals with null price and null strategy_name', async () => {
+    const { apiClient } = await import('../../lib/apiClient')
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const userEventModule = await import('@testing-library/user-event')
+    const user = userEventModule.default.setup()
+
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
+      {
+        id: 20,
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timestamp: '2024-01-01T00:00:00Z',
+        side: 'buy',
+        strength: 0.85,
+        reason: null as unknown as string,
+        strategy_name: null as unknown as string,
+        price: null as unknown as number,
+      },
+    ])
+    const queryClient = createTestQueryClient()
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Signals />
+      </QueryClientProvider>
+    )
+    await screen.findByText('BTC-USD')
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'signals.csv',
+      ['ID', 'Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Timestamp'],
+      [['20', 'BTC-USD', 'buy', '85%', '', '', '', '2024-01-01T00:00:00Z']]
+    )
   })
 })

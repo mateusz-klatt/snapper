@@ -54,7 +54,7 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
       <div className='flex min-h-full items-center justify-center p-4'>
         <div
           className={clsx(
-            'relative w-full rounded-2xl border border-dark-600 bg-white shadow-xl',
+            'relative w-full rounded-2xl border border-dark-600 bg-alpine-50 shadow-xl',
             sizeClasses[size]
           )}
         >

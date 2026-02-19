@@ -394,4 +394,37 @@ describe('UserProfile', () => {
       expect(screen.getByLabelText('Current Password')).toBeInTheDocument()
     })
   })
+  describe('Help Dialog', () => {
+    it('opens help dialog when clicking Help & Documentation', async () => {
+      const user = userEvent.setup()
+
+      renderWithMocks(<UserProfile />)
+      await user.click(screen.getByText('testuser'))
+      await user.click(screen.getByText('Help & Documentation'))
+      expect(screen.getByText('Role Capabilities')).toBeInTheDocument()
+      expect(screen.getByText('Quick Reference')).toBeInTheDocument()
+      expect(screen.getByText('API Documentation')).toBeInTheDocument()
+    })
+    it('closes help dialog via close button', async () => {
+      const user = userEvent.setup()
+
+      renderWithMocks(<UserProfile />)
+      await user.click(screen.getByText('testuser'))
+      await user.click(screen.getByText('Help & Documentation'))
+      expect(screen.getByText('Role Capabilities')).toBeInTheDocument()
+      await user.click(screen.getByLabelText('Close'))
+      await waitFor(() => {
+        expect(screen.queryByText('Role Capabilities')).not.toBeInTheDocument()
+      })
+    })
+    it('closes dropdown when help dialog opens', async () => {
+      const user = userEvent.setup()
+
+      renderWithMocks(<UserProfile />)
+      await user.click(screen.getByText('testuser'))
+      expect(screen.getByText('Sign out')).toBeInTheDocument()
+      await user.click(screen.getByText('Help & Documentation'))
+      expect(screen.queryByText('Sign out')).not.toBeInTheDocument()
+    })
+  })
 })

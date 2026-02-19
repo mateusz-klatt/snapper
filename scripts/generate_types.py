@@ -24,6 +24,9 @@ from typing import Any
 from pydantic import BaseModel
 
 from snapper.api.schemas.base import WsMessageSchema
+from snapper.auth.domain.permissions import ROLE_PERMISSIONS as BACKEND_ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
 from snapper.interface.websocket import schemas as ws_schemas
 from snapper.messaging.schemas import messages as msg_schemas
 from snapper.server.app import create_app
@@ -1614,6 +1617,59 @@ def generate_entities(project_root: Path) -> None:
     print(f"  - {request_count} request entities")
 
 
+_PERMISSIONS_TARGET = Path("frontend") / "src" / "types" / "permissions.generated.ts"
+
+
+def generate_permissions(project_root: Path) -> None:
+    """Generate TypeScript permissions constants from backend source of truth.
+
+    Reads ``Permission`` enum and ``ROLE_PERMISSIONS`` mapping from the backend
+    auth domain and produces a generated TypeScript module that the frontend
+    imports instead of duplicating the data.
+
+    Args:
+        project_root: Root directory of the project.
+    """
+    output_path = project_root / _PERMISSIONS_TARGET
+
+    permission_entries: list[str] = []
+    for perm in Permission:
+        const_name = perm.name
+        permission_entries.append(f"  {const_name}: '{perm.value}',")
+
+    role_entries: list[str] = []
+    for role in UserRole:
+        perms = sorted(p.value for p in BACKEND_ROLE_PERMISSIONS[role])
+        perm_list = ", ".join(f"'{p}'" for p in perms)
+        role_entries.append(f"  {role.value}: [{perm_list}],")
+
+    lines = [
+        "/**",
+        " * Generated permission types from backend source of truth.",
+        " * DO NOT EDIT - regenerate with: make ui-gen-permissions",
+        " */",
+        "",
+        "export const Permission = {",
+        *permission_entries,
+        "} as const",
+        "",
+        "export type Permission = (typeof Permission)[keyof typeof Permission]",
+        "",
+        f"type UserRole = {' | '.join(repr(r.value) for r in UserRole)}",
+        "",
+        "export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {",
+        *role_entries,
+        "} as const",
+        "",
+    ]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines))
+    print(f"Generated {output_path}")
+    print(f"  - {len(list(Permission))} permissions")
+    print(f"  - {len(list(UserRole))} roles")
+
+
 class GenerateTypesArgs(argparse.Namespace):
     """Typed CLI arguments for the type generator."""
 
@@ -1623,6 +1679,7 @@ class GenerateTypesArgs(argparse.Namespace):
     frontend_ws: bool
     frontend_api: bool
     entities: bool
+    permissions: bool
     ios: bool
     strip_eslint_disable: bool
     postprocess_openapi_types: bool
@@ -1679,6 +1736,7 @@ Examples:
     python scripts/generate_types.py --frontend-ws   # Generate WS Zod schemas only
     python scripts/generate_types.py --frontend-api  # Generate API Zod schemas only
     python scripts/generate_types.py --entities      # Generate entity interfaces
+    python scripts/generate_types.py --permissions   # Generate permissions types
     python scripts/generate_types.py --ios           # Generate Swift types
     python scripts/generate_types.py --all           # Everything (default)
         """,
@@ -1689,6 +1747,9 @@ Examples:
     parser.add_argument("--frontend-ws", action="store_true", help="Generate WS Zod schemas only")
     parser.add_argument("--frontend-api", action="store_true", help="Generate API Zod schemas only")
     parser.add_argument("--entities", action="store_true", help="Generate entity interfaces")
+    parser.add_argument(
+        "--permissions", action="store_true", help="Generate frontend permissions types"
+    )
     parser.add_argument("--ios", action="store_true", help="Generate iOS Swift types")
     parser.add_argument(
         "--strip-eslint-disable",
@@ -1712,6 +1773,7 @@ Examples:
     _run_schema_exports(args, project_root)
     _run_frontend_generators(args, project_root)
     _run_entity_generator(args, project_root)
+    _run_permissions_generator(args, project_root)
     _run_ios_generator(args, project_root)
     _run_strip_eslint_disable(args, project_root)
     _run_openapi_typescript_postprocess(args, project_root)
@@ -1736,6 +1798,7 @@ def _args_has_specific_targets(args: GenerateTypesArgs) -> bool:
             args.frontend_ws,
             args.frontend_api,
             args.entities,
+            args.permissions,
             args.ios,
             bool(args.strip_eslint_disable),
             bool(args.postprocess_openapi_types),
@@ -1779,6 +1842,13 @@ def _run_entity_generator(args: GenerateTypesArgs, project_root: Path) -> None:
     if args.entities or args.all:
         print("\n=== Generating Entity Interfaces ===")
         generate_entities(project_root)
+
+
+def _run_permissions_generator(args: GenerateTypesArgs, project_root: Path) -> None:
+    """Run permissions type generation when requested."""
+    if args.permissions or args.all:
+        print("\n=== Generating Permissions Types ===")
+        generate_permissions(project_root)
 
 
 def _run_ios_generator(args: GenerateTypesArgs, project_root: Path) -> None:
