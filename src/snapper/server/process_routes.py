@@ -7,6 +7,7 @@ trading strategies, executors, and other long-running services.
 Endpoints:
     - ``GET /processes/available`` - List registered process templates.
     - ``GET /processes/configured`` - List configured process instances.
+    - ``GET /processes/summary`` - Lightweight process category counts.
     - ``POST /processes`` - Create new process configuration.
     - ``GET /processes/schema/{name}`` - Get process parameter schema.
     - ``POST /processes/{name}/start`` - Start a configured process.
@@ -17,7 +18,8 @@ Process Types:
     - **Long-running**: Continuous services (feeds, executors)
     - **One-shot**: Tasks that complete (backfill, sync)
 
-All endpoints require MANAGE_PROCESSES permission (operator/admin role).
+Most endpoints require MANAGE_PROCESSES permission (operator/admin role).
+The summary endpoint requires only READ_SYSTEM_STATUS (viewer+).
 
 Example:
     Start a process::
@@ -37,6 +39,7 @@ from snapper.api.schemas.process import AvailableProcess
 from snapper.api.schemas.process import AvailableProcessesResponse
 from snapper.api.schemas.process import ConfiguredProcess
 from snapper.api.schemas.process import ConfiguredProcessesResponse
+from snapper.api.schemas.process import ProcessCategoryCount
 from snapper.api.schemas.process import ProcessCreatedInfo
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessCreateResponse
@@ -46,8 +49,10 @@ from snapper.api.schemas.process import ProcessSchemaResponse
 from snapper.api.schemas.process import ProcessStartRequest
 from snapper.api.schemas.process import ProcessStartResponse
 from snapper.api.schemas.process import ProcessStopResponse
+from snapper.api.schemas.process import ProcessSummaryResponse
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
+from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
@@ -62,6 +67,7 @@ __all__ = [
     "router",
     "get_process_factory",
     "get_process_schema",
+    "get_process_summary",
     "create_process_configuration",
 ]
 router = APIRouter(prefix="/processes", tags=["processes"])
@@ -129,6 +135,59 @@ async def list_configured_processes(
         for config in configs
     ]
     return ConfiguredProcessesResponse(processes=processes, count=len(processes))
+
+
+@router.get("/summary")
+async def get_process_summary(
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    _user: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
+) -> ProcessSummaryResponse:
+    """Lightweight process summary returning category counts.
+
+    Returns running/total counts per category (feeds, strategies,
+    executors, brokers) for the overview dashboard. Requires only
+    READ_SYSTEM_STATUS permission so viewers can see process health.
+
+    Args:
+        factory: Process launcher service.
+        _user: Authenticated user with READ_SYSTEM_STATUS permission.
+
+    Returns:
+        Process summary with counts per category.
+    """
+    configs = await factory.get_process_configs()
+    running = factory.started_processes
+
+    feeds_total = 0
+    feeds_running = 0
+    strategies_total = 0
+    strategies_running = 0
+    executors_total = 0
+    executors_running = 0
+    brokers_total = 0
+    brokers_running = 0
+
+    for config in configs:
+        is_running = config.name in running
+        if "feed_publisher" in config.name:
+            feeds_total += 1
+            feeds_running += int(is_running)
+        elif config.role is ProcessRoleEnum.STRATEGY:
+            strategies_total += 1
+            strategies_running += int(is_running)
+        elif config.name.startswith("executor_"):
+            executors_total += 1
+            executors_running += int(is_running)
+        elif config.name == "zmq_broker":
+            brokers_total += 1
+            brokers_running += int(is_running)
+
+    return ProcessSummaryResponse(
+        feeds=ProcessCategoryCount(running=feeds_running, total=feeds_total),
+        strategies=ProcessCategoryCount(running=strategies_running, total=strategies_total),
+        executors=ProcessCategoryCount(running=executors_running, total=executors_total),
+        brokers=ProcessCategoryCount(running=brokers_running, total=brokers_total),
+    )
 
 
 @router.post(

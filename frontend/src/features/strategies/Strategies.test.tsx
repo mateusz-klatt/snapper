@@ -70,6 +70,11 @@ vi.mock('../../stores/websocket', () => ({
     wsClient: mockWsClient,
   })),
 }))
+vi.mock('../../stores/auth', () => ({
+  useAuth: vi.fn(() => ({
+    hasPermission: () => true,
+  })),
+}))
 vi.mock('react-hot-toast', () => ({
   default: {
     success: vi.fn(),
@@ -2078,5 +2083,70 @@ describe('Strategies', () => {
     await waitFor(() => {
       expect(screen.getByText('Register Strategy Process')).toBeTruthy()
     })
+  })
+  it('hides action buttons for viewer without manage permission', async () => {
+    const { useAuth } = await import('../../stores/auth')
+
+    vi.mocked(useAuth).mockReturnValue({
+      hasPermission: () => false,
+    } as never)
+    const mockStrategies: ConfiguredProcess[] = [
+      {
+        name: 'strategy_test',
+        enabled: true,
+        running: false,
+        mode: 'thread',
+        class_path: 'snapper.strategy_test',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: 'Test',
+        lifecycle: 'long_running',
+        role: 'strategy',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockStrategies },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('TEST')).toBeTruthy()
+    })
+    expect(screen.queryByText('Register Strategy')).toBeNull()
+    expect(screen.queryByRole('button', { name: /start/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /stop/i })).toBeNull()
+    expect(screen.getByText(/Contact an operator or admin to manage strategies/i)).toBeTruthy()
+    vi.mocked(useAuth).mockReturnValue({
+      hasPermission: () => true,
+    } as never)
+  })
+  it('shows viewer empty state without register button', async () => {
+    const { useAuth } = await import('../../stores/auth')
+
+    vi.mocked(useAuth).mockReturnValue({
+      hasPermission: () => false,
+    } as never)
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: [] },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('No strategies configured')).toBeTruthy()
+    })
+    expect(screen.getByText('No strategies have been configured yet')).toBeTruthy()
+    expect(screen.queryByText('Register Strategy')).toBeNull()
+    vi.mocked(useAuth).mockReturnValue({
+      hasPermission: () => true,
+    } as never)
   })
 })

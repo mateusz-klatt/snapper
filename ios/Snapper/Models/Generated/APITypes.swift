@@ -464,6 +464,13 @@ struct PositionSnapshot: Codable, Sendable {
     }
 }
 
+struct ProcessCategoryCount: Codable, Sendable {
+    /// Number of currently running processes
+    let running: Int
+    /// Total number of configured processes
+    let total: Int
+}
+
 struct ProcessCreateRequest: Codable, Sendable {
     /// Unique process name
     let name: String
@@ -632,6 +639,17 @@ struct ProcessStopResponse: Codable, Sendable {
     let name: String
     /// Additional message
     let message: String?
+}
+
+struct ProcessSummaryResponse: Codable, Sendable {
+    /// Feed publisher process counts
+    let feeds: ProcessCategoryCount
+    /// Strategy process counts
+    let strategies: ProcessCategoryCount
+    /// Executor process counts
+    let executors: ProcessCategoryCount
+    /// Broker process counts
+    let brokers: ProcessCategoryCount
 }
 
 struct RefreshResponse: Codable, Sendable {

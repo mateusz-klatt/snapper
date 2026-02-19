@@ -207,7 +207,11 @@ describe('auth store', () => {
 
     expect(state.canAccess('overview')).toBe(true)
     expect(state.canAccess('market')).toBe(true)
-    expect(state.canAccess('orders')).toBe(false)
+    expect(state.canAccess('orders')).toBe(true)
+    expect(state.canAccess('strategies')).toBe(true)
+    expect(state.canAccess('signals')).toBe(true)
+    expect(state.canAccess('health')).toBe(true)
+    expect(state.canAccess('processes')).toBe(false)
     expect(state.canAccess('admin')).toBe(false)
   })
   describe('login', () => {

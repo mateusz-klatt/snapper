@@ -42,18 +42,6 @@ vi.mock('./stores/auth', () => ({
     isAuthenticated: false,
     canAccess: vi.fn(() => true),
   })),
-  RESOURCE_ACCESS: {
-    overview: ['viewer', 'operator', 'admin'],
-    market: ['viewer', 'operator', 'admin'],
-    processes: ['operator', 'admin'],
-    strategies: ['operator', 'admin'],
-    orders: ['operator', 'admin'],
-    signals: ['operator', 'admin'],
-    health: ['operator', 'admin'],
-    admin: ['admin'],
-    charts: ['viewer', 'operator', 'admin'],
-    settings: ['admin'],
-  },
 }))
 vi.mock('./stores/websocket', () => ({
   useWebSocketConnection: vi.fn(() => ({

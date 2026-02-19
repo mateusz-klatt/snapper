@@ -987,6 +987,23 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({ processes: [], count: 0 })
   })
+  it('getProcessSummary returns process category counts', async () => {
+    const summary = {
+      feeds: { running: 1, total: 2 },
+      strategies: { running: 0, total: 1 },
+      executors: { running: 0, total: 0 },
+      brokers: { running: 1, total: 1 },
+    }
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => summary,
+    })
+    const result = await apiClient.getProcessSummary()
+
+    expect(result).toEqual(summary)
+  })
   it('getAvailableProcesses returns available processes', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

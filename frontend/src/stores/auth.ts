@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { Components } from '../types/api.generated'
 import type { LoginRequest } from '../types/api'
-import { ROLE_PERMISSIONS } from '../types/permissions.generated'
+import { RESOURCE_ACCESS, ROLE_PERMISSIONS } from '../types/permissions.generated'
 import type { Permission } from '../types/permissions.generated'
 import { apiClient } from '../lib/apiClient'
 import { storeWsTicket } from '../lib/wsTicketCache'
@@ -33,19 +33,6 @@ const ROLE_HIERARCHY: Record<UserRole, number> = {
   viewer: 1,
   operator: 2,
   admin: 3,
-}
-
-export const RESOURCE_ACCESS: Record<string, UserRole[]> = {
-  overview: ['viewer', 'operator', 'admin'],
-  market: ['viewer', 'operator', 'admin'],
-  processes: ['operator', 'admin'],
-  strategies: ['operator', 'admin'],
-  orders: ['operator', 'admin'],
-  signals: ['operator', 'admin'],
-  health: ['operator', 'admin'],
-  admin: ['admin'],
-  charts: ['viewer', 'operator', 'admin'],
-  settings: ['admin'],
 }
 
 export const useAuthStore = create<AuthState>()(

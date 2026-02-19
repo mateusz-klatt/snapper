@@ -24,6 +24,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import require_role
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
@@ -1504,6 +1505,68 @@ class TestRequirePermission:
                 permission_checker(user)
             assert exc_info.value.status_code == 403
             assert "Permission 'manage:processes' required" in exc_info.value.detail
+
+
+class TestResourcePermissions:
+    """Tests for RESOURCE_PERMISSIONS mapping."""
+
+    def test_all_ui_resources_have_mapping(self) -> None:
+        """Every UI resource has an entry in RESOURCE_PERMISSIONS.
+
+        Given: The set of expected UI tab resources,
+        When: Checking RESOURCE_PERMISSIONS keys,
+        Then: All expected resources are present.
+        """
+        expected = {
+            "overview",
+            "market",
+            "processes",
+            "strategies",
+            "orders",
+            "signals",
+            "health",
+            "admin",
+            "settings",
+        }
+        assert set(RESOURCE_PERMISSIONS.keys()) == expected
+
+    def test_overview_requires_no_permission(self) -> None:
+        """Overview resource is accessible without any specific permission.
+
+        Given: RESOURCE_PERMISSIONS mapping,
+        When: Checking the 'overview' entry,
+        Then: Its value is None (no permission required).
+        """
+        assert RESOURCE_PERMISSIONS["overview"] is None
+
+    def test_protected_resources_have_valid_permissions(self) -> None:
+        """All non-None entries map to valid Permission enum members.
+
+        Given: RESOURCE_PERMISSIONS with some Permission values,
+        When: Filtering for non-None entries,
+        Then: Each value is a member of Permission.
+        """
+        for resource, perm in RESOURCE_PERMISSIONS.items():
+            if perm is not None:
+                assert isinstance(perm, Permission), f"{resource} maps to non-Permission value"
+
+    def test_admin_requires_manage_users(self) -> None:
+        """Admin resource requires MANAGE_USERS permission.
+
+        Given: RESOURCE_PERMISSIONS mapping,
+        When: Checking the 'admin' entry,
+        Then: Its value is Permission.MANAGE_USERS.
+        """
+        assert RESOURCE_PERMISSIONS["admin"] == Permission.MANAGE_USERS
+
+    def test_settings_requires_configure_system(self) -> None:
+        """Settings resource requires CONFIGURE_SYSTEM permission.
+
+        Given: RESOURCE_PERMISSIONS mapping,
+        When: Checking the 'settings' entry,
+        Then: Its value is Permission.CONFIGURE_SYSTEM.
+        """
+        assert RESOURCE_PERMISSIONS["settings"] == Permission.CONFIGURE_SYSTEM
 
 
 class TestRequireRole:

@@ -153,6 +153,13 @@ export const PositionSnapshotSchema = z
   })
   .strict()
 
+export const ProcessCategoryCountSchema = z
+  .object({
+    running: z.number().int(),
+    total: z.number().int(),
+  })
+  .strict()
+
 export const ProcessCreateRequestSchema = z
   .object({
     name: z.string().min(3).max(64),
@@ -388,6 +395,15 @@ export const HealthCheckResponseSchema = z
   })
   .strict()
 
+export const ProcessSummaryResponseSchema = z
+  .object({
+    feeds: ProcessCategoryCountSchema,
+    strategies: ProcessCategoryCountSchema,
+    executors: ProcessCategoryCountSchema,
+    brokers: ProcessCategoryCountSchema,
+  })
+  .strict()
+
 export const ProcessCreateResponseSchema = z
   .object({
     status: z.literal('created'),
@@ -507,6 +523,7 @@ export type LoginRequest = z.infer<typeof LoginRequestSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
 export type OrderStatus = z.infer<typeof OrderStatusSchema>
 export type PositionSnapshot = z.infer<typeof PositionSnapshotSchema>
+export type ProcessCategoryCount = z.infer<typeof ProcessCategoryCountSchema>
 export type ProcessCreateRequest = z.infer<typeof ProcessCreateRequestSchema>
 export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
 export type ProcessRun = z.infer<typeof ProcessRunSchema>
@@ -532,6 +549,7 @@ export type ZmqConfig = z.infer<typeof ZmqConfigSchema>
 export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
 export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
 export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
+export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
 export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
 export type SystemStatus = z.infer<typeof SystemStatusSchema>

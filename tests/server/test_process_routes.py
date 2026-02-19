@@ -19,6 +19,7 @@ from snapper.application.process_manager.models import ProcessStopResult
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import get_process_factory
 from snapper.server.process_routes import get_process_schema
+from snapper.server.process_routes import get_process_summary
 from snapper.server.process_routes import list_available_processes
 from snapper.server.process_routes import list_configured_processes
 from snapper.server.process_routes import list_process_runs
@@ -180,6 +181,120 @@ class TestListConfiguredProcesses:
         result = await list_configured_processes(factory=mock_factory, _user=MagicMock())
         assert result.count == 0
         assert result.processes == []
+
+
+class TestGetProcessSummary:
+    """Tests for lightweight process summary endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_empty_processes(self) -> None:
+        """Test summary with no configured processes returns all zeros."""
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
+        mock_factory.started_processes = {}
+        result = await get_process_summary(factory=mock_factory, _user=MagicMock())
+        assert result.feeds.running == 0
+        assert result.feeds.total == 0
+        assert result.strategies.running == 0
+        assert result.strategies.total == 0
+        assert result.executors.running == 0
+        assert result.executors.total == 0
+        assert result.brokers.running == 0
+        assert result.brokers.total == 0
+
+    @pytest.mark.asyncio
+    async def test_mixed_processes_categorization(self) -> None:
+        """Test processes are correctly categorized by name and role."""
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="kraken_feed_publisher",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.feeds.KrakenFeed",
+                    method="run",
+                    args=[],
+                    kwargs={},
+                ),
+                ProcessConfigModel(
+                    name="polygon_feed_publisher",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.feeds.PolygonFeed",
+                    method="run",
+                    args=[],
+                    kwargs={},
+                ),
+                ProcessConfigModel(
+                    name="momentum_strategy",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.strategies.Momentum",
+                    method="run",
+                    args=[],
+                    kwargs={},
+                    role=ProcessRoleEnum.STRATEGY,
+                ),
+                ProcessConfigModel(
+                    name="executor_kraken",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.executors.Kraken",
+                    method="run",
+                    args=[],
+                    kwargs={},
+                ),
+                ProcessConfigModel(
+                    name="zmq_broker",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
+                    method="run",
+                    args=[],
+                    kwargs={},
+                ),
+            ]
+        )
+        mock_factory.started_processes = {
+            "kraken_feed_publisher": MagicMock(),
+            "momentum_strategy": MagicMock(),
+            "zmq_broker": MagicMock(),
+        }
+        result = await get_process_summary(factory=mock_factory, _user=MagicMock())
+        assert result.feeds.running == 1
+        assert result.feeds.total == 2
+        assert result.strategies.running == 1
+        assert result.strategies.total == 1
+        assert result.executors.running == 0
+        assert result.executors.total == 1
+        assert result.brokers.running == 1
+        assert result.brokers.total == 1
+
+    @pytest.mark.asyncio
+    async def test_uncategorized_process_not_counted(self) -> None:
+        """Test processes that match no category are excluded from counts."""
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="backfill_symbols",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.tasks.Backfill",
+                    method="run",
+                    args=[],
+                    kwargs={},
+                    role=ProcessRoleEnum.TASK,
+                ),
+            ]
+        )
+        mock_factory.started_processes = {"backfill_symbols": MagicMock()}
+        result = await get_process_summary(factory=mock_factory, _user=MagicMock())
+        assert result.feeds.total == 0
+        assert result.strategies.total == 0
+        assert result.executors.total == 0
+        assert result.brokers.total == 0
 
 
 class TestGetProcessSchema:

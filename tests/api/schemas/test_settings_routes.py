@@ -270,7 +270,9 @@ class TestSettingsRoutes:
             ),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
-            result = await update_setting(key="existing_key", request=request, user=mock_user)
+            result = await update_setting(
+                key="existing_key", request=request, user=mock_user, _csrf=None
+            )
         mock_settings_service.update_setting.assert_called_once_with(
             key="existing_key",
             value="updated_value",
@@ -310,7 +312,7 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
             pytest.raises(HTTPException) as exc_info,
         ):
-            await update_setting(key="nonexistent_key", request=request, user=mock_user)
+            await update_setting(key="nonexistent_key", request=request, user=mock_user, _csrf=None)
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -334,7 +336,7 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
-            result = await delete_setting(key="delete_key", user=mock_user)
+            result = await delete_setting(key="delete_key", user=mock_user, _csrf=None)
         mock_session.delete.assert_called_once_with(mock_setting)
         mock_session.commit.assert_called_once()
         assert result.message == "Setting 'delete_key' deleted successfully"
@@ -359,5 +361,5 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
             pytest.raises(HTTPException) as exc_info,
         ):
-            await delete_setting(key="nonexistent_key", user=mock_user)
+            await delete_setting(key="nonexistent_key", user=mock_user, _csrf=None)
         assert exc_info.value.status_code == 404

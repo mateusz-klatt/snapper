@@ -11,6 +11,7 @@ import {
   useExecutions,
   useAvailableProcesses,
   useConfiguredProcesses,
+  useProcessSummary,
   useProcessSchema,
   useProcessRuns,
   useLatestSignals,
@@ -35,6 +36,14 @@ vi.mock('../lib/apiClient', () => ({
     getSignals: vi.fn(() => Promise.resolve([])),
     getAvailableProcesses: vi.fn(() => Promise.resolve({ available: [] })),
     getConfiguredProcesses: vi.fn(() => Promise.resolve({ processes: [] })),
+    getProcessSummary: vi.fn(() =>
+      Promise.resolve({
+        feeds: { running: 0, total: 0 },
+        strategies: { running: 0, total: 0 },
+        executors: { running: 0, total: 0 },
+        brokers: { running: 0, total: 0 },
+      })
+    ),
     getProcessSchema: vi.fn(() => Promise.resolve({ schema: {} })),
     getProcessRuns: vi.fn(() => Promise.resolve({ runs: [] })),
     startProcessByName: vi.fn(() => Promise.resolve({ status: 'success', message: 'started' })),
@@ -83,6 +92,7 @@ const mockedApiClient = apiClient as unknown as {
   getSignals: Mock
   getAvailableProcesses: Mock
   getConfiguredProcesses: Mock
+  getProcessSummary: Mock
   getProcessSchema: Mock
   getProcessRuns: Mock
   startProcessByName: Mock
@@ -329,6 +339,17 @@ describe('queries', () => {
         expect(result.current.isLoading).toBe(false)
       })
       expect(result.current.data).toBeDefined()
+    })
+  })
+  describe('useProcessSummary', () => {
+    it('returns data when authenticated', async () => {
+      const { result } = renderHook(() => useProcessSummary(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
+      expect(result.current.data?.feeds).toEqual({ running: 0, total: 0 })
     })
   })
   describe('useProcessSchema', () => {
@@ -587,6 +608,18 @@ describe('queries', () => {
         expect(result.current.isLoading).toBe(false)
       })
       expect(mockedApiClient.getCandles).not.toHaveBeenCalled()
+      vi.mocked(useAuth).mockReturnValue({ isAuthenticated: true } as ReturnType<typeof useAuth>)
+    })
+    it('usePositionsSummary does not fetch when not authenticated', async () => {
+      vi.mocked(useAuth).mockReturnValue({ isAuthenticated: false } as ReturnType<typeof useAuth>)
+      const { result } = renderHook(() => usePositionsSummary(), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(mockedApiClient.getPositions).not.toHaveBeenCalled()
       vi.mocked(useAuth).mockReturnValue({ isAuthenticated: true } as ReturnType<typeof useAuth>)
     })
   })

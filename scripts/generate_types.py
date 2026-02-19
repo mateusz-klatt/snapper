@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from snapper.api.schemas.base import WsMessageSchema
+from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS as BACKEND_RESOURCE_PERMISSIONS
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS as BACKEND_ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
@@ -1643,6 +1644,14 @@ def generate_permissions(project_root: Path) -> None:
         perm_list = ", ".join(f"'{p}'" for p in perms)
         role_entries.append(f"  {role.value}: [{perm_list}],")
 
+    resource_entries: list[str] = []
+    for resource, required_perm in BACKEND_RESOURCE_PERMISSIONS.items():
+        allowed_roles: list[str] = []
+        for role in UserRole:
+            if required_perm is None or required_perm in BACKEND_ROLE_PERMISSIONS[role]:
+                allowed_roles.append(f"'{role.value}'")
+        resource_entries.append(f"  {resource}: [{', '.join(allowed_roles)}],")
+
     lines = [
         "/**",
         " * Generated permission types from backend source of truth.",
@@ -1661,6 +1670,10 @@ def generate_permissions(project_root: Path) -> None:
         *role_entries,
         "} as const",
         "",
+        "export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {",
+        *resource_entries,
+        "} as const",
+        "",
     ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1668,6 +1681,7 @@ def generate_permissions(project_root: Path) -> None:
     print(f"Generated {output_path}")
     print(f"  - {len(list(Permission))} permissions")
     print(f"  - {len(list(UserRole))} roles")
+    print(f"  - {len(BACKEND_RESOURCE_PERMISSIONS)} resources")
 
 
 class GenerateTypesArgs(argparse.Namespace):

@@ -40,6 +40,19 @@ class Permission(StrEnum):
     MANAGE_USERS = "manage:users"
 
 
+RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
+    "overview": None,
+    "market": Permission.READ_MARKET_DATA,
+    "processes": Permission.MANAGE_PROCESSES,
+    "strategies": Permission.READ_STRATEGIES,
+    "orders": Permission.READ_ORDERS,
+    "signals": Permission.READ_MARKET_DATA,
+    "health": Permission.READ_SYSTEM_STATUS,
+    "admin": Permission.MANAGE_USERS,
+    "settings": Permission.CONFIGURE_SYSTEM,
+}
+
+
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
     UserRole.VIEWER: {
         Permission.READ_MARKET_DATA,

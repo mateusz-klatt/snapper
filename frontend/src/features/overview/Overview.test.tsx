@@ -7,9 +7,14 @@ vi.mock('../../hooks/queries', () => ({
   usePositionsSummary: vi.fn(() => ({ data: null, isLoading: false })),
   useLatestSignals: vi.fn(() => ({ data: [], isLoading: false })),
   useOrdersGrouped: vi.fn(() => ({ data: null })),
-  useConfiguredProcesses: vi.fn(() => ({
+  useProcessSummary: vi.fn(() => ({
     isLoading: false,
-    data: { processes: [], count: 0 },
+    data: {
+      feeds: { running: 0, total: 0 },
+      strategies: { running: 0, total: 0 },
+      executors: { running: 0, total: 0 },
+      brokers: { running: 0, total: 0 },
+    },
   })),
 }))
 vi.mock('../../stores/trade', () => ({
@@ -17,19 +22,6 @@ vi.mock('../../stores/trade', () => ({
     executions: [],
   })),
 }))
-
-const mockProcess = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
-  name: 'test_process',
-  enabled: true,
-  running: false,
-  mode: 'live',
-  class_path: 'test.Process',
-  method: 'run',
-  role: 'core',
-  lifecycle: 'long_running',
-  tags: [],
-  ...overrides,
-})
 
 const renderWithMocks = (ui: ReactNode) => {
   return render(ui)
@@ -78,10 +70,10 @@ describe('Overview', () => {
     expect(screen.getByText('No recent executions')).toBeInTheDocument()
   })
   it('handles undefined store values with defaults', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useProcessSummary } = await import('../../hooks/queries')
     const tradeModule = await import('../../stores/trade')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
+    vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: undefined,
     } as never)
@@ -92,9 +84,9 @@ describe('Overview', () => {
     expect(screen.getByText('Feeds Running')).toBeInTheDocument()
   })
   it('displays loading spinner for process status', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useProcessSummary } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
+    vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: true,
       data: null,
     } as never)
@@ -137,55 +129,60 @@ describe('Overview', () => {
     expect(screen.getByText('Total Value')).toBeInTheDocument()
   })
   it('displays running feeds status', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useProcessSummary } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
+    vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        processes: [
-          mockProcess({ name: 'btc_feed_publisher', running: true }),
-          mockProcess({ name: 'eth_feed_publisher', running: false }),
-        ],
-        count: 2,
+        feeds: { running: 1, total: 2 },
+        strategies: { running: 0, total: 0 },
+        executors: { running: 0, total: 0 },
+        brokers: { running: 0, total: 0 },
       },
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('1 Running')).toBeInTheDocument()
   })
   it('displays running strategies status', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useProcessSummary } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
+    vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        processes: [mockProcess({ name: 'momentum', role: 'strategy', running: true })],
-        count: 1,
+        feeds: { running: 0, total: 0 },
+        strategies: { running: 1, total: 1 },
+        executors: { running: 0, total: 0 },
+        brokers: { running: 0, total: 0 },
       },
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('1 Active')).toBeInTheDocument()
   })
   it('displays executor status', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useProcessSummary } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
+    vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        processes: [mockProcess({ name: 'executor_default', running: true })],
-        count: 1,
+        feeds: { running: 0, total: 0 },
+        strategies: { running: 0, total: 0 },
+        executors: { running: 1, total: 1 },
+        brokers: { running: 0, total: 0 },
       },
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('1/1 Running')).toBeInTheDocument()
   })
   it('displays broker status', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useProcessSummary } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
+    vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        processes: [mockProcess({ name: 'zmq_broker', running: true })],
-        count: 1,
+        feeds: { running: 0, total: 0 },
+        strategies: { running: 0, total: 0 },
+        executors: { running: 0, total: 0 },
+        brokers: { running: 1, total: 1 },
       },
     } as never)
     renderWithMocks(<Overview />)

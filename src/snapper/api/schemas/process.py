@@ -365,6 +365,34 @@ class ConfiguredProcessesResponse(StrictApiSchema):
     count: int
 
 
+class ProcessCategoryCount(StrictApiSchema):
+    """Running/total count for a process category.
+
+    Attributes:
+        running: Number of currently running processes.
+        total: Total number of configured processes.
+    """
+
+    running: int = Field(description="Number of currently running processes")
+    total: int = Field(description="Total number of configured processes")
+
+
+class ProcessSummaryResponse(StrictApiSchema):
+    """Lightweight process summary for the overview dashboard.
+
+    Attributes:
+        feeds: Count of feed publisher processes.
+        strategies: Count of strategy processes.
+        executors: Count of executor processes.
+        brokers: Count of broker processes.
+    """
+
+    feeds: ProcessCategoryCount = Field(description="Feed publisher process counts")
+    strategies: ProcessCategoryCount = Field(description="Strategy process counts")
+    executors: ProcessCategoryCount = Field(description="Executor process counts")
+    brokers: ProcessCategoryCount = Field(description="Broker process counts")
+
+
 class ProcessCreatedInfo(StrictApiSchema):
     """Process creation info schema.
 

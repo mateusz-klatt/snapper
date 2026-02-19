@@ -1,15 +1,14 @@
-import React, { useMemo } from 'react'
+import React from 'react'
 import { Card, MetricCard, StatusBadge } from '../../components/ui'
 import { CardSkeleton } from '../../components/Skeleton'
 import {
   usePositionsSummary,
   useLatestSignals,
   useOrdersGrouped,
-  useConfiguredProcesses,
+  useProcessSummary,
 } from '../../hooks/queries'
 import { useTradeStore } from '../../stores/trade'
 import type { Signal, Fill } from '../../types/entities'
-import type { ConfiguredProcess } from '../../types/api'
 
 const CURRENCY_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
 
@@ -22,14 +21,6 @@ const runningBadgeStatus = (count: number): 'connected' | 'disconnected' =>
 
 const countChangeType = (count: number): 'positive' | 'neutral' =>
   count > 0 ? 'positive' : 'neutral'
-
-const isFeedProcess = (p: ConfiguredProcess): boolean => p.name.includes('feed_publisher')
-
-const isExecutorProcess = (p: ConfiguredProcess): boolean => p.name.startsWith('executor_')
-
-const isStrategyProcess = (p: ConfiguredProcess): boolean => p.role === 'strategy'
-
-const isBrokerProcess = (p: ConfiguredProcess): boolean => p.name === 'zmq_broker'
 
 const sideStatus = (side: string): 'connected' | 'error' => (side === 'buy' ? 'connected' : 'error')
 
@@ -167,28 +158,18 @@ const SignalsCardContent: React.FC<
   return <div className='text-center py-8 text-dark-400'>No recent signals</div>
 }
 
+const zeroCounts = { running: 0, total: 0 }
+
 export const Overview: React.FC = () => {
-  const { data: configuredProcesses, isLoading: processLoading } = useConfiguredProcesses()
+  const { data: processSummary, isLoading: processLoading } = useProcessSummary()
   const { data: positionsSummary, isLoading: positionsLoading } = usePositionsSummary()
   const { data: latestSignals, isLoading: signalsLoading } = useLatestSignals(5)
   const { data: ordersGrouped } = useOrdersGrouped({ limit: 50 })
   const { executions = [] } = useTradeStore()
-  const processCounts = useMemo(() => {
-    const procs = configuredProcesses?.processes ?? []
-
-    const count = (filter: (p: ConfiguredProcess) => boolean) => {
-      const matched = procs.filter(filter)
-
-      return { running: matched.filter(p => p.running).length, total: matched.length }
-    }
-
-    return {
-      feeds: count(isFeedProcess),
-      strategies: count(isStrategyProcess),
-      executors: count(isExecutorProcess),
-      brokers: count(isBrokerProcess),
-    }
-  }, [configuredProcesses])
+  const feeds = processSummary?.feeds ?? zeroCounts
+  const strategies = processSummary?.strategies ?? zeroCounts
+  const executors = processSummary?.executors ?? zeroCounts
+  const brokers = processSummary?.brokers ?? zeroCounts
   const recentExecutions = executions.slice(0, 5)
   const openOrdersCount = ordersGrouped?.open?.length || 0
   const todayStr = new Date().toDateString()
@@ -203,13 +184,13 @@ export const Overview: React.FC = () => {
       <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>
         <MetricCard
           label='Feeds Running'
-          value={`${processCounts.feeds.running}/${processCounts.feeds.total}`}
-          changeType={countChangeType(processCounts.feeds.running)}
+          value={`${feeds.running}/${feeds.total}`}
+          changeType={countChangeType(feeds.running)}
         />
         <MetricCard
           label='Strategies Active'
-          value={`${processCounts.strategies.running}/${processCounts.strategies.total}`}
-          changeType={countChangeType(processCounts.strategies.running)}
+          value={`${strategies.running}/${strategies.total}`}
+          changeType={countChangeType(strategies.running)}
         />
         <MetricCard label='Open Orders' value={openOrdersCount} changeType='neutral' />
         <MetricCard label="Today's Executions" value={todayExecutionsCount} changeType='positive' />
@@ -221,26 +202,22 @@ export const Overview: React.FC = () => {
             <CardSkeleton showTitle={false} contentLines={4} className='border-0 p-0' />
           ) : (
             <div className='space-y-3'>
-              <ProcessStatusRow
-                label='Feeds'
-                running={processCounts.feeds.running}
-                activeLabel='Running'
-              />
+              <ProcessStatusRow label='Feeds' running={feeds.running} activeLabel='Running' />
               <ProcessStatusRow
                 label='Strategies'
-                running={processCounts.strategies.running}
+                running={strategies.running}
                 activeLabel='Active'
               />
               <ProcessStatusRow
                 label='Executors'
-                running={processCounts.executors.running}
-                total={processCounts.executors.total}
+                running={executors.running}
+                total={executors.total}
                 activeLabel='Running'
               />
               <ProcessStatusRow
                 label='Brokers'
-                running={processCounts.brokers.running}
-                total={processCounts.brokers.total}
+                running={brokers.running}
+                total={brokers.total}
                 activeLabel='Running'
               />
             </div>

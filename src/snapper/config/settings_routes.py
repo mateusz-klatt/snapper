@@ -38,6 +38,7 @@ from snapper.api.schemas.settings import SettingRead
 from snapper.api.schemas.settings import SettingUpdate
 from snapper.application.services.settings import get_settings_service
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import get_settings
@@ -107,6 +108,7 @@ async def update_setting(
     key: str,
     request: SettingUpdate,
     user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> SettingRead:
     """Update or create a setting by key.
 
@@ -155,6 +157,7 @@ async def update_setting(
 async def delete_setting(
     key: str,
     user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Delete a setting by key.
 

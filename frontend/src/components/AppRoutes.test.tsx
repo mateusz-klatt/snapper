@@ -4,6 +4,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { AppRoutes } from './AppRoutes'
 
+vi.mock('./auth/ProtectedRoute', () => ({
+  default: ({ children }: { children: ReactNode }) => <>{children}</>,
+}))
 vi.mock('../features/overview/Overview', () => ({
   Overview: () => <div data-testid='overview'>Overview Component</div>,
 }))

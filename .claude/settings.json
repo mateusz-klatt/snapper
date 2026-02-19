@@ -5,7 +5,8 @@
       "Bash(make check-all:*)",
       "Bash(ls:*)",
       "Bash(grep:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(python -m pytest:*)"
     ],
     "defaultMode": "bypassPermissions"
   }

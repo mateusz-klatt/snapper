@@ -12,6 +12,7 @@ import {
   SettingCategoriesResponseSchema,
   SystemStatusSchema,
   ConfiguredProcessesResponseSchema,
+  ProcessSummaryResponseSchema,
   AvailableProcessesResponseSchema,
   ProcessRunsResponseSchema,
   ProcessSchemaResponseSchema,
@@ -31,6 +32,7 @@ import type {
   SettingRead,
   SettingUpdate,
   ConfiguredProcessesResponse,
+  ProcessSummaryResponse,
   AvailableProcessesResponse,
   ProcessRunsResponse,
   ProcessSchemaResponse,
@@ -397,6 +399,11 @@ class APIClient {
     const data = await this.getJSON('/api/processes/configured')
 
     return validateResponse(data, ConfiguredProcessesResponseSchema, '/processes/configured')
+  }
+  async getProcessSummary(): Promise<ProcessSummaryResponse> {
+    const data = await this.getJSON('/api/processes/summary')
+
+    return validateResponse(data, ProcessSummaryResponseSchema, '/processes/summary')
   }
   async getAvailableProcesses(): Promise<AvailableProcessesResponse> {
     const data = await this.getJSON('/api/processes/available')

@@ -21,6 +21,7 @@ from snapper.api.schemas.base import MessageResponse
 from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
@@ -334,6 +335,7 @@ async def get_users(
 async def create_user(
     user_data: CreateUserRequest,
     current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> UserProfile:
     """Create a new user account.
 
@@ -369,6 +371,7 @@ async def update_user(
     user_id: str,
     user_data: UpdateUserRequest,
     current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> UserProfile:
     """Update an existing user's profile.
 
@@ -398,6 +401,7 @@ async def update_user(
 async def delete_user(
     user_id: str,
     current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Deactivate a user account.
 
@@ -431,6 +435,7 @@ async def change_user_password(
     user_id: str,
     password_data: ChangePasswordRequest,
     current_user: Annotated[UserProfile, Depends(require_authentication)],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Change a user's password.
 
@@ -475,7 +480,8 @@ async def admin_reset_user_password(
     request: Request,
     user_id: str,
     password_data: AdminResetPasswordRequest,
-    current_user: Annotated[UserProfile, Depends(require_authentication)],
+    current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Admin endpoint to reset a user's password without current password.
 
@@ -484,6 +490,7 @@ async def admin_reset_user_password(
         user_id: Target user ID.
         password_data: New password.
         current_user: Admin user with MANAGE_USERS permission.
+        _csrf: CSRF token validation.
 
     Returns:
         Success message.
@@ -491,12 +498,6 @@ async def admin_reset_user_password(
     Raises:
         HTTPException: If forbidden or user not found.
     """
-    user_permissions = ROLE_PERMISSIONS.get(current_user.role, set())
-    if Permission.MANAGE_USERS not in user_permissions:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only administrators can reset user passwords",
-        )
     user_service = get_user_service()
     try:
         async with user_service.repository.session() as session:

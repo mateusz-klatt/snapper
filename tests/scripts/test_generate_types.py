@@ -1909,12 +1909,14 @@ class TestGeneratePermissions:
         assert "export const Permission" in content
         assert "export type Permission" in content
         assert "ROLE_PERMISSIONS" in content
+        assert "RESOURCE_ACCESS" in content
         assert "read:market_data" in content
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
         assert "14 permissions" in captured.out
         assert "3 roles" in captured.out
+        assert "9 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
         """Generated file includes viewer, operator, and admin roles."""
@@ -1925,6 +1927,23 @@ class TestGeneratePermissions:
         assert "viewer:" in content
         assert "operator:" in content
         assert "admin:" in content
+
+    def test_resource_access_derives_from_permissions(self, tmp_path: Path) -> None:
+        """RESOURCE_ACCESS is derived from RESOURCE_PERMISSIONS and ROLE_PERMISSIONS.
+
+        Given: Backend RESOURCE_PERMISSIONS and ROLE_PERMISSIONS,
+        When: Permissions are generated,
+        Then: RESOURCE_ACCESS grants all roles to overview (None permission)
+              and restricts admin-only resources correctly.
+        """
+        generate_permissions(tmp_path)
+
+        output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
+        content = output.read_text()
+        assert "overview: ['viewer', 'operator', 'admin']" in content
+        assert "admin: ['admin']" in content
+        assert "settings: ['admin']" in content
+        assert "processes: ['operator', 'admin']" in content
 
     def test_user_role_type_not_exported(self, tmp_path: Path) -> None:
         """UserRole type is file-local, not exported."""

@@ -1,5 +1,6 @@
 import React from 'react'
 import ErrorBoundary from './ErrorBoundary'
+import ProtectedRoute from './auth/ProtectedRoute'
 import { Overview } from '../features/overview/Overview'
 import { MarketData } from '../features/market/MarketData'
 import { Processes } from '../features/processes/Processes'
@@ -19,56 +20,74 @@ export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactE
     case 'market':
       return (
         <ErrorBoundary componentName='Market Data'>
-          <MarketData />
+          <ProtectedRoute resource='market'>
+            <MarketData />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'processes':
       return (
         <ErrorBoundary componentName='Processes'>
-          <Processes />
+          <ProtectedRoute resource='processes'>
+            <Processes />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'strategies':
       return (
         <ErrorBoundary componentName='Strategies'>
-          <Strategies />
+          <ProtectedRoute resource='strategies'>
+            <Strategies />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'orders':
       return (
         <ErrorBoundary componentName='Orders'>
-          <Orders />
+          <ProtectedRoute resource='orders'>
+            <Orders />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'signals':
       return (
         <ErrorBoundary componentName='Signals'>
-          <Signals />
+          <ProtectedRoute resource='signals'>
+            <Signals />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'health':
       return (
         <ErrorBoundary componentName='Health'>
-          <Health />
+          <ProtectedRoute resource='health'>
+            <Health />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'admin':
       return (
         <ErrorBoundary componentName='Administration'>
-          <Admin />
+          <ProtectedRoute resource='admin'>
+            <Admin />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'settings':
       return (
         <ErrorBoundary componentName='Settings'>
-          <Settings />
+          <ProtectedRoute resource='settings'>
+            <Settings />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
     case 'overview':
     default:
       return (
         <ErrorBoundary componentName='Overview'>
-          <Overview />
+          <ProtectedRoute resource='overview'>
+            <Overview />
+          </ProtectedRoute>
         </ErrorBoundary>
       )
   }

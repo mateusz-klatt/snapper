@@ -22,8 +22,8 @@ interface StrategyCardProps {
   autoStartEnabled: boolean
   mode: 'thread' | 'process'
   health?: HealthStatus
-  onStart: () => void
-  onStop: () => void
+  onStart?: () => void
+  onStop?: () => void
   isStarting?: boolean
   isStopping?: boolean
 }
@@ -271,51 +271,53 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
           <div className='text-xs text-muted-400 text-center py-2'>Waiting for heartbeat...</div>
         )}
         {}
-        <div className='flex space-x-2 pt-2 border-t border-dark-600'>
-          {showStopButton ? (
-            <button
-              onClick={onStop}
-              disabled={isStopping || isStarting}
-              aria-label={`Stop ${displayName} strategy`}
-              className={clsx(
-                'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                isStopping || isStarting
-                  ? 'bg-loss-400/20 text-loss-600 cursor-not-allowed'
-                  : 'bg-loss-600 text-white hover:bg-loss-700 focus:outline-none focus:ring-2 focus:ring-loss-500'
-              )}
-            >
-              {isStopping ? (
-                <>
-                  <div className='w-4 h-4 border-2 border-loss-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
-                  Stopping...
-                </>
-              ) : (
-                'Stop'
-              )}
-            </button>
-          ) : (
-            <button
-              onClick={onStart}
-              disabled={isStarting || isStopping}
-              aria-label={`Start ${displayName} strategy`}
-              className={clsx(
-                'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                isStarting || isStopping
-                  ? 'bg-accent-400/20 text-accent-300 cursor-not-allowed'
-                  : 'bg-accent-600 text-white hover:bg-accent-700 focus:outline-none focus:ring-2 focus:ring-accent-500'
-              )}
-            >
-              {isStarting ? (
-                <>
-                  <div className='w-4 h-4 border-2 border-accent-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
-                  Starting...
-                </>
-              ) : (
-                'Start'
-              )}
-            </button>
-          )}
-        </div>
+        {(onStart || onStop) && (
+          <div className='flex space-x-2 pt-2 border-t border-dark-600'>
+            {showStopButton ? (
+              <button
+                onClick={onStop}
+                disabled={isStopping || isStarting}
+                aria-label={`Stop ${displayName} strategy`}
+                className={clsx(
+                  'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
+                  isStopping || isStarting
+                    ? 'bg-loss-400/20 text-loss-600 cursor-not-allowed'
+                    : 'bg-loss-600 text-white hover:bg-loss-700 focus:outline-none focus:ring-2 focus:ring-loss-500'
+                )}
+              >
+                {isStopping ? (
+                  <>
+                    <div className='w-4 h-4 border-2 border-loss-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                    Stopping...
+                  </>
+                ) : (
+                  'Stop'
+                )}
+              </button>
+            ) : (
+              <button
+                onClick={onStart}
+                disabled={isStarting || isStopping}
+                aria-label={`Start ${displayName} strategy`}
+                className={clsx(
+                  'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
+                  isStarting || isStopping
+                    ? 'bg-accent-400/20 text-accent-300 cursor-not-allowed'
+                    : 'bg-accent-600 text-white hover:bg-accent-700 focus:outline-none focus:ring-2 focus:ring-accent-500'
+                )}
+              >
+                {isStarting ? (
+                  <>
+                    <div className='w-4 h-4 border-2 border-accent-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                    Starting...
+                  </>
+                ) : (
+                  'Start'
+                )}
+              </button>
+            )}
+          </div>
+        )}
       </article>
     )
   }

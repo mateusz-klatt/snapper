@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { ChevronDown, ChevronUp, Shield, Users, Eye } from 'lucide-react'
-import { RESOURCE_ACCESS } from '../../stores/auth'
+import { RESOURCE_ACCESS } from '../../types/permissions.generated'
 import UserManagement from './UserManagement/UserManagement'
 
 const TAB_DISPLAY_NAMES: Record<string, string> = {

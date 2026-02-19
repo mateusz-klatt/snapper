@@ -29,3 +29,15 @@ export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {
   operator: ['cancel:orders', 'create:orders', 'manage:positions', 'manage:processes', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
   admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'manage:positions', 'manage:processes', 'manage:users', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
 } as const
+
+export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
+  overview: ['viewer', 'operator', 'admin'],
+  market: ['viewer', 'operator', 'admin'],
+  processes: ['operator', 'admin'],
+  strategies: ['viewer', 'operator', 'admin'],
+  orders: ['viewer', 'operator', 'admin'],
+  signals: ['viewer', 'operator', 'admin'],
+  health: ['viewer', 'operator', 'admin'],
+  admin: ['admin'],
+  settings: ['admin'],
+} as const

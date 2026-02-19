@@ -262,6 +262,7 @@ export type Paths = {
          *         user_id: Target user ID.
          *         password_data: New password.
          *         current_user: Admin user with MANAGE_USERS permission.
+         *         _csrf: CSRF token validation.
          *
          *     Returns:
          *         Success message.
@@ -400,6 +401,37 @@ export type Paths = {
         };
         /** List Configured Processes */
         get: Operations["list_configured_processes_api_processes_configured_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/processes/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Process Summary
+         * @description Lightweight process summary returning category counts.
+         *
+         *     Returns running/total counts per category (feeds, strategies,
+         *     executors, brokers) for the overview dashboard. Requires only
+         *     READ_SYSTEM_STATUS permission so viewers can see process health.
+         *
+         *     Args:
+         *         factory: Process launcher service.
+         *         _user: Authenticated user with READ_SYSTEM_STATUS permission.
+         *
+         *     Returns:
+         *         Process summary with counts per category.
+         */
+        get: Operations["get_process_summary_api_processes_summary_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1334,6 +1366,26 @@ export type Components = {
             updated_at: string;
         };
         /**
+         * ProcessCategoryCount
+         * @description Running/total count for a process category.
+         *
+         *     Attributes:
+         *         running: Number of currently running processes.
+         *         total: Total number of configured processes.
+         */
+        ProcessCategoryCount: {
+            /**
+             * Running
+             * @description Number of currently running processes
+             */
+            running: number;
+            /**
+             * Total
+             * @description Total number of configured processes
+             */
+            total: number;
+        };
+        /**
          * ProcessCreateRequest
          * @description Process creation request schema.
          *
@@ -1742,6 +1794,26 @@ export type Components = {
              * @description Additional message
              */
             message?: string | null;
+        };
+        /**
+         * ProcessSummaryResponse
+         * @description Lightweight process summary for the overview dashboard.
+         *
+         *     Attributes:
+         *         feeds: Count of feed publisher processes.
+         *         strategies: Count of strategy processes.
+         *         executors: Count of executor processes.
+         *         brokers: Count of broker processes.
+         */
+        ProcessSummaryResponse: {
+            /** @description Feed publisher process counts */
+            feeds: Components["schemas"]["ProcessCategoryCount"];
+            /** @description Strategy process counts */
+            strategies: Components["schemas"]["ProcessCategoryCount"];
+            /** @description Executor process counts */
+            executors: Components["schemas"]["ProcessCategoryCount"];
+            /** @description Broker process counts */
+            brokers: Components["schemas"]["ProcessCategoryCount"];
         };
         /**
          * RefreshResponse
@@ -2846,6 +2918,26 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["ConfiguredProcessesResponse"];
+                };
+            };
+        };
+    };
+    get_process_summary_api_processes_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ProcessSummaryResponse"];
                 };
             };
         };

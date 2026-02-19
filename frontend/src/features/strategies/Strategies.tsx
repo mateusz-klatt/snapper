@@ -11,6 +11,8 @@ import {
   useCreateProcessConfig,
 } from '../../hooks/queries'
 import { useWebSocketStore } from '../../stores/websocket'
+import { useAuth } from '../../stores/auth'
+import { Permission } from '../../types/permissions.generated'
 import { StrategyLaunchModal, type StrategyLaunchData } from './StrategyLaunchModal'
 import { StrategyCard } from './StrategyCard'
 import { StrategiesSkeleton } from '../../components/Skeleton'
@@ -34,6 +36,8 @@ interface HealthStatus {
 }
 
 export const Strategies: React.FC = () => {
+  const { hasPermission } = useAuth()
+  const canManage = hasPermission(Permission.MANAGE_PROCESSES)
   const [strategyModalOpen, setStrategyModalOpen] = useState(false)
   const [activeStrategyProcess, setActiveStrategyProcess] = useState<string | null>(null)
   const [healthStatuses, setHealthStatuses] = useState<Record<string, HealthStatus>>({})
@@ -279,16 +283,19 @@ export const Strategies: React.FC = () => {
     <div className='space-y-6'>
       <div className='flex items-center justify-between'>
         <h2 className='text-xl font-bold text-alpine-900'>Strategy Management</h2>
-        <button
-          onClick={() => setStrategyModalOpen(true)}
-          disabled={createProcessConfig.isPending || startProcess.isPending}
-          className='px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed'
-        >
-          {createProcessConfig.isPending ? 'Saving…' : 'Register Strategy'}
-        </button>
+        {canManage && (
+          <button
+            onClick={() => setStrategyModalOpen(true)}
+            disabled={createProcessConfig.isPending || startProcess.isPending}
+            className='px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed'
+          >
+            {createProcessConfig.isPending ? 'Saving…' : 'Register Strategy'}
+          </button>
+        )}
         <p className='mt-2 text-xs text-muted-500'>
-          Register new strategy processes directly from the UI. Autostart keeps the process enabled
-          across restarts.
+          {canManage
+            ? 'Register new strategy processes directly from the UI. Autostart keeps the process enabled across restarts.'
+            : 'View configured strategies and their status. Contact an operator or admin to manage strategies.'}
         </p>
       </div>
       {}
@@ -326,8 +333,10 @@ export const Strategies: React.FC = () => {
                 autoStartEnabled={strategy.enabled}
                 mode={strategy.mode}
                 health={healthStatuses[strategy.name]}
-                onStart={() => requestStartStrategy(strategy.name, strategy.mode)}
-                onStop={() => requestStopStrategy(strategy.name)}
+                onStart={
+                  canManage ? () => requestStartStrategy(strategy.name, strategy.mode) : undefined
+                }
+                onStop={canManage ? () => requestStopStrategy(strategy.name) : undefined}
                 isStarting={startProcess.isPending && activeStrategyProcess === strategy.name}
                 isStopping={stopProcess.isPending && activeStrategyProcess === strategy.name}
               />
@@ -355,14 +364,18 @@ export const Strategies: React.FC = () => {
             </div>
             <p className='text-muted-500 font-medium'>No strategies configured</p>
             <p className='text-sm text-muted-400 mt-1'>
-              Register a strategy to start algorithmic trading
+              {canManage
+                ? 'Register a strategy to start algorithmic trading'
+                : 'No strategies have been configured yet'}
             </p>
-            <button
-              onClick={() => setStrategyModalOpen(true)}
-              className='mt-3 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700'
-            >
-              Register Strategy
-            </button>
+            {canManage && (
+              <button
+                onClick={() => setStrategyModalOpen(true)}
+                className='mt-3 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700'
+              >
+                Register Strategy
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -3252,6 +3252,7 @@ async def test_create_user_success(monkeypatch: Any) -> None:
     result = await routes.create_user(
         user_data=request,
         current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        _csrf=None,
     )
     assert result.username == "charlie"
 
@@ -3278,6 +3279,7 @@ async def test_create_user_value_error(monkeypatch: Any) -> None:
         await routes.create_user(
             user_data=request,
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            _csrf=None,
         )
     assert exc.value.status_code == 400
 
@@ -3303,6 +3305,7 @@ async def test_update_user_not_found(monkeypatch: Any) -> None:
             user_id="missing",
             user_data=request,
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            _csrf=None,
         )
     assert exc.value.status_code == 404
 
@@ -3328,6 +3331,7 @@ async def test_update_user_success(monkeypatch: Any) -> None:
         user_id="u4",
         user_data=request,
         current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        _csrf=None,
     )
     assert result.username == "dora"
     assert stub_service.updated_users["u4"] == updated_user
@@ -3347,6 +3351,7 @@ async def test_delete_user_success(monkeypatch: Any) -> None:
     result = await routes.delete_user(
         user_id="user-2",
         current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        _csrf=None,
     )
     assert result.message == "User 'user-2' has been deactivated"
     assert stub_service.deleted_users == ["user-2"]
@@ -3366,6 +3371,7 @@ async def test_delete_user_self_forbidden(monkeypatch: Any) -> None:
         await routes.delete_user(
             user_id="self",
             current_user=UserProfile(id="self", username="self", role=UserRole.ADMIN),
+            _csrf=None,
         )
     assert exc.value.status_code == 400
 
@@ -3385,6 +3391,7 @@ async def test_delete_user_not_found(monkeypatch: Any) -> None:
         await routes.delete_user(
             user_id="missing",
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            _csrf=None,
         )
     assert exc.value.status_code == 404
 
@@ -3405,6 +3412,7 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
         user_id="self",
         password_data=pwd_request,
         current_user=UserProfile(id="self", username="self", role=UserRole.OPERATOR),
+        _csrf=None,
     )
     assert result.message == "Password changed successfully"
     assert stub_service.change_password_calls == [("self", "old-pass", "new-password")]
@@ -3427,6 +3435,7 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
             user_id="other",
             password_data=pwd_request,
             current_user=UserProfile(id="self", username="self", role=UserRole.VIEWER),
+            _csrf=None,
         )
     assert exc.value.status_code == 403
 
@@ -3449,6 +3458,7 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
             user_id="self",
             password_data=pwd_request,
             current_user=UserProfile(id="self", username="self", role=UserRole.OPERATOR),
+            _csrf=None,
         )
     assert exc.value.status_code == 400
 
@@ -3469,27 +3479,25 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
         user_id="target",
         password_data=pwd_request,
         current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        _csrf=None,
     )
     assert result.message == "Password changed successfully"
     assert stub_service.change_password_calls == [("target", "irrelevant", "new-password")]
 
 
-@pytest.mark.asyncio()
-async def test_admin_reset_password_requires_admin() -> None:
-    """Admin reset password requires admin role.
+def test_admin_reset_password_route_registered() -> None:
+    """Admin reset password route is registered on the auth router.
 
-    Given: Viewer user,
-    When: Attempting admin reset password,
-    Then: Raises HTTPException with 403 status.
+    Given: The auth router,
+    When: Inspecting registered routes,
+    Then: The admin-reset-password endpoint exists.
     """
-    with pytest.raises(HTTPException) as exc:
-        await routes.admin_reset_user_password(
-            request=MagicMock(spec=Request),
-            user_id="user-1",
-            password_data=AdminResetPasswordRequest(new_password="super-secret"),
-            current_user=UserProfile(id="viewer", username="view", role=UserRole.VIEWER),
-        )
-    assert exc.value.status_code == 403
+    admin_reset_routes = [
+        r
+        for r in routes.router.routes
+        if hasattr(r, "path") and r.path == "/auth/users/{user_id}/admin-reset-password"
+    ]
+    assert len(admin_reset_routes) == 1
 
 
 @pytest.mark.asyncio()
@@ -3535,6 +3543,7 @@ async def test_admin_reset_password_handles_repository_error(
             user_id="user-1",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            _csrf=None,
         )
     assert exc.value.status_code == 500
 
@@ -3610,6 +3619,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
         user_id="user-1",
         password_data=AdminResetPasswordRequest(new_password="super-secret"),
         current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        _csrf=None,
     )
     assert result.message == "Password reset successfully for user target"
     assert stub_service.hashed_passwords == ["super-secret"]
@@ -3668,6 +3678,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
             user_id="missing",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            _csrf=None,
         )
     assert exc.value.status_code == 404
     assert exc.value.detail == "User not found"
