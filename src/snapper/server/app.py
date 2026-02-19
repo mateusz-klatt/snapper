@@ -367,6 +367,26 @@ def _build_strategy_payload(raw_status: dict[str, Any]) -> StrategyStatusPayload
     )
 
 
+TRADER_COORDINATOR_PROCESS = "trader_coordinator"
+
+
+def _resolve_trader_status(process_factory: ProcessLauncherService) -> ProcessStatus:
+    """Derive trader coordinator status from the process launcher.
+
+    Checks whether the trader_coordinator process is currently running
+    and returns an appropriate ProcessStatus.
+
+    Args:
+        process_factory: Process launcher service with started processes.
+
+    Returns:
+        ProcessStatus reflecting actual trader coordinator state.
+    """
+    if TRADER_COORDINATOR_PROCESS in process_factory.started_processes:
+        return ProcessStatus(status="running")
+    return ProcessStatus(status="not_running")
+
+
 def _collect_strategy_statuses(
     process_factory: ProcessLauncherService,
 ) -> list[StrategyStatusPayload]:
@@ -774,8 +794,9 @@ def _create_monitoring_endpoints_router(
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> SystemStatus:
         process_factory: ProcessLauncherService = request.app.state.process_factory
+        trader_status = _resolve_trader_status(process_factory)
         return SystemStatus(
-            trader=ProcessStatus(status="not_running"),
+            trader=trader_status,
             backtests={},
             strategies=_collect_strategy_statuses(process_factory),
         )

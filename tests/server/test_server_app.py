@@ -969,13 +969,14 @@ class TestSystemStatusEdgeCases:
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
         mock_factory = MagicMock()
-        mock_factory.running_processes = {}
+        mock_factory.started_processes = {}
         app.state.process_factory = mock_factory
         client = TestClient(app)
         response = client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
         assert "trader" in data
+        assert data["trader"]["status"] == "not_running"
         assert "strategies" in data
 
     def test_system_status_handles_process_error(self) -> None:
@@ -999,7 +1000,7 @@ class TestSystemStatusEdgeCases:
         mock_process.name = "test_strategy"
         mock_process.get_status = MagicMock(side_effect=Exception("Status error"))
         mock_factory = MagicMock()
-        mock_factory.running_processes = {"test_strategy": mock_process}
+        mock_factory.started_processes = {"test_strategy": mock_process}
         app.state.process_factory = mock_factory
         client = TestClient(app)
         response = client.get("/api/status")
@@ -1007,6 +1008,58 @@ class TestSystemStatusEdgeCases:
         data = response.json()
         assert "trader" in data
         assert "strategies" in data
+
+    def test_system_status_trader_running_when_coordinator_started(self) -> None:
+        """Verify trader status reflects trader_coordinator process state.
+
+        Given: trader_coordinator process is in started_processes,
+        When: GET /status is called,
+        Then: trader.status is 'running'.
+        """
+        app = create_app()
+
+        def skip_csrf_validation() -> None:
+            return None
+
+        def skip_authentication() -> UserProfile:
+            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+
+        app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
+        app.dependency_overrides[require_authentication] = skip_authentication
+        mock_factory = MagicMock()
+        mock_factory.started_processes = {"trader_coordinator": MagicMock()}
+        app.state.process_factory = mock_factory
+        client = TestClient(app)
+        response = client.get("/api/status")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["trader"]["status"] == "running"
+
+    def test_system_status_trader_not_running_when_coordinator_absent(self) -> None:
+        """Verify trader status is not_running when coordinator is absent.
+
+        Given: trader_coordinator is NOT in started_processes,
+        When: GET /status is called,
+        Then: trader.status is 'not_running'.
+        """
+        app = create_app()
+
+        def skip_csrf_validation() -> None:
+            return None
+
+        def skip_authentication() -> UserProfile:
+            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+
+        app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
+        app.dependency_overrides[require_authentication] = skip_authentication
+        mock_factory = MagicMock()
+        mock_factory.started_processes = {"some_other_process": MagicMock()}
+        app.state.process_factory = mock_factory
+        client = TestClient(app)
+        response = client.get("/api/status")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["trader"]["status"] == "not_running"
 
 
 class TestAppCoverageImprovement:
