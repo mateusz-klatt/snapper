@@ -142,6 +142,11 @@ enum ProcessStopResponseStatus: String, Codable, Sendable {
     case error
 }
 
+enum StrategyProcessMode: String, Codable, Sendable {
+    case thread
+    case process
+}
+
 enum TradingSignalExchange: String, Codable, Sendable {
     case paper
     case kraken
@@ -698,6 +703,22 @@ struct SettingUpdate: Codable, Sendable {
     let category: String?
     /// Setting description
     let description: String?
+}
+
+struct StrategyListResponse: Codable, Sendable {
+    let strategies: [StrategyProcess]
+    let count: Int
+}
+
+struct StrategyProcess: Codable, Sendable {
+    /// Unique process name
+    let name: String
+    /// Whether process is currently running
+    let running: Bool
+    /// Whether process autostarts on boot
+    let enabled: Bool
+    /// Execution mode (thread/process)
+    let mode: String
 }
 
 struct StrategyStatusPayload: Codable, Sendable {
