@@ -12,6 +12,7 @@ import {
   useAvailableProcesses,
   useConfiguredProcesses,
   useProcessSummary,
+  useStrategies,
   useProcessSchema,
   useProcessRuns,
   useLatestSignals,
@@ -42,6 +43,12 @@ vi.mock('../lib/apiClient', () => ({
         strategies: { running: 0, total: 0 },
         executors: { running: 0, total: 0 },
         brokers: { running: 0, total: 0 },
+      })
+    ),
+    getStrategies: vi.fn(() =>
+      Promise.resolve({
+        strategies: [{ name: 'strategy_test', running: false, enabled: true, mode: 'thread' }],
+        count: 1,
       })
     ),
     getProcessSchema: vi.fn(() => Promise.resolve({ schema: {} })),
@@ -350,6 +357,18 @@ describe('queries', () => {
       })
       expect(result.current.data).toBeDefined()
       expect(result.current.data?.feeds).toEqual({ running: 0, total: 0 })
+    })
+  })
+  describe('useStrategies', () => {
+    it('returns strategy list when authenticated', async () => {
+      const { result } = renderHook(() => useStrategies(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
+      expect(result.current.data?.strategies).toHaveLength(1)
+      expect(result.current.data?.strategies[0].name).toBe('strategy_test')
     })
   })
   describe('useProcessSchema', () => {

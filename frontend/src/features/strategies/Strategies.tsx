@@ -6,7 +6,7 @@ import { ThemeSelect } from '../../components/ThemeSelect'
 import {
   useStartProcessByName,
   useStopProcessByName,
-  useConfiguredProcesses,
+  useStrategies,
   useAvailableProcesses,
   useCreateProcessConfig,
 } from '../../hooks/queries'
@@ -55,15 +55,12 @@ export const Strategies: React.FC = () => {
   const startProcess = useStartProcessByName()
   const stopProcess = useStopProcessByName()
   const createProcessConfig = useCreateProcessConfig()
-  const { data: configuredProcesses, isLoading } = useConfiguredProcesses()
+  const { data: strategiesData, isLoading } = useStrategies()
   const { data: availableProcesses } = useAvailableProcesses()
   const strategyTemplates = useMemo(() => {
     return availableProcesses?.processes.filter(process => process.role === 'strategy') ?? []
   }, [availableProcesses?.processes])
-  const strategies = useMemo(
-    () => configuredProcesses?.processes.filter(p => p.role === 'strategy') || [],
-    [configuredProcesses?.processes]
-  )
+  const strategies = useMemo(() => strategiesData?.strategies ?? [], [strategiesData?.strategies])
 
   useEffect(() => {
     if (!wsClient) {
@@ -150,7 +147,7 @@ export const Strategies: React.FC = () => {
       }
 
       setStrategyModalOpen(false)
-      queryClient.invalidateQueries({ queryKey: ['processes', 'configured'] })
+      queryClient.invalidateQueries({ queryKey: ['strategies'] })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
 
@@ -191,7 +188,7 @@ export const Strategies: React.FC = () => {
             duration: 3000,
             icon: '🚀',
           })
-          queryClient.invalidateQueries({ queryKey: ['processes', 'configured'] })
+          queryClient.invalidateQueries({ queryKey: ['strategies'] })
         },
         onError: (error: Error) => {
           setActiveStrategyProcess(null)
@@ -233,7 +230,7 @@ export const Strategies: React.FC = () => {
             duration: 3000,
             icon: '✋',
           })
-          queryClient.invalidateQueries({ queryKey: ['processes', 'configured'] })
+          queryClient.invalidateQueries({ queryKey: ['strategies'] })
         },
         onError: (error: Error) => {
           const errorMessage = error.message.toLowerCase()

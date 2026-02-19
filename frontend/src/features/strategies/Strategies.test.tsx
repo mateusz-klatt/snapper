@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Strategies } from './Strategies'
-import type { ConfiguredProcess } from '../../types/api'
+import type { StrategyProcess } from '../../types/api'
 import type { HeartbeatEnvelope } from '../../types/ws'
 
 function createHeartbeat(
@@ -46,7 +46,7 @@ const mockWsClient = {
 }
 
 vi.mock('../../hooks/queries', () => ({
-  useConfiguredProcesses: vi.fn(() => ({
+  useStrategies: vi.fn(() => ({
     data: null,
     isLoading: false,
   })),
@@ -116,10 +116,10 @@ describe('Strategies', () => {
     expect(screen.getByText(/Saving/i)).toBeTruthy()
   })
   it('displays empty state when no strategies configured', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: [] },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -129,27 +129,18 @@ describe('Strategies', () => {
     })
   })
   it('displays configured strategies', async () => {
-    let mockStrategies: ConfiguredProcess[] = [
+    let mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_macd_btc',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_macd',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'MACD Strategy',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -159,27 +150,18 @@ describe('Strategies', () => {
     })
   })
   it('subscribes to heartbeat topics for strategies', async () => {
-    let mockStrategies: ConfiguredProcess[] = [
+    let mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_macd_btc',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_macd',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -189,42 +171,18 @@ describe('Strategies', () => {
     })
   })
   it('filters only strategy role processes', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
+    const mockProcesses: StrategyProcess[] = [
       {
         name: 'strategy_macd_btc',
-        role: 'strategy',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_macd',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        tags: [],
-        is_one_shot: false,
-      },
-      {
-        name: 'executor_binance',
-        role: 'core',
-        enabled: true,
-        running: false,
-        mode: 'thread',
-        class_path: 'snapper.executor',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockProcesses },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -265,27 +223,18 @@ describe('Strategies', () => {
     })
   })
   it('handles websocket connection callback', async () => {
-    let mockStrategies: ConfiguredProcess[] = [
+    let mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -295,27 +244,18 @@ describe('Strategies', () => {
     })
   })
   it('resubscribes to heartbeats on reconnect', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -327,27 +267,18 @@ describe('Strategies', () => {
     expect(mockWsClient.subscribe).toHaveBeenCalledWith(['system.heartbeats.strategy.test'])
   })
   it('does not resubscribe when connection callback is false', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -361,27 +292,18 @@ describe('Strategies', () => {
     expect(mockWsClient.subscribe).toHaveBeenCalledTimes(subscribeCalls)
   })
   it('unsubscribes heartbeat topics on unmount', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -394,27 +316,18 @@ describe('Strategies', () => {
     expect(mockWsClient.unsubscribe).toHaveBeenCalledWith(['system.heartbeats.strategy.test'])
   })
   it('handles heartbeat messages', async () => {
-    let mockStrategies: ConfiguredProcess[] = [
+    let mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -436,9 +349,9 @@ describe('Strategies', () => {
     })
   })
   it('shows loading skeleton while loading', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
+    vi.mocked(useStrategies).mockReturnValue({
       data: null,
       isLoading: true,
       refetch: vi.fn(),
@@ -447,27 +360,18 @@ describe('Strategies', () => {
     expect(screen.queryByText('Strategy Management')).toBeNull()
   })
   it('handles start strategy with success', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -498,27 +402,18 @@ describe('Strategies', () => {
     )
   })
   it('defaults to thread mode when strategy mode is missing', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
-        mode: '' as ConfiguredProcess['mode'],
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
+        mode: '' as StrategyProcess['mode'],
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -547,28 +442,19 @@ describe('Strategies', () => {
     )
   })
   it('shows starting state while start mutation is pending', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName, useStopProcessByName } =
+    const { useStrategies, useStartProcessByName, useStopProcessByName } =
       await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -613,27 +499,18 @@ describe('Strategies', () => {
     expect(screen.getByLabelText('Status: starting')).toBeTruthy()
   })
   it('handles start strategy error - already running', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -661,27 +538,18 @@ describe('Strategies', () => {
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles start strategy error - not found', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -709,27 +577,18 @@ describe('Strategies', () => {
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles start strategy error - network error', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -757,27 +616,18 @@ describe('Strategies', () => {
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles stop strategy with success', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -805,28 +655,19 @@ describe('Strategies', () => {
     expect(mockMutate).toHaveBeenCalledWith({ name: 'strategy_test' }, expect.any(Object))
   })
   it('disables stop button while stop mutation is pending for active strategy', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName, useStopProcessByName } =
+    const { useStrategies, useStartProcessByName, useStopProcessByName } =
       await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -872,27 +713,18 @@ describe('Strategies', () => {
     expect(screen.getByLabelText('Stop TEST strategy')).toBeDisabled()
   })
   it('handles stop strategy error - not running', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -920,27 +752,18 @@ describe('Strategies', () => {
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles stop strategy error - network error', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1268,27 +1091,18 @@ describe('Strategies', () => {
     })
   })
   it('handles stop strategy error - generic error', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1316,27 +1130,18 @@ describe('Strategies', () => {
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles start strategy error - generic error', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+    const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1364,27 +1169,18 @@ describe('Strategies', () => {
     expect(mockMutate).toHaveBeenCalled()
   })
   it('handles heartbeat message for warn status', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1406,27 +1202,18 @@ describe('Strategies', () => {
     }
   })
   it('handles heartbeat message for error status', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1440,27 +1227,18 @@ describe('Strategies', () => {
     }
   })
   it('handles heartbeat message for ok status', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1474,27 +1252,18 @@ describe('Strategies', () => {
     }
   })
   it('defaults lag_ms to 0 when missing from heartbeat', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1512,27 +1281,18 @@ describe('Strategies', () => {
     })
   })
   it('ignores heartbeat messages for unknown strategies', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_known',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_known',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Known',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1546,30 +1306,21 @@ describe('Strategies', () => {
     }
   })
   it('clears activeStrategyProcess when stopping process that is not running', async () => {
-    let mockStrategies: ConfiguredProcess[] = [
+    let mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses, useStartProcessByName, useStopProcessByName } =
+    const { useStrategies, useStartProcessByName, useStopProcessByName } =
       await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockImplementation(
+    vi.mocked(useStrategies).mockImplementation(
       () =>
         ({
-          data: { processes: mockStrategies },
+          data: { strategies: mockStrategies },
           isLoading: false,
           refetch: vi.fn(),
         }) as never
@@ -1645,27 +1396,18 @@ describe('Strategies', () => {
     vi.mocked(useWebSocketStore).mockReturnValue({
       wsClient: null,
     } as never)
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1679,10 +1421,10 @@ describe('Strategies', () => {
     } as never)
   })
   it('does not subscribe when no strategies configured', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: [] },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1693,27 +1435,18 @@ describe('Strategies', () => {
     expect(mockWsClient.subscribe).not.toHaveBeenCalled()
   })
   it('handles heartbeat with warn status', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1727,27 +1460,18 @@ describe('Strategies', () => {
     }
   })
   it('handles heartbeat with error status', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1769,27 +1493,18 @@ describe('Strategies', () => {
     }
   })
   it('handles heartbeat with warning status alternative', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1803,27 +1518,18 @@ describe('Strategies', () => {
     }
   })
   it('triggers connection callback and resubscribes', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1838,27 +1544,18 @@ describe('Strategies', () => {
     }
   })
   it('ignores heartbeat messages for non-strategy components', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1872,42 +1569,24 @@ describe('Strategies', () => {
     }
   })
   it('filters strategies by status filter', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_running',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.running',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Running',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
       {
         name: 'strategy_stopped',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.stopped',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Stopped',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1924,42 +1603,24 @@ describe('Strategies', () => {
     expect(screen.getByText('RUNNING')).toBeTruthy()
   })
   it('filters strategies by stopped status filter', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_running',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.running',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Running',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
       {
         name: 'strategy_stopped',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.stopped',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Stopped',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1978,27 +1639,18 @@ describe('Strategies', () => {
     expect(screen.queryByText('RUNNING')).toBeNull()
   })
   it('shows no match state and clears filters', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: true,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2022,27 +1674,18 @@ describe('Strategies', () => {
     })
   })
   it('cancels confirm dialog', async () => {
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2064,10 +1707,10 @@ describe('Strategies', () => {
     })
   })
   it('opens register modal from empty state button', async () => {
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: [] },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2090,27 +1733,18 @@ describe('Strategies', () => {
     vi.mocked(useAuth).mockReturnValue({
       hasPermission: () => false,
     } as never)
-    const mockStrategies: ConfiguredProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
         running: false,
         mode: 'thread',
-        class_path: 'snapper.strategy_test',
-        method: 'main',
-        args: [],
-        kwargs: {},
-        note: 'Test',
-        lifecycle: 'long_running',
-        role: 'strategy',
-        tags: [],
-        is_one_shot: false,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: mockStrategies },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2132,10 +1766,10 @@ describe('Strategies', () => {
     vi.mocked(useAuth).mockReturnValue({
       hasPermission: () => false,
     } as never)
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useStrategies } = await import('../../hooks/queries')
 
-    vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { processes: [] },
+    vi.mocked(useStrategies).mockReturnValue({
+      data: { strategies: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)

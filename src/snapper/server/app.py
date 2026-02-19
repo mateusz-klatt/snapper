@@ -119,6 +119,7 @@ from snapper.messaging.topics.schemas import get_all_topic_names
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.process_routes import router as process_router
 from snapper.server.rate_limiting import limiter
+from snapper.server.strategy_routes import router as strategy_router
 from snapper.utils.logging import set_log_context
 
 API_PREFIX = "/api"
@@ -305,6 +306,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix=API_PREFIX)
     app.include_router(settings_router, prefix=API_PREFIX)
     app.include_router(process_router, prefix=API_PREFIX)
+    app.include_router(strategy_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 

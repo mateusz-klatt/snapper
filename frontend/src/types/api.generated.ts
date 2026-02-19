@@ -555,6 +555,36 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/strategies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Strategies
+         * @description List configured strategy processes with lightweight status.
+         *
+         *     Returns only strategy-role processes with minimal fields
+         *     (name, running, enabled, mode) for read-only views.
+         *
+         *     Args:
+         *         request: FastAPI request containing app state.
+         *         _user: Authenticated user with READ_STRATEGIES permission.
+         *
+         *     Returns:
+         *         Strategy list with running status.
+         */
+        get: Operations["list_strategies_api_strategies_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -1917,6 +1947,53 @@ export type Components = {
             description?: string | null;
         };
         /**
+         * StrategyListResponse
+         * @description Strategy processes list response.
+         *
+         *     Attributes:
+         *         strategies: List of strategy processes.
+         *         count: Total number of strategies.
+         */
+        StrategyListResponse: {
+            /** Strategies */
+            strategies: Components["schemas"]["StrategyProcess"][];
+            /** Count */
+            count: number;
+        };
+        /**
+         * StrategyProcess
+         * @description Lightweight strategy process info for read-only views.
+         *
+         *     Attributes:
+         *         name: Unique process name.
+         *         running: Whether process is currently running.
+         *         enabled: Whether process autostarts on boot.
+         *         mode: Execution mode (thread/process).
+         */
+        StrategyProcess: {
+            /**
+             * Name
+             * @description Unique process name
+             */
+            name: string;
+            /**
+             * Running
+             * @description Whether process is currently running
+             */
+            running: boolean;
+            /**
+             * Enabled
+             * @description Whether process autostarts on boot
+             */
+            enabled: boolean;
+            /**
+             * Mode
+             * @description Execution mode (thread/process)
+             * @enum {string}
+             */
+            mode: "thread" | "process";
+        };
+        /**
          * StrategyStatusPayload
          * @description Strategy process status payload for the system status endpoint.
          *
@@ -3121,6 +3198,26 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_strategies_api_strategies_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["StrategyListResponse"];
                 };
             };
         };

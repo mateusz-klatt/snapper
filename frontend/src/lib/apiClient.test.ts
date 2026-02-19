@@ -1004,6 +1004,21 @@ describe('domain API methods', () => {
 
     expect(result).toEqual(summary)
   })
+  it('getStrategies returns strategy list', async () => {
+    const strategiesResponse = {
+      strategies: [{ name: 'strategy_test', running: true, enabled: true, mode: 'thread' }],
+      count: 1,
+    }
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => strategiesResponse,
+    })
+    const result = await apiClient.getStrategies()
+
+    expect(result).toEqual(strategiesResponse)
+  })
   it('getAvailableProcesses returns available processes', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

@@ -19,6 +19,7 @@ import {
   ProcessCreateResponseSchema,
   ProcessStartResponseSchema,
   ProcessStopResponseSchema,
+  StrategyListResponseSchema,
   MessageResponseSchema,
   HealthCheckResponseSchema,
 } from './schemas/api.generated.zod'
@@ -41,6 +42,7 @@ import type {
   ProcessStartRequest,
   ProcessStartResponse,
   ProcessStopResponse,
+  StrategyListResponse,
   ChangePasswordRequest,
 } from '../types/api'
 
@@ -404,6 +406,11 @@ class APIClient {
     const data = await this.getJSON('/api/processes/summary')
 
     return validateResponse(data, ProcessSummaryResponseSchema, '/processes/summary')
+  }
+  async getStrategies(): Promise<StrategyListResponse> {
+    const data = await this.getJSON('/api/strategies')
+
+    return validateResponse(data, StrategyListResponseSchema, '/strategies')
   }
   async getAvailableProcesses(): Promise<AvailableProcessesResponse> {
     const data = await this.getJSON('/api/processes/available')

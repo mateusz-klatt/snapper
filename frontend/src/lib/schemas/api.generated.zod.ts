@@ -271,6 +271,15 @@ export const SettingUpdateSchema = z
   })
   .strict()
 
+export const StrategyProcessSchema = z
+  .object({
+    name: z.string(),
+    running: z.boolean(),
+    enabled: z.boolean(),
+    mode: z.enum(['thread', 'process']),
+  })
+  .strict()
+
 export const StrategyStatusPayloadSchema = z
   .object({
     strategy_name: z.string(),
@@ -418,6 +427,13 @@ export const ProcessRunsResponseSchema = z
   })
   .strict()
 
+export const StrategyListResponseSchema = z
+  .object({
+    strategies: z.array(StrategyProcessSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
 export const SystemStatusSchema = z
   .object({
     trader: ProcessStatusSchema,
@@ -535,6 +551,7 @@ export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
+export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
 export type StrategyStatusPayload = z.infer<typeof StrategyStatusPayloadSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TopicMetricSnapshotSchema = z.infer<typeof TopicMetricSnapshotSchemaSchema>
@@ -552,6 +569,7 @@ export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
 export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
+export type StrategyListResponse = z.infer<typeof StrategyListResponseSchema>
 export type SystemStatus = z.infer<typeof SystemStatusSchema>
 export type CreateUserRequest = z.infer<typeof CreateUserRequestSchema>
 export type UpdateUserRequest = z.infer<typeof UpdateUserRequestSchema>

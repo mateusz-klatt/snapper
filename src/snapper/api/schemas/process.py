@@ -24,6 +24,8 @@ _METHOD_DESC = "Entry point method name"
 _LIFECYCLE_DESC = "Process lifecycle type"
 _ROLE_DESC = "Process role category"
 _PROCESS_NAME_DESC = "Process name"
+_RUNNING_DESC = "Whether process is currently running"
+_ENABLED_DESC = "Whether process autostarts on boot"
 
 __all__ = [
     "ProcessStartRequest",
@@ -337,8 +339,8 @@ class ConfiguredProcess(StrictApiSchema):
     """
 
     name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
-    enabled: bool = Field(description="Whether process autostarts on boot")
-    running: bool = Field(description="Whether process is currently running")
+    enabled: bool = Field(description=_ENABLED_DESC)
+    running: bool = Field(description=_RUNNING_DESC)
     mode: ProcessMode = Field(description="Execution mode (thread/process)")
     class_path: str = Field(description=_CLASS_PATH_DESC)
     method: str = Field(description=_METHOD_DESC)
@@ -391,6 +393,34 @@ class ProcessSummaryResponse(StrictApiSchema):
     strategies: ProcessCategoryCount = Field(description="Strategy process counts")
     executors: ProcessCategoryCount = Field(description="Executor process counts")
     brokers: ProcessCategoryCount = Field(description="Broker process counts")
+
+
+class StrategyProcess(StrictApiSchema):
+    """Lightweight strategy process info for read-only views.
+
+    Attributes:
+        name: Unique process name.
+        running: Whether process is currently running.
+        enabled: Whether process autostarts on boot.
+        mode: Execution mode (thread/process).
+    """
+
+    name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
+    running: bool = Field(description=_RUNNING_DESC)
+    enabled: bool = Field(description=_ENABLED_DESC)
+    mode: ProcessMode = Field(description="Execution mode (thread/process)")
+
+
+class StrategyListResponse(StrictApiSchema):
+    """Strategy processes list response.
+
+    Attributes:
+        strategies: List of strategy processes.
+        count: Total number of strategies.
+    """
+
+    strategies: list[StrategyProcess]
+    count: int
 
 
 class ProcessCreatedInfo(StrictApiSchema):
@@ -504,7 +534,7 @@ class ProcessRuntimeStatus(StrictApiSchema):
     """
 
     name: str = Field(description=_PROCESS_NAME_DESC)
-    running: bool = Field(description="Whether process is currently running")
+    running: bool = Field(description=_RUNNING_DESC)
     role: ProcessRoleType = Field(description=_ROLE_DESC)
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
     active_run_id: str | None = Field(None, description="Active run ID if running")

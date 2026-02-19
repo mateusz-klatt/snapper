@@ -17,6 +17,7 @@ import type {
   ProcessSchemaResponse,
   ProcessCreateRequest,
   ProcessCreateResponse,
+  StrategyListResponse,
 } from '../types/api'
 
 const queryKeys = {
@@ -25,6 +26,7 @@ const queryKeys = {
   availableProcesses: ['processes', 'available'] as const,
   configuredProcesses: ['processes', 'configured'] as const,
   processSummary: ['processes', 'summary'] as const,
+  strategies: ['strategies'] as const,
   processSchema: (name: string) => ['processes', 'schema', name] as const,
   processRuns: (name?: string, limit?: number) =>
     ['processes', 'runs', name ?? 'all', limit ?? 50] as const,
@@ -288,6 +290,7 @@ export const useStartProcessByName = () => {
       queryClient.invalidateQueries({ queryKey: ['process', 'runtime', variables.name] })
       queryClient.invalidateQueries({ queryKey: queryKeys.configuredProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processSummary })
+      queryClient.invalidateQueries({ queryKey: queryKeys.strategies })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
     },
@@ -306,6 +309,7 @@ export const useStopProcessByName = () => {
       queryClient.invalidateQueries({ queryKey: ['process', 'runtime', variables.name] })
       queryClient.invalidateQueries({ queryKey: queryKeys.configuredProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processSummary })
+      queryClient.invalidateQueries({ queryKey: queryKeys.strategies })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
     },
@@ -324,6 +328,14 @@ export const useProcessSummary = () => {
   return useQuery<ProcessSummaryResponse>({
     queryKey: queryKeys.processSummary,
     queryFn: () => apiClient.getProcessSummary(),
+    refetchInterval: 5000,
+  })
+}
+
+export const useStrategies = () => {
+  return useQuery<StrategyListResponse>({
+    queryKey: queryKeys.strategies,
+    queryFn: () => apiClient.getStrategies(),
     refetchInterval: 5000,
   })
 }
@@ -362,6 +374,7 @@ export const useCreateProcessConfig = () => {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.configuredProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processSummary })
+      queryClient.invalidateQueries({ queryKey: queryKeys.strategies })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
     },
