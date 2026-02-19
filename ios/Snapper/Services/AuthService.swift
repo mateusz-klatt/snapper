@@ -79,6 +79,32 @@ class AuthService: ObservableObject {
         _ = try? await session.data(for: request)
     }
 
+    private static let roleHierarchy: [UserRole: Int] = [
+        .viewer: 1,
+        .operatorRole: 2,
+        .admin: 3,
+    ]
+
+    func hasRole(_ role: UserRole) -> Bool {
+        guard let user = currentUser else { return false }
+        let userLevel = Self.roleHierarchy[user.role] ?? 0
+        let requiredLevel = Self.roleHierarchy[role] ?? 0
+        return userLevel >= requiredLevel
+    }
+
+    func hasPermission(_ permission: Permission) -> Bool {
+        guard let user = currentUser else { return false }
+        if user.role == .admin { return true }
+        let perms = rolePermissions[user.role] ?? []
+        return perms.contains(permission)
+    }
+
+    func canAccess(_ resource: String) -> Bool {
+        guard let user = currentUser else { return false }
+        let allowed = resourceAccess[resource] ?? []
+        return allowed.contains(user.role)
+    }
+
     func getWsToken() -> String? {
         return wsToken
     }

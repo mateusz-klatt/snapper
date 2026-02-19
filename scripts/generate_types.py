@@ -875,6 +875,8 @@ def generate_ios_types(project_root: Path) -> None:
             exclude_enums=ws_enums,
         )
 
+    generate_ios_permissions(project_root)
+
 
 _ZOD_SIMPLE_TYPE_MAP: dict[str, str] = {
     "integer": "z.number().int()",
@@ -1619,6 +1621,7 @@ def generate_entities(project_root: Path) -> None:
 
 
 _PERMISSIONS_TARGET = Path("frontend") / "src" / "types" / "permissions.generated.ts"
+_IOS_PERMISSIONS_TARGET = Path("ios") / "Snapper" / "Models" / "Generated" / "Permissions.swift"
 
 
 def generate_permissions(project_root: Path) -> None:
@@ -1673,6 +1676,96 @@ def generate_permissions(project_root: Path) -> None:
         "export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {",
         *resource_entries,
         "} as const",
+        "",
+    ]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines))
+    print(f"Generated {output_path}")
+    print(f"  - {len(list(Permission))} permissions")
+    print(f"  - {len(list(UserRole))} roles")
+    print(f"  - {len(BACKEND_RESOURCE_PERMISSIONS)} resources")
+
+
+def _perm_name_to_swift_case(name: str) -> str:
+    """Convert UPPER_SNAKE_CASE permission name to Swift camelCase.
+
+    Args:
+        name: Permission name in UPPER_SNAKE_CASE, e.g. ``READ_MARKET_DATA``.
+
+    Returns:
+        Swift-safe camelCase identifier, e.g. ``readMarketData``.
+    """
+    parts = name.lower().split("_")
+    return parts[0] + "".join(p.capitalize() for p in parts[1:])
+
+
+def _role_value_to_swift_case(value: str) -> str:
+    """Return the Swift enum case name for a role string value.
+
+    Handles Swift keyword renames so that reserved words like ``operator``
+    become the safe alias defined in ``SWIFT_KEYWORD_RENAMES``.
+
+    Args:
+        value: Raw role string value, e.g. ``"operator"``.
+
+    Returns:
+        Swift-safe case name, e.g. ``operatorRole``.
+    """
+    return SWIFT_KEYWORD_RENAMES.get(value, value)
+
+
+def generate_ios_permissions(project_root: Path) -> None:
+    """Generate Swift permissions constants from backend source of truth.
+
+    Produces ``Permissions.swift`` in ``ios/Snapper/Models/Generated/`` with a
+    ``Permission`` enum, ``rolePermissions`` dictionary, and ``resourceAccess``
+    dictionary that mirror ``permissions.generated.ts`` used by the frontend.
+    ``UserRole`` is deliberately omitted because it is already emitted by the
+    WS schema generator in ``WSMessages.swift``.
+
+    Args:
+        project_root: Root directory of the project.
+    """
+    output_path = project_root / _IOS_PERMISSIONS_TARGET
+
+    perm_cases: list[str] = []
+    for perm in Permission:
+        case_name = _perm_name_to_swift_case(perm.name)
+        perm_cases.append(f'    case {case_name} = "{perm.value}"')
+
+    role_perm_entries: list[str] = []
+    for role in UserRole:
+        swift_role = _role_value_to_swift_case(role.value)
+        perms = sorted(BACKEND_ROLE_PERMISSIONS[role], key=lambda p: p.value)
+        perm_list = ", ".join(f".{_perm_name_to_swift_case(p.name)}" for p in perms)
+        role_perm_entries.append(f"    .{swift_role}: [{perm_list}],")
+
+    resource_entries: list[str] = []
+    for resource, required_perm in BACKEND_RESOURCE_PERMISSIONS.items():
+        allowed_roles: list[str] = []
+        for role in UserRole:
+            if required_perm is None or required_perm in BACKEND_ROLE_PERMISSIONS[role]:
+                allowed_roles.append(f".{_role_value_to_swift_case(role.value)}")
+        resource_entries.append(f'    "{resource}": [{", ".join(allowed_roles)}],')
+
+    lines = [
+        "// This file was auto-generated from backend schemas.",
+        "// DO NOT EDIT - regenerate with: make ios-gen-types",
+        "",
+        "import Foundation",
+        "",
+        "enum Permission: String, CaseIterable, Codable, Sendable {",
+        *perm_cases,
+        "}",
+        "",
+        "let rolePermissions: [UserRole: [Permission]] = [",
+        *role_perm_entries,
+        "]",
+        "",
+        "let resourceAccess: [String: [UserRole]] = [",
+        *resource_entries,
+        "]",
         "",
     ]
 

@@ -12,10 +12,11 @@ struct LoginView: View {
                 VStack(spacing: 24) {
 
                     VStack(spacing: 8) {
-                        Image(systemName: "chart.line.uptrend.xyaxis")
-                            .font(.system(size: 60))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundColor(.brandRed)
+                        Image("AppLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 80, height: 80)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
 
                         Text("Snapper")
                             .font(.largeTitle)

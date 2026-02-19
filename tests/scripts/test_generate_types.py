@@ -25,6 +25,7 @@ from scripts.generate_types import fix_refs_openapi
 from scripts.generate_types import fix_refs_pydantic
 from scripts.generate_types import generate_entities
 from scripts.generate_types import generate_entity_interface
+from scripts.generate_types import generate_ios_permissions
 from scripts.generate_types import generate_ios_types
 from scripts.generate_types import generate_permissions
 from scripts.generate_types import generate_swift_enum
@@ -917,6 +918,111 @@ class TestGenerateIosTypes:
         assert "enum UserRole" in ws_content
         assert "enum UserRole" not in api_content
         assert "struct UserProfile" in api_content
+
+
+class TestGenerateIosPermissions:
+    """Tests for generate_ios_permissions function."""
+
+    def test_generates_permissions_file(self, tmp_path: Path, capsys: Any) -> None:
+        """Generates Permissions.swift from backend source of truth.
+
+        Given: A project root directory,
+        When: generate_ios_permissions is called,
+        Then: Permissions.swift is created with Permission enum and dictionaries.
+        """
+        generate_ios_permissions(tmp_path)
+
+        output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
+        assert output.exists()
+        content = output.read_text()
+        assert "enum Permission:" in content
+        assert "rolePermissions" in content
+        assert "resourceAccess" in content
+        assert "read:market_data" in content
+        assert "manage:users" in content
+        captured = capsys.readouterr()
+        assert "Generated" in captured.out
+        assert "14 permissions" in captured.out
+        assert "3 roles" in captured.out
+        assert "9 resources" in captured.out
+
+    def test_includes_all_roles(self, tmp_path: Path) -> None:
+        """Generated file includes viewer, operatorRole, and admin roles.
+
+        Given: Backend ROLE_PERMISSIONS,
+        When: generate_ios_permissions is called,
+        Then: all three role case names appear in rolePermissions.
+        """
+        generate_ios_permissions(tmp_path)
+
+        output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
+        content = output.read_text()
+        assert ".viewer:" in content
+        assert ".operatorRole:" in content
+        assert ".admin:" in content
+
+    def test_resource_access_derives_from_permissions(self, tmp_path: Path) -> None:
+        """Resource access entries are derived from RESOURCE_PERMISSIONS and ROLE_PERMISSIONS.
+
+        Given: Backend RESOURCE_PERMISSIONS and ROLE_PERMISSIONS,
+        When: generate_ios_permissions is called,
+        Then: resourceAccess grants all roles to overview (None permission)
+              and restricts admin-only resources correctly.
+        """
+        generate_ios_permissions(tmp_path)
+
+        output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
+        content = output.read_text()
+        assert '"overview": [.viewer, .operatorRole, .admin]' in content
+        assert '"admin": [.admin]' in content
+        assert '"settings": [.admin]' in content
+        assert '"processes": [.operatorRole, .admin]' in content
+
+    def test_user_role_not_redeclared(self, tmp_path: Path) -> None:
+        """UserRole enum is not redeclared since WSMessages.swift already defines it.
+
+        Given: The generated Permissions.swift,
+        When: content is inspected,
+        Then: no UserRole enum declaration appears.
+        """
+        generate_ios_permissions(tmp_path)
+
+        output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
+        content = output.read_text()
+        assert "enum UserRole" not in content
+
+    def test_permission_cases_use_camel_case(self, tmp_path: Path) -> None:
+        """Permission enum cases are camelCase, not UPPER_SNAKE_CASE.
+
+        Given: Permission enum values,
+        When: the Swift file is generated,
+        Then: cases like readMarketData and manageUsers appear.
+        """
+        generate_ios_permissions(tmp_path)
+
+        output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
+        content = output.read_text()
+        assert "case readMarketData" in content
+        assert "case manageUsers" in content
+        assert "READ_MARKET_DATA" not in content
+
+    def test_ios_types_generates_permissions(self, tmp_path: Path) -> None:
+        """generate_ios_types also produces the Permissions.swift file.
+
+        Given: build schemas are present,
+        When: generate_ios_types is called,
+        Then: Permissions.swift is present alongside other generated files.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(json.dumps({"definitions": {}}))
+        (build_dir / "openapi-schemas.json").write_text(json.dumps({"definitions": {}}))
+        ios_dir = tmp_path / "ios" / "Snapper" / "Models" / "Generated"
+        ios_dir.mkdir(parents=True)
+
+        generate_ios_types(tmp_path)
+
+        assert (ios_dir / "Permissions.swift").exists()
 
 
 class TestJsonTypeToZod:

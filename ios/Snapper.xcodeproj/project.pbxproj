@@ -18,6 +18,7 @@
 		7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3AFFCD485E4541E995FC91CB /* Configuration.plist */; };
 		81189414878D69E0A0DC0601 /* TradingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 569FFBB46A52B74686A202D0 /* TradingView.swift */; };
 		8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C866C094E8868C0EF03F6809 /* AuthService.swift */; };
+		A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 039FE3D502C2D2EB294EB4AA /* Permissions.swift */; };
 		B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */; };
 		BBB8164DA1ACDEF80598BF46 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */; };
 		D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6605FA90A650CA70270A857 /* SettingsView.swift */; };
@@ -38,6 +39,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		039FE3D502C2D2EB294EB4AA /* Permissions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Permissions.swift; sourceTree = "<group>"; };
 		10C33334091D91D43D43B1C3 /* Environment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Environment.swift; sourceTree = "<group>"; };
 		1499AF1C8B116093A1A9426D /* WebSocketManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketManager.swift; sourceTree = "<group>"; };
 		1FC42AFF6C9070E52403CC6A /* WSMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSMessages.swift; sourceTree = "<group>"; };
@@ -81,6 +83,7 @@
 			children = (
 				34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */,
 				C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */,
+				039FE3D502C2D2EB294EB4AA /* Permissions.swift */,
 				1FC42AFF6C9070E52403CC6A /* WSMessages.swift */,
 			);
 			path = Generated;
@@ -284,6 +287,7 @@
 				D4D538F756906829CC4ECC61 /* LoginView.swift in Sources */,
 				D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */,
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
+				A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */,
 				D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */,
 				3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */,
 				FC31D3C744C65776E28C570D /* Theme.swift in Sources */,
