@@ -317,12 +317,30 @@ const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) =
           </section>
           <section>
             <h4 className='font-semibold text-alpine-900 mb-2'>API Documentation</h4>
-            <p className='text-muted-600'>
-              Interactive API documentation is available at{' '}
-              <code className='text-xs bg-dark-700 px-1.5 py-0.5 rounded'>/api/docs</code> (Swagger
-              UI) and <code className='text-xs bg-dark-700 px-1.5 py-0.5 rounded'>/api/redoc</code>{' '}
-              (ReDoc).
-            </p>
+            <ul className='list-disc list-inside space-y-1 text-muted-600'>
+              <li>
+                <a
+                  href='/docs'
+                  target='_blank'
+                  rel='noreferrer'
+                  className='text-primary-500 hover:text-primary-400 underline'
+                >
+                  Swagger UI
+                </a>{' '}
+                — interactive API explorer
+              </li>
+              <li>
+                <a
+                  href='/redoc'
+                  target='_blank'
+                  rel='noreferrer'
+                  className='text-primary-500 hover:text-primary-400 underline'
+                >
+                  ReDoc
+                </a>{' '}
+                — API reference documentation
+              </li>
+            </ul>
           </section>
         </div>
       </Modal>
