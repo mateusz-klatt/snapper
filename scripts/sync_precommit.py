@@ -62,7 +62,7 @@ def load_versions(pyproject_path: Path = DEFAULT_PYPROJECT_PATH) -> dict[str, st
     }
 
 
-def _validate_config_path(config_path: Path) -> Path:
+def _resolve_config(config_path: Path) -> Path:
     """Resolve and validate the config file path.
 
     Args:
@@ -85,6 +85,38 @@ def _validate_config_path(config_path: Path) -> Path:
     return resolved
 
 
+def _read_config(config_path: Path) -> tuple[Path, list[str]]:
+    """Validate path, read .pre-commit-config.yaml, and return lines.
+
+    Args:
+        config_path: Path to the .pre-commit-config.yaml file.
+
+    Returns:
+        Tuple of (resolved path, list of lines from the file).
+
+    Raises:
+        FileNotFoundError: If config file does not exist.
+        ValueError: If path contains traversal or targets wrong filename.
+    """
+    resolved = _resolve_config(config_path)
+    return resolved, resolved.read_text(encoding="utf-8").splitlines()
+
+
+def _write_config(config_path: Path, content: str) -> None:
+    """Validate path and write content to .pre-commit-config.yaml.
+
+    Args:
+        config_path: Path to the .pre-commit-config.yaml file.
+        content: Full file content to write.
+
+    Raises:
+        FileNotFoundError: If config file does not exist.
+        ValueError: If path contains traversal or targets wrong filename.
+    """
+    resolved = _resolve_config(config_path)
+    resolved.write_text(content, encoding="utf-8")
+
+
 def update_config(
     expected_revs: dict[str, str],
     config_path: Path = DEFAULT_CONFIG_PATH,
@@ -99,8 +131,7 @@ def update_config(
         FileNotFoundError: If config file does not exist.
         ValueError: If path contains traversal or targets wrong filename.
     """
-    resolved = _validate_config_path(config_path)
-    lines = resolved.read_text(encoding="utf-8").splitlines()
+    _, lines = _read_config(config_path)
     updated_lines: list[str] = []
     active_repo: str | None = None
     for line in lines:
@@ -122,7 +153,7 @@ def update_config(
             active_repo = None
         else:
             updated_lines.append(line)
-    resolved.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+    _write_config(config_path, "\n".join(updated_lines) + "\n")
 
 
 def main() -> int:
