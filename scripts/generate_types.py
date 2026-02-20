@@ -41,6 +41,14 @@ _OPENAPI_FILE = "openapi.json"
 _DEFS_KEY = "$defs"
 _STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
 _OPENAPI_TYPESCRIPT_TARGET = Path("frontend") / "src" / "types" / "api.generated.ts"
+_SWIFT_HEADER_LINES = [
+    "// This file was auto-generated from backend schemas.",
+    "// DO NOT EDIT - regenerate with: make ios-gen-types",
+    "",
+    "import Foundation",
+    "",
+]
+_TS_CONST_OBJECT_CLOSE = "} as const"
 
 ENTITY_RENAMES: dict[str, str] = {}
 ENVELOPE_SUFFIX = "Envelope"
@@ -813,13 +821,7 @@ def generate_swift_types(
 
     definitions = schema.get("definitions", {})
 
-    lines: list[str] = [
-        "// This file was auto-generated from backend schemas.",
-        "// DO NOT EDIT - regenerate with: make ios-gen-types",
-        "",
-        "import Foundation",
-        "",
-    ]
+    lines: list[str] = [*_SWIFT_HEADER_LINES]
     if include_any_codable:
         lines.extend(get_any_codable_helper())
 
@@ -844,13 +846,7 @@ def generate_ios_types(project_root: Path) -> None:
     ios_gen_dir.mkdir(parents=True, exist_ok=True)
 
     any_codable_path = ios_gen_dir / "AnyCodable.swift"
-    any_codable_lines = [
-        "// This file was auto-generated from backend schemas.",
-        "// DO NOT EDIT - regenerate with: make ios-gen-types",
-        "",
-        "import Foundation",
-        "",
-    ]
+    any_codable_lines = [*_SWIFT_HEADER_LINES]
     any_codable_lines.extend(get_any_codable_helper())
     any_codable_path.write_text("\n".join(any_codable_lines))
     print(f"Generated {any_codable_path}")
@@ -1663,7 +1659,7 @@ def generate_permissions(project_root: Path) -> None:
         "",
         "export const Permission = {",
         *permission_entries,
-        "} as const",
+        _TS_CONST_OBJECT_CLOSE,
         "",
         "export type Permission = (typeof Permission)[keyof typeof Permission]",
         "",
@@ -1671,11 +1667,11 @@ def generate_permissions(project_root: Path) -> None:
         "",
         "export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {",
         *role_entries,
-        "} as const",
+        _TS_CONST_OBJECT_CLOSE,
         "",
         "export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {",
         *resource_entries,
-        "} as const",
+        _TS_CONST_OBJECT_CLOSE,
         "",
     ]
 
@@ -1750,11 +1746,7 @@ def generate_ios_permissions(project_root: Path) -> None:
         resource_entries.append(f'    "{resource}": [{", ".join(allowed_roles)}],')
 
     lines = [
-        "// This file was auto-generated from backend schemas.",
-        "// DO NOT EDIT - regenerate with: make ios-gen-types",
-        "",
-        "import Foundation",
-        "",
+        *_SWIFT_HEADER_LINES,
         "enum Permission: String, CaseIterable, Codable, Sendable {",
         *perm_cases,
         "}",

@@ -16,6 +16,45 @@ interface HealthStatus {
   inputs?: string[]
   outputs?: string[]
 }
+
+const FeedPublisherEntry: React.FC<Readonly<{ feedKey: string; feed: FeedHealth }>> = ({
+  feedKey,
+  feed,
+}) => {
+  const isHealthy = feed.healthy
+  const isFresh = feed.heartbeat_age_ms < 5000
+
+  return (
+    <div className='bg-dark-700 rounded p-2 space-y-1'>
+      <div className='flex items-center justify-between'>
+        <div className='flex items-center space-x-2'>
+          <div
+            className={clsx('w-2 h-2 rounded-full', {
+              'bg-accent-500': isHealthy && isFresh,
+              'bg-warning-500': isHealthy && !isFresh,
+              'bg-loss-500': !isHealthy,
+            })}
+          />
+          <span className='text-xs font-medium text-alpine-900'>{feedKey}</span>
+        </div>
+        <span
+          className={clsx('text-xs', {
+            'text-accent-400': feed.status === 'healthy',
+            'text-warning-400': feed.status === 'warning',
+            'text-loss-400': feed.status === 'error',
+          })}
+        >
+          {feed.status}
+        </span>
+      </div>
+      <div className='grid grid-cols-2 gap-2 text-xs text-muted-500'>
+        <div>Feed lag: {feed.lag_ms}ms</div>
+        <div>HB age: {Math.round(feed.heartbeat_age_ms / 1000)}s</div>
+      </div>
+    </div>
+  )
+}
+
 interface StrategyCardProps {
   name: string
   running: boolean
@@ -220,42 +259,9 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
                       Feed Publishers ({Object.keys(health.feed_health).length})
                     </div>
                     <div className='space-y-2'>
-                      {Object.entries(health.feed_health).map(([feedKey, feed]) => {
-                        const isHealthy = feed.healthy
-                        const isFresh = feed.heartbeat_age_ms < 5000
-
-                        return (
-                          <div key={feedKey} className='bg-dark-700 rounded p-2 space-y-1'>
-                            <div className='flex items-center justify-between'>
-                              <div className='flex items-center space-x-2'>
-                                <div
-                                  className={clsx('w-2 h-2 rounded-full', {
-                                    'bg-accent-500': isHealthy && isFresh,
-                                    'bg-warning-500': isHealthy && !isFresh,
-                                    'bg-loss-500': !isHealthy,
-                                  })}
-                                />
-                                <span className='text-xs font-medium text-alpine-900'>
-                                  {feedKey}
-                                </span>
-                              </div>
-                              <span
-                                className={clsx('text-xs', {
-                                  'text-accent-400': feed.status === 'healthy',
-                                  'text-warning-400': feed.status === 'warning',
-                                  'text-loss-400': feed.status === 'error',
-                                })}
-                              >
-                                {feed.status}
-                              </span>
-                            </div>
-                            <div className='grid grid-cols-2 gap-2 text-xs text-muted-500'>
-                              <div>Feed lag: {feed.lag_ms}ms</div>
-                              <div>HB age: {Math.round(feed.heartbeat_age_ms / 1000)}s</div>
-                            </div>
-                          </div>
-                        )
-                      })}
+                      {Object.entries(health.feed_health).map(([feedKey, feed]) => (
+                        <FeedPublisherEntry key={feedKey} feedKey={feedKey} feed={feed} />
+                      ))}
                     </div>
                   </div>
                 )}
