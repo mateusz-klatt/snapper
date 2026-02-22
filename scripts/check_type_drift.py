@@ -24,10 +24,12 @@ def get_files_to_check(project_root: Path) -> list[Path]:
         project_root / "frontend" / "src" / "types" / "api.generated.ts",
         project_root / "frontend" / "src" / "types" / "ws.generated.ts",
         project_root / "frontend" / "src" / "types" / "entities.generated.ts",
+        project_root / "frontend" / "src" / "types" / "permissions.generated.ts",
         project_root / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts",
         project_root / "frontend" / "src" / "lib" / "schemas" / "api.generated.zod.ts",
         project_root / "ios" / "Snapper" / "Models" / "Generated" / "WSMessages.swift",
         project_root / "ios" / "Snapper" / "Models" / "Generated" / "APITypes.swift",
+        project_root / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift",
     ]
 
 
@@ -121,7 +123,7 @@ def main() -> int:
         restore_files(backups)
 
     if drifted:
-        print("Type drift detected! Run 'make ui-gen-types' and commit the changes.")
+        print("Type drift detected! Run 'make ui-gen-types ios-gen-types' and commit the changes.")
         return 1
     else:
         print("Generated types are up to date")

@@ -20,7 +20,7 @@ struct MainTabView: View {
                     }
             }
 
-            if authService.canAccess("settings") {
+            if authService.canAccess("overview") {
                 SettingsView()
                     .tabItem {
                         Label("Settings", systemImage: "gearshape.fill")
