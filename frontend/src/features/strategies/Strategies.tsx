@@ -278,18 +278,20 @@ export const Strategies: React.FC = () => {
 
   return (
     <div className='space-y-6'>
-      <div className='flex items-center justify-between'>
-        <h2 className='text-xl font-bold text-alpine-900'>Strategy Management</h2>
-        {canManage && (
-          <button
-            onClick={() => setStrategyModalOpen(true)}
-            disabled={createProcessConfig.isPending || startProcess.isPending}
-            className='px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed'
-          >
-            {createProcessConfig.isPending ? 'Saving…' : 'Register Strategy'}
-          </button>
-        )}
-        <p className='mt-2 text-xs text-muted-500'>
+      <div className='space-y-2'>
+        <div className='flex flex-wrap items-center justify-between gap-2'>
+          <h2 className='text-xl font-bold text-alpine-900'>Strategy Management</h2>
+          {canManage && (
+            <button
+              onClick={() => setStrategyModalOpen(true)}
+              disabled={createProcessConfig.isPending || startProcess.isPending}
+              className='px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed'
+            >
+              {createProcessConfig.isPending ? 'Saving…' : 'Register Strategy'}
+            </button>
+          )}
+        </div>
+        <p className='text-xs text-muted-500'>
           {canManage
             ? 'Register new strategy processes directly from the UI. Autostart keeps the process enabled across restarts.'
             : 'View configured strategies and their status. Contact an operator or admin to manage strategies.'}

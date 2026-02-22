@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -117,7 +117,7 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('admin')).toBeTruthy()
+      expect(screen.getAllByText('admin')[0]).toBeTruthy()
     })
   })
   it('displays inactive users badge', async () => {
@@ -140,7 +140,7 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('Inactive')).toBeTruthy()
+      expect(screen.getAllByText('Inactive')[0]).toBeTruthy()
     })
   })
   it('calls onEditUser when edit button clicked', async () => {
@@ -211,7 +211,7 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('testuser')).toBeTruthy()
+      expect(screen.getAllByText('testuser')[0]).toBeTruthy()
     })
   })
   it('cancels user deletion when cancel clicked in dialog', async () => {
@@ -233,10 +233,12 @@ describe('UserList', () => {
         }),
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    const table = await screen.findByRole('table')
+
     await waitFor(() => {
-      expect(screen.getByText('canceluser')).toBeTruthy()
+      expect(within(table).getByText('canceluser')).toBeTruthy()
     })
-    const row = screen.getByText('canceluser').closest('tr')
+    const row = within(table).getByText('canceluser').closest('tr')
     const deleteButton = row?.querySelector('button:last-of-type')
 
     if (deleteButton) {
@@ -274,10 +276,12 @@ describe('UserList', () => {
       json: () => Promise.resolve({ users: [], total_count: 0 }),
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    const table = await screen.findByRole('table')
+
     await waitFor(() => {
-      expect(screen.getByText('deleteuser')).toBeTruthy()
+      expect(within(table).getByText('deleteuser')).toBeTruthy()
     })
-    const row = screen.getByText('deleteuser').closest('tr')
+    const row = within(table).getByText('deleteuser').closest('tr')
     const deleteButton = row?.querySelector('button:last-of-type')
 
     if (deleteButton) {
@@ -317,10 +321,12 @@ describe('UserList', () => {
       statusText: 'Internal Server Error',
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    const table = await screen.findByRole('table')
+
     await waitFor(() => {
-      expect(screen.getByText('failuser')).toBeTruthy()
+      expect(within(table).getByText('failuser')).toBeTruthy()
     })
-    const row = screen.getByText('failuser').closest('tr')
+    const row = within(table).getByText('failuser').closest('tr')
     const deleteButton = row?.querySelector('button:last-of-type')
 
     if (deleteButton) {
@@ -366,10 +372,12 @@ describe('UserList', () => {
     } as Response)
     vi.mocked(api).mockRejectedValueOnce(new Error(''))
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    const table = await screen.findByRole('table')
+
     await waitFor(() => {
-      expect(screen.getByText('emptyerror')).toBeTruthy()
+      expect(within(table).getByText('emptyerror')).toBeTruthy()
     })
-    const row = screen.getByText('emptyerror').closest('tr')
+    const row = within(table).getByText('emptyerror').closest('tr')
     const deleteButton = row?.querySelector('button:last-of-type')
 
     if (deleteButton) {
@@ -404,7 +412,7 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('operator')).toBeTruthy()
+      expect(screen.getAllByText('operator')[0]).toBeTruthy()
     })
   })
   it('displays viewer role badge', async () => {
@@ -427,7 +435,7 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('viewer')).toBeTruthy()
+      expect(screen.getAllByText('viewer')[0]).toBeTruthy()
     })
   })
   it('displays unknown role badge with default styling', async () => {
@@ -450,7 +458,7 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('custom_role')).toBeTruthy()
+      expect(screen.getAllByText('custom_role')[0]).toBeTruthy()
     })
   })
   it('formats dates correctly', async () => {
@@ -474,7 +482,7 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('dateuser')).toBeTruthy()
+      expect(screen.getAllByText('dateuser')[0]).toBeTruthy()
     })
   })
   it('toggles inactive filter and changes button text', async () => {
@@ -585,10 +593,12 @@ describe('UserList', () => {
         }),
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    const table = await screen.findByRole('table')
+
     await waitFor(() => {
-      expect(screen.getByText('editableuser')).toBeTruthy()
+      expect(within(table).getByText('editableuser')).toBeTruthy()
     })
-    const editButtons = screen.getAllByRole('button')
+    const editButtons = within(table).getAllByRole('button')
 
     for (const btn of editButtons) {
       if (btn.classList.contains('text-brand-600')) {
@@ -651,14 +661,14 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('alice')).toBeTruthy()
-      expect(screen.getByText('bob')).toBeTruthy()
+      expect(screen.getAllByText('alice')[0]).toBeTruthy()
+      expect(screen.getAllByText('bob')[0]).toBeTruthy()
     })
     const searchInput = screen.getByPlaceholderText('Search by username, email, or role...')
 
     await userEvent.type(searchInput, 'alice')
     await waitFor(() => {
-      expect(screen.getByText('alice')).toBeTruthy()
+      expect(screen.getAllByText('alice')[0]).toBeTruthy()
       expect(screen.queryByText('bob')).toBeNull()
     })
   })
@@ -682,13 +692,83 @@ describe('UserList', () => {
     } as Response)
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
-      expect(screen.getByText('alice')).toBeTruthy()
+      expect(screen.getAllByText('alice')[0]).toBeTruthy()
     })
     const searchInput = screen.getByPlaceholderText('Search by username, email, or role...')
 
     await userEvent.type(searchInput, 'zzzzz')
     await waitFor(() => {
       expect(screen.getByText('No users match your search criteria.')).toBeTruthy()
+    })
+  })
+  it('calls onEditUser from mobile card view', async () => {
+    vi.mocked(api).mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          users: [
+            {
+              id: '1',
+              username: 'carduser',
+              email: 'card@example.com',
+              role: 'viewer',
+              is_active: true,
+              created_at: '2024-01-01T00:00:00Z',
+            },
+          ],
+          total_count: 1,
+        }),
+    } as Response)
+    renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    await waitFor(() => {
+      expect(screen.getAllByText('carduser')[0]).toBeTruthy()
+    })
+    const cards = document.querySelector('.md\\:hidden')
+    const editButton = within(cards as HTMLElement)
+      .getAllByRole('button')
+      .find(btn => btn.classList.contains('text-brand-600'))
+
+    if (editButton) {
+      await userEvent.click(editButton)
+    }
+
+    expect(mockOnEditUser).toHaveBeenCalledWith(
+      expect.objectContaining({ id: '1', username: 'carduser' })
+    )
+  })
+  it('opens deactivate dialog from mobile card view', async () => {
+    vi.mocked(api).mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          users: [
+            {
+              id: '2',
+              username: 'carddelete',
+              email: 'carddelete@example.com',
+              role: 'operator',
+              is_active: true,
+              created_at: '2024-01-01T00:00:00Z',
+            },
+          ],
+          total_count: 1,
+        }),
+    } as Response)
+    renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
+    await waitFor(() => {
+      expect(screen.getAllByText('carddelete')[0]).toBeTruthy()
+    })
+    const cards = document.querySelector('.md\\:hidden')
+    const deleteButton = within(cards as HTMLElement)
+      .getAllByRole('button')
+      .find(btn => btn.classList.contains('text-loss-600'))
+
+    if (deleteButton) {
+      await userEvent.click(deleteButton)
+    }
+
+    await waitFor(() => {
+      expect(screen.getByText('Deactivate User')).toBeTruthy()
     })
   })
 })
