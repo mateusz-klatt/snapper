@@ -1618,4 +1618,512 @@ describe('Processes', () => {
     })
     unmount()
   })
+  it('shows starting state only for ZMQ Broker when isPending', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'zmq_broker',
+        enabled: false,
+        running: false,
+        mode: 'thread',
+        class_path: 'snapper.zmq_broker',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    vi.mocked(useStartProcessByName).mockReturnValue({
+      mutate: mockStartProcessMutate,
+      isPending: true,
+      variables: { name: 'zmq_broker' },
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('ZMQ Broker')).toBeTruthy()
+    })
+    expect(screen.getByText(/Starting/i)).toBeTruthy()
+  })
+  it('shows starting state only for targeted long-running process when isPending', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'executor_kraken',
+        enabled: false,
+        running: false,
+        mode: 'thread',
+        class_path: 'snapper.executor',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    vi.mocked(useStartProcessByName).mockReturnValue({
+      mutate: mockStartProcessMutate,
+      isPending: true,
+      variables: { name: 'executor_kraken' },
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Long-Running Processes')).toBeTruthy()
+    })
+    expect(screen.getByText(/Starting/i)).toBeTruthy()
+  })
+  it('shows starting state only for targeted task process when isPending', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'sync_task',
+        enabled: false,
+        running: false,
+        mode: 'thread',
+        class_path: 'snapper.sync_task',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'one_shot',
+        role: 'task',
+        tags: [],
+        is_one_shot: true,
+      },
+    ]
+    const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    vi.mocked(useStartProcessByName).mockReturnValue({
+      mutate: mockStartProcessMutate,
+      isPending: true,
+      variables: { name: 'sync_task' },
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Task Processes')).toBeTruthy()
+    })
+    expect(screen.getByText(/Starting/i)).toBeTruthy()
+  })
+  it('shows stopping state only for targeted long-running process when isPending', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'executor_kraken',
+        enabled: true,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.executor',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+      {
+        name: 'executor_zonda',
+        enabled: true,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.executor',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 2 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    vi.mocked(useStopProcessByName).mockReturnValue({
+      mutate: mockStopProcessMutate,
+      isPending: true,
+      variables: { name: 'executor_kraken' },
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Long-Running Processes')).toBeTruthy()
+    })
+    expect(screen.getByText(/Stopping/i)).toBeTruthy()
+  })
+  it('shows stopping state only for targeted task process when isPending', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'sync_task',
+        enabled: false,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.sync_task',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'one_shot',
+        role: 'task',
+        tags: [],
+        is_one_shot: true,
+      },
+    ]
+    const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    vi.mocked(useStopProcessByName).mockReturnValue({
+      mutate: mockStopProcessMutate,
+      isPending: true,
+      variables: { name: 'sync_task' },
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Task Processes')).toBeTruthy()
+    })
+    expect(screen.getByText(/Stopping/i)).toBeTruthy()
+  })
+  it('restarts ZMQ Broker: shows confirm dialog and calls stop with onSuccess', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'zmq_broker',
+        enabled: true,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.zmq_broker',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('ZMQ Broker')).toBeTruthy()
+    })
+    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-2xl')
+    const restartButton = Array.from(zmqCard?.querySelectorAll('button') ?? []).find(
+      (btn: Element) => btn.textContent === 'Restart'
+    )
+
+    expect(restartButton).toBeTruthy()
+
+    if (restartButton) {
+      fireEvent.click(restartButton)
+    }
+
+    await waitFor(() => {
+      expect(screen.getByText(/Restart zmq_broker/i)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    expect(mockStopProcessMutate).toHaveBeenCalledWith(
+      { name: 'zmq_broker' },
+      expect.objectContaining({ onSuccess: expect.any(Function) })
+    )
+  })
+  it('restarts ZMQ Broker: onSuccess opens execution mode modal and starts process', async () => {
+    let capturedOnSuccess: (() => void) | undefined
+
+    mockStopProcessMutate.mockImplementation(
+      (_args: unknown, options?: { onSuccess?: () => void }) => {
+        capturedOnSuccess = options?.onSuccess
+      }
+    )
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'zmq_broker',
+        enabled: true,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.zmq_broker',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('ZMQ Broker')).toBeTruthy()
+    })
+    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-2xl')
+    const restartButton = Array.from(zmqCard?.querySelectorAll('button') ?? []).find(
+      (btn: Element) => btn.textContent === 'Restart'
+    )
+
+    if (restartButton) {
+      fireEvent.click(restartButton)
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    expect(capturedOnSuccess).toBeDefined()
+    act(() => {
+      capturedOnSuccess?.()
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Execution Mode:')).toBeTruthy()
+    })
+    const modalButtons = screen.getAllByRole('button')
+    const modalStartButton = modalButtons.find(
+      (btn: HTMLElement) =>
+        btn.textContent?.toLowerCase().includes('start') && btn.classList.contains('bg-primary-600')
+    )
+
+    expect(modalStartButton).toBeTruthy()
+
+    if (modalStartButton) {
+      fireEvent.click(modalStartButton)
+    }
+
+    expect(mockStartProcessMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'zmq_broker' })
+    )
+  })
+  it('restarts long-running process: shows confirm dialog and calls stop with onSuccess', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'my_service',
+        enabled: false,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.my_service',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Long-Running Processes')).toBeTruthy()
+    })
+    const restartButtons = screen.getAllByRole('button', { name: /restart/i })
+
+    expect(restartButtons.length).toBeGreaterThan(0)
+    fireEvent.click(restartButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText(/Restart my_service/i)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    expect(mockStopProcessMutate).toHaveBeenCalledWith(
+      { name: 'my_service' },
+      expect.objectContaining({ onSuccess: expect.any(Function) })
+    )
+  })
+  it('restarts long-running process: onSuccess opens execution mode modal and starts process', async () => {
+    let capturedOnSuccess: (() => void) | undefined
+
+    mockStopProcessMutate.mockImplementation(
+      (_args: unknown, options?: { onSuccess?: () => void }) => {
+        capturedOnSuccess = options?.onSuccess
+      }
+    )
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'my_service',
+        enabled: false,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.my_service',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'long_running',
+        role: 'core',
+        tags: [],
+        is_one_shot: false,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Long-Running Processes')).toBeTruthy()
+    })
+    const restartButtons = screen.getAllByRole('button', { name: /restart/i })
+
+    fireEvent.click(restartButtons[0])
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    expect(capturedOnSuccess).toBeDefined()
+    act(() => {
+      capturedOnSuccess?.()
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Execution Mode:')).toBeTruthy()
+    })
+    const modalButtons = screen.getAllByRole('button')
+    const modalStartButton = modalButtons.find(
+      (btn: HTMLElement) =>
+        btn.textContent?.toLowerCase().includes('start') && btn.classList.contains('bg-primary-600')
+    )
+
+    expect(modalStartButton).toBeTruthy()
+
+    if (modalStartButton) {
+      fireEvent.click(modalStartButton)
+    }
+
+    expect(mockStartProcessMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'my_service' })
+    )
+  })
+  it('restarts task process: shows confirm dialog and calls stop with onSuccess', async () => {
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'sync_task',
+        enabled: false,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.sync_task',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'one_shot',
+        role: 'task',
+        tags: [],
+        is_one_shot: true,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Task Processes')).toBeTruthy()
+    })
+    const restartButtons = screen.getAllByRole('button', { name: /restart/i })
+
+    expect(restartButtons.length).toBeGreaterThan(0)
+    fireEvent.click(restartButtons[0])
+    await waitFor(() => {
+      expect(screen.getByText(/Restart sync_task/i)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    expect(mockStopProcessMutate).toHaveBeenCalledWith(
+      { name: 'sync_task' },
+      expect.objectContaining({ onSuccess: expect.any(Function) })
+    )
+  })
+  it('restarts task process: onSuccess opens execution mode modal', async () => {
+    let capturedOnSuccess: (() => void) | undefined
+
+    mockStopProcessMutate.mockImplementation(
+      (_args: unknown, options?: { onSuccess?: () => void }) => {
+        capturedOnSuccess = options?.onSuccess
+      }
+    )
+    const mockProcesses: ConfiguredProcess[] = [
+      {
+        name: 'sync_task',
+        enabled: false,
+        running: true,
+        mode: 'thread',
+        class_path: 'snapper.sync_task',
+        method: 'main',
+        args: [],
+        kwargs: {},
+        note: '',
+        lifecycle: 'one_shot',
+        role: 'task',
+        tags: [],
+        is_one_shot: true,
+      },
+    ]
+    const { useConfiguredProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useConfiguredProcesses).mockReturnValue({
+      data: { processes: mockProcesses, count: 1 },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Processes />)
+    await waitFor(() => {
+      expect(screen.getByText('Task Processes')).toBeTruthy()
+    })
+    const restartButtons = screen.getAllByRole('button', { name: /restart/i })
+
+    fireEvent.click(restartButtons[0])
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    expect(capturedOnSuccess).toBeDefined()
+    act(() => {
+      capturedOnSuccess?.()
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Execution Mode:')).toBeTruthy()
+    })
+  })
 })

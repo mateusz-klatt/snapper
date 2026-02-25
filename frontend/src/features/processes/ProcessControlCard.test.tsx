@@ -11,6 +11,7 @@ const renderWithMocks = (ui: ReactNode) => {
 describe('ProcessControlCard', () => {
   const mockOnStart = vi.fn()
   const mockOnStop = vi.fn()
+  const mockOnRestart = vi.fn()
 
   it('renders card with title and description', () => {
     renderWithMocks(
@@ -261,7 +262,23 @@ describe('ProcessControlCard', () => {
     )
     expect(screen.getByText('error')).toBeInTheDocument()
   })
-  it('calls onStop when restart clicked', async () => {
+  it('calls onRestart when restart clicked', async () => {
+    const user = userEvent.setup()
+
+    renderWithMocks(
+      <ProcessControlCard
+        title='Test Process'
+        description='Test description'
+        status='running'
+        onStart={mockOnStart}
+        onStop={mockOnStop}
+        onRestart={mockOnRestart}
+      />
+    )
+    await user.click(screen.getByText('Restart'))
+    expect(mockOnRestart).toHaveBeenCalled()
+  })
+  it('uses default noop when onRestart is not provided and restart is clicked', async () => {
     const user = userEvent.setup()
 
     renderWithMocks(
@@ -274,7 +291,6 @@ describe('ProcessControlCard', () => {
       />
     )
     await user.click(screen.getByText('Restart'))
-    expect(mockOnStop).toHaveBeenCalled()
   })
   it('displays custom heartbeat label', () => {
     const heartbeatData = {

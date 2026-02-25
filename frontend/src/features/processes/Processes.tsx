@@ -179,6 +179,20 @@ export const Processes: React.FC = () => {
     },
     [startProcess, executeAction, showExecutionModeModal, getProcess]
   )
+  const handleRestart = React.useCallback(
+    (processName: string, stopMessage: string, openStartModal: () => void) => {
+      setConfirmDialog({
+        open: true,
+        title: `Restart ${processName}`,
+        message: stopMessage,
+        onConfirm: () => {
+          stopProcess.mutate({ name: processName }, { onSuccess: openStartModal })
+        },
+      })
+    },
+    [stopProcess]
+  )
+
   const getProcessAutostartDefault = React.useCallback(
     (name: string): boolean => {
       const process = configuredProcesses?.processes.find(item => item.name === name)
@@ -233,8 +247,27 @@ export const Processes: React.FC = () => {
                 'This will stop the ZMQ broker. All connected processes will lose connectivity.'
               )
             }
-            isStarting={startProcess.isPending}
-            isStopping={stopProcess.isPending}
+            onRestart={() =>
+              handleRestart(
+                'zmq_broker',
+                'This will restart the ZMQ broker. All connected processes will briefly lose connectivity.',
+                () =>
+                  showExecutionModeModal(
+                    'ZMQ Broker',
+                    'Message routing and distribution hub for process communication.',
+                    getProcessAutostartDefault('zmq_broker'),
+                    ({ executionMode, autostart }) => {
+                      startProcess.mutate({
+                        name: 'zmq_broker',
+                        mode: executionMode,
+                        autostart,
+                      })
+                    }
+                  )
+              )
+            }
+            isStarting={startProcess.isPending && startProcess.variables?.name === 'zmq_broker'}
+            isStopping={stopProcess.isPending && stopProcess.variables?.name === 'zmq_broker'}
           />
           {}
           {longRunningProcesses.map(process => {
@@ -300,8 +333,27 @@ export const Processes: React.FC = () => {
                     `This will stop the ${process.name} process.`
                   )
                 }
-                isStarting={startProcess.isPending}
-                isStopping={stopProcess.isPending}
+                onRestart={() =>
+                  handleRestart(
+                    process.name,
+                    `This will restart the ${process.name} process.`,
+                    () =>
+                      showExecutionModeModal(
+                        process.name,
+                        registryDetails?.description || '',
+                        process.enabled,
+                        ({ executionMode, autostart }) => {
+                          startProcess.mutate({
+                            name: process.name,
+                            mode: executionMode,
+                            autostart,
+                          })
+                        }
+                      )
+                  )
+                }
+                isStarting={startProcess.isPending && startProcess.variables?.name === process.name}
+                isStopping={stopProcess.isPending && stopProcess.variables?.name === process.name}
               />
             )
           })}
@@ -374,8 +426,17 @@ export const Processes: React.FC = () => {
                       `This will stop the ${process.name} process.`
                     )
                   }
-                  isStarting={startProcess.isPending}
-                  isStopping={stopProcess.isPending}
+                  onRestart={() =>
+                    handleRestart(
+                      process.name,
+                      `This will restart the ${process.name} process.`,
+                      () => handleTaskProcessStart(process.name)
+                    )
+                  }
+                  isStarting={
+                    startProcess.isPending && startProcess.variables?.name === process.name
+                  }
+                  isStopping={stopProcess.isPending && stopProcess.variables?.name === process.name}
                 />
               )
             })}

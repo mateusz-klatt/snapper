@@ -17,6 +17,7 @@ interface ProcessControlCardProps {
   details?: Record<string, unknown>
   onStart: () => void
   onStop: () => void
+  onRestart?: () => void
   isStarting?: boolean
   isStopping?: boolean
   showList?: boolean
@@ -34,6 +35,7 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
   details,
   onStart,
   onStop,
+  onRestart = () => {},
   isStarting = false,
   isStopping = false,
   showList = false,
@@ -163,10 +165,7 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
           {}
           {isRunning && (
             <button
-              onClick={() => {
-                onStop()
-                setTimeout(onStart, 1000)
-              }}
+              onClick={onRestart}
               className='px-4 py-2 rounded-md text-sm font-medium bg-info-600 text-white hover:bg-info-700 transition-colors'
             >
               Restart
