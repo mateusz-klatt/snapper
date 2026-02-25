@@ -56,6 +56,31 @@ const FeedPublisherEntry: React.FC<Readonly<{ feedKey: string; feed: FeedHealth 
   )
 }
 
+const HEALTH_COLOR: Record<HealthStatus['status'], string> = {
+  healthy: 'bg-accent-500',
+  warning: 'bg-warning-500',
+  error: 'bg-loss-500',
+}
+
+const HEALTH_LABEL: Record<HealthStatus['status'], string> = {
+  healthy: 'Healthy - receiving fresh data',
+  warning: 'Warning - data is stale',
+  error: 'Error - no recent data',
+}
+
+const resolveHealthColor = (health: HealthStatus | undefined): string =>
+  health ? HEALTH_COLOR[health.status] : 'bg-muted-400'
+
+const resolveHealthLabel = (health: HealthStatus | undefined): string =>
+  health ? HEALTH_LABEL[health.status] : 'Unknown - no heartbeat data'
+
+const resolveDisplayName = (name: string): string =>
+  name
+    .replace(/^strategy_/, '')
+    .split('_')
+    .map(part => part.toUpperCase())
+    .join(' ')
+
 const resolveStatusKey = (
   isStarting: boolean,
   isRunning: boolean
@@ -105,34 +130,16 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
     const [expanded, setExpanded] = useState(false)
     const isRunning = running || isStarting
     const showStopButton = running || isStopping
-    const healthColor = health
-      ? {
-          healthy: 'bg-accent-500',
-          warning: 'bg-warning-500',
-          error: 'bg-loss-500',
-        }[health.status]
-      : 'bg-muted-400'
-    const healthLabel = health
-      ? {
-          healthy: 'Healthy - receiving fresh data',
-          warning: 'Warning - data is stale',
-          error: 'Error - no recent data',
-        }[health.status]
-      : 'Unknown - no heartbeat data'
-
+    const healthColor = resolveHealthColor(health)
+    const healthLabel = resolveHealthLabel(health)
     const statusColor = {
       running: 'text-accent-400 bg-accent-400/10',
       stopped: 'text-muted-400 bg-muted-400/10',
       starting: 'text-info-400 bg-info-400/10',
     }[resolveStatusKey(isStarting, isRunning)]
-
     const statusText = resolveStatusText(isStarting, isStopping, isRunning)
     const showLagBadge = health && health.lag_ms > 2000
-    const displayName = name
-      .replace(/^strategy_/, '')
-      .split('_')
-      .map(part => part.toUpperCase())
-      .join(' ')
+    const displayName = resolveDisplayName(name)
 
     return (
       <article
