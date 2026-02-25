@@ -32,7 +32,7 @@ _CACHE_ROOT = Path("data/polygon/cache")
 @register_process(
     "polygon_grouped_daily_backfill",
     method="start",
-    description="Download Polygon grouped daily aggregates to CSV.gz",
+    description="Polygon grouped daily backfill",
     priority=33,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,

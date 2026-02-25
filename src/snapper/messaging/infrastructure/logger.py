@@ -87,7 +87,7 @@ class LoggerStatistics:
 
 @register_process(
     "zmq_message_logger",
-    description="ZMQ message logger for debugging and audit trail (subscribes to ALL messages)",
+    description="ZMQ message logger",
     priority=15,
     role=ProcessRoleEnum.CORE,
     tags=("zmq", "logging", "audit", "debugging"),

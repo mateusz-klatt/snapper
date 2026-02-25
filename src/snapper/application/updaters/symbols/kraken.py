@@ -27,7 +27,7 @@ from snapper.infrastructure.symbols.mapper import make_native_symbol
 @register_process(
     "kraken_symbol_updater",
     method="start",
-    description="Kraken symbol updater (REST + WebSocket verification)",
+    description="Kraken symbol updater",
     priority=15,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,

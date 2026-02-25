@@ -23,7 +23,7 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonExch
 @register_process(
     "polygon_symbol_updater",
     method="start",
-    description="Polygon symbol updater (44k+ tickers from API)",
+    description="Polygon symbol updater",
     priority=11,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,

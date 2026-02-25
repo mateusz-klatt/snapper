@@ -112,7 +112,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
 
 @register_process(
     "paper_feed_publisher",
-    description="Paper trading feed publisher (historical data replay)",
+    description="Paper trading feed publisher",
     priority=30,
     role=ProcessRoleEnum.CORE,
     tags=("market-data", "publisher", "paper"),

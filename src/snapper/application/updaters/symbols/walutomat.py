@@ -20,7 +20,7 @@ from snapper.infrastructure.exchanges.implementations.walutomat import Walutomat
 @register_process(
     "walutomat_symbol_updater",
     method="start",
-    description="Walutomat symbol updater (REST API -> symbol_aliases)",
+    description="Walutomat symbol updater",
     priority=16,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,

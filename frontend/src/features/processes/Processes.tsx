@@ -85,32 +85,25 @@ export const Processes: React.FC = () => {
       return acc
     }, {})
   }, [processRuns])
-  const getProcess = React.useCallback(
-    (name: string) => configuredProcesses?.processes.find(p => p.name === name),
-    [configuredProcesses]
-  )
   const longRunningProcesses = React.useMemo<ConfiguredProcess[]>(() => {
     if (!configuredProcesses) return []
-    const featured = new Set(['zmq_broker', 'executor', 'feed_publisher'])
 
     return configuredProcesses.processes.filter(
       process =>
         process.lifecycle === 'long_running' &&
-        !featured.has(process.name) &&
         process.role !== 'strategy' &&
         process.role !== 'backtest'
     )
   }, [configuredProcesses])
   const taskProcesses = React.useMemo<ConfiguredProcess[]>(() => {
     if (!configuredProcesses) return []
-    const tasks = configuredProcesses.processes.filter(
+
+    return configuredProcesses.processes.filter(
       process =>
         process.lifecycle === 'one_shot' &&
         process.role !== 'strategy' &&
         process.role !== 'backtest'
     )
-
-    return tasks
   }, [configuredProcesses])
   const formatTimestamp = React.useCallback((timestamp?: string | null) => {
     if (!timestamp) return null
@@ -126,8 +119,14 @@ export const Processes: React.FC = () => {
   const startProcess = useStartProcessByName()
   const stopProcess = useStopProcessByName()
 
-  const executeAction = React.useCallback((action: () => void, title: string, message: string) => {
-    setConfirmDialog({ open: true, title, message, onConfirm: action })
+  const closeExecutionModeModal = React.useCallback(() => {
+    setExecutionModeModal({
+      open: false,
+      componentName: '',
+      description: '',
+      defaultAutostart: false,
+      onStart: noop,
+    })
   }, [])
 
   const showExecutionModeModal = React.useCallback(
@@ -148,37 +147,27 @@ export const Processes: React.FC = () => {
     []
   )
 
-  const closeExecutionModeModal = () => {
-    setExecutionModeModal({
-      open: false,
-      componentName: '',
-      description: '',
-      defaultAutostart: false,
-      onStart: noop,
-    })
-  }
-
-  const handleTaskProcessStart = React.useCallback(
-    (processName: string) => {
-      showExecutionModeModal(
-        processName,
-        `Start ${processName.replaceAll('_', ' ')} process`,
-        !!getProcess(processName)?.enabled,
-        ({ executionMode, autostart }) =>
-          executeAction(
-            () =>
-              startProcess.mutate({
-                name: processName,
-                mode: executionMode,
-                autostart,
-              }),
-            `Start ${processName}`,
-            `This will start the ${processName} process.`
-          )
+  const handleStart = React.useCallback(
+    (name: string, description: string, defaultAutostart: boolean) => {
+      showExecutionModeModal(name, description, defaultAutostart, ({ executionMode, autostart }) =>
+        startProcess.mutate({ name, mode: executionMode, autostart })
       )
     },
-    [startProcess, executeAction, showExecutionModeModal, getProcess]
+    [startProcess, showExecutionModeModal]
   )
+
+  const handleStop = React.useCallback(
+    (processName: string, message: string) => {
+      setConfirmDialog({
+        open: true,
+        title: `Stop ${processName}`,
+        message,
+        onConfirm: () => stopProcess.mutate({ name: processName }),
+      })
+    },
+    [stopProcess]
+  )
+
   const handleRestart = React.useCallback(
     (processName: string, stopMessage: string, openStartModal: () => void) => {
       setConfirmDialog({
@@ -193,13 +182,27 @@ export const Processes: React.FC = () => {
     [stopProcess]
   )
 
-  const getProcessAutostartDefault = React.useCallback(
-    (name: string): boolean => {
-      const process = configuredProcesses?.processes.find(item => item.name === name)
+  const getHeartbeat = React.useCallback(
+    (processName: string): HeartbeatData | undefined => {
+      if (processName.startsWith('executor_')) {
+        return allHeartbeats[processName] ?? { status: 'unknown', healthy: false, timestamp: 0 }
+      }
 
-      return process?.enabled ?? false
+      if (processName.includes('feed_publisher')) {
+        const exchangeName = processName.replace('_feed_publisher', '')
+
+        return (
+          allHeartbeats[`feed.${exchangeName}`] ?? {
+            status: 'unknown',
+            healthy: false,
+            timestamp: 0,
+          }
+        )
+      }
+
+      return undefined
     },
-    [configuredProcesses]
+    [allHeartbeats]
   )
 
   if (isLoading) {
@@ -220,136 +223,28 @@ export const Processes: React.FC = () => {
       <div className='space-y-4'>
         <h2 className='text-lg font-semibold text-primary-600'>Long-Running Processes</h2>
         <div className='grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4'>
-          {}
-          <ProcessControlCard
-            title='ZMQ Broker'
-            description='Message routing and distribution hub'
-            status={getProcess('zmq_broker')?.running ? 'running' : 'stopped'}
-            details={undefined}
-            onStart={() =>
-              showExecutionModeModal(
-                'ZMQ Broker',
-                'Message routing and distribution hub for process communication.',
-                getProcessAutostartDefault('zmq_broker'),
-                ({ executionMode, autostart }) => {
-                  startProcess.mutate({
-                    name: 'zmq_broker',
-                    mode: executionMode,
-                    autostart,
-                  })
-                }
-              )
-            }
-            onStop={() =>
-              executeAction(
-                () => stopProcess.mutate({ name: 'zmq_broker' }),
-                'Stop ZMQ Broker',
-                'This will stop the ZMQ broker. All connected processes will lose connectivity.'
-              )
-            }
-            onRestart={() =>
-              handleRestart(
-                'zmq_broker',
-                'This will restart the ZMQ broker. All connected processes will briefly lose connectivity.',
-                () =>
-                  showExecutionModeModal(
-                    'ZMQ Broker',
-                    'Message routing and distribution hub for process communication.',
-                    getProcessAutostartDefault('zmq_broker'),
-                    ({ executionMode, autostart }) => {
-                      startProcess.mutate({
-                        name: 'zmq_broker',
-                        mode: executionMode,
-                        autostart,
-                      })
-                    }
-                  )
-              )
-            }
-            isStarting={startProcess.isPending && startProcess.variables?.name === 'zmq_broker'}
-            isStopping={stopProcess.isPending && stopProcess.variables?.name === 'zmq_broker'}
-          />
-          {}
           {longRunningProcesses.map(process => {
             const registryDetails = registryByName[process.name]
-            let heartbeatData: Record<string, HeartbeatData> | undefined
-            let heartbeatLabel: string | undefined
-
-            if (process.name.startsWith('executor_')) {
-              const executorName = process.name.replace('executor_', '')
-              const componentName = process.name
-
-              heartbeatData = {
-                [executorName]: allHeartbeats[componentName] || {
-                  status: 'unknown',
-                  healthy: false,
-                  timestamp: 0,
-                  lag_ms: undefined,
-                },
-              }
-              heartbeatLabel = 'Exchanges'
-            } else if (process.name.includes('feed_publisher')) {
-              const exchangeName = process.name.replace('_feed_publisher', '')
-              const componentName = `feed.${exchangeName}`
-
-              heartbeatData = {
-                [componentName]: allHeartbeats[componentName] || {
-                  status: 'unknown',
-                  healthy: false,
-                  timestamp: 0,
-                  lag_ms: undefined,
-                },
-              }
-              heartbeatLabel = 'Feeds'
-            }
+            const description = registryDetails?.description || process.note || ''
+            const heartbeat = getHeartbeat(process.name)
 
             return (
               <ProcessControlCard
                 key={process.name}
-                title={registryDetails?.description || process.name}
-                description={process.note || ''}
+                title={description || process.name}
+                description={process.note && process.note !== description ? process.note : ''}
                 status={process.running ? 'running' : 'stopped'}
                 details={undefined}
-                heartbeatData={heartbeatData}
-                heartbeatLabel={heartbeatLabel}
-                onStart={() =>
-                  showExecutionModeModal(
-                    process.name,
-                    registryDetails?.description || '',
-                    process.enabled,
-                    ({ executionMode, autostart }) => {
-                      startProcess.mutate({
-                        name: process.name,
-                        mode: executionMode,
-                        autostart,
-                      })
-                    }
-                  )
-                }
+                heartbeat={heartbeat}
+                onStart={() => handleStart(process.name, description, process.enabled)}
                 onStop={() =>
-                  executeAction(
-                    () => stopProcess.mutate({ name: process.name }),
-                    `Stop ${process.name}`,
-                    `This will stop the ${process.name} process.`
-                  )
+                  handleStop(process.name, `This will stop the ${process.name} process.`)
                 }
                 onRestart={() =>
                   handleRestart(
                     process.name,
                     `This will restart the ${process.name} process.`,
-                    () =>
-                      showExecutionModeModal(
-                        process.name,
-                        registryDetails?.description || '',
-                        process.enabled,
-                        ({ executionMode, autostart }) => {
-                          startProcess.mutate({
-                            name: process.name,
-                            mode: executionMode,
-                            autostart,
-                          })
-                        }
-                      )
+                    () => handleStart(process.name, description, process.enabled)
                   )
                 }
                 isStarting={startProcess.isPending && startProcess.variables?.name === process.name}
@@ -379,58 +274,31 @@ export const Processes: React.FC = () => {
               const statusBadge = resolveStatusBadge()
               const registryDetails = registryByName[process.name]
               const latestRun = latestRunByProcess[process.name]
-              const tags = registryDetails?.tags?.length ? registryDetails.tags : process.tags
-              const details: Record<string, string> = {
-                lifecycle: (registryDetails?.lifecycle ?? process.lifecycle).replace('_', ' '),
-                role: registryDetails?.role ?? process.role,
-                autostart: process.enabled ? 'enabled' : 'disabled',
-                mode: process.mode,
-              }
-
-              if (tags?.length) {
-                details.tags = tags.join(', ')
-              }
-
-              if (process.parameters_schema || registryDetails?.parameters_schema) {
-                const parameterSource =
-                  process.parameters_schema ?? registryDetails?.parameters_schema
-
-                details.parameters_schema = JSON.stringify(parameterSource)
-              }
-
-              if (process.active_run_id) {
-                details.active_run = process.active_run_id
-              }
+              const details: Record<string, string> = {}
 
               if (latestRun) {
                 details.last_run = `${latestRun.status} (${formatTimestamp(latestRun.started_at)})`
               }
 
+              const description = registryDetails?.description || process.note || ''
+
               return (
                 <ProcessControlCard
                   key={process.name}
-                  title={process.name
-                    .replaceAll('_', ' ')
-                    .replaceAll(/\b\w/g, (letter: string) => letter.toUpperCase())}
-                  description={
-                    registryDetails?.description || `Configured process (${process.mode} mode)`
-                  }
+                  title={description || process.name}
+                  description=''
                   status={status}
                   statusBadge={statusBadge}
                   details={details}
-                  onStart={() => handleTaskProcessStart(process.name)}
+                  onStart={() => handleStart(process.name, description, process.enabled)}
                   onStop={() =>
-                    executeAction(
-                      () => stopProcess.mutate({ name: process.name }),
-                      `Stop ${process.name}`,
-                      `This will stop the ${process.name} process.`
-                    )
+                    handleStop(process.name, `This will stop the ${process.name} process.`)
                   }
                   onRestart={() =>
                     handleRestart(
                       process.name,
                       `This will restart the ${process.name} process.`,
-                      () => handleTaskProcessStart(process.name)
+                      () => handleStart(process.name, description, process.enabled)
                     )
                   }
                   isStarting={

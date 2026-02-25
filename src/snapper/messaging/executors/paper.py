@@ -36,7 +36,7 @@ from snapper.messaging.executors.base import ExchangeExecutorService
 
 @register_process(
     "executor_paper",
-    description="Paper trading execution service for simulated orders",
+    description="Paper order executor",
     priority=30,
     role=ProcessRoleEnum.CORE,
     tags=("execution", "orders", "paper", "simulation"),

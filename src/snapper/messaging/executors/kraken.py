@@ -36,7 +36,7 @@ from snapper.messaging.executors.base import ExchangeExecutorService
 
 @register_process(
     "executor_kraken",
-    description="Kraken execution service for processing orders",
+    description="Kraken order executor",
     priority=30,
     role=ProcessRoleEnum.CORE,
     tags=("execution", "orders", "kraken"),

@@ -13,7 +13,7 @@ from snapper.messaging.executors.base import ExchangeExecutorService
 
 @register_process(
     "executor_zonda",
-    description="Zonda execution service for processing orders",
+    description="Zonda order executor",
     priority=30,
     role=ProcessRoleEnum.CORE,
     tags=("execution", "orders", "zonda"),

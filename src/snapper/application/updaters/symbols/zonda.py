@@ -21,7 +21,7 @@ from snapper.infrastructure.symbols.mapper import make_native_symbol
 @register_process(
     "zonda_symbol_updater",
     method="start",
-    description="Zonda symbol updater (REST API -> symbol_aliases)",
+    description="Zonda symbol updater",
     priority=17,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,

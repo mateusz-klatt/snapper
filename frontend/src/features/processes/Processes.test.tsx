@@ -412,7 +412,8 @@ describe('Processes', () => {
     } as never)
     renderWithProviders(<Processes />)
     await waitFor(() => {
-      expect(screen.getByText(/last_run: failed/i)).toBeInTheDocument()
+      expect(screen.getByText(/last run:/i)).toBeInTheDocument()
+      expect(screen.getByText(/failed/i)).toBeInTheDocument()
     })
   })
   it('renders last run with null timestamp when missing', async () => {
@@ -458,7 +459,8 @@ describe('Processes', () => {
     } as never)
     renderWithProviders(<Processes />)
     await waitFor(() => {
-      expect(screen.getByText(/last_run: succeeded \(null\)/i)).toBeInTheDocument()
+      expect(screen.getByText(/last run:/i)).toBeInTheDocument()
+      expect(screen.getByText(/succeeded \(null\)/i)).toBeInTheDocument()
     })
   })
   it('subscribes to heartbeat topics', async () => {
@@ -916,9 +918,9 @@ describe('Processes', () => {
     } as never)
     renderWithProviders(<Processes />)
     await waitFor(() => {
-      expect(screen.getByText('executor_kraken')).toBeTruthy()
+      expect(screen.getByText('Kraken Executor')).toBeTruthy()
     })
-    const executorCard = screen.getByText('executor_kraken').closest('.rounded-2xl')
+    const executorCard = screen.getByText('Kraken Executor').closest('.rounded-2xl')
     const startButton = executorCard?.querySelector('button')
 
     expect(startButton).toBeTruthy()
@@ -1047,7 +1049,6 @@ describe('Processes', () => {
     await waitFor(() => {
       expect(screen.getByText('Task Processes')).toBeTruthy()
     })
-    expect(screen.getByText('Data Sync Task')).toBeTruthy()
     expect(screen.getByText('Synchronize data from external sources')).toBeTruthy()
   })
   it('starts task process with execution mode modal and confirm dialog', async () => {
@@ -1068,7 +1069,12 @@ describe('Processes', () => {
         is_one_shot: true,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useAvailableProcesses).mockReturnValue({
+      data: null,
+      isLoading: false,
+    } as never)
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
       data: { processes: mockProcesses, count: 1 },
@@ -1079,7 +1085,7 @@ describe('Processes', () => {
     await waitFor(() => {
       expect(screen.getByText('Task Processes')).toBeTruthy()
     })
-    const taskTitle = screen.getByText('Data Sync Task')
+    const taskTitle = screen.getByText('Data sync task')
     const taskCard = taskTitle.closest('.rounded-2xl')
     const startButton = taskCard?.querySelector('button')
 
@@ -1105,10 +1111,6 @@ describe('Processes', () => {
       fireEvent.click(modalStartButton)
     }
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /confirm/i })).toBeTruthy()
-    })
-    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
     expect(mockStartProcessMutate).toHaveBeenCalled()
   })
   it('stops task process with confirm dialog', async () => {
@@ -1129,7 +1131,12 @@ describe('Processes', () => {
         is_one_shot: true,
       },
     ]
-    const { useConfiguredProcesses } = await import('../../hooks/queries')
+    const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
+
+    vi.mocked(useAvailableProcesses).mockReturnValue({
+      data: null,
+      isLoading: false,
+    } as never)
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
       data: { processes: mockProcesses, count: 1 },
@@ -1140,7 +1147,7 @@ describe('Processes', () => {
     await waitFor(() => {
       expect(screen.getByText('Task Processes')).toBeTruthy()
     })
-    const taskTitle = screen.getByText('Data Sync Task')
+    const taskTitle = screen.getByText('Data sync task')
     const taskCard = taskTitle.closest('.rounded-2xl')
     const stopButton = taskCard?.querySelector('button')
 
@@ -1302,15 +1309,15 @@ describe('Processes', () => {
       } as never)
       renderWithProviders(<Processes />)
       expect(screen.getByText('Process Control')).toBeTruthy()
-      expect(screen.getByText(/waiting\.\.\./i)).toBeTruthy()
+      expect(screen.getByText(/waiting/i)).toBeTruthy()
       act(() => {
         heartbeatCallback?.(createHeartbeat('executor_kraken', 'healthy', 10))
       })
-      expect(screen.queryByText(/waiting\.\.\./i)).toBeNull()
+      expect(screen.queryByText(/waiting/i)).toBeNull()
       act(() => {
         vi.advanceTimersByTime(15000)
       })
-      expect(screen.getByText(/waiting\.\.\./i)).toBeTruthy()
+      expect(screen.getByText(/waiting/i)).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
@@ -1415,7 +1422,7 @@ describe('Processes', () => {
     }
 
     await waitFor(() => {
-      expect(screen.getByText(/All connected processes will lose connectivity/i)).toBeTruthy()
+      expect(screen.getByText(/This will stop the zmq_broker process/i)).toBeTruthy()
     })
     fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
     expect(mockStopProcessMutate).toHaveBeenCalledWith({ name: 'zmq_broker' })
@@ -1542,7 +1549,7 @@ describe('Processes', () => {
     await waitFor(() => {
       expect(screen.getByText('Task Processes')).toBeTruthy()
     })
-    expect(screen.getByText('Simple Task')).toBeTruthy()
+    expect(screen.getByText('Simple task')).toBeTruthy()
   })
   it('handles wsClient being null', async () => {
     const { useWebSocketStore } = await import('../../stores/websocket')
@@ -1650,7 +1657,7 @@ describe('Processes', () => {
     } as never)
     renderWithProviders(<Processes />)
     await waitFor(() => {
-      expect(screen.getByText('ZMQ Broker')).toBeTruthy()
+      expect(screen.getByText('zmq_broker')).toBeTruthy()
     })
     expect(screen.getByText(/Starting/i)).toBeTruthy()
   })
@@ -1840,9 +1847,9 @@ describe('Processes', () => {
     } as never)
     renderWithProviders(<Processes />)
     await waitFor(() => {
-      expect(screen.getByText('ZMQ Broker')).toBeTruthy()
+      expect(screen.getByText('zmq_broker')).toBeTruthy()
     })
-    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-2xl')
+    const zmqCard = screen.getByText('zmq_broker').closest('.rounded-2xl')
     const restartButton = Array.from(zmqCard?.querySelectorAll('button') ?? []).find(
       (btn: Element) => btn.textContent === 'Restart'
     )
@@ -1896,9 +1903,9 @@ describe('Processes', () => {
     } as never)
     renderWithProviders(<Processes />)
     await waitFor(() => {
-      expect(screen.getByText('ZMQ Broker')).toBeTruthy()
+      expect(screen.getByText('zmq_broker')).toBeTruthy()
     })
-    const zmqCard = screen.getByText('ZMQ Broker').closest('.rounded-2xl')
+    const zmqCard = screen.getByText('zmq_broker').closest('.rounded-2xl')
     const restartButton = Array.from(zmqCard?.querySelectorAll('button') ?? []).find(
       (btn: Element) => btn.textContent === 'Restart'
     )

@@ -86,7 +86,7 @@ def _timeframe_label(multiplier: int, timespan: str) -> str:
 @register_process(
     "polygon_aggregates_backfill",
     method="start",
-    description="Download Polygon aggregates to CSV.gz and database",
+    description="Polygon aggregates backfill",
     priority=32,
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,

@@ -2,28 +2,59 @@ import React from 'react'
 import clsx from 'clsx'
 import type { HeartbeatData } from '../../hooks/useHeartbeats'
 
-interface ProcessListItem {
-  id: string
-  name: string
-  status: 'running' | 'stopped' | 'error'
-  onStop?: () => void
-}
 interface ProcessControlCardProps {
   title: string
   description: string
   status: 'running' | 'stopped' | 'error'
   statusBadge?: string
-  lastHeartbeat?: string
   details?: Record<string, unknown>
   onStart: () => void
   onStop: () => void
   onRestart?: () => void
   isStarting?: boolean
   isStopping?: boolean
-  showList?: boolean
-  listItems?: ProcessListItem[]
-  heartbeatData?: Record<string, HeartbeatData>
-  heartbeatLabel?: string
+  heartbeat?: HeartbeatData
+}
+
+const formatDetailKey = (key: string): string =>
+  key.replaceAll('_', ' ').replace(/^\w/, c => c.toUpperCase())
+
+const formatDetailValue = (value: unknown): string => {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const str = String(value)
+
+    return str.charAt(0).toUpperCase() + str.slice(1)
+  }
+
+  return JSON.stringify(value)
+}
+
+const HeartbeatIndicator: React.FC<{ heartbeat: HeartbeatData }> = ({ heartbeat }) => {
+  const isUnknown = heartbeat.status === 'unknown'
+
+  let color = 'text-muted-400'
+  let dot = 'bg-muted-400'
+
+  if (!isUnknown) {
+    color = heartbeat.healthy ? 'text-accent-400' : 'text-loss-400'
+    dot = heartbeat.healthy ? 'bg-accent-400' : 'bg-loss-400'
+  }
+
+  return (
+    <div className={clsx('flex items-center gap-1.5 text-xs', color)}>
+      <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', dot)} />
+      {isUnknown ? (
+        <span className='opacity-70'>waiting</span>
+      ) : (
+        <span>
+          {heartbeat.status}
+          {heartbeat.lag_ms !== undefined && (
+            <span className='opacity-70 ml-1'>({heartbeat.lag_ms}ms)</span>
+          )}
+        </span>
+      )}
+    </div>
+  )
 }
 
 export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = ({
@@ -31,17 +62,13 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
   description,
   status,
   statusBadge,
-  lastHeartbeat,
   details,
   onStart,
   onStop,
   onRestart = () => {},
   isStarting = false,
   isStopping = false,
-  showList = false,
-  listItems = [],
-  heartbeatData,
-  heartbeatLabel = 'Components',
+  heartbeat,
 }) => {
   const isRunning = status === 'running'
   const statusColor = {
@@ -51,76 +78,43 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
   }[status]
 
   return (
-    <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-6 space-y-4'>
+    <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-6 flex flex-col gap-4'>
       {}
-      <div className='flex items-start justify-between'>
-        <div>
-          <h3 className='text-lg font-semibold text-alpine-900'>{title}</h3>
-          <p className='text-sm text-muted-600 mt-1'>{description}</p>
+      <div className='flex items-start justify-between gap-3'>
+        <div className='min-w-0 flex-1'>
+          <h3 className='text-lg font-semibold text-alpine-900 line-clamp-2 leading-snug'>
+            {title}
+          </h3>
+          {description && <p className='text-sm text-muted-600 mt-1 line-clamp-2'>{description}</p>}
         </div>
-        <div className='flex items-center space-x-2'>
-          <span className={clsx('px-2 py-1 rounded-md text-xs font-medium', statusColor)}>
-            {status}
-          </span>
-          {statusBadge && (
-            <span className='px-2 py-1 rounded-md text-xs font-medium text-info-400 bg-info-400/10'>
-              {statusBadge}
+        <div className='flex flex-col items-end gap-1 shrink-0'>
+          <div className='flex items-center gap-1.5'>
+            <span className={clsx('px-2 py-1 rounded-md text-xs font-medium', statusColor)}>
+              {status}
             </span>
-          )}
+            {statusBadge && (
+              <span className='px-2 py-1 rounded-md text-xs font-medium text-info-400 bg-info-400/10'>
+                {statusBadge}
+              </span>
+            )}
+          </div>
+          {heartbeat && <HeartbeatIndicator heartbeat={heartbeat} />}
         </div>
       </div>
       {}
-      {(lastHeartbeat || details) && (
-        <div className='space-y-1 text-xs text-muted-600'>
-          {lastHeartbeat && (
-            <div>Last heartbeat: {new Date(lastHeartbeat).toLocaleTimeString()}</div>
-          )}
-          {details &&
-            Object.entries(details).map(([key, value]) => (
-              <div key={key}>
-                {key}:{' '}
-                {typeof value === 'string' ||
-                typeof value === 'number' ||
-                typeof value === 'boolean'
-                  ? String(value)
-                  : JSON.stringify(value)}
-              </div>
-            ))}
+      {details && (
+        <div className='space-y-1'>
+          {Object.entries(details).map(([key, value]) => (
+            <div key={key} className='flex gap-2 text-xs'>
+              <span className='text-muted-400 font-medium shrink-0'>{formatDetailKey(key)}:</span>
+              <span className='text-muted-600 break-all'>{formatDetailValue(value)}</span>
+            </div>
+          ))}
         </div>
       )}
       {}
-      {showList && listItems.length > 0 && (
-        <div className='space-y-2'>
-          <div className='text-sm font-medium text-muted-600'>Active processes:</div>
-          <div className='space-y-1'>
-            {listItems.map(item => (
-              <div key={item.id} className='flex items-center justify-between py-1'>
-                <div className='flex items-center space-x-2'>
-                  <span
-                    className={clsx(
-                      'w-2 h-2 rounded-full',
-                      item.status === 'running' ? 'bg-accent-400' : 'bg-muted-400'
-                    )}
-                  />
-                  <span className='text-sm text-muted-700'>{item.name}</span>
-                </div>
-                {item.status === 'running' && item.onStop && (
-                  <button
-                    onClick={item.onStop}
-                    className='text-xs text-loss-400 hover:text-loss-600 px-2 py-1 rounded-sm transition-colors'
-                  >
-                    Stop
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {}
-      <div className='flex items-start gap-3 pt-2 border-t border-dark-600'>
-        {}
-        <div className='flex space-x-2 flex-1'>
+      <div className='mt-auto pt-2 border-t border-dark-600'>
+        <div className='flex space-x-2'>
           {isRunning ? (
             <button
               onClick={onStop}
@@ -166,47 +160,12 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
           {isRunning && (
             <button
               onClick={onRestart}
-              className='px-4 py-2 rounded-md text-sm font-medium bg-info-600 text-white hover:bg-info-700 transition-colors'
+              className='flex-1 px-4 py-2 rounded-md text-sm font-medium bg-info-600 text-white hover:bg-info-700 transition-colors'
             >
               Restart
             </button>
           )}
         </div>
-        {}
-        {heartbeatData && Object.keys(heartbeatData).length > 0 && (
-          <div className='flex flex-col gap-1'>
-            <div className='text-xs font-medium text-muted-600'>{heartbeatLabel}:</div>
-            <div className='flex flex-wrap gap-1'>
-              {Object.entries(heartbeatData).map(([key, data]) => {
-                const isUnknown = data.status === 'unknown'
-                const isHealthy = data.healthy && !isUnknown
-
-                return (
-                  <div
-                    key={key}
-                    className={clsx(
-                      'px-2 py-1 rounded text-xs whitespace-nowrap',
-                      isUnknown && 'bg-muted-500/10 text-muted-400',
-                      !isUnknown && isHealthy && 'bg-accent-400/10 text-accent-400',
-                      !isUnknown && !isHealthy && 'bg-loss-400/10 text-loss-400'
-                    )}
-                  >
-                    <span className='font-medium capitalize'>{key}</span>
-                    {!isUnknown && (
-                      <>
-                        <span className='opacity-70 ml-1'>{data.status}</span>
-                        {data.lag_ms !== undefined && (
-                          <span className='opacity-70 ml-1'>({data.lag_ms}ms)</span>
-                        )}
-                      </>
-                    )}
-                    {isUnknown && <span className='opacity-70 ml-1'>waiting...</span>}
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   )

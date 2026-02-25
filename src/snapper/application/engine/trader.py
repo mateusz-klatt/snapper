@@ -54,7 +54,7 @@ _bootstrap_settings = get_bootstrap_settings()
 
 @register_process(
     "trader_coordinator",
-    description="Central trading coordinator (ONE per system) - consumes signals and manages engines",
+    description="Trading coordinator",
     priority=40,
     role=ProcessRoleEnum.CORE,
     tags=("trading", "signals", "risk"),
