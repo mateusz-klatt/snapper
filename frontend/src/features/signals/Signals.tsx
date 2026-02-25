@@ -6,6 +6,7 @@ import { apiClient } from '../../lib/apiClient'
 import { SignalCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
 import { exportToCSV } from '../../lib/csvExport'
+import { EmptyState } from '../../components/ui'
 import type { TradingSignal } from '../../types/api'
 import clsx from 'clsx'
 import {
@@ -227,8 +228,8 @@ export const Signals: React.FC = () => {
           </div>
         )}
         {!isLoading && filteredSignals.length === 0 && (
-          <div className='py-8 text-center text-muted-500'>
-            <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
+          <EmptyState
+            icon={
               <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
                 <path
                   strokeLinecap='round'
@@ -237,14 +238,14 @@ export const Signals: React.FC = () => {
                   d='M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z'
                 />
               </svg>
-            </div>
-            <p>No signals found</p>
-            <p className='mt-1 text-sm'>
-              {strategyFilter === 'all'
+            }
+            title='No signals found'
+            message={
+              strategyFilter === 'all'
                 ? 'Signals from active strategies will appear here'
-                : `No signals from ${strategyFilter} strategy`}
-            </p>
-          </div>
+                : `No signals from ${strategyFilter} strategy`
+            }
+          />
         )}
         {!isLoading && filteredSignals.length > 0 && (
           <div className='space-y-3'>

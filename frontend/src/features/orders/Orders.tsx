@@ -5,6 +5,7 @@ import type { OrderStatus, Fill } from '../../types/entities'
 import { OrderCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
 import { exportToCSV } from '../../lib/csvExport'
+import { EmptyState } from '../../components/ui'
 import clsx from 'clsx'
 
 const OrderCard: React.FC<{ order: OrderStatus }> = ({ order }) => {
@@ -247,8 +248,8 @@ export const Orders: React.FC = () => {
               </div>
             )}
             {!ordersLoading && filteredOrders.length === 0 && (
-              <div className='py-8 text-center text-muted-500'>
-                <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
+              <EmptyState
+                icon={
                   <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
                     <path
                       strokeLinecap='round'
@@ -257,14 +258,14 @@ export const Orders: React.FC = () => {
                       d='M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2'
                     />
                   </svg>
-                </div>
-                <p>No orders found</p>
-                <p className='mt-1 text-sm'>
-                  {statusFilter === 'all'
+                }
+                title='No orders found'
+                message={
+                  statusFilter === 'all'
                     ? 'Start trading to see orders here'
-                    : `No ${statusFilter} orders`}
-                </p>
-              </div>
+                    : `No ${statusFilter} orders`
+                }
+              />
             )}
             {!ordersLoading && filteredOrders.length > 0 && (
               <div className='grid gap-4'>
@@ -286,8 +287,8 @@ export const Orders: React.FC = () => {
               </div>
             )}
             {!executionsLoading && executions.length === 0 && (
-              <div className='py-8 text-center text-muted-500'>
-                <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
+              <EmptyState
+                icon={
                   <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
                     <path
                       strokeLinecap='round'
@@ -296,10 +297,10 @@ export const Orders: React.FC = () => {
                       d='M13 10V3L4 14h7v7l9-11h-7z'
                     />
                   </svg>
-                </div>
-                <p>No executions found</p>
-                <p className='mt-1 text-sm'>Trade executions will appear here</p>
-              </div>
+                }
+                title='No executions found'
+                message='Trade executions will appear here'
+              />
             )}
             {!executionsLoading && executions.length > 0 && (
               <div className='grid gap-4'>

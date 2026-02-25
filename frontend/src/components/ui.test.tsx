@@ -1,6 +1,15 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { StatusBadge, Card, Button, Badge, LoadingSpinner, ConnectionBar, MetricCard } from './ui'
+import {
+  StatusBadge,
+  Card,
+  Button,
+  Badge,
+  LoadingSpinner,
+  ConnectionBar,
+  MetricCard,
+  EmptyState,
+} from './ui'
 import userEvent from '@testing-library/user-event'
 
 describe('StatusBadge', () => {
@@ -223,5 +232,34 @@ describe('MetricCard', () => {
   it('handles string values', () => {
     render(<MetricCard label='Status' value='Active' />)
     expect(screen.getByText('Active')).toBeInTheDocument()
+  })
+})
+describe('EmptyState', () => {
+  it('renders title', () => {
+    render(<EmptyState icon={<span>icon</span>} title='No items found' />)
+
+    expect(screen.getByText('No items found')).toBeInTheDocument()
+  })
+  it('renders icon', () => {
+    render(<EmptyState icon={<span data-testid='test-icon'>icon</span>} title='Empty' />)
+
+    expect(screen.getByTestId('test-icon')).toBeInTheDocument()
+  })
+  it('renders message when provided', () => {
+    render(<EmptyState icon={<span>icon</span>} title='Empty' message='No data available' />)
+
+    expect(screen.getByText('No data available')).toBeInTheDocument()
+  })
+  it('does not render message when omitted', () => {
+    render(<EmptyState icon={<span>icon</span>} title='Empty' />)
+
+    expect(screen.queryByText('No data available')).not.toBeInTheDocument()
+  })
+  it('renders ReactNode message', () => {
+    render(
+      <EmptyState icon={<span>icon</span>} title='Empty' message={<strong>Bold message</strong>} />
+    )
+
+    expect(screen.getByText('Bold message')).toBeInTheDocument()
   })
 })

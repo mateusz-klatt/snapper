@@ -1,6 +1,7 @@
 import React from 'react'
 import clsx from 'clsx'
 import type { HeartbeatData } from '../../hooks/useHeartbeats'
+import { LoadingSpinner } from '../../components/ui'
 
 interface ProcessControlCardProps {
   title: string
@@ -128,7 +129,7 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
             >
               {isStopping ? (
                 <>
-                  <div className='w-4 h-4 border-2 border-loss-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                  <LoadingSpinner size='sm' className='inline-block mr-2' />
                   Stopping...
                 </>
               ) : (
@@ -148,7 +149,7 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
             >
               {isStarting ? (
                 <>
-                  <div className='w-4 h-4 border-2 border-accent-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                  <LoadingSpinner size='sm' className='inline-block mr-2' />
                   Starting...
                 </>
               ) : (

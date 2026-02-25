@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import clsx from 'clsx'
+import { LoadingSpinner } from '../../components/ui'
 
 export interface FeedHealth {
   status: 'healthy' | 'warning' | 'error'
@@ -300,7 +301,7 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
               >
                 {isStopping ? (
                   <>
-                    <div className='w-4 h-4 border-2 border-loss-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                    <LoadingSpinner size='sm' className='inline-block mr-2' />
                     Stopping...
                   </>
                 ) : (
@@ -321,7 +322,7 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
               >
                 {isStarting ? (
                   <>
-                    <div className='w-4 h-4 border-2 border-accent-300 border-t-transparent rounded-full animate-spin inline-block mr-2' />
+                    <LoadingSpinner size='sm' className='inline-block mr-2' />
                     Starting...
                   </>
                 ) : (

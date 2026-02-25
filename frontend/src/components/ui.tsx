@@ -184,6 +184,24 @@ export const ConnectionBar: React.FC<Readonly<ConnectionBarProps>> = ({
   )
 }
 
+interface EmptyStateProps {
+  icon: React.ReactNode
+  title: string
+  message?: React.ReactNode
+}
+
+export const EmptyState: React.FC<Readonly<EmptyStateProps>> = ({ icon, title, message }) => {
+  return (
+    <div className='py-8 text-center text-muted-500'>
+      <div className='mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-dark-700'>
+        {icon}
+      </div>
+      <p>{title}</p>
+      {message && <p className='mt-1 text-sm'>{message}</p>}
+    </div>
+  )
+}
+
 interface MetricCardProps {
   label: string
   value: string | number
