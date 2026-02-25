@@ -14,6 +14,13 @@ import { ProcessesSkeleton } from '../../components/Skeleton'
 import type { ConfiguredProcess, AvailableProcess, ProcessRun } from '../../types/api'
 import { noop } from '../../lib/noop'
 
+const resolveStatusBadge = (process: ConfiguredProcess): string => {
+  if (process.is_one_shot) return 'one-shot'
+  if (process.enabled) return 'auto-start'
+
+  return 'manual'
+}
+
 type ConfirmDialogState = {
   open: boolean
   title: string
@@ -115,6 +122,15 @@ export const Processes: React.FC = () => {
 
     return date.toLocaleString()
   }, [])
+
+  const getDescription = React.useCallback(
+    (process: ConfiguredProcess): string => {
+      const registryDetails = registryByName[process.name]
+
+      return registryDetails?.description || process.note || ''
+    },
+    [registryByName]
+  )
 
   const startProcess = useStartProcessByName()
   const stopProcess = useStopProcessByName()
@@ -224,8 +240,7 @@ export const Processes: React.FC = () => {
         <h2 className='text-lg font-semibold text-primary-600'>Long-Running Processes</h2>
         <div className='grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4'>
           {longRunningProcesses.map(process => {
-            const registryDetails = registryByName[process.name]
-            const description = registryDetails?.description || process.note || ''
+            const description = getDescription(process)
             const heartbeat = getHeartbeat(process.name)
 
             return (
@@ -264,23 +279,14 @@ export const Processes: React.FC = () => {
                 ? 'running'
                 : 'stopped'
 
-              const resolveStatusBadge = (): string => {
-                if (process.is_one_shot) return 'one-shot'
-                if (process.enabled) return 'auto-start'
-
-                return 'manual'
-              }
-
-              const statusBadge = resolveStatusBadge()
-              const registryDetails = registryByName[process.name]
+              const statusBadge = resolveStatusBadge(process)
+              const description = getDescription(process)
               const latestRun = latestRunByProcess[process.name]
               const details: Record<string, string> = {}
 
               if (latestRun) {
                 details.last_run = `${latestRun.status} (${formatTimestamp(latestRun.started_at)})`
               }
-
-              const description = registryDetails?.description || process.note || ''
 
               return (
                 <ProcessControlCard

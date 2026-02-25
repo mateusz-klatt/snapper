@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
+PRECOMMIT_CONFIG_FILENAME = ".pre-commit-config.yaml"
 DEFAULT_PYPROJECT_PATH = Path("pyproject.toml")
-DEFAULT_CONFIG_PATH = Path(".pre-commit-config.yaml")
+DEFAULT_CONFIG_PATH = Path(PRECOMMIT_CONFIG_FILENAME)
 
 
 def extract_version(raw_value: object, prefix: str = "") -> str:
@@ -78,10 +79,10 @@ def _resolve_config(config_path: Path) -> Path:
     if ".." in config_path.parts:
         raise ValueError(f"Config path must not contain '..' components: {config_path}")
     resolved = config_path.resolve()
-    if resolved.name != ".pre-commit-config.yaml":
-        raise ValueError(f"Config path must target .pre-commit-config.yaml: {config_path}")
+    if resolved.name != PRECOMMIT_CONFIG_FILENAME:
+        raise ValueError(f"Config path must target {PRECOMMIT_CONFIG_FILENAME}: {config_path}")
     if not resolved.exists():
-        raise FileNotFoundError(".pre-commit-config.yaml not found")
+        raise FileNotFoundError(f"{PRECOMMIT_CONFIG_FILENAME} not found")
     return resolved
 
 
@@ -114,7 +115,7 @@ def _write_config(config_path: Path, content: str) -> None:
         ValueError: If path contains traversal or targets wrong filename.
     """
     resolved = _resolve_config(config_path)
-    resolved.write_text(content, encoding="utf-8")
+    (resolved.parent / PRECOMMIT_CONFIG_FILENAME).write_text(content, encoding="utf-8")
 
 
 def update_config(

@@ -55,6 +55,28 @@ const FeedPublisherEntry: React.FC<Readonly<{ feedKey: string; feed: FeedHealth 
   )
 }
 
+const resolveStatusKey = (
+  isStarting: boolean,
+  isRunning: boolean
+): 'starting' | 'running' | 'stopped' => {
+  if (isStarting) return 'starting'
+  if (isRunning) return 'running'
+
+  return 'stopped'
+}
+
+const resolveStatusText = (
+  isStarting: boolean,
+  isStopping: boolean,
+  isRunning: boolean
+): string => {
+  if (isStarting) return 'starting'
+  if (isStopping) return 'stopping'
+  if (isRunning) return 'running'
+
+  return 'stopped'
+}
+
 interface StrategyCardProps {
   name: string
   running: boolean
@@ -97,28 +119,13 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
         }[health.status]
       : 'Unknown - no heartbeat data'
 
-    const resolveStatusKey = (): 'starting' | 'running' | 'stopped' => {
-      if (isStarting) return 'starting'
-      if (isRunning) return 'running'
-
-      return 'stopped'
-    }
-
     const statusColor = {
       running: 'text-accent-400 bg-accent-400/10',
       stopped: 'text-muted-400 bg-muted-400/10',
       starting: 'text-info-400 bg-info-400/10',
-    }[resolveStatusKey()]
+    }[resolveStatusKey(isStarting, isRunning)]
 
-    const resolveStatusText = (): string => {
-      if (isStarting) return 'starting'
-      if (isStopping) return 'stopping'
-      if (isRunning) return 'running'
-
-      return 'stopped'
-    }
-
-    const statusText = resolveStatusText()
+    const statusText = resolveStatusText(isStarting, isStopping, isRunning)
     const showLagBadge = health && health.lag_ms > 2000
     const displayName = name
       .replace(/^strategy_/, '')
