@@ -7,6 +7,7 @@ import {
   useProcessRuns,
 } from '../../hooks/queries'
 import { useHeartbeats, type HeartbeatData } from '../../hooks/useHeartbeats'
+import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 import { ProcessControlCard } from './ProcessControlCard'
 import { ExecutionModeModal } from './ExecutionModeModal'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
@@ -21,14 +22,8 @@ const resolveStatusBadge = (process: ConfiguredProcess): string => {
   return 'manual'
 }
 
-type ConfirmDialogState = {
-  open: boolean
-  title: string
-  message: string
-  onConfirm: () => void
-}
-
 export const Processes: React.FC = () => {
+  const { openConfirm, dialogProps: confirmDialogProps } = useConfirmDialog()
   const [executionModeModal, setExecutionModeModal] = useState<{
     open: boolean
     componentName: string
@@ -41,12 +36,6 @@ export const Processes: React.FC = () => {
     description: '',
     defaultAutostart: false,
     onStart: noop,
-  })
-  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>({
-    open: false,
-    title: '',
-    message: '',
-    onConfirm: noop,
   })
   const heartbeatTopics = React.useMemo(
     () => ['system.heartbeats.executor.', 'system.heartbeats.feed.'],
@@ -174,28 +163,24 @@ export const Processes: React.FC = () => {
 
   const handleStop = React.useCallback(
     (processName: string, message: string) => {
-      setConfirmDialog({
-        open: true,
+      openConfirm({
         title: `Stop ${processName}`,
         message,
         onConfirm: () => stopProcess.mutate({ name: processName }),
       })
     },
-    [stopProcess]
+    [stopProcess, openConfirm]
   )
 
   const handleRestart = React.useCallback(
     (processName: string, stopMessage: string, openStartModal: () => void) => {
-      setConfirmDialog({
-        open: true,
+      openConfirm({
         title: `Restart ${processName}`,
         message: stopMessage,
-        onConfirm: () => {
-          stopProcess.mutate({ name: processName }, { onSuccess: openStartModal })
-        },
+        onConfirm: () => stopProcess.mutate({ name: processName }, { onSuccess: openStartModal }),
       })
     },
-    [stopProcess]
+    [stopProcess, openConfirm]
   )
 
   const getHeartbeat = React.useCallback(
@@ -318,16 +303,7 @@ export const Processes: React.FC = () => {
         </div>
       )}
       {}
-      <ConfirmDialog
-        open={confirmDialog.open}
-        title={confirmDialog.title}
-        message={confirmDialog.message}
-        onConfirm={() => {
-          confirmDialog.onConfirm()
-          setConfirmDialog((prev: ConfirmDialogState) => ({ ...prev, open: false }))
-        }}
-        onCancel={() => setConfirmDialog((prev: ConfirmDialogState) => ({ ...prev, open: false }))}
-      />
+      <ConfirmDialog {...confirmDialogProps} />
       <ExecutionModeModal
         open={executionModeModal.open}
         onClose={closeExecutionModeModal}

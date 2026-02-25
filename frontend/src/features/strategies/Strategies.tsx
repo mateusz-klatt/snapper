@@ -14,26 +14,10 @@ import { useWebSocketStore } from '../../stores/websocket'
 import { useAuth } from '../../stores/auth'
 import { Permission } from '../../types/permissions.generated'
 import { StrategyLaunchModal, type StrategyLaunchData } from './StrategyLaunchModal'
-import { StrategyCard } from './StrategyCard'
+import { StrategyCard, type FeedHealth, type HealthStatus } from './StrategyCard'
 import { StrategiesSkeleton } from '../../components/Skeleton'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
-import { noop } from '../../lib/noop'
-
-interface FeedHealth {
-  status: 'healthy' | 'warning' | 'error'
-  lag_ms: number
-  heartbeat_age_ms: number
-  healthy: boolean
-}
-interface HealthStatus {
-  status: 'healthy' | 'warning' | 'error'
-  lag_ms: number
-  timestamp: number
-  seq?: number
-  feed_health?: Record<string, FeedHealth>
-  inputs?: string[]
-  outputs?: string[]
-}
+import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 
 export const Strategies: React.FC = () => {
   const { hasPermission } = useAuth()
@@ -41,13 +25,7 @@ export const Strategies: React.FC = () => {
   const [strategyModalOpen, setStrategyModalOpen] = useState(false)
   const [activeStrategyProcess, setActiveStrategyProcess] = useState<string | null>(null)
   const [healthStatuses, setHealthStatuses] = useState<Record<string, HealthStatus>>({})
-  const [confirmDialog, setConfirmDialog] = useState<{
-    open: boolean
-    title: string
-    message: string
-    onConfirm: () => void
-    variant: 'default' | 'danger'
-  }>({ open: false, title: '', message: '', onConfirm: noop, variant: 'default' })
+  const { openConfirm, dialogProps: confirmDialogProps } = useConfirmDialog()
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'stopped'>('all')
   const queryClient = useQueryClient()
@@ -156,8 +134,7 @@ export const Strategies: React.FC = () => {
   }
 
   const requestStartStrategy = (processName: string, mode: string) => {
-    setConfirmDialog({
-      open: true,
+    openConfirm({
       title: `Start ${processName}`,
       message: `This will start the ${processName} strategy. It may begin live trading operations.`,
       variant: 'default',
@@ -166,8 +143,7 @@ export const Strategies: React.FC = () => {
   }
 
   const requestStopStrategy = (processName: string) => {
-    setConfirmDialog({
-      open: true,
+    openConfirm({
       title: `Stop ${processName}`,
       message: `This will stop the ${processName} strategy. Active positions will not be automatically closed.`,
       variant: 'danger',
@@ -379,17 +355,7 @@ export const Strategies: React.FC = () => {
         )}
       </div>
       {}
-      <ConfirmDialog
-        open={confirmDialog.open}
-        title={confirmDialog.title}
-        message={confirmDialog.message}
-        variant={confirmDialog.variant}
-        onConfirm={() => {
-          confirmDialog.onConfirm()
-          setConfirmDialog(prev => ({ ...prev, open: false }))
-        }}
-        onCancel={() => setConfirmDialog(prev => ({ ...prev, open: false }))}
-      />
+      <ConfirmDialog {...confirmDialogProps} />
       <StrategyLaunchModal
         open={strategyModalOpen}
         onClose={() => setStrategyModalOpen(false)}

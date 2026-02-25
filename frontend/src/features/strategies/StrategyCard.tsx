@@ -1,13 +1,13 @@
 import React, { useState } from 'react'
 import clsx from 'clsx'
 
-interface FeedHealth {
+export interface FeedHealth {
   status: 'healthy' | 'warning' | 'error'
   lag_ms: number
   heartbeat_age_ms: number
   healthy: boolean
 }
-interface HealthStatus {
+export interface HealthStatus {
   status: 'healthy' | 'warning' | 'error'
   lag_ms: number
   timestamp: number
