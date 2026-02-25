@@ -46,7 +46,7 @@ ccxt = "^4.5.40"
 python-kraken-sdk = "^3.2.7"
 polygon-api-client = "^1.16.3"
 pyopenssl = "^25.3.0"
-boto3 = "^1.42.55"
+boto3 = "^1.42.56"
 bcrypt = "^5.0.0"
 slowapi = "^0.1.9"
 
