@@ -201,13 +201,13 @@ typecheck:
 PYTEST_PARALLEL := -n $(shell $(PYTHON) -c "import os,math; print(math.ceil(os.cpu_count()/2))")
 
 test:
-	$(PYRUN) pytest $(PYTEST_PARALLEL) --timeout=15 --timeout-method=thread
+	$(PYRUN) pytest $(PYTEST_PARALLEL) --timeout=15 --timeout-method=thread --max-worker-restart=0
 
 test-serial:
 	$(PYRUN) pytest --timeout=15 --timeout-method=thread
 
 cov:
-	$(PYRUN) pytest $(PYTEST_PARALLEL) --cov --timeout=15 --timeout-method=thread
+	$(PYRUN) pytest $(PYTEST_PARALLEL) --cov --timeout=15 --timeout-method=thread --max-worker-restart=0
 
 cov-serial:
 	$(PYRUN) pytest --cov --timeout=15 --timeout-method=thread
