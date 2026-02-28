@@ -6,6 +6,7 @@ for key derivation and Fernet (AES-128-CBC + HMAC-SHA256) for encryption.
 
 Security features:
     - Master password-derived encryption keys via PBKDF2
+    - Salt derived deterministically from master password via SHA-256
     - 100,000 iterations for key derivation (OWASP recommendation)
     - Automatic detection of encrypted vs cleartext values
     - Pattern-based identification of sensitive settings
@@ -16,12 +17,13 @@ Example:
     ...     encrypt_if_sensitive,
     ...     decrypt_if_encrypted,
     ... )
-    >>> initialize_global_encryption("my-master-password", "my-salt")
+    >>> initialize_global_encryption("my-master-password")
     >>> value, encrypted = encrypt_if_sensitive("api_key", "secret123")
     >>> original = decrypt_if_encrypted(value, encrypted)
 """
 
 import base64
+import hashlib
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -45,7 +47,8 @@ class SettingsEncryptionService:
     """Singleton service for encrypting/decrypting sensitive settings.
 
     Uses Fernet symmetric encryption with PBKDF2 key derivation from a
-    master password. The singleton ensures consistent encryption across
+    master password. Salt is derived deterministically from the password
+    via SHA-256. The singleton ensures consistent encryption across
     the application.
 
     Encrypted values are identifiable by the ``gAAAAAB`` prefix (Fernet
@@ -53,50 +56,47 @@ class SettingsEncryptionService:
 
     Attributes:
         master_password: The password bytes used for key derivation.
-        salt: Salt bytes for PBKDF2.
+        salt: Salt bytes for PBKDF2, derived from master password.
 
     Example:
-        >>> service = SettingsEncryptionService("my-password", "my-salt")
+        >>> service = SettingsEncryptionService("my-password")
         >>> encrypted = service.encrypt("api-key-value")
         >>> decrypted = service.decrypt(encrypted)
     """
 
     _instance: "SettingsEncryptionService | None" = None
-    _init_params: tuple[str, str] | None = None
+    _init_params: str | None = None
     _initialized: bool = False
 
-    def __new__(cls, master_password: str, salt: str) -> "SettingsEncryptionService":
+    def __new__(cls, master_password: str) -> "SettingsEncryptionService":
         """Create or return the singleton instance.
 
         Returns existing instance only if called with the same parameters.
 
         Args:
             master_password: Master password for key derivation.
-            salt: Salt for PBKDF2.
 
         Returns:
             The singleton SettingsEncryptionService instance.
         """
-        current_params = (master_password, salt)
-        if cls._instance is not None and cls._init_params == current_params:
+        if cls._instance is not None and cls._init_params == master_password:
             return cls._instance
         instance = super().__new__(cls)
         cls._instance = instance
-        cls._init_params = current_params
+        cls._init_params = master_password
         return instance
 
-    def __init__(self, master_password: str, salt: str) -> None:
+    def __init__(self, master_password: str) -> None:
         """Initialize the encryption service.
 
         Args:
             master_password: Master password for key derivation.
-            salt: Salt for PBKDF2.
         """
         if self._initialized:
             return
         self._initialized = True
         self.master_password = master_password.encode()
-        self.salt = salt.encode()
+        self.salt = hashlib.sha256(self.master_password).digest()
         self._fernet = self._create_fernet()
 
     def _create_fernet(self) -> Fernet:
@@ -213,42 +213,39 @@ class SettingsEncryptionService:
 
 
 def get_encryption_service(
-    master_password: str | None = None, salt: str | None = None
+    master_password: str | None = None,
 ) -> SettingsEncryptionService | None:
     """Get or create an encryption service instance.
 
-    Falls back to bootstrap settings if parameters not provided.
+    Falls back to bootstrap settings if parameter not provided.
 
     Args:
         master_password: Optional master password override.
-        salt: Optional salt string override.
 
     Returns:
         SettingsEncryptionService instance, or None if no password available.
     """
-    if not master_password or not salt:
+    if not master_password:
         bootstrap = BootstrapSettingsLoader()
-        master_password = master_password or bootstrap.master_password
-        salt = salt or bootstrap.encryption_salt
+        master_password = bootstrap.master_password
     if not master_password:
         logger.warning("No master password provided - encryption disabled")
         return None
-    return SettingsEncryptionService(master_password, salt)
+    return SettingsEncryptionService(master_password)
 
 
-def initialize_global_encryption(master_password: str, salt: str) -> SettingsEncryptionService:
+def initialize_global_encryption(master_password: str) -> SettingsEncryptionService:
     """Initialize the global encryption singleton.
 
     Must be called before using encrypt_if_sensitive or decrypt_if_encrypted.
 
     Args:
         master_password: Master password for key derivation.
-        salt: Salt for PBKDF2.
 
     Returns:
         The initialized SettingsEncryptionService instance.
     """
-    encryption = SettingsEncryptionService(master_password, salt)
+    encryption = SettingsEncryptionService(master_password)
     logger.info("AppSettings encryption initialized")
     return encryption
 

@@ -128,7 +128,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             bootstrap_settings.db_url,
             bootstrap_settings.zmq_broker_xpub,
             bootstrap_settings.master_password,
-            bootstrap_settings.encryption_salt,
         )
         self.settings = get_settings_with_service(settings_service)
         logger.info(f"{process_name}: AppSettings initialized with database access")

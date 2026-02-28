@@ -20,7 +20,6 @@ def mocked_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         zmq_broker_xpub="tcp://127.0.0.1:5555",
         zmq_broker_xsub="tcp://127.0.0.1:5556",
         master_password="master",
-        encryption_salt="salt",
     )
     monkeypatch.setattr(
         "snapper.messaging.executors.base.get_settings",

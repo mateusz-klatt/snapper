@@ -306,7 +306,6 @@ class DummySettings(SimpleNamespace):
     db_url: str = "sqlite:///test.db"
     zmq_broker_xpub: str = "tcp://127.0.0.1:5555"
     master_password: str | None = None
-    encryption_salt: str | None = None
     polygon_api_key: str | None = None
     backfill_days: int = 3
     instruments: dict[str, list[str]] = {}
@@ -1084,7 +1083,6 @@ async def test_start_without_api_key_raises_value_error() -> None:
     stub_settings.zmq_broker_xpub = "tcp://127.0.0.1:5555"
     stub_settings.zmq_broker_xsub = "tcp://127.0.0.1:5556"
     stub_settings.master_password = "test"
-    stub_settings.encryption_salt = "test"
     with (
         patch.object(
             service,
@@ -1121,7 +1119,6 @@ async def test_all_mapped_no_results_returns_early() -> None:
     stub_settings.zmq_broker_xpub = "tcp://127.0.0.1:5555"
     stub_settings.zmq_broker_xsub = "tcp://127.0.0.1:5556"
     stub_settings.master_password = "test"
-    stub_settings.encryption_salt = "test"
     with (
         patch.object(
             service,
@@ -1185,7 +1182,6 @@ async def test_no_candles_returned_logs_warning() -> None:
     stub_settings.zmq_broker_xpub = "tcp://127.0.0.1:5555"
     stub_settings.zmq_broker_xsub = "tcp://127.0.0.1:5556"
     stub_settings.master_password = "test"
-    stub_settings.encryption_salt = "test"
     stub_settings.instruments = {"polygon": ["X:BTCUSD"]}
     with (
         patch.object(
@@ -1268,7 +1264,6 @@ async def test_730_day_limit_enforced() -> None:
     stub_settings.zmq_broker_xpub = "tcp://127.0.0.1:5555"
     stub_settings.zmq_broker_xsub = "tcp://127.0.0.1:5556"
     stub_settings.master_password = "test"
-    stub_settings.encryption_salt = "test"
     stub_settings.instruments = {"polygon": ["X:BTCUSD"]}
     with (
         patch.object(
@@ -1343,7 +1338,6 @@ async def test_chunk_optimization_skip_when_all_csv_exist() -> None:
     stub_settings.zmq_broker_xpub = "tcp://127.0.0.1:5555"
     stub_settings.zmq_broker_xsub = "tcp://127.0.0.1:5556"
     stub_settings.master_password = "test"
-    stub_settings.encryption_salt = "test"
     stub_settings.instruments = {"polygon": ["X:BTCUSD"]}
     with (
         patch.object(
@@ -1394,7 +1388,6 @@ async def test_start_without_symbols_returns(monkeypatch: pytest.MonkeyPatch) ->
             db_url="sqlite://",
             zmq_broker_xpub="xpub",
             master_password=None,
-            encryption_salt=None,
             polygon_api_key="dummy",
             backfill_days=1,
         ),
@@ -1444,7 +1437,6 @@ async def test_start_all_mapped_without_results(
             db_url="sqlite://",
             zmq_broker_xpub="xpub",
             master_password=None,
-            encryption_salt=None,
             polygon_api_key="dummy",
             backfill_days=1,
         ),
@@ -1495,7 +1487,6 @@ async def test_start_skips_symbol_without_context(
             db_url="sqlite://",
             zmq_broker_xpub="xpub",
             master_password=None,
-            encryption_salt=None,
             polygon_api_key="dummy",
             backfill_days=1,
         ),
@@ -1604,7 +1595,6 @@ async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyP
         db_url="sqlite:///tmp.db",
         zmq_broker_xpub="inproc://xpub",
         master_password="pw",
-        encryption_salt="salt",
         polygon_api_key="key",
         instruments={"polygon": ["X:IGNORED"]},
     )
@@ -1678,7 +1668,6 @@ async def test_process_symbol_caps_to_max_ts(monkeypatch: pytest.MonkeyPatch) ->
         db_url="sqlite:///tmp.db",
         zmq_broker_xpub="inproc://xpub",
         master_password="pw",
-        encryption_salt="salt",
         polygon_api_key="key",
         instruments={},
     )
@@ -1963,7 +1952,6 @@ def base_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         db_url="sqlite://",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password="pwd",
-        encryption_salt="salt",
     )
     monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.get_settings",

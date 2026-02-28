@@ -7,7 +7,6 @@ These settings are loaded from environment variables and/or a .env file.
 Bootstrap settings include:
     - Database connection URL
     - Master password for settings encryption
-    - Encryption salt
     - HTTP server configuration (host, port, reload)
     - Reverse proxy trust configuration (proxy headers, trusted proxy IPs)
     - ZMQ broker endpoints
@@ -48,7 +47,6 @@ class BootstrapSettingsLoader(BaseSettings):
     Attributes:
         db_url: SQLAlchemy async database URL.
         master_password: Password for encrypting sensitive settings in DB.
-        encryption_salt: Salt used with master password for key derivation.
         server_host: HTTP server bind address.
         server_port: HTTP server port.
         server_reload: Enable uvicorn auto-reload for development.
@@ -66,7 +64,6 @@ class BootstrapSettingsLoader(BaseSettings):
     master_password: str = Field(
         default="snapper_default_master_password_v1", alias="MASTER_PASSWORD"
     )
-    encryption_salt: str = Field(default="snapper_settings_salt_v1", alias="ENCRYPTION_SALT")
     server_host: str = Field(default="127.0.0.1", alias="SERVER_HOST")
     server_port: int = Field(default=8000, alias="SERVER_PORT")
     server_reload: bool = Field(default=False, alias="SERVER_RELOAD")

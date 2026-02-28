@@ -476,7 +476,6 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self.settings.db_url,
                 self.settings.zmq_broker_xpub,
                 self.settings.master_password,
-                self.settings.encryption_salt,
             )
             self.settings = get_settings_with_service(settings_service)
             logger.info("AppSettings service initialized with database access")

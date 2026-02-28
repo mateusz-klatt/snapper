@@ -68,7 +68,6 @@ def service_fixture(
         db_url="sqlite://",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password="pwd",
-        encryption_salt="salt",
     )
     monkeypatch.setattr(
         "snapper.application.updaters.historical.grouped.get_settings",
@@ -155,7 +154,6 @@ async def test_start_requires_polygon_api_key(monkeypatch: pytest.MonkeyPatch) -
         db_url="sqlite://",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password="pwd",
-        encryption_salt="salt",
     )
     monkeypatch.setattr(
         "snapper.application.updaters.historical.grouped.get_settings",

@@ -185,7 +185,7 @@ def main_callback() -> None:
     """Initialize global encryption before any CLI command runs."""
     bootstrap = BootstrapSettingsLoader()
     if bootstrap.master_password:
-        initialize_global_encryption(bootstrap.master_password, bootstrap.encryption_salt)
+        initialize_global_encryption(bootstrap.master_password)
 
 
 @app.command(name="trade-zmq")
@@ -700,7 +700,7 @@ def _verify_encryption_services(
     old_decrypted = old_encryption.decrypt(old_encryption.encrypt(test_value))
     new_decrypted = new_encryption.decrypt(new_encryption.encrypt(test_value))
     if old_decrypted != test_value or new_decrypted != test_value:
-        raise ValueError("Encryption verification failed - check your passwords/salts")
+        raise ValueError("Encryption verification failed - check your passwords")
 
 
 def _rotate_single_setting(
@@ -746,8 +746,6 @@ async def _commit_rotation_results(
     total_settings: int,
     dry_run: bool,
     new_master_password: str,
-    new_salt: str | None,
-    new_encryption_salt: str,
 ) -> None:
     """Commit rotation results and print summary.
 
@@ -757,8 +755,6 @@ async def _commit_rotation_results(
         total_settings: Total number of encrypted settings found.
         dry_run: Whether this was a dry run.
         new_master_password: New master password for display.
-        new_salt: New salt option (None if unchanged).
-        new_encryption_salt: Resolved new encryption salt.
     """
     if not dry_run and changes_made > 0:
         await session.commit()
@@ -766,8 +762,6 @@ async def _commit_rotation_results(
         typer.echo()
         typer.echo("IMPORTANT: Update your environment variables with new credentials:")
         typer.echo(f"   MASTER_PASSWORD={new_master_password}")
-        if new_salt:
-            typer.echo(f"   ENCRYPTION_SALT={new_encryption_salt}")
         typer.echo()
         typer.echo("Restart the application to use new encryption parameters")
     elif dry_run:
@@ -776,34 +770,26 @@ async def _commit_rotation_results(
 
 async def _run_encryption_rotation(
     new_master_password: str,
-    new_salt: str | None,
     old_master_password: str | None,
-    old_salt: str | None,
     dry_run: bool,
 ) -> None:
     """Execute the encryption rotation workflow.
 
     Args:
         new_master_password: New master password for encryption.
-        new_salt: New encryption salt (None to keep current).
         old_master_password: Current master password (None to read from bootstrap).
-        old_salt: Current encryption salt (None to read from bootstrap).
         dry_run: Show changes without applying them.
     """
     try:
         bootstrap = BootstrapSettingsLoader()
         current_password = old_master_password or bootstrap.master_password
-        current_salt = old_salt or bootstrap.encryption_salt
         typer.echo("Starting encryption rotation...")
         typer.echo(f"Current password: {'***' if current_password else 'None'}")
-        typer.echo(f"Current salt: {current_salt}")
         typer.echo(f"New password: {'***' if new_master_password else 'None'}")
-        typer.echo(f"New salt: {new_salt or 'Using same as current'}")
         if dry_run:
             typer.echo("DRY RUN MODE - No changes will be made")
-        old_encryption = SettingsEncryptionService(current_password, current_salt)
-        new_encryption_salt = new_salt or current_salt
-        new_encryption = SettingsEncryptionService(new_master_password, new_encryption_salt)
+        old_encryption = SettingsEncryptionService(current_password)
+        new_encryption = SettingsEncryptionService(new_master_password)
         _verify_encryption_services(old_encryption, new_encryption)
         typer.echo("Encryption parameters verified")
         poolclass = NullPool if "sqlite" in bootstrap.db_url else None
@@ -826,8 +812,6 @@ async def _run_encryption_rotation(
                 len(encrypted_settings),
                 dry_run,
                 new_master_password,
-                new_salt,
-                new_encryption_salt,
             )
         await engine.dispose()
     except Exception as e:
@@ -839,12 +823,8 @@ async def _run_encryption_rotation(
 @app.command(name="settings-rotate-encryption")
 def settings_rotate_encryption(
     new_master_password: str = typer.Option(..., "--new-password", help="New master password"),
-    new_salt: str = typer.Option(None, "--new-salt", help="New encryption salt (optional)"),
     old_master_password: str = typer.Option(
         None, "--old-password", help="Current master password (optional, reads from env/bootstrap)"
-    ),
-    old_salt: str = typer.Option(
-        None, "--old-salt", help="Current salt (optional, reads from env/bootstrap)"
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be changed without making changes"
@@ -854,16 +834,10 @@ def settings_rotate_encryption(
 
     Args:
         new_master_password: New master password for encryption.
-        new_salt: New encryption salt (optional).
         old_master_password: Current master password.
-        old_salt: Current encryption salt.
         dry_run: Show changes without applying them.
     """
-    asyncio.run(
-        _run_encryption_rotation(
-            new_master_password, new_salt, old_master_password, old_salt, dry_run
-        )
-    )
+    asyncio.run(_run_encryption_rotation(new_master_password, old_master_password, dry_run))
 
 
 @app.command(name="polygon-backfill-aggregates")

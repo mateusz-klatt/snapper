@@ -85,15 +85,6 @@ class AppSettings:
         return self._bootstrap.master_password
 
     @property
-    def encryption_salt(self) -> str:
-        """Return encryption salt from bootstrap settings.
-
-        Returns:
-            Encryption salt string.
-        """
-        return self._bootstrap.encryption_salt
-
-    @property
     def server_host(self) -> str:
         """Return server host address from bootstrap settings.
 

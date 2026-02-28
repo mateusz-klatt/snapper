@@ -30,7 +30,6 @@ class DummySettings:
     zmq_broker_xsub: str
     zmq_broker_xpub: str
     master_password: str
-    encryption_salt: str
 
 
 class DummyExchangeClient:
@@ -158,7 +157,6 @@ def updater_factory(
             zmq_broker_xsub="inproc://xsub",
             zmq_broker_xpub="inproc://xpub",
             master_password="master",
-            encryption_salt="salt",
         )
         monkeypatch.setattr(
             "snapper.application.updaters.symbols.base.get_settings",

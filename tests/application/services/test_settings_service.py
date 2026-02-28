@@ -185,7 +185,7 @@ class TestSettingsService:
     def test_init_service_with_encryption(self) -> None:
         """Verify SettingsService initializes with encryption enabled.
 
-        Given: Database URL, ZMQ URL, master password, and encryption salt,
+        Given: Database URL, ZMQ URL, and master password,
         When: SettingsService created,
         Then: Properties set correctly.
         """
@@ -193,7 +193,6 @@ class TestSettingsService:
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
             master_password="test-password",
-            encryption_salt="test-salt",
         )
         assert service.db_url == "sqlite+aiosqlite:///:memory:"
         assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
@@ -358,7 +357,6 @@ class TestSettingsService:
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
             master_password="super-secret",
-            encryption_salt="test-salt",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -577,7 +575,7 @@ class TestSettingsEncryption:
         When: Value encrypted then decrypted,
         Then: Original value recovered.
         """
-        encryption = SettingsEncryptionService("test-password", "test-salt")
+        encryption = SettingsEncryptionService("test-password")
         original = "super-secret-value"
         encrypted = encryption.encrypt(original)
         decrypted = encryption.decrypt(encrypted)
@@ -618,7 +616,6 @@ def test_settings_bootstrap_access() -> None:
     assert s.server_host
     assert s.server_port
     assert s.master_password
-    assert s.encryption_salt
     assert s.zmq_broker_xsub
     assert s.zmq_broker_xpub
 
@@ -669,7 +666,6 @@ async def test_settings_with_service_database_access() -> None:
         bootstrap.db_url,
         bootstrap.zmq_broker_xpub,
         bootstrap.master_password,
-        bootstrap.encryption_salt,
     )
     s = get_settings_with_service(service)
     assert s.instruments
@@ -754,7 +750,6 @@ def test_settings_service_without_master_password() -> None:
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password=None,
-        encryption_salt=None,
     )
     assert service.db_url == "sqlite+aiosqlite:///:memory:"
     assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
@@ -1192,7 +1187,7 @@ class TestEncryptionExceptionHandling:
         When: encrypt called and fernet raises ValueError,
         Then: ValueError propagated.
         """
-        encryption = SettingsEncryptionService("test-password", "test-salt")
+        encryption = SettingsEncryptionService("test-password")
         with patch.object(encryption, "_fernet") as mock_fernet:
             mock_fernet.encrypt.side_effect = ValueError("Encryption failed")
             with pytest.raises(ValueError, match="Encryption failed"):
@@ -1210,9 +1205,8 @@ class TestEncryptionExceptionHandling:
         ) as mock_bootstrap:
             mock_instance = MagicMock()
             mock_instance.master_password = None
-            mock_instance.encryption_salt = None
             mock_bootstrap.return_value = mock_instance
-            result = get_encryption_service(master_password=None, salt=None)
+            result = get_encryption_service(master_password=None)
             assert result is None
 
     def test_encrypt_if_sensitive_already_encrypted_value(self) -> None:
@@ -1223,7 +1217,7 @@ class TestEncryptionExceptionHandling:
         Then: Value passed through, is_encrypted=True.
         """
         clear_global_encryption()
-        encryption = initialize_global_encryption("test-password", "test-salt")
+        encryption = initialize_global_encryption("test-password")
         encrypted_value = encryption.encrypt("my-secret")
         result_value, is_encrypted = encrypt_if_sensitive("api_secret", encrypted_value)
         assert is_encrypted is True

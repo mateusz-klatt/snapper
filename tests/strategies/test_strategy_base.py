@@ -3416,7 +3416,6 @@ class TestExecutorBasePhase4:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_password"
-        mock_settings.encryption_salt = b"test_salt_1234__"
         with patch("snapper.config.settings.get_settings", return_value=mock_settings):
             executor = KrakenOrderExecutor()
             executor.running = True

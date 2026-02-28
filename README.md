@@ -69,7 +69,6 @@ DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
 # Settings encryption in database
 MASTER_PASSWORD=your_master_password
-ENCRYPTION_SALT=your_salt
 
 # HTTP Server
 SERVER_HOST=127.0.0.1

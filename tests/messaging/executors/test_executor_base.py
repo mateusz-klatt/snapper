@@ -65,7 +65,6 @@ class DummyExecutor(ExchangeExecutorService[Any]):
                 zmq_broker_xpub="xpub",
                 zmq_broker_xsub="xsub",
                 master_password=None,
-                encryption_salt=None,
             ),
         )
 
@@ -1013,7 +1012,6 @@ class TestExecutorNonWebSocketMode:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -1074,7 +1072,6 @@ class TestOrderHandlerEdgeCases:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -1192,7 +1189,6 @@ class TestExecutionHandler:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -1257,7 +1253,6 @@ class TestExecuteLiveOrderErrors:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
@@ -1326,7 +1321,6 @@ class TestProcessOrder:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
@@ -1964,7 +1958,6 @@ class TestStartWithAsyncContextManager:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -2482,7 +2475,6 @@ class TestExecutorCoverage:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
@@ -3396,7 +3388,6 @@ class TestExecutorWebSocketExecutions:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.db_url = "sqlite:///test.db"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         if with_credentials:
             mock_settings.kraken_api_key = "test_api_key"
             mock_settings.kraken_api_secret = "test_api_secret"
@@ -3926,7 +3917,6 @@ class TestCancelReplaceHandlers:
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         mock_settings.master_password = "test_master_password"
-        mock_settings.encryption_salt = b"test_salt_16byte"
         return mock_settings
 
     @pytest.mark.asyncio

@@ -1208,7 +1208,6 @@ def test_settings_rotate_encryption_dry_run_with_no_encrypted_settings(
     settings = SimpleNamespace(
         db_url="sqlite+aiosqlite:///memory.db",
         master_password="old-pass",
-        encryption_salt="oldsalt",
     )
     monkeypatch.setattr(app_module, "BootstrapSettingsLoader", lambda: settings)
     dummy_engine_disposed: list[bool] = []
@@ -1230,8 +1229,6 @@ def test_settings_rotate_encryption_dry_run_with_no_encrypted_settings(
             "settings-rotate-encryption",
             "--new-password",
             "new-pass",
-            "--new-salt",
-            "newsalt",
             "--dry-run",
         ],
     )
@@ -1243,25 +1240,24 @@ def test_settings_rotate_encryption_dry_run_with_no_encrypted_settings(
 def test_main_callback_initializes_encryption(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test main callback initializes encryption service.
 
-    Given: Bootstrap settings with master password and salt,
+    Given: Bootstrap settings with master password,
     When: main_callback is invoked,
     Then: Global encryption is initialized with credentials.
     """
-    called: list[tuple[str, str]] = []
+    called: list[str] = []
 
     class DummyBootstrap:
         def __init__(self) -> None:
             self.master_password = "secret"
-            self.encryption_salt = "salt"
 
     monkeypatch.setattr(app_module, "BootstrapSettingsLoader", DummyBootstrap)
     monkeypatch.setattr(
         app_module,
         "initialize_global_encryption",
-        lambda password, salt: called.append((password, salt)),
+        lambda password: called.append(password),
     )
     app_module.main_callback()
-    assert called == [("secret", "salt")]
+    assert called == ["secret"]
 
 
 def create_mock_settings(**overrides: Any) -> type:
@@ -2092,7 +2088,6 @@ class TestEncryptionRotateErrors:
         ):
             mock_bootstrap = MagicMock()
             mock_bootstrap.master_password = "old-password"
-            mock_bootstrap.encryption_salt = "salt123"
             mock_bootstrap_class.return_value = mock_bootstrap
             mock_old_encryption = MagicMock()
             mock_new_encryption = MagicMock()
@@ -2104,8 +2099,6 @@ class TestEncryptionRotateErrors:
             settings_rotate_encryption(
                 old_master_password="old",
                 new_master_password="new",
-                old_salt=None,
-                new_salt=None,
                 dry_run=False,
             )
             error_calls = [str(call) for call in mock_echo.call_args_list]
@@ -2128,7 +2121,6 @@ class TestEncryptionRotateErrors:
         ):
             mock_bootstrap = MagicMock()
             mock_bootstrap.master_password = "old-password"
-            mock_bootstrap.encryption_salt = "salt123"
             mock_bootstrap_class.return_value = mock_bootstrap
             mock_old_encryption = MagicMock()
             mock_new_encryption = MagicMock()
@@ -2177,8 +2169,6 @@ class TestEncryptionRotateErrors:
             settings_rotate_encryption(
                 old_master_password="old",
                 new_master_password="new",
-                old_salt="oldsalt",
-                new_salt="newsalt",
                 dry_run=False,
             )
             error_calls = [str(call) for call in mock_echo.call_args_list]
@@ -2201,7 +2191,6 @@ class TestEncryptionRotateErrors:
         ):
             mock_bootstrap = MagicMock()
             mock_bootstrap.master_password = "old-password"
-            mock_bootstrap.encryption_salt = "salt123"
             mock_bootstrap_class.return_value = mock_bootstrap
             mock_old_encryption = MagicMock()
             mock_new_encryption = MagicMock()
@@ -2250,8 +2239,6 @@ class TestEncryptionRotateErrors:
             settings_rotate_encryption(
                 old_master_password="old",
                 new_master_password="new",
-                old_salt="oldsalt",
-                new_salt="newsalt",
                 dry_run=True,
             )
             error_calls = [str(call) for call in mock_echo.call_args_list]
@@ -2273,7 +2260,6 @@ class TestEncryptionRotateErrors:
         ):
             mock_bootstrap = MagicMock()
             mock_bootstrap.master_password = "old-password"
-            mock_bootstrap.encryption_salt = "salt123"
             mock_bootstrap_class.return_value = mock_bootstrap
             mock_encryption = MagicMock()
             mock_encryption.encrypt.return_value = "enc1"
@@ -2282,8 +2268,6 @@ class TestEncryptionRotateErrors:
             settings_rotate_encryption(
                 old_master_password="old",
                 new_master_password="new",
-                old_salt="oldsalt",
-                new_salt="newsalt",
                 dry_run=True,
             )
             error_calls = [str(call) for call in mock_echo.call_args_list]
@@ -3091,7 +3075,6 @@ def mock_bootstrap_settings() -> MagicMock:
     """Provide mock bootstrap settings for encryption rotation tests."""
     mock = MagicMock()
     mock.master_password = "old-password"
-    mock.encryption_salt = "old-salt"
     mock.db_url = "sqlite+aiosqlite:///:memory:"
     return mock
 
@@ -3147,7 +3130,7 @@ def test_rotate_encryption_dry_run(
     When: settings-rotate-encryption --dry-run is invoked,
     Then: Shows settings to rotate without committing.
     """
-    old_encryption = SettingsEncryptionService("old-password", "old-salt")
+    old_encryption = SettingsEncryptionService("old-password")
     encrypted_value = old_encryption.encrypt("secret-value")
     mock_setting.value = encrypted_value
     execute_result = MagicMock()
@@ -3189,7 +3172,7 @@ def test_rotate_encryption_success(
     When: settings-rotate-encryption is invoked,
     Then: Settings are re-encrypted and committed.
     """
-    old_encryption = SettingsEncryptionService("old-password", "old-salt")
+    old_encryption = SettingsEncryptionService("old-password")
     encrypted_value = old_encryption.encrypt("secret-value")
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
@@ -3213,49 +3196,6 @@ def test_rotate_encryption_success(
     assert result.exit_code == 0
     assert "Successfully rotated 1 encrypted settings" in result.stdout
     assert "Update your environment variables" in result.stdout
-    mock_session.commit.assert_called_once()
-
-
-def test_rotate_encryption_with_new_salt(
-    cli_runner: CliRunner,
-    mock_bootstrap_settings: MagicMock,
-    mock_engine: AsyncMock,
-    mock_session: AsyncMock,
-    mock_session_factory: MagicMock,
-    mock_setting: MagicMock,
-) -> None:
-    """Test encryption rotation with new salt.
-
-    Given: Encrypted settings and new salt specified,
-    When: settings-rotate-encryption --new-salt is invoked,
-    Then: Shows new salt in output.
-    """
-    old_encryption = SettingsEncryptionService("old-password", "old-salt")
-    encrypted_value = old_encryption.encrypt("secret-value")
-    mock_setting.value = encrypted_value
-    result_mock = MagicMock()
-    result_mock.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
-    )
-    mock_session.execute.return_value = result_mock
-    with (
-        patch("snapper.cli.app.BootstrapSettingsLoader", return_value=mock_bootstrap_settings),
-        patch("snapper.cli.app.create_async_engine", return_value=mock_engine),
-        patch("snapper.cli.app.async_sessionmaker", return_value=mock_session_factory),
-    ):
-        result = cli_runner.invoke(
-            app,
-            [
-                "settings-rotate-encryption",
-                "--new-password",
-                "new-password",
-                "--new-salt",
-                "new-salt",
-            ],
-        )
-    assert result.exit_code == 0
-    assert "Successfully rotated 1 encrypted settings" in result.stdout
-    assert "ENCRYPTION_SALT=new-salt" in result.stdout
     mock_session.commit.assert_called_once()
 
 
@@ -3347,7 +3287,7 @@ def test_rotate_encryption_with_custom_old_password(
     When: settings-rotate-encryption --old-password is invoked,
     Then: Decrypts with custom password and rotates.
     """
-    old_encryption = SettingsEncryptionService("custom-old-password", "custom-old-salt")
+    old_encryption = SettingsEncryptionService("custom-old-password")
     encrypted_value = old_encryption.encrypt("secret-value")
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
@@ -3368,8 +3308,6 @@ def test_rotate_encryption_with_custom_old_password(
                 "new-password",
                 "--old-password",
                 "custom-old-password",
-                "--old-salt",
-                "custom-old-salt",
             ],
         )
     assert result.exit_code == 0

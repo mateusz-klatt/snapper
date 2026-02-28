@@ -30,8 +30,7 @@ DB_URL=mssql+pyodbc://user:password@server.database.windows.net/snapper?driver=O
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
-| `MASTER_PASSWORD` | `snapper_default_master_password_v1` | Password for encrypting settings in database |
-| `ENCRYPTION_SALT` | `snapper_settings_salt_v1` | Salt for key derivation |
+| `MASTER_PASSWORD` | `snapper_default_master_password_v1` | Password for encrypting settings in database (salt derived automatically) |
 
 **Important**: Change default values in production environment.
 
@@ -97,7 +96,6 @@ DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
 # Settings Encryption (CHANGE IN PRODUCTION!)
 MASTER_PASSWORD=your_secure_master_password
-ENCRYPTION_SALT=your_unique_salt_value
 
 # HTTP Server
 SERVER_HOST=127.0.0.1
@@ -179,7 +177,6 @@ SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
 # .env.production
 DB_URL=postgresql+asyncpg://user:pass@db.example.com/snapper
 MASTER_PASSWORD=<strong_random_password>
-ENCRYPTION_SALT=<unique_random_salt>
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
 SERVER_RELOAD=false
@@ -201,14 +198,14 @@ services:
 
 ## Settings Encryption
 
-Sensitive settings are encrypted with AES-256-GCM:
+Sensitive settings are encrypted with Fernet (AES-128-CBC + HMAC-SHA256):
 
-1.  Key is generated from `MASTER_PASSWORD` and `ENCRYPTION_SALT` (PBKDF2)
-2.  Value is encrypted with random IV
-3.  Ciphertext + IV + tag are stored in database as base64
+1.  Salt is derived from `MASTER_PASSWORD` via SHA-256
+2.  Encryption key is derived via PBKDF2-HMAC-SHA256 (100,000 iterations)
+3.  Values are encrypted with Fernet and stored in database
 
 If `MASTER_PASSWORD` changes, encrypted settings become inaccessible.
-Export settings before changing the password.
+Use `snapper settings-rotate-encryption` to rotate passwords safely.
 
 ## Configuration Validation
 

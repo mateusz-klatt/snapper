@@ -175,7 +175,6 @@ async def _initialize_settings_service(settings: AppSettings) -> SettingsService
         settings.db_url,
         settings.zmq_broker_xpub,
         settings.master_password,
-        settings.encryption_salt,
     )
     logger.info("AppSettings initialized with database access (cached, ZMQ-synced)")
     return settings_service

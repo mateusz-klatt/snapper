@@ -109,7 +109,6 @@ class PolygonGroupedDailyBackfillService(RegisterableProcess):
             self.settings.db_url,
             self.settings.zmq_broker_xpub,
             self.settings.master_password,
-            self.settings.encryption_salt,
         )
         self.settings = get_settings_with_service(settings_service)
         api_key = self.settings.polygon_api_key
