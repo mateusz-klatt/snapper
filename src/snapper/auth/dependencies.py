@@ -27,6 +27,7 @@ from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.interface.websocket.helpers import build_allowed_origins
 
 
 def get_current_user(
@@ -342,12 +343,7 @@ def validate_csrf_token(
     origin = request.headers.get("origin") or ""
     referer = request.headers.get("referer") or ""
     settings = get_settings()
-    allowed_origins = {
-        f"http://localhost:{settings.server_port}",
-        "http://localhost:8000",
-        "http://localhost:3000",
-        "https://snapper.ch",
-    }
+    allowed_origins = build_allowed_origins(settings, settings.server_port)
     origin_valid = origin in allowed_origins or any(
         referer == allowed_origin or referer.startswith(allowed_origin + "/")
         for allowed_origin in allowed_origins

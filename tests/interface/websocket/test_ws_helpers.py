@@ -88,6 +88,20 @@ class TestWebSocketHelpersRuntimeError:
         assert isinstance(origins, set)
         assert "http://localhost:8000" in origins
 
+    def test_build_allowed_origins_parses_comma_separated_ui_origin(self) -> None:
+        """Build allowed origins parses comma-separated ui_origin values.
+
+        Given: Settings with a comma-separated ui_origin string containing empty entries,
+        When: Building allowed origins,
+        Then: Each non-empty origin is added individually to the set.
+        """
+        mock_settings = MagicMock()
+        mock_settings.ui_origin = "http://example.com:3000, , http://example.com:8000,"
+        mock_settings.session_domain = ""
+        origins = build_allowed_origins(mock_settings, 8000)
+        assert "http://example.com:3000" in origins
+        assert "http://example.com:8000" in origins
+
     def test_role_allowed_categories_returns_default_for_unknown_role(self) -> None:
         """Role allowed categories returns default for unknown role.
 

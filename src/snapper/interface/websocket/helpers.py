@@ -49,7 +49,10 @@ def build_allowed_origins(settings: AppSettings, server_port: int = 8000) -> set
     try:
         configured_origin = settings.ui_origin
         if configured_origin:
-            allowed_origins.add(configured_origin.rstrip("/"))
+            for raw_origin in configured_origin.split(","):
+                cleaned = raw_origin.strip().rstrip("/")
+                if cleaned:
+                    allowed_origins.add(cleaned)
     except RuntimeError:
         pass
     try:
