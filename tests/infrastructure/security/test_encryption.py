@@ -27,7 +27,7 @@ class TestSettingsEncryption:
         When: encrypting and decrypting a value,
         Then: decrypted value equals original and ciphertext differs.
         """
-        encryption = SettingsEncryptionService("test-password")
+        encryption = SettingsEncryptionService("test-password", "test-salt")
         original = "super-secret-value"
         encrypted = encryption.encrypt(original)
         decrypted = encryption.decrypt(encrypted)
@@ -41,7 +41,7 @@ class TestSettingsEncryption:
         When: encrypting and decrypting empty string,
         Then: roundtrip preserves empty string.
         """
-        encryption = SettingsEncryptionService("test-password")
+        encryption = SettingsEncryptionService("test-password", "test-salt")
         original = ""
         encrypted = encryption.encrypt(original)
         decrypted = encryption.decrypt(encrypted)
@@ -54,7 +54,7 @@ class TestSettingsEncryption:
         When: encrypting value with emojis and Unicode,
         Then: roundtrip preserves all special characters.
         """
-        encryption = SettingsEncryptionService("test-password")
+        encryption = SettingsEncryptionService("test-password", "test-salt")
         original = "🔐 Secret with émojis and ü̧nicöde!"
         encrypted = encryption.encrypt(original)
         decrypted = encryption.decrypt(encrypted)
@@ -67,8 +67,8 @@ class TestSettingsEncryption:
         When: encrypting the same plaintext,
         Then: ciphertexts are different.
         """
-        enc1 = SettingsEncryptionService("password1")
-        enc2 = SettingsEncryptionService("password2")
+        enc1 = SettingsEncryptionService("password1", "test-salt")
+        enc2 = SettingsEncryptionService("password2", "test-salt")
         original = "same-plaintext"
         encrypted1 = enc1.encrypt(original)
         encrypted2 = enc2.encrypt(original)
@@ -81,8 +81,8 @@ class TestSettingsEncryption:
         When: decrypting with wrong password,
         Then: InvalidToken exception is raised.
         """
-        enc1 = SettingsEncryptionService("correct-password")
-        enc2 = SettingsEncryptionService("wrong-password")
+        enc1 = SettingsEncryptionService("correct-password", "test-salt")
+        enc2 = SettingsEncryptionService("wrong-password", "test-salt")
         original = "secret-data"
         encrypted = enc1.encrypt(original)
         with pytest.raises(InvalidToken):
@@ -95,7 +95,7 @@ class TestSettingsEncryption:
         When: checking various values with is_encrypted_value,
         Then: encrypted values return True, plain text returns False.
         """
-        encryption = SettingsEncryptionService("test-password")
+        encryption = SettingsEncryptionService("test-password", "test-salt")
         encrypted = encryption.encrypt("test-value")
         assert encryption.is_encrypted_value(encrypted)
         assert not encryption.is_encrypted_value("plain-text")
@@ -136,7 +136,7 @@ class TestSettingsEncryption:
         When: encrypting with one and decrypting with other,
         Then: roundtrip succeeds.
         """
-        salt = b"custom_salt_1234"
+        salt = "custom_salt_1234"
         enc1 = SettingsEncryptionService("password", salt)
         enc2 = SettingsEncryptionService("password", salt)
         original = "test-value"
@@ -212,7 +212,7 @@ class TestGlobalEncryption:
         When: calling initialize_global_encryption,
         Then: returns service and get_global_encryption returns same instance.
         """
-        encryption = initialize_global_encryption("test-password")
+        encryption = initialize_global_encryption("test-password", "test-salt")
         assert encryption is not None
         assert isinstance(encryption, SettingsEncryptionService)
         global_enc = get_global_encryption()
@@ -226,7 +226,7 @@ class TestGlobalEncryption:
         When: encrypting sensitive and non-sensitive keys,
         Then: sensitive keys are encrypted, non-sensitive are unchanged.
         """
-        initialize_global_encryption("test-password")
+        initialize_global_encryption("test-password", "test-salt")
         value, is_encrypted = encrypt_if_sensitive("api_secret", "secret-value")
         assert is_encrypted is True
         assert value != "secret-value"
@@ -253,7 +253,7 @@ class TestGlobalEncryption:
         When: calling decrypt_if_encrypted with encrypted flag,
         Then: returns original value; plain value unchanged.
         """
-        encryption = initialize_global_encryption("test-password")
+        encryption = initialize_global_encryption("test-password", "test-salt")
         original = "secret-data"
         encrypted = encryption.encrypt(original)
         decrypted = decrypt_if_encrypted(encrypted, True)
@@ -284,7 +284,7 @@ class TestGlobalEncryption:
         When: decrypting empty string with either flag,
         Then: returns empty string.
         """
-        initialize_global_encryption("test-password")
+        initialize_global_encryption("test-password", "test-salt")
         result = decrypt_if_encrypted("", True)
         assert result == ""
         result = decrypt_if_encrypted("", False)
@@ -297,7 +297,7 @@ class TestGlobalEncryption:
         When: calling decrypt_if_encrypted with encrypted flag,
         Then: raises RuntimeError about decryption failure.
         """
-        initialize_global_encryption("test-password")
+        initialize_global_encryption("test-password", "test-salt")
         invalid_data = "not-valid-encrypted-data"
         with pytest.raises(RuntimeError, match="Failed to decrypt encrypted setting"):
             decrypt_if_encrypted(invalid_data, True)
@@ -313,7 +313,7 @@ class TestForceEncryptIfCleartext:
         When: calling force_encrypt_if_cleartext,
         Then: value is encrypted and starts with Fernet prefix.
         """
-        initialize_global_encryption("test-password")
+        initialize_global_encryption("test-password", "test-salt")
         cleartext = "my-secret-api-key-12345"
         encrypted_value, is_encrypted = force_encrypt_if_cleartext("polygon_api_key", cleartext)
         assert is_encrypted is True
@@ -327,7 +327,7 @@ class TestForceEncryptIfCleartext:
         When: calling force_encrypt_if_cleartext,
         Then: value unchanged (no double encryption), decrypts to original.
         """
-        initialize_global_encryption("test-password")
+        initialize_global_encryption("test-password", "test-salt")
         encryption = get_global_encryption()
         assert encryption is not None
         original = "my-secret-key"
@@ -347,7 +347,7 @@ class TestForceEncryptIfCleartext:
         When: calling force_encrypt_if_cleartext,
         Then: value unchanged and is_encrypted is False.
         """
-        initialize_global_encryption("test-password")
+        initialize_global_encryption("test-password", "test-salt")
         value = "some-regular-value"
         result_value, is_encrypted = force_encrypt_if_cleartext("regular_setting", value)
         assert is_encrypted is False

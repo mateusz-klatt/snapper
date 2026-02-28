@@ -16,7 +16,7 @@ Example:
     ...     encrypt_if_sensitive,
     ...     decrypt_if_encrypted,
     ... )
-    >>> initialize_global_encryption("my-master-password")
+    >>> initialize_global_encryption("my-master-password", "my-salt")
     >>> value, encrypted = encrypt_if_sensitive("api_key", "secret123")
     >>> original = decrypt_if_encrypted(value, encrypted)
 """
@@ -53,35 +53,31 @@ class SettingsEncryptionService:
 
     Attributes:
         master_password: The password bytes used for key derivation.
-        salt: Salt bytes for PBKDF2 (default: ``snapper_settings_salt_v1``).
+        salt: Salt bytes for PBKDF2.
 
     Example:
-        >>> service = SettingsEncryptionService("my-password")
+        >>> service = SettingsEncryptionService("my-password", "my-salt")
         >>> encrypted = service.encrypt("api-key-value")
         >>> decrypted = service.decrypt(encrypted)
     """
 
     _instance: "SettingsEncryptionService | None" = None
-    _init_params: tuple[bytes, bytes] | None = None
+    _init_params: tuple[str, str] | None = None
     _initialized: bool = False
 
-    def __new__(
-        cls, master_password: str, salt: bytes | None = None
-    ) -> "SettingsEncryptionService":
+    def __new__(cls, master_password: str, salt: str) -> "SettingsEncryptionService":
         """Create or return the singleton instance.
 
         Returns existing instance only if called with the same parameters.
 
         Args:
             master_password: Master password for key derivation.
-            salt: Optional salt bytes for PBKDF2.
+            salt: Salt for PBKDF2.
 
         Returns:
             The singleton SettingsEncryptionService instance.
         """
-        salt_bytes = salt or b"snapper_settings_salt_v1"
-        password_bytes = master_password.encode()
-        current_params = (password_bytes, salt_bytes)
+        current_params = (master_password, salt)
         if cls._instance is not None and cls._init_params == current_params:
             return cls._instance
         instance = super().__new__(cls)
@@ -89,18 +85,18 @@ class SettingsEncryptionService:
         cls._init_params = current_params
         return instance
 
-    def __init__(self, master_password: str, salt: bytes | None = None) -> None:
+    def __init__(self, master_password: str, salt: str) -> None:
         """Initialize the encryption service.
 
         Args:
             master_password: Master password for key derivation.
-            salt: Optional salt bytes for PBKDF2.
+            salt: Salt for PBKDF2.
         """
         if self._initialized:
             return
         self._initialized = True
         self.master_password = master_password.encode()
-        self.salt = salt or b"snapper_settings_salt_v1"
+        self.salt = salt.encode()
         self._fernet = self._create_fernet()
 
     def _create_fernet(self) -> Fernet:
@@ -237,26 +233,22 @@ def get_encryption_service(
     if not master_password:
         logger.warning("No master password provided - encryption disabled")
         return None
-    salt_bytes = salt.encode() if salt else None
-    return SettingsEncryptionService(master_password, salt_bytes)
+    return SettingsEncryptionService(master_password, salt)
 
 
-def initialize_global_encryption(
-    master_password: str, salt: str | None = None
-) -> SettingsEncryptionService:
+def initialize_global_encryption(master_password: str, salt: str) -> SettingsEncryptionService:
     """Initialize the global encryption singleton.
 
     Must be called before using encrypt_if_sensitive or decrypt_if_encrypted.
 
     Args:
         master_password: Master password for key derivation.
-        salt: Optional salt string for PBKDF2.
+        salt: Salt for PBKDF2.
 
     Returns:
         The initialized SettingsEncryptionService instance.
     """
-    salt_bytes = salt.encode() if salt else None
-    encryption = SettingsEncryptionService(master_password, salt_bytes)
+    encryption = SettingsEncryptionService(master_password, salt)
     logger.info("AppSettings encryption initialized")
     return encryption
 

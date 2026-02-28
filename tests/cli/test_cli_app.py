@@ -3147,7 +3147,7 @@ def test_rotate_encryption_dry_run(
     When: settings-rotate-encryption --dry-run is invoked,
     Then: Shows settings to rotate without committing.
     """
-    old_encryption = SettingsEncryptionService("old-password", b"old-salt")
+    old_encryption = SettingsEncryptionService("old-password", "old-salt")
     encrypted_value = old_encryption.encrypt("secret-value")
     mock_setting.value = encrypted_value
     execute_result = MagicMock()
@@ -3189,7 +3189,7 @@ def test_rotate_encryption_success(
     When: settings-rotate-encryption is invoked,
     Then: Settings are re-encrypted and committed.
     """
-    old_encryption = SettingsEncryptionService("old-password", b"old-salt")
+    old_encryption = SettingsEncryptionService("old-password", "old-salt")
     encrypted_value = old_encryption.encrypt("secret-value")
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
@@ -3230,7 +3230,7 @@ def test_rotate_encryption_with_new_salt(
     When: settings-rotate-encryption --new-salt is invoked,
     Then: Shows new salt in output.
     """
-    old_encryption = SettingsEncryptionService("old-password", b"old-salt")
+    old_encryption = SettingsEncryptionService("old-password", "old-salt")
     encrypted_value = old_encryption.encrypt("secret-value")
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
@@ -3347,7 +3347,7 @@ def test_rotate_encryption_with_custom_old_password(
     When: settings-rotate-encryption --old-password is invoked,
     Then: Decrypts with custom password and rotates.
     """
-    old_encryption = SettingsEncryptionService("custom-old-password", b"custom-old-salt")
+    old_encryption = SettingsEncryptionService("custom-old-password", "custom-old-salt")
     encrypted_value = old_encryption.encrypt("secret-value")
     mock_setting.value = encrypted_value
     result_mock = MagicMock()

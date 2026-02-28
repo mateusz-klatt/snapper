@@ -801,11 +801,9 @@ async def _run_encryption_rotation(
         typer.echo(f"New salt: {new_salt or 'Using same as current'}")
         if dry_run:
             typer.echo("DRY RUN MODE - No changes will be made")
-        old_encryption = SettingsEncryptionService(current_password, current_salt.encode())
+        old_encryption = SettingsEncryptionService(current_password, current_salt)
         new_encryption_salt = new_salt or current_salt
-        new_encryption = SettingsEncryptionService(
-            new_master_password, new_encryption_salt.encode()
-        )
+        new_encryption = SettingsEncryptionService(new_master_password, new_encryption_salt)
         _verify_encryption_services(old_encryption, new_encryption)
         typer.echo("Encryption parameters verified")
         poolclass = NullPool if "sqlite" in bootstrap.db_url else None

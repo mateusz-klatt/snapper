@@ -124,7 +124,7 @@ class SettingsService:
         self._loaded = False
         self._zmq_context: zmq.asyncio.Context | None = None
         self._publisher: ValidatedPublisher | None = None
-        if master_password:
+        if master_password and encryption_salt:
             initialize_global_encryption(master_password, encryption_salt)
             logger.info("Encryption enabled for sensitive settings")
         else:

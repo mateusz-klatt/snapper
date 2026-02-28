@@ -185,7 +185,7 @@ class TestSettingsService:
     def test_init_service_with_encryption(self) -> None:
         """Verify SettingsService initializes with encryption enabled.
 
-        Given: Database URL, ZMQ URL, and master password,
+        Given: Database URL, ZMQ URL, master password, and encryption salt,
         When: SettingsService created,
         Then: Properties set correctly.
         """
@@ -193,6 +193,7 @@ class TestSettingsService:
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
             master_password="test-password",
+            encryption_salt="test-salt",
         )
         assert service.db_url == "sqlite+aiosqlite:///:memory:"
         assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
@@ -357,6 +358,7 @@ class TestSettingsService:
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
             master_password="super-secret",
+            encryption_salt="test-salt",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -575,7 +577,7 @@ class TestSettingsEncryption:
         When: Value encrypted then decrypted,
         Then: Original value recovered.
         """
-        encryption = SettingsEncryptionService("test-password")
+        encryption = SettingsEncryptionService("test-password", "test-salt")
         original = "super-secret-value"
         encrypted = encryption.encrypt(original)
         decrypted = encryption.decrypt(encrypted)
@@ -1190,7 +1192,7 @@ class TestEncryptionExceptionHandling:
         When: encrypt called and fernet raises ValueError,
         Then: ValueError propagated.
         """
-        encryption = SettingsEncryptionService("test-password")
+        encryption = SettingsEncryptionService("test-password", "test-salt")
         with patch.object(encryption, "_fernet") as mock_fernet:
             mock_fernet.encrypt.side_effect = ValueError("Encryption failed")
             with pytest.raises(ValueError, match="Encryption failed"):
@@ -1221,7 +1223,7 @@ class TestEncryptionExceptionHandling:
         Then: Value passed through, is_encrypted=True.
         """
         clear_global_encryption()
-        encryption = initialize_global_encryption("test-password")
+        encryption = initialize_global_encryption("test-password", "test-salt")
         encrypted_value = encryption.encrypt("my-secret")
         result_value, is_encrypted = encrypt_if_sensitive("api_secret", encrypted_value)
         assert is_encrypted is True
