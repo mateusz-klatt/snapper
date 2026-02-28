@@ -257,19 +257,19 @@ run-backtest:
 	$(PYRUN) snapper backtest --strategy macd_crossover --from 2024-01-01 --to 2024-12-31
 
 run-server:
-	$(PYRUN) snapper server
+	$(PYRUN) snapper server --host 0.0.0.0
 
 dev-backend:
 	$(info Starting backend with hot reload...)
 	$(info Backend API: http://localhost:8000/api)
 	$(info WebSocket: ws://localhost:8000/api/ws)
-	@bash -c 'script -q -e -c "$(PYRUN) snapper server --reload" /dev/null 2>&1 | tee >(sed "s/\x1b\[[0-9;]*m//g" > data/snapper.log)'
+	@bash -c 'script -q -e -c "$(PYRUN) snapper server --host 0.0.0.0 --reload" /dev/null 2>&1 | tee >(sed "s/\x1b\[[0-9;]*m//g" > data/snapper.log)'
 
 dev-frontend:
 	$(info Starting frontend dev server...)
 	$(info Frontend URL: http://localhost:3000/)
 	$(info API proxy: http://localhost:3000/api -> http://localhost:8000/api)
-	@cd $(UI_DIR) && pnpm dev
+	@cd $(UI_DIR) && pnpm dev --host 0.0.0.0
 
 run-static:
 	$(PYRUN) snapper update-kraken-symbols --force
