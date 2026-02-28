@@ -231,3 +231,17 @@ reportUnknownMemberType = false  # Dynamic typing from external libraries
 init_forbid_extra = true
 init_typed = true
 warn_required_dynamic_aliases = true
+
+[tool.coverage.run]
+source = ["src/snapper", "proprietary/src", "scripts"]
+branch = true
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+skip_covered = true
+show_missing = true
+fail_under = 100
+exclude_lines = [
+    "if __name__ == .__main__.:",
+    "^\\s*\\.\\.\\.\\s*$",
+]
