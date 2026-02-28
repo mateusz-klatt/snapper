@@ -1340,7 +1340,7 @@ class TestTradeCommands:
 
 
 class TestDatabaseCommands:
-    """Tests for database CLI commands (init, upgrade, downgrade)."""
+    """Tests for database CLI commands (init, upgrade, downgrade, seed)."""
 
     def test_db_init_command(self, cli_runner: CliRunner) -> None:
         """Test db-init runs Alembic upgrade.
@@ -1386,6 +1386,50 @@ class TestDatabaseCommands:
                 result = cli_runner.invoke(app, ["db-downgrade", "--revision", "-1"])
                 assert result.exit_code == 0
                 mock_downgrade.assert_called_once()
+
+    def test_db_seed_default_profile(self, cli_runner: CliRunner) -> None:
+        """Test db-seed with default dev profile.
+
+        Given: Mocked run_seed returning counts,
+        When: db-seed command is invoked without arguments,
+        Then: run_seed is called with 'dev' profile.
+        """
+        with patch("snapper.cli.app.run_seed", return_value=(3, 1)) as mock_run:
+            result = cli_runner.invoke(app, ["db-seed"])
+            assert result.exit_code == 0
+            mock_run.assert_called_once_with("dev")
+            assert "3 users" in result.stdout
+            assert "1 settings" in result.stdout
+
+    def test_db_seed_custom_profile(self, cli_runner: CliRunner) -> None:
+        """Test db-seed with custom profile.
+
+        Given: Mocked run_seed,
+        When: db-seed --profile prod is invoked,
+        Then: run_seed is called with 'prod' profile.
+        """
+        with patch("snapper.cli.app.run_seed", return_value=(1, 7)) as mock_run:
+            result = cli_runner.invoke(app, ["db-seed", "--profile", "prod"])
+            assert result.exit_code == 0
+            mock_run.assert_called_once_with("prod")
+            assert "1 users" in result.stdout
+            assert "7 settings" in result.stdout
+            assert "prod" in result.stdout
+
+    def test_db_seed_missing_profile_error(self, cli_runner: CliRunner) -> None:
+        """Test db-seed with missing profile shows error.
+
+        Given: run_seed raises FileNotFoundError,
+        When: db-seed --profile nonexistent is invoked,
+        Then: error message is displayed and exit code is 1.
+        """
+        with patch(
+            "snapper.cli.app.run_seed",
+            side_effect=FileNotFoundError("Seed profile 'nonexistent' not found"),
+        ):
+            result = cli_runner.invoke(app, ["db-seed", "--profile", "nonexistent"])
+            assert result.exit_code == 1
+            assert "nonexistent" in result.stdout
 
 
 class TestServiceCommands:

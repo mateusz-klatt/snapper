@@ -1,0 +1,275 @@
+"""Seed data loader for environment-specific database seeding.
+
+Loads seed profiles from TOML files using a three-tier lookup:
+``data/seed/{profile}.toml`` -> ``proprietary/data/seed/{profile}.toml``
+-> ``src/snapper/data/seed/{profile}.toml``.
+
+Provides idempotent semantics so ``db-seed`` can be run repeatedly
+without duplicating data.  Users are skipped entirely when any account
+already exists; settings use INSERT OR IGNORE to preserve manually
+configured values.
+
+Example:
+    >>> from snapper.data.seed.loader import run_seed
+    >>> users, settings = run_seed("dev")
+"""
+
+import tomllib
+from dataclasses import dataclass
+from dataclasses import field
+from datetime import UTC
+from datetime import datetime
+from pathlib import Path
+
+import bcrypt
+from loguru import logger
+from sqlalchemy import create_engine
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.pool import NullPool
+
+from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.infrastructure.security.encryption import SettingsEncryptionService
+from snapper.infrastructure.security.encryption import get_encryption_service
+
+
+@dataclass
+class SeedUser:
+    """Seed data for a user account.
+
+    Attributes:
+        username: Login username (also used as primary key id).
+        email: User email address.
+        password: Plaintext password (will be bcrypt-hashed before insert).
+        role: User role (admin, operator, viewer).
+    """
+
+    username: str
+    email: str
+    password: str
+    role: str
+
+
+@dataclass
+class SeedSetting:
+    """Seed data for an application setting.
+
+    Attributes:
+        key: Setting key name.
+        value: Setting value (sensitive values encrypted before insert).
+        category: Setting category (api, server, etc.).
+        description: Human-readable description.
+    """
+
+    key: str
+    value: str
+    category: str
+    description: str
+
+
+@dataclass
+class SeedProfile:
+    """Complete seed profile parsed from TOML.
+
+    Attributes:
+        users: List of user seed entries.
+        settings: List of setting seed entries.
+    """
+
+    users: list[SeedUser] = field(default_factory=list)
+    settings: list[SeedSetting] = field(default_factory=list)
+
+
+def _project_root() -> Path:
+    """Return the project root directory.
+
+    Walks up from this file (src/snapper/data/seed/loader.py) four levels
+    to reach the project root.
+
+    Returns:
+        Absolute path to the project root.
+    """
+    return Path(__file__).resolve().parent.parent.parent.parent.parent
+
+
+def resolve_seed_path(profile: str) -> Path:
+    """Resolve the seed TOML file path using three-tier lookup.
+
+    Lookup order:
+        1. ``{project_root}/data/seed/{profile}.toml`` (deployment override)
+        2. ``{project_root}/proprietary/data/seed/{profile}.toml``
+        3. ``{project_root}/src/snapper/data/seed/{profile}.toml``
+
+    Args:
+        profile: Seed profile name (e.g. "dev", "prod").
+
+    Returns:
+        Path to the resolved TOML file.
+
+    Raises:
+        FileNotFoundError: If no seed file found in any location.
+    """
+    root = _project_root()
+    candidates = [
+        root / "data" / "seed" / f"{profile}.toml",
+        root / "proprietary" / "data" / "seed" / f"{profile}.toml",
+        root / "src" / "snapper" / "data" / "seed" / f"{profile}.toml",
+    ]
+    for path in candidates:
+        if path.exists():
+            logger.info(f"Seed profile resolved: {path}")
+            return path
+    searched = ", ".join(str(p) for p in candidates)
+    raise FileNotFoundError(f"Seed profile '{profile}' not found. Searched: {searched}")
+
+
+def load_seed_profile(profile: str) -> SeedProfile:
+    """Load and parse a seed profile from TOML.
+
+    Args:
+        profile: Seed profile name.
+
+    Returns:
+        Parsed SeedProfile with users and settings.
+    """
+    path = resolve_seed_path(profile)
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    users = [SeedUser(**entry) for entry in data.get("users", [])]
+    settings = [SeedSetting(**entry) for entry in data.get("settings", [])]
+    return SeedProfile(users=users, settings=settings)
+
+
+def _hash_password(password: str) -> str:
+    """Hash a plaintext password using bcrypt.
+
+    Args:
+        password: Plaintext password string.
+
+    Returns:
+        Bcrypt hash string suitable for database storage.
+    """
+    hashed: bytes = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+    return hashed.decode()
+
+
+def seed_users(conn: Connection, users: list[SeedUser]) -> int:
+    """Seed user accounts into the database.
+
+    If any user already exists in the database the entire seed is
+    skipped.  This prevents mixing accounts from different profiles
+    (e.g. an accidental ``migrate-dev`` on a production database).
+    Passwords are bcrypt-hashed before insertion.
+
+    Args:
+        conn: Active SQLAlchemy connection.
+        users: List of user seed entries.
+
+    Returns:
+        Number of users inserted (0 when table is non-empty or list is empty).
+    """
+    if not users:
+        return 0
+    existing = conn.execute(text("SELECT COUNT(*) FROM users")).scalar() or 0
+    if existing > 0:
+        logger.info(f"Users table has {existing} rows, skipping user seed")
+        return 0
+    now = datetime.now(tz=UTC)
+    for user in users:
+        password_hash = _hash_password(user.password)
+        conn.execute(
+            text(
+                "INSERT INTO users (id, username, email, password_hash, role, is_active, created_at)"
+                " VALUES (:id, :username, :email, :password_hash, :role, 1, :created_at)"
+            ),
+            {
+                "id": user.username,
+                "username": user.username,
+                "email": user.email,
+                "password_hash": password_hash,
+                "role": user.role,
+                "created_at": now,
+            },
+        )
+    logger.info(f"Seeded {len(users)} users")
+    return len(users)
+
+
+def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
+    """Seed application settings into the database.
+
+    Sensitive settings (detected by key pattern) are encrypted
+    via ``get_encryption_service()`` before insertion.
+    Uses INSERT OR IGNORE so manually configured values are never
+    overwritten by a subsequent seed run.
+
+    Args:
+        conn: Active SQLAlchemy connection.
+        settings: List of setting seed entries.
+
+    Returns:
+        Number of new settings inserted (skips existing keys).
+    """
+    encryption = get_encryption_service()
+    now = datetime.now(tz=UTC)
+    inserted = 0
+    for setting in settings:
+        stored_value = setting.value
+        is_encrypted = 0
+        if SettingsEncryptionService.is_sensitive_setting(setting.key):
+            stored_value = encryption.encrypt(setting.value)
+            is_encrypted = 1
+        result = conn.execute(
+            text(
+                "INSERT INTO settings (key, value, category, description, is_encrypted, updated_at)"
+                " VALUES (:key, :value, :category, :description, :is_encrypted, :updated_at)"
+                " ON CONFLICT(key) DO NOTHING"
+            ),
+            {
+                "key": setting.key,
+                "value": stored_value,
+                "category": setting.category,
+                "description": setting.description,
+                "is_encrypted": is_encrypted,
+                "updated_at": now,
+            },
+        )
+        inserted += result.rowcount
+    logger.info(f"Seeded {inserted} new settings ({len(settings) - inserted} already existed)")
+    return inserted
+
+
+def _sync_db_url(db_url: str) -> str:
+    """Convert an async database URL to sync for direct engine use.
+
+    Args:
+        db_url: SQLAlchemy database URL (possibly async).
+
+    Returns:
+        Synchronous database URL.
+    """
+    if "aiosqlite" in db_url:
+        return db_url.replace("sqlite+aiosqlite://", "sqlite://")
+    return db_url
+
+
+def run_seed(profile: str) -> tuple[int, int]:
+    """Load a seed profile and apply it to the database.
+
+    Creates a synchronous SQLAlchemy engine, loads the TOML profile,
+    and seeds users and settings in a single transaction.
+
+    Args:
+        profile: Seed profile name (e.g. "dev", "prod").
+
+    Returns:
+        Tuple of (users_count, settings_count).
+    """
+    seed_data = load_seed_profile(profile)
+    db_url = _sync_db_url(BootstrapSettingsLoader().db_url)
+    engine = create_engine(db_url, poolclass=NullPool)
+    with engine.connect() as conn:
+        users_count = seed_users(conn, seed_data.users)
+        settings_count = seed_settings(conn, seed_data.settings)
+        conn.commit()
+    engine.dispose()
+    return users_count, settings_count

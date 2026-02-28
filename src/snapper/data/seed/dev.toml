@@ -1,0 +1,23 @@
+[[users]]
+username = "admin"
+email = "admin@snapper.local"
+password = "AdminSnapper2026!"
+role = "admin"
+
+[[users]]
+username = "operator"
+email = "operator@snapper.local"
+password = "OpSnapper2026!"
+role = "operator"
+
+[[users]]
+username = "viewer"
+email = "viewer@snapper.local"
+password = "ViewSnapper2026!"
+role = "viewer"
+
+[[settings]]
+key = "ui_origin"
+value = "http://localhost:3000,http://localhost:8000"
+category = "server"
+description = "Allowed UI origins for WebSocket CORS (comma-separated)"

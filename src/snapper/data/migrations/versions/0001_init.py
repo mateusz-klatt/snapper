@@ -2,14 +2,13 @@
 
 Creates all core tables for the Snapper trading system including
 instruments, candles, trades, orders, users, and market snapshots.
-Also seeds demo users and symbol catalog with aliases.
+Seeds symbol catalog with aliases and exchange capabilities.
 """
 
 from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
 
-import bcrypt
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
@@ -22,29 +21,6 @@ revision: str = "0001"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
-DEMO_USERS = [
-    {
-        "id": "admin",
-        "username": "admin",
-        "email": "admin@snapper.local",
-        "password": "AdminSnapper2026!",
-        "role": "admin",
-    },
-    {
-        "id": "operator",
-        "username": "operator",
-        "email": "operator@snapper.local",
-        "password": "OpSnapper2026!",
-        "role": "operator",
-    },
-    {
-        "id": "viewer",
-        "username": "viewer",
-        "email": "viewer@snapper.local",
-        "password": "ViewSnapper2026!",
-        "role": "viewer",
-    },
-]
 SYMBOL_CATALOG = [
     ("BTC-USD", "BTC", "USD", "crypto"),
     ("BTC-EUR", "BTC", "EUR", "crypto"),
@@ -117,18 +93,13 @@ for _alias in SYMBOL_ALIASES:
         SYMBOL_CAPABILITIES.append((_alias[0], _alias[1], _can_md, _can_trade))
 
 
-def _hash_password(password: str) -> str:
-    hashed: bytes = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
-    return hashed.decode()
-
-
 def upgrade() -> None:
-    """Create initial database schema and seed data.
+    """Create initial database schema and seed reference data.
 
     Creates all tables for instruments, candles, trades, orders, executions,
     positions, signal events, users, settings, symbol catalog, symbol aliases,
     process runs, instrument specs, and market snapshots.
-    Seeds demo users, symbol catalog entries, and symbol aliases.
+    Seeds symbol catalog entries, aliases, and exchange capabilities.
     """
     op.create_table(
         "symbol_catalog",
@@ -450,23 +421,6 @@ def upgrade() -> None:
         ["exchange", "symbol", "updated_at"],
     )
     conn = op.get_bind()
-    demo_created_at = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
-    for user in DEMO_USERS:
-        password_hash = _hash_password(user["password"])
-        conn.execute(
-            text("""
-                INSERT INTO users (id, username, email, password_hash, role, is_active, created_at)
-                VALUES (:id, :username, :email, :password_hash, :role, 1, :created_at)
-                """),
-            {
-                "id": user["id"],
-                "username": user["username"],
-                "email": user["email"],
-                "password_hash": password_hash,
-                "role": user["role"],
-                "created_at": demo_created_at,
-            },
-        )
     now = datetime.now(tz=UTC)
     for entry in SYMBOL_CATALOG:
         conn.execute(

@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build docker-migrate docker-push docker-run docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate seed migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build docker-migrate docker-seed docker-migrate-dev docker-migrate-prod docker-push docker-run docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -42,6 +42,9 @@ help:
 	$(info run-polygon-aggregates-all Backfill Polygon OHLCV [all mapped symbols])
 	$(info run-polygon-grouped        Backfill Polygon grouped daily [CLI])
 	$(info migrate                    Run database migrations)
+	$(info seed                       Seed database with dev profile)
+	$(info migrate-dev                Run migrations + seed dev data)
+	$(info migrate-prod               Run migrations + seed prod data)
 	$(info )
 	$(info Development [hot reload]:)
 	$(info dev-backend  Start backend with auto-reload)
@@ -89,12 +92,15 @@ help:
 	$(info ios-ipa       Build IPA [archive + export])
 	$(info )
 	$(info Docker:)
-	$(info docker-build   Build Docker image)
-	$(info docker-migrate Run database migrations in Docker)
-	$(info docker-push    Push Docker image)
-	$(info docker-run     Run Docker container [background])
-	$(info docker-stop    Stop Docker container)
-	$(info server-check   Health check server [cross-platform])
+	$(info docker-build        Build Docker image)
+	$(info docker-migrate      Run database migrations in Docker)
+	$(info docker-seed         Seed database with dev profile in Docker)
+	$(info docker-migrate-dev  Run migrations + seed dev data in Docker)
+	$(info docker-migrate-prod Run migrations + seed prod data in Docker)
+	$(info docker-push         Push Docker image)
+	$(info docker-run          Run Docker container [background])
+	$(info docker-stop         Stop Docker container)
+	$(info server-check        Health check server [cross-platform])
 	$(info )
 	$(info Docs:)
 	$(info docs-pdf Export README + docs/*.md into snapper.pdf)
@@ -311,6 +317,14 @@ zmq-logger:
 migrate:
 	$(PYRUN) snapper db-init
 
+seed:
+	$(PYRUN) snapper db-seed --profile dev
+
+migrate-dev: migrate seed
+
+migrate-prod: migrate
+	$(PYRUN) snapper db-seed --profile prod
+
 ui-setup:
 	@cd $(UI_DIR) && (pnpm --version 2>&1 || (corepack enable && corepack prepare pnpm@latest --activate)) && pnpm install --frozen-lockfile
 
@@ -452,6 +466,14 @@ docker-build:
 
 docker-migrate:
 	docker run --rm -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-init
+
+docker-seed:
+	docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-seed --profile dev
+
+docker-migrate-dev: docker-migrate docker-seed
+
+docker-migrate-prod: docker-migrate
+	docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-seed --profile prod
 
 docker-push:
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)

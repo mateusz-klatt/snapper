@@ -69,6 +69,7 @@ from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.data.models import Setting
 from snapper.data.models import User
+from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
 from snapper.infrastructure.market_data.zonda import run_zonda_snapshot_update
@@ -255,6 +256,27 @@ def db_downgrade(revision: str = typer.Option("-1", help="Revision to downgrade 
     cfg = _alembic_cfg(s.db_url)
     command.downgrade(cfg, revision)
     typer.echo(f"DB downgraded by {revision}")
+
+
+@app.command(name="db-seed")
+def db_seed(
+    profile: str = typer.Option("dev", help="Seed profile name (e.g. dev, prod)"),
+) -> None:
+    """Seed the database with environment-specific data from TOML profiles.
+
+    Loads users and settings from a TOML seed file. Uses three-tier lookup:
+    ``data/seed/{profile}.toml`` -> ``proprietary/data/seed/{profile}.toml``
+    -> ``src/snapper/data/seed/{profile}.toml``.
+
+    Args:
+        profile: Seed profile name.
+    """
+    try:
+        users_count, settings_count = run_seed(profile)
+        typer.echo(f"Seeded {users_count} users and {settings_count} settings (profile: {profile})")
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}")
+        raise typer.Exit(code=1) from e
 
 
 @app.command()

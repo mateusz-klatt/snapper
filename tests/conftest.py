@@ -61,6 +61,7 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import dispose_repositories
+from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -298,6 +299,7 @@ def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[No
     os.environ["DB_URL"] = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     settings.get_bootstrap_settings.cache_clear()
     settings.get_settings.cache_clear()
+    run_seed("dev")
     try:
         yield
     finally:
