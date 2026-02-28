@@ -76,15 +76,6 @@ class AppSettings:
         return self._bootstrap.db_url
 
     @property
-    def master_password(self) -> str:
-        """Return master password for encryption from bootstrap settings.
-
-        Returns:
-            Master password string for encryption operations.
-        """
-        return self._bootstrap.master_password
-
-    @property
     def server_host(self) -> str:
         """Return server host address from bootstrap settings.
 

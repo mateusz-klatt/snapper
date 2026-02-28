@@ -243,7 +243,6 @@ class TestSettingsRoutes:
         mock_settings = MagicMock()
         mock_settings.db_url = "sqlite:///:memory:"
         mock_settings.zmq_broker_xpub = "tcp://localhost:5555"
-        mock_settings.master_password = None
         mock_settings_service = AsyncMock()
         mock_repository = MockRepository()
         mock_session = MockSession()
@@ -294,7 +293,6 @@ class TestSettingsRoutes:
         mock_settings = MagicMock()
         mock_settings.db_url = "sqlite:///:memory:"
         mock_settings.zmq_broker_xpub = "tcp://localhost:5555"
-        mock_settings.master_password = None
         mock_settings_service = AsyncMock()
         mock_repository = MockRepository()
         mock_session = MockSession()

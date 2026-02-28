@@ -153,7 +153,6 @@ def _build_mock_settings() -> Mock:
     mock_settings = Mock()
     bootstrap = BootstrapSettingsLoader()
     mock_settings.db_url = bootstrap.db_url
-    mock_settings.master_password = bootstrap.master_password
     mock_settings.server_host = bootstrap.server_host
     mock_settings.server_port = bootstrap.server_port
     mock_settings.server_reload = bootstrap.server_reload

@@ -1222,7 +1222,6 @@ class TestFeedPublisherCoverage:
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
         mock_settings.db_url = "sqlite:///test.db"
-        mock_settings.master_password = "test"
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_get_settings.return_value = mock_settings
         mock_settings_service = AsyncMock()
@@ -1281,7 +1280,6 @@ class TestFeedPublisherCoverage:
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
         mock_settings.db_url = "sqlite:///test.db"
-        mock_settings.master_password = "test"
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_get_settings.return_value = mock_settings
         mock_settings_service = AsyncMock()

@@ -26,10 +26,9 @@ from snapper.config.settings import get_settings_with_service
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
-from snapper.infrastructure.security.encryption import clear_global_encryption
+from snapper.infrastructure.security.encryption import clear_encryption
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import get_encryption_service
-from snapper.infrastructure.security.encryption import initialize_global_encryption
 from snapper.messaging.schemas.messages import BarEnvelope
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import list_process_runs
@@ -80,10 +79,10 @@ async def feed_bar_to_strategy(
 def clear_settings_singleton() -> Iterator[None]:
     """Clear singleton instances before and after each test."""
     SettingsService.clear_instance()
-    clear_global_encryption()
+    clear_encryption()
     yield
     SettingsService.clear_instance()
-    clear_global_encryption()
+    clear_encryption()
 
 
 @pytest.fixture
@@ -161,7 +160,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         assert service.db_url == "sqlite+aiosqlite:///:memory:"
         assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
@@ -192,7 +190,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password="test-password",
         )
         assert service.db_url == "sqlite+aiosqlite:///:memory:"
         assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
@@ -207,7 +204,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         result = service.get_setting("test_key", "default")
         assert result == "default"
@@ -222,7 +218,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         result = service.get_setting("test_key")
         assert result is None
@@ -237,7 +232,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         parser = cast(Any, service)._parse_value
         assert parser("true") is True
@@ -262,7 +256,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -295,7 +288,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         publisher = self._StubPublisher()
         cast(Any, service)._publisher = publisher
@@ -321,7 +313,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         await cast(Any, service)._broadcast_change("unused", "value", "system")
 
@@ -336,7 +327,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         publisher = MagicMock()
         publisher.send_multipart = AsyncMock(side_effect=RuntimeError("fail"))
@@ -349,14 +339,13 @@ class TestSettingsService:
     async def test_update_setting_logs_encrypted_value(self) -> None:
         """Verify update_setting logs encrypted value, not plaintext.
 
-        Given: Service with master_password,
+        Given: Service initialized,
         When: update_setting called with sensitive key,
         Then: Logged value is encrypted, not plaintext.
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password="super-secret",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -386,7 +375,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -410,7 +398,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -466,7 +453,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -498,7 +484,6 @@ class TestSettingsService:
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -615,7 +600,6 @@ def test_settings_bootstrap_access() -> None:
     assert s.db_url
     assert s.server_host
     assert s.server_port
-    assert s.master_password
     assert s.zmq_broker_xsub
     assert s.zmq_broker_xpub
 
@@ -665,7 +649,6 @@ async def test_settings_with_service_database_access() -> None:
     service = await get_settings_service(
         bootstrap.db_url,
         bootstrap.zmq_broker_xpub,
-        bootstrap.master_password,
     )
     s = get_settings_with_service(service)
     assert s.instruments
@@ -739,17 +722,16 @@ def test_settings_get_setting_without_service_raises() -> None:
         settings.get_setting("custom_timeout", 99)
 
 
-def test_settings_service_without_master_password() -> None:
-    """Verify SettingsService works without encryption.
+def test_settings_service_basic_creation() -> None:
+    """Verify SettingsService creation sets properties.
 
-    Given: master_password=None,
+    Given: db_url and zmq_broker_xpub,
     When: SettingsService created,
     Then: Properties set correctly.
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     assert service.db_url == "sqlite+aiosqlite:///:memory:"
     assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
@@ -765,14 +747,12 @@ def test_settings_service_skip_reinit_if_already_initialized() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     original_db_url = service.db_url
     SettingsService.__init__(
         service,
         db_url="sqlite+aiosqlite:///:memory:different",
         zmq_broker_xpub="tcp://127.0.0.1:9999",
-        master_password=None,
     )
     assert service.db_url == original_db_url
 
@@ -788,7 +768,6 @@ async def test_update_setting_with_force_encrypt_cleartext_false() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     mock_session = MagicMock()
     mock_result = MagicMock()
@@ -824,7 +803,6 @@ async def test_broadcast_change_when_publisher_is_none() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     service._publisher = None
     await service._broadcast_change("test_key", "test_value", "system", "user1")
@@ -841,7 +819,6 @@ async def test_broadcast_change_when_send_multipart_raises() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     mock_publisher = MagicMock()
     mock_publisher.send_multipart = AsyncMock(side_effect=Exception("ZMQ error"))
@@ -861,7 +838,6 @@ async def test_get_settings_service_with_already_loaded_cache() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     with (
         patch.object(service, "_load_all_settings", new_callable=AsyncMock) as mock_load,
@@ -871,7 +847,6 @@ async def test_get_settings_service_with_already_loaded_cache() -> None:
         result = await get_settings_service(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
-            master_password=None,
         )
         assert result is service
         assert not mock_load.called
@@ -887,7 +862,6 @@ def test_parse_value_for_bool() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     assert service._parse_value("true") is True
     assert service._parse_value("True") is True
@@ -905,7 +879,6 @@ def test_parse_value_for_int() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     assert service._parse_value("123") == 123
     assert service._parse_value("-456") == -456
@@ -922,7 +895,6 @@ def test_parse_value_for_float() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     assert service._parse_value("123.45") == pytest.approx(123.45)
     assert service._parse_value("-67.89") == pytest.approx(-67.89)
@@ -939,7 +911,6 @@ def test_parse_value_for_string() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     assert service._parse_value("hello") == "hello"
     assert service._parse_value("not a number") == "not a number"
@@ -956,7 +927,6 @@ def test_parse_value_for_json_list() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     result = service._parse_value('["a", "b", "c"]')
     assert result == ["a", "b", "c"]
@@ -972,7 +942,6 @@ def test_parse_value_for_json_dict() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     result = service._parse_value('{"key": "value"}')
     assert result == {"key": "value"}
@@ -989,7 +958,6 @@ async def test_shutdown_when_publisher_exists() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     mock_publisher = MagicMock()
     service._publisher = mock_publisher
@@ -1011,7 +979,6 @@ async def test_shutdown_when_publisher_is_none() -> None:
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
-        master_password=None,
     )
     service._publisher = None
     mock_context = MagicMock()
@@ -1193,21 +1160,15 @@ class TestEncryptionExceptionHandling:
             with pytest.raises(ValueError, match="Encryption failed"):
                 encryption.encrypt("test-value")
 
-    def test_get_encryption_service_no_master_password_from_bootstrap(self) -> None:
-        """Verify get_encryption_service returns None without password.
+    def test_get_encryption_service_returns_instance(self) -> None:
+        """Verify get_encryption_service returns SettingsEncryptionService.
 
-        Given: Bootstrap with no master_password,
+        Given: No explicit password provided,
         When: get_encryption_service called,
-        Then: None returned.
+        Then: SettingsEncryptionService returned using bootstrap default.
         """
-        with patch(
-            "snapper.infrastructure.security.encryption.BootstrapSettingsLoader"
-        ) as mock_bootstrap:
-            mock_instance = MagicMock()
-            mock_instance.master_password = None
-            mock_bootstrap.return_value = mock_instance
-            result = get_encryption_service(master_password=None)
-            assert result is None
+        result = get_encryption_service()
+        assert isinstance(result, SettingsEncryptionService)
 
     def test_encrypt_if_sensitive_already_encrypted_value(self) -> None:
         """Verify encrypt_if_sensitive handles already encrypted values.
@@ -1216,8 +1177,7 @@ class TestEncryptionExceptionHandling:
         When: encrypt_if_sensitive called,
         Then: Value passed through, is_encrypted=True.
         """
-        clear_global_encryption()
-        encryption = initialize_global_encryption("test-password")
+        encryption = get_encryption_service()
         encrypted_value = encryption.encrypt("my-secret")
         result_value, is_encrypted = encrypt_if_sensitive("api_secret", encrypted_value)
         assert is_encrypted is True

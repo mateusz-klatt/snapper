@@ -1,20 +1,14 @@
 """Unit tests for settings encryption service."""
 
-import os
-from unittest.mock import MagicMock
-from unittest.mock import patch
-
 import pytest
 from cryptography.fernet import InvalidToken
 
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
-from snapper.infrastructure.security.encryption import clear_global_encryption
+from snapper.infrastructure.security.encryption import clear_encryption
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import force_encrypt_if_cleartext
 from snapper.infrastructure.security.encryption import get_encryption_service
-from snapper.infrastructure.security.encryption import get_global_encryption
-from snapper.infrastructure.security.encryption import initialize_global_encryption
 
 
 class TestSettingsEncryption:
@@ -55,7 +49,7 @@ class TestSettingsEncryption:
         Then: roundtrip preserves all special characters.
         """
         encryption = SettingsEncryptionService("test-password")
-        original = "🔐 Secret with émojis and ü̧nicöde!"
+        original = "\U0001f510 Secret with \u00e9mojis and \u00fc\u0327nic\u00f6de!"
         encrypted = encryption.encrypt(original)
         decrypted = encryption.decrypt(encrypted)
         assert decrypted == original
@@ -130,148 +124,117 @@ class TestSettingsEncryption:
         assert not SettingsEncryptionService.is_sensitive_setting("csrf_token_expire_minutes")
 
 
-class TestGlobalEncryption:
-    """Tests for global encryption service management."""
+class TestGetEncryptionService:
+    """Tests for get_encryption_service and clear_encryption."""
 
-    def test_get_encryption_service_with_password(self) -> None:
-        """Test get_encryption_service with explicit password.
+    def test_get_encryption_service_returns_instance(self) -> None:
+        """Test get_encryption_service returns SettingsEncryptionService.
 
-        Given: explicit password string,
+        Given: bootstrap settings available,
         When: calling get_encryption_service,
         Then: returns SettingsEncryptionService instance.
         """
-        service = get_encryption_service("test-password")
-        assert service is not None
-        assert isinstance(service, SettingsEncryptionService)
-
-    def test_get_encryption_service_no_password(self) -> None:
-        """Test get_encryption_service with no password.
-
-        Given: None as password parameter,
-        When: calling get_encryption_service,
-        Then: returns SettingsEncryptionService instance (fallback).
-        """
-        service = get_encryption_service(None)
-        assert service is not None
-        assert isinstance(service, SettingsEncryptionService)
-
-    @patch.dict(os.environ, {"MASTER_PASSWORD": "env-password"})
-    def test_get_encryption_service_from_env(self) -> None:
-        """Test get_encryption_service from environment variable.
-
-        Given: MASTER_PASSWORD set in environment,
-        When: calling get_encryption_service with no args,
-        Then: returns SettingsEncryptionService using env password.
-        """
         service = get_encryption_service()
-        assert service is not None
         assert isinstance(service, SettingsEncryptionService)
 
-    @patch.dict(os.environ, {}, clear=True)
-    def test_get_encryption_service_no_env_password(self) -> None:
-        """Test get_encryption_service without env password.
+    def test_clear_encryption_resets_singleton(self) -> None:
+        """Test clear_encryption resets the singleton.
 
-        Given: no MASTER_PASSWORD in environment,
-        When: calling get_encryption_service,
-        Then: returns SettingsEncryptionService (default fallback).
+        Given: encryption service initialized,
+        When: calling clear_encryption then get_encryption_service,
+        Then: a new instance is created.
         """
-        service = get_encryption_service()
-        assert service is not None
-        assert isinstance(service, SettingsEncryptionService)
+        first = get_encryption_service()
+        clear_encryption()
+        second = get_encryption_service()
+        assert isinstance(second, SettingsEncryptionService)
+        assert first is not second
 
-    def test_initialize_global_encryption(self) -> None:
-        """Test global encryption initialization.
 
-        Given: test password string,
-        When: calling initialize_global_encryption,
-        Then: returns service and get_global_encryption returns same instance.
+class TestEncryptIfSensitive:
+    """Tests for encrypt_if_sensitive helper."""
+
+    def test_encrypt_sensitive_key(self) -> None:
+        """Test encrypt_if_sensitive encrypts sensitive keys.
+
+        Given: sensitive key with plaintext value,
+        When: calling encrypt_if_sensitive,
+        Then: value is encrypted and is_encrypted is True.
         """
-        encryption = initialize_global_encryption("test-password")
-        assert encryption is not None
-        assert isinstance(encryption, SettingsEncryptionService)
-        global_enc = get_global_encryption()
-        assert global_enc is not None
-        assert global_enc is encryption
-
-    def test_encrypt_if_sensitive_with_global_encryption(self) -> None:
-        """Test encrypt_if_sensitive with global encryption.
-
-        Given: global encryption initialized,
-        When: encrypting sensitive and non-sensitive keys,
-        Then: sensitive keys are encrypted, non-sensitive are unchanged.
-        """
-        initialize_global_encryption("test-password")
         value, is_encrypted = encrypt_if_sensitive("api_secret", "secret-value")
         assert is_encrypted is True
         assert value != "secret-value"
+
+    def test_skip_non_sensitive_key(self) -> None:
+        """Test encrypt_if_sensitive skips non-sensitive keys.
+
+        Given: non-sensitive key,
+        When: calling encrypt_if_sensitive,
+        Then: value unchanged and is_encrypted is False.
+        """
         value, is_encrypted = encrypt_if_sensitive("server_host", "localhost")
         assert is_encrypted is False
         assert value == "localhost"
 
-    def test_encrypt_if_sensitive_no_global_encryption(self) -> None:
-        """Test encrypt_if_sensitive without global encryption.
+    def test_already_encrypted_value(self) -> None:
+        """Test encrypt_if_sensitive skips already encrypted values.
 
-        Given: no global encryption initialized,
+        Given: already encrypted value for sensitive key,
         When: calling encrypt_if_sensitive,
-        Then: value unchanged and is_encrypted is False.
+        Then: value unchanged (no double encryption), is_encrypted is True.
         """
-        value, is_encrypted = encrypt_if_sensitive("api_secret", "secret-value")
-        if get_global_encryption() is None:
-            assert is_encrypted is False
-            assert value == "secret-value"
+        encryption = get_encryption_service()
+        encrypted_value = encryption.encrypt("my-secret")
+        result_value, is_encrypted = encrypt_if_sensitive("api_secret", encrypted_value)
+        assert is_encrypted is True
+        assert result_value == encrypted_value
 
-    def test_decrypt_if_encrypted_with_global_encryption(self) -> None:
-        """Test decrypt_if_encrypted with global encryption.
 
-        Given: global encryption initialized and value encrypted,
-        When: calling decrypt_if_encrypted with encrypted flag,
-        Then: returns original value; plain value unchanged.
+class TestDecryptIfEncrypted:
+    """Tests for decrypt_if_encrypted helper."""
+
+    def test_decrypt_encrypted_value(self) -> None:
+        """Test decrypt_if_encrypted decrypts encrypted value.
+
+        Given: encrypted value,
+        When: calling decrypt_if_encrypted with is_encrypted=True,
+        Then: returns original plaintext.
         """
-        encryption = initialize_global_encryption("test-password")
+        encryption = get_encryption_service()
         original = "secret-data"
         encrypted = encryption.encrypt(original)
         decrypted = decrypt_if_encrypted(encrypted, True)
         assert decrypted == original
-        plain_value = "plain-data"
-        result = decrypt_if_encrypted(plain_value, False)
-        assert result == plain_value
 
-    def test_decrypt_if_encrypted_no_global_encryption(self) -> None:
-        """Test decrypt_if_encrypted without global encryption.
+    def test_pass_through_non_encrypted(self) -> None:
+        """Test decrypt_if_encrypted passes through non-encrypted values.
 
-        Given: global encryption cleared,
-        When: calling decrypt_if_encrypted with encrypted flag,
-        Then: raises RuntimeError for encrypted, returns plain for non-encrypted.
+        Given: plain value,
+        When: calling decrypt_if_encrypted with is_encrypted=False,
+        Then: returns value unchanged.
         """
-        clear_global_encryption()
-        with pytest.raises(
-            RuntimeError, match="Encryption not initialized but encrypted setting found"
-        ):
-            decrypt_if_encrypted("encrypted-data", True)
         result = decrypt_if_encrypted("plain-data", False)
         assert result == "plain-data"
 
-    def test_decrypt_if_encrypted_empty_value(self) -> None:
+    def test_empty_value_returns_empty(self) -> None:
         """Test decrypt_if_encrypted with empty value.
 
-        Given: global encryption initialized,
-        When: decrypting empty string with either flag,
+        Given: empty string,
+        When: decrypting with either flag,
         Then: returns empty string.
         """
-        initialize_global_encryption("test-password")
         result = decrypt_if_encrypted("", True)
         assert result == ""
         result = decrypt_if_encrypted("", False)
         assert result == ""
 
-    def test_decrypt_if_encrypted_invalid_encrypted_data(self) -> None:
+    def test_invalid_encrypted_data_raises(self) -> None:
         """Test decrypt_if_encrypted with invalid encrypted data.
 
-        Given: global encryption initialized and invalid ciphertext,
-        When: calling decrypt_if_encrypted with encrypted flag,
+        Given: invalid ciphertext,
+        When: calling decrypt_if_encrypted with is_encrypted=True,
         Then: raises RuntimeError about decryption failure.
         """
-        initialize_global_encryption("test-password")
         invalid_data = "not-valid-encrypted-data"
         with pytest.raises(RuntimeError, match="Failed to decrypt encrypted setting"):
             decrypt_if_encrypted(invalid_data, True)
@@ -283,11 +246,10 @@ class TestForceEncryptIfCleartext:
     def test_force_encrypt_cleartext_sensitive_value(self) -> None:
         """Test force_encrypt_if_cleartext with cleartext sensitive value.
 
-        Given: global encryption initialized and cleartext sensitive value,
+        Given: cleartext sensitive value,
         When: calling force_encrypt_if_cleartext,
         Then: value is encrypted and starts with Fernet prefix.
         """
-        initialize_global_encryption("test-password")
         cleartext = "my-secret-api-key-12345"
         encrypted_value, is_encrypted = force_encrypt_if_cleartext("polygon_api_key", cleartext)
         assert is_encrypted is True
@@ -297,13 +259,11 @@ class TestForceEncryptIfCleartext:
     def test_force_encrypt_already_encrypted_value(self) -> None:
         """Test force_encrypt_if_cleartext with already encrypted value.
 
-        Given: global encryption initialized and pre-encrypted value,
+        Given: pre-encrypted value,
         When: calling force_encrypt_if_cleartext,
         Then: value unchanged (no double encryption), decrypts to original.
         """
-        initialize_global_encryption("test-password")
-        encryption = get_global_encryption()
-        assert encryption is not None
+        encryption = get_encryption_service()
         original = "my-secret-key"
         encrypted_once = encryption.encrypt(original)
         encrypted_again, is_encrypted = force_encrypt_if_cleartext(
@@ -317,41 +277,11 @@ class TestForceEncryptIfCleartext:
     def test_force_encrypt_non_sensitive_key(self) -> None:
         """Test force_encrypt_if_cleartext with non-sensitive key.
 
-        Given: global encryption initialized and non-sensitive setting,
+        Given: non-sensitive setting,
         When: calling force_encrypt_if_cleartext,
         Then: value unchanged and is_encrypted is False.
         """
-        initialize_global_encryption("test-password")
         value = "some-regular-value"
         result_value, is_encrypted = force_encrypt_if_cleartext("regular_setting", value)
         assert is_encrypted is False
         assert result_value == value
-
-    def test_force_encrypt_without_global_encryption(self) -> None:
-        """Test force_encrypt_if_cleartext without global encryption.
-
-        Given: global encryption cleared,
-        When: calling force_encrypt_if_cleartext for sensitive key,
-        Then: value unchanged and is_encrypted is False.
-        """
-        clear_global_encryption()
-        value = "some-api-key"
-        result_value, is_encrypted = force_encrypt_if_cleartext("polygon_api_key", value)
-        assert is_encrypted is False
-        assert result_value == value
-
-    def test_get_encryption_service_bootstrap_no_password(self) -> None:
-        """Test get_encryption_service with bootstrap loader returning no password.
-
-        Given: mocked BootstrapSettingsLoader with no password,
-        When: calling get_encryption_service(None),
-        Then: returns None.
-        """
-        mock_bootstrap = MagicMock()
-        mock_bootstrap.master_password = None
-        with patch(
-            "snapper.infrastructure.security.encryption.BootstrapSettingsLoader",
-            return_value=mock_bootstrap,
-        ):
-            result = get_encryption_service(None)
-            assert result is None

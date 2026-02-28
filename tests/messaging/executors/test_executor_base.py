@@ -1011,7 +1011,6 @@ class TestExecutorNonWebSocketMode:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -1071,7 +1070,6 @@ class TestOrderHandlerEdgeCases:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -1188,7 +1186,6 @@ class TestExecutionHandler:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -1252,7 +1249,6 @@ class TestExecuteLiveOrderErrors:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
@@ -1320,7 +1316,6 @@ class TestProcessOrder:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
@@ -1957,7 +1952,6 @@ class TestStartWithAsyncContextManager:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     @pytest.mark.asyncio
@@ -2474,7 +2468,6 @@ class TestExecutorCoverage:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
@@ -3387,7 +3380,6 @@ class TestExecutorWebSocketExecutions:
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.db_url = "sqlite:///test.db"
-        mock_settings.master_password = "test_master_password"
         if with_credentials:
             mock_settings.kraken_api_key = "test_api_key"
             mock_settings.kraken_api_secret = "test_api_secret"
@@ -3916,7 +3908,6 @@ class TestCancelReplaceHandlers:
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.paper_initial_cash_usd = 10000.0
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
-        mock_settings.master_password = "test_master_password"
         return mock_settings
 
     @pytest.mark.asyncio

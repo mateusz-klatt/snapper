@@ -1242,22 +1242,16 @@ def test_main_callback_initializes_encryption(monkeypatch: pytest.MonkeyPatch) -
 
     Given: Bootstrap settings with master password,
     When: main_callback is invoked,
-    Then: Global encryption is initialized with credentials.
+    Then: get_encryption_service is called.
     """
-    called: list[str] = []
-
-    class DummyBootstrap:
-        def __init__(self) -> None:
-            self.master_password = "secret"
-
-    monkeypatch.setattr(app_module, "BootstrapSettingsLoader", DummyBootstrap)
+    called: list[bool] = []
     monkeypatch.setattr(
         app_module,
-        "initialize_global_encryption",
-        lambda password: called.append(password),
+        "get_encryption_service",
+        lambda: called.append(True),
     )
     app_module.main_callback()
-    assert called == ["secret"]
+    assert called == [True]
 
 
 def create_mock_settings(**overrides: Any) -> type:
@@ -3362,15 +3356,18 @@ def test_rotate_encryption_verification_failure(
 ) -> None:
     """Test encryption rotation fails on verification.
 
-    Given: Missing master password,
+    Given: Verification raises ValueError,
     When: settings-rotate-encryption is invoked,
     Then: Shows failed to rotate error.
     """
-    mock_bootstrap_settings.master_password = None
     with (
         patch("snapper.cli.app.BootstrapSettingsLoader", return_value=mock_bootstrap_settings),
         patch("snapper.cli.app.create_async_engine", return_value=mock_engine),
         patch("snapper.cli.app.async_sessionmaker", return_value=mock_session_factory),
+        patch(
+            "snapper.cli.app._verify_encryption_services",
+            side_effect=ValueError("Encryption verification failed"),
+        ),
     ):
         result = cli_runner.invoke(
             app,

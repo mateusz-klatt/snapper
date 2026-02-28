@@ -27,7 +27,6 @@ from snapper.data.repository import get_repository
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import force_encrypt_if_cleartext
-from snapper.infrastructure.security.encryption import initialize_global_encryption
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 
@@ -68,14 +67,13 @@ class SettingsService:
     """
 
     _instance: "SettingsService | None" = None
-    _init_params: tuple[str, str, str | None] | None = None
+    _init_params: tuple[str, str] | None = None
     _initialized: bool = False
 
     def __new__(
         cls,
         db_url: str,
         zmq_broker_xpub: str,
-        master_password: str | None = None,
     ) -> "SettingsService":
         """Create or return existing singleton instance.
 
@@ -84,12 +82,11 @@ class SettingsService:
         Args:
             db_url: Database connection URL.
             zmq_broker_xpub: ZMQ broker XPUB address.
-            master_password: Optional encryption master password.
 
         Returns:
             SettingsService singleton instance.
         """
-        current_params = (db_url, zmq_broker_xpub, master_password)
+        current_params = (db_url, zmq_broker_xpub)
         if cls._instance is not None and cls._init_params == current_params:
             return cls._instance
         instance = super().__new__(cls)
@@ -101,7 +98,6 @@ class SettingsService:
         self,
         db_url: str,
         zmq_broker_xpub: str,
-        master_password: str | None = None,
     ) -> None:
         """Initialize the settings service.
 
@@ -110,7 +106,6 @@ class SettingsService:
         Args:
             db_url: Database connection URL.
             zmq_broker_xpub: ZMQ broker XPUB address.
-            master_password: Optional encryption master password.
         """
         if self._initialized:
             return
@@ -120,11 +115,6 @@ class SettingsService:
         self._loaded = False
         self._zmq_context: zmq.asyncio.Context | None = None
         self._publisher: ValidatedPublisher | None = None
-        if master_password:
-            initialize_global_encryption(master_password)
-            logger.info("Encryption enabled for sensitive settings")
-        else:
-            logger.info("No master password provided - sensitive settings will not be encrypted")
         self._initialized = True
 
     async def initialize(self) -> None:
@@ -348,14 +338,12 @@ class SettingsService:
         cls,
         db_url: str | None = None,
         zmq_broker_xpub: str | None = None,
-        master_password: str | None = None,
     ) -> "SettingsService | None":
         """Get existing singleton or create new one.
 
         Args:
             db_url: Database URL (required for new instance).
             zmq_broker_xpub: ZMQ broker address (required for new instance).
-            master_password: Optional encryption password.
 
         Returns:
             SettingsService instance or None if parameters missing.
@@ -363,7 +351,7 @@ class SettingsService:
         if cls._instance is None:
             if db_url is None or zmq_broker_xpub is None:
                 return None
-            cls._instance = SettingsService(db_url, zmq_broker_xpub, master_password)
+            cls._instance = SettingsService(db_url, zmq_broker_xpub)
         return cls._instance
 
     @classmethod
@@ -379,7 +367,6 @@ class SettingsService:
 async def get_settings_service(
     db_url: str,
     zmq_broker_xpub: str,
-    master_password: str | None = None,
 ) -> SettingsService:
     """Get or create an initialized SettingsService.
 
@@ -389,12 +376,11 @@ async def get_settings_service(
     Args:
         db_url: Database connection URL.
         zmq_broker_xpub: ZMQ broker XPUB address.
-        master_password: Optional encryption password.
 
     Returns:
         Initialized SettingsService instance.
     """
-    instance = SettingsService.get_instance(db_url, zmq_broker_xpub, master_password)
+    instance = SettingsService.get_instance(db_url, zmq_broker_xpub)
     assert instance is not None, "get_instance should never return None with required params"
     if not instance._loaded:
         await instance.initialize()

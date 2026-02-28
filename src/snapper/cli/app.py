@@ -73,7 +73,7 @@ from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
 from snapper.infrastructure.market_data.zonda import run_zonda_snapshot_update
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
-from snapper.infrastructure.security.encryption import initialize_global_encryption
+from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.executors.walutomat import WalutomatOrderExecutor
 from snapper.messaging.executors.zonda import ZondaOrderExecutor
@@ -183,9 +183,7 @@ def _alembic_cfg(db_url: str) -> Config:
 @app.callback()
 def main_callback() -> None:
     """Initialize global encryption before any CLI command runs."""
-    bootstrap = BootstrapSettingsLoader()
-    if bootstrap.master_password:
-        initialize_global_encryption(bootstrap.master_password)
+    get_encryption_service()
 
 
 @app.command(name="trade-zmq")

@@ -13,11 +13,11 @@ Security features:
 
 Example:
     >>> from snapper.infrastructure.security.encryption import (
-    ...     initialize_global_encryption,
+    ...     get_encryption_service,
     ...     encrypt_if_sensitive,
     ...     decrypt_if_encrypted,
     ... )
-    >>> initialize_global_encryption("my-master-password")
+    >>> encryption = get_encryption_service()
     >>> value, encrypted = encrypt_if_sensitive("api_key", "secret123")
     >>> original = decrypt_if_encrypted(value, encrypted)
 """
@@ -34,9 +34,8 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 
 __all__ = [
     "SettingsEncryptionService",
-    "initialize_global_encryption",
-    "get_global_encryption",
-    "clear_global_encryption",
+    "get_encryption_service",
+    "clear_encryption",
     "encrypt_if_sensitive",
     "force_encrypt_if_cleartext",
     "decrypt_if_encrypted",
@@ -194,15 +193,6 @@ class SettingsEncryptionService:
         return any(pattern in key_lower for pattern in sensitive_patterns)
 
     @classmethod
-    def get_instance(cls) -> "SettingsEncryptionService | None":
-        """Get the singleton instance if it exists.
-
-        Returns:
-            The singleton instance or None if not initialized.
-        """
-        return cls._instance
-
-    @classmethod
     def clear_instance(cls) -> None:
         """Clear the singleton instance.
 
@@ -212,55 +202,20 @@ class SettingsEncryptionService:
         cls._init_params = None
 
 
-def get_encryption_service(
-    master_password: str | None = None,
-) -> SettingsEncryptionService | None:
-    """Get or create an encryption service instance.
+def get_encryption_service() -> SettingsEncryptionService:
+    """Get or create the encryption service singleton.
 
-    Falls back to bootstrap settings if parameter not provided.
-
-    Args:
-        master_password: Optional master password override.
+    Reads master password from BootstrapSettingsLoader (env / .env file).
+    Always returns a valid instance since master_password has a default.
 
     Returns:
-        SettingsEncryptionService instance, or None if no password available.
+        SettingsEncryptionService instance.
     """
-    if not master_password:
-        bootstrap = BootstrapSettingsLoader()
-        master_password = bootstrap.master_password
-    if not master_password:
-        logger.warning("No master password provided - encryption disabled")
-        return None
-    return SettingsEncryptionService(master_password)
+    return SettingsEncryptionService(BootstrapSettingsLoader().master_password)
 
 
-def initialize_global_encryption(master_password: str) -> SettingsEncryptionService:
-    """Initialize the global encryption singleton.
-
-    Must be called before using encrypt_if_sensitive or decrypt_if_encrypted.
-
-    Args:
-        master_password: Master password for key derivation.
-
-    Returns:
-        The initialized SettingsEncryptionService instance.
-    """
-    encryption = SettingsEncryptionService(master_password)
-    logger.info("AppSettings encryption initialized")
-    return encryption
-
-
-def get_global_encryption() -> SettingsEncryptionService | None:
-    """Get the global encryption singleton.
-
-    Returns:
-        The encryption service instance, or None if not initialized.
-    """
-    return SettingsEncryptionService.get_instance()
-
-
-def clear_global_encryption() -> None:
-    """Clear the global encryption singleton.
+def clear_encryption() -> None:
+    """Clear the encryption singleton.
 
     Useful for testing or when changing master password.
     """
@@ -280,12 +235,12 @@ def encrypt_if_sensitive(key: str, value: str) -> tuple[str, bool]:
     Returns:
         Tuple of (possibly encrypted value, whether encryption was applied).
     """
-    encryption = get_global_encryption()
-    if encryption and SettingsEncryptionService.is_sensitive_setting(key):
-        if encryption.is_encrypted_value(value):
-            return value, True
-        return encryption.encrypt(value), True
-    return value, False
+    if not SettingsEncryptionService.is_sensitive_setting(key):
+        return value, False
+    encryption = get_encryption_service()
+    if encryption.is_encrypted_value(value):
+        return value, True
+    return encryption.encrypt(value), True
 
 
 def force_encrypt_if_cleartext(key: str, value: str) -> tuple[str, bool]:
@@ -301,12 +256,12 @@ def force_encrypt_if_cleartext(key: str, value: str) -> tuple[str, bool]:
     Returns:
         Tuple of (possibly encrypted value, whether it should be stored encrypted).
     """
-    encryption = get_global_encryption()
-    if encryption and SettingsEncryptionService.is_sensitive_setting(key):
-        if encryption.is_encrypted_value(value):
-            return value, True
-        return encryption.encrypt(value), True
-    return value, False
+    if not SettingsEncryptionService.is_sensitive_setting(key):
+        return value, False
+    encryption = get_encryption_service()
+    if encryption.is_encrypted_value(value):
+        return value, True
+    return encryption.encrypt(value), True
 
 
 def decrypt_if_encrypted(value: str, is_encrypted: bool) -> str:
@@ -320,19 +275,13 @@ def decrypt_if_encrypted(value: str, is_encrypted: bool) -> str:
         Decrypted value, or original value if not encrypted.
 
     Raises:
-        RuntimeError: If encryption not initialized but decryption needed,
-            or if decryption fails (wrong password, corrupted data).
+        RuntimeError: If decryption fails (wrong password, corrupted data).
     """
     if not is_encrypted:
         return value
     if not value:
         return value
-    encryption = get_global_encryption()
-    if not encryption:
-        raise RuntimeError(
-            "Encryption not initialized but encrypted setting found. "
-            "Check MASTER_PASSWORD environment variable."
-        )
+    encryption = get_encryption_service()
     try:
         return encryption.decrypt(value)
     except Exception as e:
