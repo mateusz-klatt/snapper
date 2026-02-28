@@ -215,7 +215,7 @@ cov-serial:
 cov-xml:
 	$(PYRUN) coverage xml -o coverage.xml
 
-check: fmt lint typecheck check-docstrings check-no-comments check-main-guard
+check: fmt lint typecheck check-docstrings check-no-comments check-main-guard check-init-files
 
 fix: fmt-fix lint-fix move-imports
 
@@ -236,6 +236,9 @@ check-no-comments:
 
 check-main-guard:
 	$(VENV_PY) scripts/check_main_guard.py --strict
+
+check-init-files:
+	$(VENV_PY) scripts/check_init_files.py --strict
 
 move-imports:
 	$(VENV_PY) scripts/move_imports_to_top.py $(PY_DIRS)
