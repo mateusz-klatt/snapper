@@ -26,9 +26,9 @@ class TestResolveSeedPath:
     def test_data_seed_override_takes_priority(self, tmp_path: Path) -> None:
         """Test data/seed/ override takes priority over other locations.
 
-        Given: data/seed/test.toml exists in project root,
+        Given: data/seed/test.toml and proprietary/data/seed/test.toml both exist,
         When: resolving seed path for 'test' profile,
-        Then: data/seed path is returned.
+        Then: data/seed path is returned (not proprietary).
         """
         data_dir = tmp_path / "data" / "seed"
         data_dir.mkdir(parents=True)
@@ -38,19 +38,21 @@ class TestResolveSeedPath:
         (prop_dir / "test.toml").write_text("")
         with patch("snapper.data.seed.loader._project_root", return_value=tmp_path):
             path = resolve_seed_path("test")
-        assert str(path).endswith("data/seed/test.toml")
-        assert "proprietary" not in str(path)
+        assert path == data_dir / "test.toml"
 
-    def test_open_source_fallback(self) -> None:
+    def test_open_source_fallback(self, tmp_path: Path) -> None:
         """Test open-source seed file is found as fallback.
 
         Given: no data/seed or proprietary override exists,
         When: resolving seed path for 'dev' profile,
         Then: src/snapper/data/seed/dev.toml is returned.
         """
-        path = resolve_seed_path("dev")
-        assert path.name == "dev.toml"
-        assert "data/seed" in str(path)
+        src_dir = tmp_path / "src" / "snapper" / "data" / "seed"
+        src_dir.mkdir(parents=True)
+        (src_dir / "dev.toml").write_text("")
+        with patch("snapper.data.seed.loader._project_root", return_value=tmp_path):
+            path = resolve_seed_path("dev")
+        assert path == src_dir / "dev.toml"
 
     def test_missing_profile_raises_file_not_found(self) -> None:
         """Test missing profile raises FileNotFoundError.
