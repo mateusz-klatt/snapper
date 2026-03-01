@@ -1,11 +1,16 @@
 """Tests for seed data loader."""
 
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
+from typing import cast
+from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
 from snapper.data.seed.loader import SeedProfile
@@ -13,6 +18,7 @@ from snapper.data.seed.loader import SeedSetting
 from snapper.data.seed.loader import SeedUser
 from snapper.data.seed.loader import _hash_password
 from snapper.data.seed.loader import _sync_db_url
+from snapper.data.seed.loader import _timestamp_value
 from snapper.data.seed.loader import load_seed_profile
 from snapper.data.seed.loader import resolve_seed_path
 from snapper.data.seed.loader import run_seed
@@ -225,6 +231,36 @@ class TestHashPassword:
         hash1 = _hash_password("password1")
         hash2 = _hash_password("password2")
         assert hash1 != hash2
+
+
+class TestTimestampValue:
+    """Tests for timestamp value conversion by database dialect."""
+
+    def test_returns_iso_string_for_sqlite(self) -> None:
+        """Test SQLite timestamp is serialized to UTC ISO string.
+
+        Given: a connection dialect named "sqlite",
+        When: building a seed timestamp value,
+        Then: value is an ISO string with UTC offset.
+        """
+        conn_mock = Mock()
+        conn_mock.dialect.name = "sqlite"
+        value = _timestamp_value(cast(Connection, conn_mock))
+        assert isinstance(value, str)
+        assert value.endswith("+00:00")
+
+    def test_returns_datetime_for_non_sqlite(self) -> None:
+        """Test non-SQLite timestamp remains a timezone-aware datetime.
+
+        Given: a connection dialect named "postgresql",
+        When: building a seed timestamp value,
+        Then: value is a UTC datetime object.
+        """
+        conn_mock = Mock()
+        conn_mock.dialect.name = "postgresql"
+        value = _timestamp_value(cast(Connection, conn_mock))
+        assert isinstance(value, datetime)
+        assert value.tzinfo == UTC
 
 
 class TestSyncDbUrl:

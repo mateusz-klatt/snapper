@@ -152,6 +152,24 @@ def _hash_password(password: str) -> str:
     return hashed.decode()
 
 
+def _timestamp_value(conn: Connection) -> datetime | str:
+    """Build a UTC timestamp value compatible with the current SQL driver.
+
+    Python 3.12 deprecates sqlite3's implicit datetime adapter. Returning
+    an ISO-8601 string for SQLite avoids warnings while keeping UTC data.
+
+    Args:
+        conn: Active SQLAlchemy connection.
+
+    Returns:
+        UTC datetime for non-SQLite engines, ISO string for SQLite.
+    """
+    now = datetime.now(tz=UTC)
+    if conn.dialect.name == "sqlite":
+        return now.isoformat(timespec="seconds")
+    return now
+
+
 def seed_users(conn: Connection, users: list[SeedUser]) -> int:
     """Seed user accounts into the database.
 
@@ -173,7 +191,7 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
     if existing > 0:
         logger.info(f"Users table has {existing} rows, skipping user seed")
         return 0
-    now = datetime.now(tz=UTC)
+    now = _timestamp_value(conn)
     for user in users:
         password_hash = _hash_password(user.password)
         conn.execute(
@@ -210,7 +228,7 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
         Number of new settings inserted (skips existing keys).
     """
     encryption = get_encryption_service()
-    now = datetime.now(tz=UTC)
+    now = _timestamp_value(conn)
     inserted = 0
     for setting in settings:
         stored_value = setting.value
