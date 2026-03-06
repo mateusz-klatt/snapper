@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml poetry.lock README.md ./
 COPY src/ ./src/
+COPY *proprietary/data/seed/ ./src/snapper/data/seed/
 
 RUN python -m pip install --upgrade pip poetry \
  && poetry config virtualenvs.create false \

@@ -17,6 +17,7 @@ from snapper.data.seed.loader import SeedProfile
 from snapper.data.seed.loader import SeedSetting
 from snapper.data.seed.loader import SeedUser
 from snapper.data.seed.loader import _hash_password
+from snapper.data.seed.loader import _package_dir
 from snapper.data.seed.loader import _sync_db_url
 from snapper.data.seed.loader import _timestamp_value
 from snapper.data.seed.loader import load_seed_profile
@@ -42,50 +43,77 @@ class TestResolveSeedPath:
         prop_dir = tmp_path / "proprietary" / "data" / "seed"
         prop_dir.mkdir(parents=True)
         (prop_dir / "test.toml").write_text("")
-        with patch("snapper.data.seed.loader._project_root", return_value=tmp_path):
+        with patch("snapper.data.seed.loader.Path.cwd", return_value=tmp_path):
             path = resolve_seed_path("test")
         assert path == data_dir / "test.toml"
 
-    def test_open_source_fallback(self, tmp_path: Path) -> None:
-        """Test open-source seed file is found as fallback.
+    def test_package_bundled_fallback(self, tmp_path: Path) -> None:
+        """Test package-bundled seed file is used as final fallback.
 
-        Given: no data/seed or proprietary override exists,
-        When: resolving seed path for 'dev' profile,
-        Then: src/snapper/data/seed/dev.toml is returned.
+        Given: no seed file in CWD tiers but package dir has it,
+        When: resolving seed path for 'bundled' profile,
+        Then: package-bundled path is returned.
         """
-        src_dir = tmp_path / "src" / "snapper" / "data" / "seed"
-        src_dir.mkdir(parents=True)
-        (src_dir / "dev.toml").write_text("")
-        with patch("snapper.data.seed.loader._project_root", return_value=tmp_path):
-            path = resolve_seed_path("dev")
-        assert path == src_dir / "dev.toml"
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "bundled.toml").write_text("")
+        with (
+            patch("snapper.data.seed.loader.Path.cwd", return_value=tmp_path),
+            patch("snapper.data.seed.loader._package_dir", return_value=pkg_dir),
+        ):
+            path = resolve_seed_path("bundled")
+        assert path == pkg_dir / "bundled.toml"
 
-    def test_missing_profile_raises_file_not_found(self) -> None:
+    def test_missing_profile_raises_file_not_found(self, tmp_path: Path) -> None:
         """Test missing profile raises FileNotFoundError.
 
-        Given: no seed file exists for profile,
+        Given: no seed file exists for profile in any tier,
         When: resolving seed path for 'nonexistent',
         Then: FileNotFoundError is raised with profile name.
         """
-        with pytest.raises(FileNotFoundError, match="nonexistent"):
+        pkg_dir = tmp_path / "empty_pkg"
+        pkg_dir.mkdir()
+        with (
+            patch("snapper.data.seed.loader.Path.cwd", return_value=tmp_path),
+            patch("snapper.data.seed.loader._package_dir", return_value=pkg_dir),
+            pytest.raises(FileNotFoundError, match="nonexistent"),
+        ):
             resolve_seed_path("nonexistent")
 
-    def test_proprietary_overrides_open_source(self, tmp_path: Path) -> None:
-        """Test proprietary seed file overrides open-source.
+    def test_proprietary_overrides_package_bundled(self, tmp_path: Path) -> None:
+        """Test proprietary seed file overrides package-bundled.
 
-        Given: both proprietary and open-source seed files exist,
-        When: resolving seed path with _project_root pointing to tmp_path,
-        Then: proprietary path is returned instead of open-source.
+        Given: both proprietary and package-bundled seed files exist,
+        When: resolving seed path for 'custom' profile,
+        Then: proprietary path is returned instead of package-bundled.
         """
         prop_dir = tmp_path / "proprietary" / "data" / "seed"
         prop_dir.mkdir(parents=True)
         (prop_dir / "custom.toml").write_text("")
-        src_dir = tmp_path / "src" / "snapper" / "data" / "seed"
-        src_dir.mkdir(parents=True)
-        (src_dir / "custom.toml").write_text("")
-        with patch("snapper.data.seed.loader._project_root", return_value=tmp_path):
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "custom.toml").write_text("")
+        with (
+            patch("snapper.data.seed.loader.Path.cwd", return_value=tmp_path),
+            patch("snapper.data.seed.loader._package_dir", return_value=pkg_dir),
+        ):
             path = resolve_seed_path("custom")
         assert "proprietary" in str(path)
+
+
+class TestPackageDir:
+    """Tests for _package_dir helper."""
+
+    def test_returns_loader_parent_directory(self) -> None:
+        """Test _package_dir returns the directory containing loader.py.
+
+        Given: loader.py is at snapper/data/seed/loader.py,
+        When: calling _package_dir(),
+        Then: returned path ends with snapper/data/seed.
+        """
+        result = _package_dir()
+        assert result.name == "seed"
+        assert (result / "loader.py").exists()
 
 
 class TestLoadSeedProfile:

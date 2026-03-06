@@ -1,8 +1,9 @@
 """Seed data loader for environment-specific database seeding.
 
 Loads seed profiles from TOML files using a three-tier lookup:
-``data/seed/{profile}.toml`` -> ``proprietary/data/seed/{profile}.toml``
--> ``src/snapper/data/seed/{profile}.toml``.
+``data/seed/{profile}.toml`` (CWD, e.g. Docker volume mount)
+-> ``proprietary/data/seed/{profile}.toml`` (CWD, local dev)
+-> package-bundled ``snapper/data/seed/{profile}.toml`` (installed wheel).
 
 Provides idempotent semantics so ``db-seed`` can be run repeatedly
 without duplicating data.  Users are skipped entirely when any account
@@ -80,25 +81,21 @@ class SeedProfile:
     settings: list[SeedSetting] = field(default_factory=list)
 
 
-def _project_root() -> Path:
-    """Return the project root directory.
-
-    Walks up from this file (src/snapper/data/seed/loader.py) four levels
-    to reach the project root.
-
-    Returns:
-        Absolute path to the project root.
-    """
-    return Path(__file__).resolve().parent.parent.parent.parent.parent
+def _package_dir() -> Path:
+    """Return the directory containing this module (snapper/data/seed/)."""
+    return Path(__file__).resolve().parent
 
 
 def resolve_seed_path(profile: str) -> Path:
     """Resolve the seed TOML file path using three-tier lookup.
 
-    Lookup order:
-        1. ``{project_root}/data/seed/{profile}.toml`` (deployment override)
-        2. ``{project_root}/proprietary/data/seed/{profile}.toml``
-        3. ``{project_root}/src/snapper/data/seed/{profile}.toml``
+    Lookup order (CWD-relative for tiers 1-2, then package-bundled):
+        1. ``{cwd}/data/seed/{profile}.toml`` (deployment/volume override)
+        2. ``{cwd}/proprietary/data/seed/{profile}.toml`` (local dev)
+        3. Package-bundled ``snapper/data/seed/{profile}.toml`` (installed wheel)
+
+    In Docker, CWD is ``/app`` (WORKDIR) and ``data/`` is a volume mount,
+    so tier 1 picks up overrides.  Locally, CWD is the project root.
 
     Args:
         profile: Seed profile name (e.g. "dev", "prod").
@@ -109,11 +106,11 @@ def resolve_seed_path(profile: str) -> Path:
     Raises:
         FileNotFoundError: If no seed file found in any location.
     """
-    root = _project_root()
+    cwd = Path.cwd()
     candidates = [
-        root / "data" / "seed" / f"{profile}.toml",
-        root / "proprietary" / "data" / "seed" / f"{profile}.toml",
-        root / "src" / "snapper" / "data" / "seed" / f"{profile}.toml",
+        cwd / "data" / "seed" / f"{profile}.toml",
+        cwd / "proprietary" / "data" / "seed" / f"{profile}.toml",
+        _package_dir() / f"{profile}.toml",
     ]
     for path in candidates:
         if path.exists():

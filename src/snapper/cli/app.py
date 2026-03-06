@@ -266,7 +266,7 @@ def db_seed(
 
     Loads users and settings from a TOML seed file. Uses three-tier lookup:
     ``data/seed/{profile}.toml`` -> ``proprietary/data/seed/{profile}.toml``
-    -> ``src/snapper/data/seed/{profile}.toml``.
+    -> package-bundled ``snapper/data/seed/{profile}.toml``.
 
     Args:
         profile: Seed profile name.
