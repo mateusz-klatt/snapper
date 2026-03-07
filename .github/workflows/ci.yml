@@ -55,13 +55,20 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      - name: Build and test Docker image
+      - name: Docker build
+        run: make docker-build
+
+      - name: Docker run
         run: |
-          make docker-build
           cp .env.example .env
           make docker-run
-          make server-check
-          make docker-stop
+
+      - name: Docker health check
+        run: make server-check
+
+      - name: Docker stop
+        if: always()
+        run: make docker-stop
 
   ios-test:
     runs-on: macos-15
