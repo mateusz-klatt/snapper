@@ -620,7 +620,7 @@ class TestMarkdownToPdf:
 
         Given: A MarkdownToPdf builder,
         When: Calling build_html,
-        Then: The HTML includes a cover page with 'Dokumentacja Snapper' title.
+        Then: The HTML includes a cover page with 'Snapper Documentation' title.
         """
         builder = MarkdownToPdf(
             font_path=None,
@@ -631,7 +631,7 @@ class TestMarkdownToPdf:
         )
         html = builder.build_html()
         assert 'class="cover"' in html
-        assert "Dokumentacja Snapper" in html
+        assert "Snapper Documentation" in html
 
     def test_build_html_includes_toc(
         self,
@@ -644,7 +644,7 @@ class TestMarkdownToPdf:
 
         Given: A MarkdownToPdf builder,
         When: Calling build_html,
-        Then: The HTML includes a table of contents section ('Spis treści').
+        Then: The HTML includes a table of contents section ('Table of Contents').
         """
         builder = MarkdownToPdf(
             font_path=None,
@@ -655,7 +655,7 @@ class TestMarkdownToPdf:
         )
         html = builder.build_html()
         assert 'class="toc"' in html
-        assert "Spis treści" in html
+        assert "Table of Contents" in html
 
     def test_build_stylesheet_without_font(
         self,
