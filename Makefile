@@ -328,7 +328,7 @@ migrate-prod: migrate
 	$(PYRUN) snapper db-seed --profile prod
 
 ui-setup:
-	@command -v corepack >/dev/null 2>&1 || (echo "Error: corepack not found. Run 'make system-deps' first." && exit 1)
+	@corepack --version >/dev/null 2>&1 || (echo "Error: corepack not found. Run 'make system-deps' first." && exit 1)
 	@cd $(UI_DIR) && pnpm install --frozen-lockfile
 
 ui-refresh:
