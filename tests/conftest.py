@@ -412,7 +412,7 @@ def cleanup_session_resources() -> Generator[None]:
     yield
     with contextlib.suppress(Exception):
         _cleanup_zmq_contexts()
-    for connection in list(_tracked_sqlite_connections):
+    for connection in _tracked_sqlite_connections:
         with contextlib.suppress(Exception):
             connection.close()
     loop = asyncio.new_event_loop()
