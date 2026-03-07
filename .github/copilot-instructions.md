@@ -89,29 +89,41 @@ Every commit created by an AI assistant MUST include a `Co-authored-by:` trailer
 Rules:
 
 - Use the canonical Git trailer form: `Co-authored-by: Name <email>`
-- Prefer the product name plus model/version when the assistant exposes it
-- If the assistant does not expose a reliable version, use the stable product identity only
-- Use a stable provider-controlled address for that assistant identity
-    - no-reply is preferred when available
-    - a provider contact/product address is acceptable when no no-reply address is defined
+- Choose identity in this order:
+    - product name + model/version, only when the assistant exposes a reliable version string
+    - otherwise, stable product identity only
+- Choose email in this order:
+    - provider no-reply address when available
+    - otherwise, provider contact/product address officially defined for that assistant identity
+- Separate the trailer from the commit body with a blank line
+- Use an identity/address only if it is explicitly configured and confirmed for the assistant in use
 - Do not invent a version string or email address
 
-Use a HEREDOC to pass the commit message:
+Use a HEREDOC to pass the commit message (avoids shell escaping issues):
 
 ```bash
 git commit -m "$(cat <<'EOF'
 commit message here
 
-Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+Co-authored-by: ...
 EOF
 )"
 ```
 
-Examples:
+Cross-platform alternative (works in CMD, PowerShell, Git Bash, WSL):
+
+```bash
+git commit -m "commit message here" -m "Co-authored-by: ..."
+```
+
+Examples (illustrative; use only verified configured identities):
 
 - `Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>`
+- `Co-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>`
+- `Co-authored-by: GitHub Copilot (Gemini 3.1 Pro) <copilot@github.com>`
+- `Co-authored-by: Google Deepmind Antigravity <noreply@google.com>`
 - `Co-authored-by: OpenAI Codex (GPT-5) <codex@openai.com>`
-- `Co-authored-by: GitHub Copilot <copilot@github.com>` only if that identity/address is explicitly configured and confirmed
+- `Co-authored-by: OpenAI Codex (GPT-5.3-Codex) <codex@openai.com>`
 
 ## IMPORTANT: Task Completion Protocol
 
