@@ -1,7 +1,7 @@
 FROM node:25-alpine AS ui-build
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN npm install -g corepack && corepack enable && corepack prepare pnpm@latest --activate
 
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
 WORKDIR /app/frontend

@@ -326,7 +326,7 @@ migrate-prod: migrate
 	$(PYRUN) snapper db-seed --profile prod
 
 ui-setup:
-	@cd $(UI_DIR) && (pnpm --version 2>&1 || (corepack enable && corepack prepare pnpm@latest --activate)) && pnpm install --frozen-lockfile
+	@cd $(UI_DIR) && (pnpm --version 2>&1 || (npm install -g corepack && corepack enable && corepack prepare pnpm@latest --activate)) && pnpm install --frozen-lockfile
 
 ui-refresh:
 	$(PYTHON) scripts/ui_refresh.py
