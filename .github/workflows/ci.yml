@@ -26,19 +26,8 @@ jobs:
         with:
           node-version: '25'
 
-      - name: Enable Corepack & pnpm
-        run: |
-          npm install -g corepack
-          corepack enable
-          corepack prepare pnpm@latest --activate
-
-      - name: UI install
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: UI build
-        working-directory: frontend
-        run: pnpm build
+      - name: UI setup and build
+        run: make ui-setup ui-build
 
       - name: Install system dependencies
         run: make system-deps
