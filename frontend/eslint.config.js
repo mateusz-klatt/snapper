@@ -1,13 +1,11 @@
 import js from '@eslint/js'
-import tseslint from '@typescript-eslint/eslint-plugin'
-import tsparser from '@typescript-eslint/parser'
+import tseslint from 'typescript-eslint'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
-import react from 'eslint-plugin-react'
 import prettier from 'eslint-config-prettier'
 import globals from 'globals'
 
-export default [
+export default tseslint.config(
   js.configs.recommended,
 
   prettier,
@@ -34,29 +32,21 @@ export default [
 
   {
     files: ['**/*.{ts,tsx}'],
+    extends: [...tseslint.configs.recommended],
     languageOptions: {
-      parser: tsparser,
       parserOptions: {
         ecmaFeatures: {
           jsx: true,
         },
-        project: './tsconfig.json',
+        projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
     },
-    settings: {
-      react: {
-        version: 'detect',
-      },
-    },
     plugins: {
-      '@typescript-eslint': tseslint,
       'react-hooks': reactHooks,
       'react-refresh': reactRefresh,
-      react: react,
     },
     rules: {
-      ...tseslint.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
 
       'no-unused-vars': 'off',
@@ -74,22 +64,6 @@ export default [
 
       'react-hooks/exhaustive-deps': 'error',
       'react-hooks/set-state-in-effect': 'off',
-      'react/jsx-key': 'error',
-      'react/jsx-no-duplicate-props': 'error',
-      'react/jsx-no-undef': 'error',
-      'react/no-array-index-key': 'off',
-      'react/no-children-prop': 'error',
-      'react/no-danger-with-children': 'error',
-      'react/no-deprecated': 'error',
-      'react/no-direct-mutation-state': 'error',
-      'react/no-find-dom-node': 'error',
-      'react/no-is-mounted': 'error',
-      'react/no-render-return-value': 'error',
-      'react/no-string-refs': 'error',
-      'react/no-unescaped-entities': 'error',
-      'react/no-unknown-property': 'error',
-      'react/prop-types': 'off',
-      'react/react-in-jsx-scope': 'off',
 
       'no-console': 'off',
       'no-debugger': 'error',
@@ -118,19 +92,8 @@ export default [
 
   {
     files: ['**/*.config.{ts,js}', 'eslint.config.js'],
-    languageOptions: {
-      parser: tsparser,
-      parserOptions: {
-        ecmaFeatures: {
-          jsx: true,
-        },
-      },
-    },
-    plugins: {
-      '@typescript-eslint': tseslint,
-    },
+    extends: [...tseslint.configs.recommended],
     rules: {
-      ...tseslint.configs.recommended.rules,
       '@typescript-eslint/no-explicit-any': 'error',
       'no-console': 'off',
       'no-debugger': 'error',
@@ -152,5 +115,5 @@ export default [
       'vite.config.ts',
       'src/types/*.generated.ts',
     ],
-  },
-]
+  }
+)

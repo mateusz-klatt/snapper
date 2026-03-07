@@ -129,7 +129,7 @@ describe('Strategies', () => {
     })
   })
   it('displays configured strategies', async () => {
-    let mockStrategies: StrategyProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_macd_btc',
         enabled: true,
@@ -150,7 +150,7 @@ describe('Strategies', () => {
     })
   })
   it('subscribes to heartbeat topics for strategies', async () => {
-    let mockStrategies: StrategyProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_macd_btc',
         enabled: true,
@@ -223,7 +223,7 @@ describe('Strategies', () => {
     })
   })
   it('handles websocket connection callback', async () => {
-    let mockStrategies: StrategyProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,
@@ -316,7 +316,7 @@ describe('Strategies', () => {
     expect(mockWsClient.unsubscribe).toHaveBeenCalledWith(['system.heartbeats.strategy.test'])
   })
   it('handles heartbeat messages', async () => {
-    let mockStrategies: StrategyProcess[] = [
+    const mockStrategies: StrategyProcess[] = [
       {
         name: 'strategy_test',
         enabled: true,

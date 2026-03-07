@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { apiClient } from '../../lib/apiClient'
 import type { SettingRead } from '../../types/api'
 import { SettingItem } from './SettingItem'
@@ -15,11 +15,7 @@ export const Settings = () => {
   const [searchTerm, setSearchTerm] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
 
-  useEffect(() => {
-    loadSettings()
-  }, [])
-
-  const loadSettings = async () => {
+  const loadSettings = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
@@ -35,7 +31,11 @@ export const Settings = () => {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    loadSettings()
+  }, [loadSettings])
 
   const updateSetting = async (
     key: string,
