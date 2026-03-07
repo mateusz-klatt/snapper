@@ -32,8 +32,11 @@ jobs:
       - name: Setup development environment
         run: make setup
 
-      - name: UI setup and build
-        run: make ui-setup ui-build
+      - name: UI setup
+        run: make ui-setup
+
+      - name: UI build
+        run: make ui-build
 
       - name: Initialize database
         run: make migrate
