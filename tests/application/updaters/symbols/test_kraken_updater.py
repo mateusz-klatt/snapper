@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
@@ -473,94 +474,97 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
     Then: BTC aliases updated, ETH catalog and aliases inserted.
     """
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    session_local = sessionmaker(bind=engine)
-    now = datetime.now(UTC)
-    with session_local() as session:
-        session.add(
-            SymbolCatalog(
-                native_symbol="BTC-USD",
-                base="BTC",
-                quote="USD",
-                asset_type="crypto",
-                created_at=now,
-                updated_at=now,
+    try:
+        Base.metadata.create_all(engine)
+        session_local = sessionmaker(bind=engine)
+        now = datetime.now(UTC)
+        with session_local() as session:
+            session.add(
+                SymbolCatalog(
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    updated_at=now,
+                )
             )
-        )
-        session.add(
-            SymbolAlias(
-                native_symbol="BTC-USD",
-                exchange="kraken",
-                channel="ws",
-                exchange_symbol="OLD/WS",
-                created_at=now,
-                updated_at=now,
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    exchange_symbol="OLD/WS",
+                    created_at=now,
+                    updated_at=now,
+                )
             )
-        )
-        session.add(
-            SymbolAlias(
-                native_symbol="BTC-USD",
-                exchange="kraken",
-                channel="rest",
-                exchange_symbol="OLDREST",
-                created_at=now,
-                updated_at=now,
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="rest",
+                    exchange_symbol="OLDREST",
+                    created_at=now,
+                    updated_at=now,
+                )
             )
-        )
-        session.add(
-            SymbolAlias(
-                native_symbol="BTC-USD",
-                exchange="kraken",
-                channel="ccxt",
-                exchange_symbol="OLD/CCXT",
-                created_at=now,
-                updated_at=now,
+            session.add(
+                SymbolAlias(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ccxt",
+                    exchange_symbol="OLD/CCXT",
+                    created_at=now,
+                    updated_at=now,
+                )
             )
-        )
-        session.commit()
+            session.commit()
 
-    class Repo:
-        def get_session(self) -> Session:
-            return session_local()
+        class Repo:
+            def get_session(self) -> Session:
+                return session_local()
 
-    svc = KrakenSymbolUpdaterService()
-    svc.repository = Repo()
-    symbols = [
-        {
-            "native_symbol": "BTC-USD",
-            "kraken_websocket_symbol": "BTC/USD",
-            "kraken_rest_symbol": "XXBTZUSD",
-            "ccxt_symbol": "BTC/USD",
-            "base_currency": "BTC",
-            "quote_currency": "USD",
-        },
-        {
-            "native_symbol": "ETH-USD",
-            "kraken_websocket_symbol": "ETH/USD",
-            "kraken_rest_symbol": "XETHZUSD",
-            "ccxt_symbol": "ETH/USD",
-            "base_currency": "ETH",
-            "quote_currency": "USD",
-        },
-    ]
-    await svc._update_database(symbols)
-    with session_local() as session:
-        btc_catalog = session.query(SymbolCatalog).filter_by(native_symbol="BTC-USD").one()
-        eth_catalog = session.query(SymbolCatalog).filter_by(native_symbol="ETH-USD").one()
-        assert btc_catalog.base == "BTC"
-        assert eth_catalog.base == "ETH"
-        btc_rest = (
-            session.query(SymbolAlias)
-            .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="rest")
-            .one()
-        )
-        eth_ws = (
-            session.query(SymbolAlias)
-            .filter_by(native_symbol="ETH-USD", exchange="kraken", channel="ws")
-            .one()
-        )
-        assert btc_rest.exchange_symbol == "XXBTZUSD"
-        assert eth_ws.exchange_symbol == "ETH/USD"
+        svc = KrakenSymbolUpdaterService()
+        svc.repository = Repo()
+        symbols = [
+            {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            },
+            {
+                "native_symbol": "ETH-USD",
+                "kraken_websocket_symbol": "ETH/USD",
+                "kraken_rest_symbol": "XETHZUSD",
+                "ccxt_symbol": "ETH/USD",
+                "base_currency": "ETH",
+                "quote_currency": "USD",
+            },
+        ]
+        await svc._update_database(symbols)
+        with session_local() as session:
+            btc_catalog = session.query(SymbolCatalog).filter_by(native_symbol="BTC-USD").one()
+            eth_catalog = session.query(SymbolCatalog).filter_by(native_symbol="ETH-USD").one()
+            assert btc_catalog.base == "BTC"
+            assert eth_catalog.base == "ETH"
+            btc_rest = (
+                session.query(SymbolAlias)
+                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="rest")
+                .one()
+            )
+            eth_ws = (
+                session.query(SymbolAlias)
+                .filter_by(native_symbol="ETH-USD", exchange="kraken", channel="ws")
+                .one()
+            )
+            assert btc_rest.exchange_symbol == "XXBTZUSD"
+            assert eth_ws.exchange_symbol == "ETH/USD"
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1767,11 +1771,14 @@ class TestKrakenUpdateDatabaseBranches:
             return KrakenSymbolUpdaterService()
 
     @pytest.fixture
-    def db_session_factory(self) -> sessionmaker:
+    def db_session_factory(self) -> Generator[sessionmaker]:
         """Create in-memory SQLite session factory with schema."""
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
-        return sessionmaker(bind=engine)
+        try:
+            yield sessionmaker(bind=engine)
+        finally:
+            engine.dispose()
 
     @pytest.mark.asyncio
     async def test_update_database_only_ws_alias_changed(
@@ -2561,11 +2568,14 @@ class TestKrakenPersistHelpers:
             return KrakenSymbolUpdaterService()
 
     @pytest.fixture
-    def db_session_factory(self) -> sessionmaker:
+    def db_session_factory(self) -> Generator[sessionmaker]:
         """Create in-memory SQLite session factory with schema."""
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
-        return sessionmaker(bind=engine)
+        try:
+            yield sessionmaker(bind=engine)
+        finally:
+            engine.dispose()
 
     def test_persist_ws_only_symbol_creates_alias_and_capability(
         self,

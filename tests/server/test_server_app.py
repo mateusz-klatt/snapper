@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import AsyncGenerator
 from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,37 @@ from snapper.server.app import get_settings_dependency
 from snapper.server.app import lifespan
 from snapper.utils.logging import setup_logging
 from tests.server import dummy_processes
+
+_tracked_test_clients: list[TestClient] = []
+
+
+def _track_test_client(client: TestClient) -> TestClient:
+    """Track a TestClient so module teardown can close it deterministically."""
+    _tracked_test_clients.append(client)
+    return client
+
+
+def teardown_module(module: object) -> None:
+    """Close all TestClient instances created in this module."""
+    for client in _tracked_test_clients:
+        client.close()
+    _tracked_test_clients.clear()
+
+
+def _build_mock_process_factory(started_processes: dict[str, object]) -> MagicMock:
+    """Create a mock process launcher with async lifecycle methods."""
+    mock_factory = MagicMock()
+    mock_factory.started_processes = started_processes
+    mock_factory.sync_registry_to_database = AsyncMock()
+    mock_factory.start_all_processes = AsyncMock()
+    mock_factory.stop_all_processes = AsyncMock()
+    return mock_factory
+
+
+@contextlib.asynccontextmanager
+async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+    """Disable application lifespan for endpoint-only tests."""
+    yield
 
 
 class TestLifespan:
@@ -370,13 +402,16 @@ class TestCreateApiRouter:
             }
         )
         mock_no_status_process = MagicMock(spec=[])
-        mock_process_factory.started_processes = {
-            "strategy_macd_btc_1h": mock_strategy_process,
-            "zmq_broker": mock_other_process,
-            "executor": mock_no_status_process,
-        }
-        self.app.state.process_factory = mock_process_factory
-        response = self.client.get("/api/status")
+        mock_process_factory = _build_mock_process_factory(
+            {
+                "strategy_macd_btc_1h": mock_strategy_process,
+                "zmq_broker": mock_other_process,
+                "executor": mock_no_status_process,
+            }
+        )
+        with patch("snapper.server.app.ProcessLauncherService", return_value=mock_process_factory):
+            self.app.state.process_factory = mock_process_factory
+            response = self.client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
         assert "trader" in data
@@ -599,6 +634,7 @@ class MockResult:
 def create_test_client() -> TestClient:
     """Create a test client with CSRF and auth bypassed."""
     app = create_app()
+    app.router.lifespan_context = _noop_lifespan
 
     def skip_csrf_validation() -> None:
         return None
@@ -608,7 +644,7 @@ def create_test_client() -> TestClient:
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
     app.dependency_overrides[require_authentication] = skip_authentication
-    return TestClient(app)
+    return _track_test_client(TestClient(app))
 
 
 class TestLifespanCancellation:
@@ -765,7 +801,7 @@ class TestOrdersEndpointWithErrors:
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         response = client.get("/api/orders")
         assert response.status_code == 500
         assert "Failed to fetch orders" in response.json()["detail"]
@@ -795,7 +831,7 @@ class TestSignalsEndpointWithErrors:
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         response = client.get("/api/signals")
         assert response.status_code == 500
         assert "Failed to fetch signals" in response.json()["detail"]
@@ -825,7 +861,7 @@ class TestExecutionsEndpointWithErrors:
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         response = client.get("/api/executions")
         assert response.status_code == 500
         assert "Failed to fetch executions" in response.json()["detail"]
@@ -855,7 +891,7 @@ class TestPositionsEndpointWithErrors:
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
         app.dependency_overrides[get_repository_dependency] = get_error_repo
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         response = client.get("/api/positions")
         assert response.status_code == 500
         assert "Failed to fetch positions" in response.json()["detail"]
@@ -881,7 +917,7 @@ class TestCandlesEndpointWithErrors:
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         with patch("snapper.server.app.get_repository") as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
@@ -914,7 +950,7 @@ class TestZmqHealthCheckErrors:
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         original_context = app.state.manager.zmq_bridge.context
         app.state.manager.zmq_bridge.context = None
         try:
@@ -968,16 +1004,16 @@ class TestSystemStatusEdgeCases:
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
-        mock_factory = MagicMock()
-        mock_factory.started_processes = {}
-        app.state.process_factory = mock_factory
-        client = TestClient(app)
-        response = client.get("/api/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert "trader" in data
-        assert data["trader"]["status"] == "not_running"
-        assert "strategies" in data
+        mock_factory = _build_mock_process_factory({})
+        with patch("snapper.server.app.ProcessLauncherService", return_value=mock_factory):
+            app.state.process_factory = mock_factory
+            with TestClient(app) as client:
+                response = client.get("/api/status")
+                assert response.status_code == 200
+                data = response.json()
+                assert "trader" in data
+                assert data["trader"]["status"] == "not_running"
+                assert "strategies" in data
 
     def test_system_status_handles_process_error(self) -> None:
         """Verify status handles process status error gracefully.
@@ -999,15 +1035,15 @@ class TestSystemStatusEdgeCases:
         mock_process = MagicMock()
         mock_process.name = "test_strategy"
         mock_process.get_status = MagicMock(side_effect=Exception("Status error"))
-        mock_factory = MagicMock()
-        mock_factory.started_processes = {"test_strategy": mock_process}
-        app.state.process_factory = mock_factory
-        client = TestClient(app)
-        response = client.get("/api/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert "trader" in data
-        assert "strategies" in data
+        mock_factory = _build_mock_process_factory({"test_strategy": mock_process})
+        with patch("snapper.server.app.ProcessLauncherService", return_value=mock_factory):
+            app.state.process_factory = mock_factory
+            with TestClient(app) as client:
+                response = client.get("/api/status")
+                assert response.status_code == 200
+                data = response.json()
+                assert "trader" in data
+                assert "strategies" in data
 
     def test_system_status_trader_running_when_coordinator_started(self) -> None:
         """Verify trader status reflects trader_coordinator process state.
@@ -1026,14 +1062,14 @@ class TestSystemStatusEdgeCases:
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
-        mock_factory = MagicMock()
-        mock_factory.started_processes = {"trader_coordinator": MagicMock()}
-        app.state.process_factory = mock_factory
-        client = TestClient(app)
-        response = client.get("/api/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["trader"]["status"] == "running"
+        mock_factory = _build_mock_process_factory({"trader_coordinator": MagicMock()})
+        with patch("snapper.server.app.ProcessLauncherService", return_value=mock_factory):
+            app.state.process_factory = mock_factory
+            with TestClient(app) as client:
+                response = client.get("/api/status")
+                assert response.status_code == 200
+                data = response.json()
+                assert data["trader"]["status"] == "running"
 
     def test_system_status_trader_not_running_when_coordinator_absent(self) -> None:
         """Verify trader status is not_running when coordinator is absent.
@@ -1052,14 +1088,14 @@ class TestSystemStatusEdgeCases:
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
-        mock_factory = MagicMock()
-        mock_factory.started_processes = {"some_other_process": MagicMock()}
-        app.state.process_factory = mock_factory
-        client = TestClient(app)
-        response = client.get("/api/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["trader"]["status"] == "not_running"
+        mock_factory = _build_mock_process_factory({"some_other_process": MagicMock()})
+        with patch("snapper.server.app.ProcessLauncherService", return_value=mock_factory):
+            app.state.process_factory = mock_factory
+            with TestClient(app) as client:
+                response = client.get("/api/status")
+                assert response.status_code == 200
+                data = response.json()
+                assert data["trader"]["status"] == "not_running"
 
 
 class TestAppCoverageImprovement:
@@ -1158,7 +1194,7 @@ class TestAppCoverageImprovement:
         """
         app = create_app()
         assert app is not None
-        test_client = TestClient(app)
+        test_client = _track_test_client(TestClient(app))
         response = test_client.get("/api/health")
         assert response.status_code == 200
         test_client.close()
@@ -1307,6 +1343,7 @@ class MockResultV2:
 def create_app_with_overrides(repo: MockRepository | None = None) -> TestClient:
     """Create a test client with optional repository override."""
     app = create_app()
+    app.router.lifespan_context = _noop_lifespan
 
     def skip_csrf_validation() -> None:
         return None
@@ -1318,7 +1355,7 @@ def create_app_with_overrides(repo: MockRepository | None = None) -> TestClient:
     app.dependency_overrides[require_authentication] = skip_authentication
     if repo:
         app.dependency_overrides[get_repository_dependency] = lambda: repo
-    return TestClient(app)
+    return _track_test_client(TestClient(app))
 
 
 class TestOrdersSuccessPath:
@@ -1538,7 +1575,7 @@ class TestZmqHealthCheckContextError:
         mock_context.socket.side_effect = Exception("ZMQ socket creation failed")
         original_context = app.state.manager.zmq_bridge.context
         app.state.manager.zmq_bridge.context = mock_context
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         try:
             response = client.get("/api/zmq/health")
             assert response.status_code == 200
@@ -1574,17 +1611,19 @@ class TestSystemStatusProcessError:
         mock_process = MagicMock()
         mock_process.name = "failing_strategy"
         mock_process.get_status.side_effect = RuntimeError("Status unavailable")
-        mock_factory = MagicMock()
-        mock_factory.started_processes = {"failing_strategy": mock_process}
-        app.state.process_factory = mock_factory
-        client = TestClient(app)
-        with patch("snapper.server.app.logger") as mock_logger:
-            response = client.get("/api/status")
-            assert response.status_code == 200
-            data = response.json()
-            assert "strategies" in data
-            assert "trader" in data
-            mock_logger.warning.assert_called()
+        mock_factory = _build_mock_process_factory({"failing_strategy": mock_process})
+        with (
+            patch("snapper.server.app.ProcessLauncherService", return_value=mock_factory),
+            patch("snapper.server.app.logger") as mock_logger,
+        ):
+            app.state.process_factory = mock_factory
+            with TestClient(app) as client:
+                response = client.get("/api/status")
+                assert response.status_code == 200
+                data = response.json()
+                assert "strategies" in data
+                assert "trader" in data
+                mock_logger.warning.assert_called()
 
     def test_system_status_with_valid_process_status(self) -> None:
         """Verify status includes valid process information.
@@ -1614,16 +1653,16 @@ class TestSystemStatusProcessError:
                 "pnl": 100.50,
             }
         )
-        mock_factory = MagicMock()
-        mock_factory.started_processes = {"test_strategy": mock_process}
-        app.state.process_factory = mock_factory
-        client = TestClient(app)
-        response = client.get("/api/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["strategies"]) == 1
-        assert data["strategies"][0]["strategy_name"] == "test_strategy"
-        assert data["strategies"][0]["status"] == "running"
+        mock_factory = _build_mock_process_factory({"test_strategy": mock_process})
+        with patch("snapper.server.app.ProcessLauncherService", return_value=mock_factory):
+            app.state.process_factory = mock_factory
+            with TestClient(app) as client:
+                response = client.get("/api/status")
+                assert response.status_code == 200
+                data = response.json()
+                assert len(data["strategies"]) == 1
+                assert data["strategies"][0]["strategy_name"] == "test_strategy"
+                assert data["strategies"][0]["status"] == "running"
 
 
 class TestSignalsExchangeFilter:
@@ -1794,7 +1833,7 @@ class TestCandlesHttpExceptionReraise:
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
-        client = TestClient(app)
+        client = _track_test_client(TestClient(app))
         with patch("snapper.server.app.get_repository") as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = MagicMock()

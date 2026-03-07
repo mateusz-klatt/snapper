@@ -293,6 +293,16 @@ class SQLAlchemyRepository(Repository):
         """Return the database dialect name."""
         return self.engine.url.get_dialect().name
 
+    def __del__(self) -> None:
+        """Attempt to dispose the sync engine when the repository is garbage-collected."""
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return
+        try:
+            engine.sync_engine.dispose()
+        except Exception:
+            return
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
         """Provide async session with automatic rollback on error."""
@@ -1172,3 +1182,17 @@ class DatabaseRepository:
     def create_all(self) -> None:
         """Create all database tables from model metadata."""
         Base.metadata.create_all(self.engine)
+
+    def dispose(self) -> None:
+        """Dispose the engine and release open database resources."""
+        self.engine.dispose()
+
+    def __del__(self) -> None:
+        """Attempt to dispose the engine when the repository is garbage-collected."""
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return
+        try:
+            engine.dispose()
+        except Exception:
+            return

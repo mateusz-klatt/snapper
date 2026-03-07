@@ -84,7 +84,7 @@ has_trading_permission = cast(Any, has_trading_permission)
 
 
 @pytest.fixture
-def test_client(mock_settings_for_tests: Any) -> Any:
+def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
     """Provide a TestClient with mocked authentication."""
     app: Any = create_app()
     app.state.settings = SimpleNamespace(
@@ -107,7 +107,10 @@ def test_client(mock_settings_for_tests: Any) -> Any:
     app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
     app.dependency_overrides[require_authentication] = skip_authentication
     client: Any = TestClient(app)
-    return client
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 WS_PATH = "/api/ws"

@@ -199,6 +199,37 @@ class BaseStrategy(ABC):
             self.zmq_context.term()
             self.zmq_context = None
 
+    def __del__(self) -> None:
+        """Attempt to release ZMQ resources during garbage collection."""
+        heartbeat_task = getattr(self, "_heartbeat_task", None)
+        if heartbeat_task is not None and not heartbeat_task.done():
+            with contextlib.suppress(Exception):
+                heartbeat_task.cancel()
+        listen_task = getattr(self, "_listen_task", None)
+        if listen_task is not None and not listen_task.done():
+            with contextlib.suppress(Exception):
+                listen_task.cancel()
+        subscriber = getattr(self, "subscriber", None)
+        if subscriber is not None:
+            with contextlib.suppress(Exception):
+                subscriber.close()
+            self.subscriber = None
+        publisher = getattr(self, "publisher", None)
+        if publisher is not None:
+            with contextlib.suppress(Exception):
+                publisher.close()
+            self.publisher = None
+        zmq_context = getattr(self, "zmq_context", None)
+        if zmq_context is not None:
+            destroy = getattr(zmq_context, "destroy", None)
+            if callable(destroy):
+                with contextlib.suppress(Exception):
+                    destroy(linger=0)
+            else:
+                with contextlib.suppress(Exception):
+                    zmq_context.term()
+            self.zmq_context = None
+
     def _connect_subscriber_socket(self, raw_sub_socket: zmq.asyncio.Socket) -> None:
         """Connect the subscriber socket to broker or direct feed.
 

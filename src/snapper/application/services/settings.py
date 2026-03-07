@@ -9,6 +9,7 @@ It handles:
 """
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass
 from datetime import UTC
@@ -125,10 +126,15 @@ class SettingsService:
     async def shutdown(self) -> None:
         """Shutdown the service and cleanup resources."""
         if self._publisher:
-            self._publisher.setsockopt(zmq.LINGER, 0)
-            self._publisher.close()
+            with contextlib.suppress(Exception):
+                self._publisher.setsockopt(zmq.LINGER, 0)
+            with contextlib.suppress(Exception):
+                self._publisher.close()
+            self._publisher = None
         if self._zmq_context:
-            self._zmq_context.term()
+            with contextlib.suppress(Exception):
+                self._zmq_context.term()
+            self._zmq_context = None
         logger.info("SettingsService shutdown complete")
         await asyncio.sleep(0)
 

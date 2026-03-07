@@ -574,6 +574,24 @@ def _make_mapper_with_empty_cache() -> SymbolMapperService:
     return mapper
 
 
+def test_clear_instance_logs_warning_on_repository_dispose_error() -> None:
+    """Clear instance logs a warning when repository disposal fails.
+
+    Given: A singleton instance whose repository dispose raises,
+    When: clear_instance is called,
+    Then: The instance is cleared and the warning is emitted.
+    """
+    mapper = SymbolMapperService.__new__(SymbolMapperService)
+    repository = Mock()
+    repository.dispose.side_effect = RuntimeError("dispose failed")
+    mapper.repository = repository
+    SymbolMapperService._instance = mapper
+    with patch.object(symbol_mapper_module.logger, "warning") as warning_mock:
+        SymbolMapperService.clear_instance()
+    warning_mock.assert_called_once()
+    assert SymbolMapperService._instance is None
+
+
 class TestDatabaseSymbolMapperCore:
     """Tests for core SymbolMapperService operations."""
 

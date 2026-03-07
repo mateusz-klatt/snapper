@@ -34,20 +34,26 @@ Note:
 """
 
 import asyncio
+import contextlib
+import gc
 import os
 import shutil
 import socket
+import sqlite3
 import sys
 import tracemalloc
+import weakref
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
+from typing import cast
 from unittest import mock
 from unittest.mock import Mock
 
 import pytest
 import zmq
 import zmq.asyncio
+from fastapi.testclient import TestClient
 
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.application.services.settings import SettingsService
@@ -68,6 +74,83 @@ from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.server.rate_limiting import limiter
 
 _background_tasks: set[asyncio.Task[None]] = set()
+_tracked_zmq_contexts: weakref.WeakSet[object] = weakref.WeakSet()
+_tracked_sqlite_connections: weakref.WeakSet[sqlite3.Connection] = weakref.WeakSet()
+_tracking_install_state = {"zmq": False, "sqlite": False}
+
+
+class _TrackedSQLiteConnection(sqlite3.Connection):
+    """sqlite3 connection subclass that supports weakref-based tracking."""
+
+
+def _close_test_client_on_gc(self: TestClient) -> None:
+    """Close TestClient during garbage collection to release lifespan resources."""
+    try:
+        self.close()
+    except Exception:
+        return
+
+
+def _cleanup_zmq_contexts() -> None:
+    """Close tracked sockets and destroy shared ZMQ contexts."""
+    contexts = list(_tracked_zmq_contexts)
+    for ctx_module in (zmq.asyncio, zmq):
+        try:
+            contexts.append(ctx_module.Context.instance())
+        except Exception:
+            continue
+    for ctx in contexts:
+        sockets = getattr(ctx, "sockets", ())
+        try:
+            socket_iterable = tuple(sockets)
+        except Exception:
+            socket_iterable = ()
+        for socket_obj in socket_iterable:
+            try:
+                socket_obj.setsockopt(zmq.LINGER, 0)
+                socket_obj.close()
+            except Exception:
+                pass
+        with contextlib.suppress(Exception):
+            ctx.destroy(linger=0)
+
+
+def _install_zmq_context_tracking() -> None:
+    """Track every created ZMQ context so teardown can destroy it."""
+    if _tracking_install_state["zmq"]:
+        return
+    original_sync_init = zmq.Context.__init__
+    original_async_init = zmq.asyncio.Context.__init__
+
+    def tracked_sync_init(self: zmq.Context, *args: Any, **kwargs: Any) -> None:
+        original_sync_init(self, *args, **kwargs)
+        _tracked_zmq_contexts.add(self)
+
+    def tracked_async_init(self: zmq.asyncio.Context, *args: Any, **kwargs: Any) -> None:
+        original_async_init(self, *args, **kwargs)
+        _tracked_zmq_contexts.add(self)
+
+    zmq.Context.__init__ = tracked_sync_init
+    zmq.asyncio.Context.__init__ = tracked_async_init
+    _tracking_install_state["zmq"] = True
+
+
+def _install_sqlite_connection_tracking() -> None:
+    """Track sqlite connections so session teardown can close stragglers."""
+    if _tracking_install_state["sqlite"]:
+        return
+    original_connect = sqlite3.connect
+
+    def tracked_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs.setdefault("factory", _TrackedSQLiteConnection)
+        connection = cast(sqlite3.Connection, original_connect(*args, **kwargs))
+        with contextlib.suppress(TypeError):
+            _tracked_sqlite_connections.add(connection)
+        return connection
+
+    sqlite3.connect = tracked_connect
+    sqlite3.dbapi2.connect = tracked_connect
+    _tracking_install_state["sqlite"] = True
 
 
 @pytest.fixture(autouse=True)
@@ -323,9 +406,30 @@ def cleanup_tmp_path_factory(
         shutil.rmtree(base_temp, ignore_errors=True)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_session_resources() -> Generator[None]:
+    """Dispose lingering repositories and contexts before pytest final GC."""
+    yield
+    with contextlib.suppress(Exception):
+        _cleanup_zmq_contexts()
+    for connection in list(_tracked_sqlite_connections):
+        with contextlib.suppress(Exception):
+            connection.close()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(dispose_repositories())
+    finally:
+        loop.close()
+    clear_repository_cache()
+    gc.collect()
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Configure pytest: start tracemalloc and set event loop policy."""
     tracemalloc.start()
+    TestClient.__del__ = _close_test_client_on_gc
+    _install_zmq_context_tracking()
+    _install_sqlite_connection_tracking()
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
@@ -372,6 +476,7 @@ def cleanup_all() -> Generator[None]:
     except Exception:
         pass
     finally:
+        _cleanup_zmq_contexts()
         clear_repository_cache()
 
 
@@ -379,17 +484,5 @@ def cleanup_all() -> Generator[None]:
 def cleanup_zmq_sockets() -> Generator[None]:
     """Close all ZMQ sockets after each test function."""
     yield
-    try:
-        for ctx_module in [zmq, zmq.asyncio]:
-            try:
-                ctx = ctx_module.Context.instance()
-                for socket in tuple(ctx.sockets):
-                    try:
-                        socket.setsockopt(zmq.LINGER, 0)
-                        socket.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-    except ImportError:
-        pass
+    with contextlib.suppress(ImportError):
+        _cleanup_zmq_contexts()

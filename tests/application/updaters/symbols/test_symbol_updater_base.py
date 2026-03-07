@@ -149,6 +149,7 @@ def updater_factory(
 ) -> Callable[[int, bool], DummySymbolUpdater]:
     """Provide factory function for creating test updater instances."""
     created_repositories: list[DatabaseRepository] = []
+    created_updaters: list[DummySymbolUpdater] = []
 
     def factory(update_threshold_hours: int, force: bool = False) -> DummySymbolUpdater:
         db_path = tmp_path / f"symbols_{len(created_repositories)}.sqlite"
@@ -166,10 +167,13 @@ def updater_factory(
         repository = DatabaseRepository(settings.db_url)
         repository.create_all()
         updater.repository = repository
+        created_updaters.append(updater)
         created_repositories.append(repository)
         return updater
 
     def cleanup() -> None:
+        for updater in created_updaters:
+            SymbolUpdaterService._cleanup_zmq(updater)
         for repository in created_repositories:
             repository.engine.dispose()
 

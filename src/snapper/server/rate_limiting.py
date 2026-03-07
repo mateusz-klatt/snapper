@@ -4,9 +4,13 @@ Provides a pre-configured slowapi Limiter instance that uses
 the client IP address as the rate limit key.
 """
 
+import inspect
 import math
 import time
+from typing import Any
+from typing import cast
 
+import slowapi.extension as slowapi_extension
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
@@ -15,6 +19,14 @@ from limits.limits import RateLimitItem
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+
+def _patch_slowapi_coroutine_detection() -> None:
+    """Patch slowapi to use non-deprecated coroutine detection on Python 3.14+."""
+    asyncio_module = cast(Any, slowapi_extension).asyncio
+    asyncio_module.iscoroutinefunction = inspect.iscoroutinefunction
+
+
+_patch_slowapi_coroutine_detection()
 limiter = Limiter(key_func=get_remote_address)
 """Application-wide rate limiter keyed by client IP address."""
 

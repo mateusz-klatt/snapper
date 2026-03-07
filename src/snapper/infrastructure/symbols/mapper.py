@@ -408,4 +408,15 @@ class SymbolMapperService:
         Resets the singleton state, allowing a fresh instance to be created
         on next access. Useful for testing.
         """
+        instance = cls._instance
         cls._instance = None
+        cls._initialized = False
+        if instance is None:
+            return
+        repository = getattr(instance, "repository", None)
+        dispose = getattr(repository, "dispose", None)
+        if callable(dispose):
+            try:
+                dispose()
+            except Exception as exc:
+                logger.warning(f"Failed to dispose SymbolMapperService repository: {exc}")

@@ -1501,6 +1501,28 @@ def test_database_repository_get_session_and_create_all(
     session.close()
 
 
+def test_database_repository_del_without_engine() -> None:
+    """Test DatabaseRepository.__del__ tolerates missing engine attribute.
+
+    Given: A partially initialized repository without an engine,
+    When: __del__ is invoked,
+    Then: No exception is raised.
+    """
+    repo = DatabaseRepository.__new__(DatabaseRepository)
+    DatabaseRepository.__del__(repo)
+
+
+def test_sqlalchemy_repository_del_without_engine() -> None:
+    """Test SQLAlchemyRepository.__del__ tolerates missing engine attribute.
+
+    Given: A partially initialized async repository without an engine,
+    When: __del__ is invoked,
+    Then: No exception is raised.
+    """
+    repo = SQLAlchemyRepository.__new__(SQLAlchemyRepository)
+    SQLAlchemyRepository.__del__(repo)
+
+
 def test_get_repository_caches_by_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test get_repository caches instances by URL.
 

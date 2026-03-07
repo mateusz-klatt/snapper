@@ -25,6 +25,7 @@ patterns for real-time data streaming.
 """
 
 import asyncio
+import inspect
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
@@ -1385,7 +1386,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         Returns:
             Result of the function call.
         """
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
             return await func(*args, **kwargs)
         return func(*args, **kwargs)
 

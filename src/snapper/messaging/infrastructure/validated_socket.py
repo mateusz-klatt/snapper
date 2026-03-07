@@ -48,6 +48,8 @@ Subscribing with validation::
     topic, payload = await subscriber.recv_multipart()
 """
 
+import contextlib
+
 import zmq
 import zmq.asyncio
 from loguru import logger
@@ -121,7 +123,16 @@ class ValidatedPublisher:
 
     def close(self) -> None:
         """Close the underlying socket."""
+        with contextlib.suppress(Exception):
+            self._socket.setsockopt(zmq.LINGER, 0)
         self._socket.close()
+
+    def __del__(self) -> None:
+        """Attempt to close the underlying socket during garbage collection."""
+        try:
+            self.close()
+        except Exception:
+            return
 
     def setsockopt(self, option: int, value: int) -> None:
         """Set a socket option.
@@ -219,7 +230,16 @@ class ValidatedSubscriber:
 
     def close(self) -> None:
         """Close the underlying socket."""
+        with contextlib.suppress(Exception):
+            self._socket.setsockopt(zmq.LINGER, 0)
         self._socket.close()
+
+    def __del__(self) -> None:
+        """Attempt to close the underlying socket during garbage collection."""
+        try:
+            self.close()
+        except Exception:
+            return
 
     def setsockopt(self, option: int, value: int) -> None:
         """Set a socket option.

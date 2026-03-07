@@ -44,6 +44,11 @@ app.include_router(router)
 client = TestClient(app)
 
 
+def teardown_module(module: object) -> None:
+    """Close the module-scoped TestClient after the test module completes."""
+    client.close()
+
+
 class TestUserManagementBasic:
     """Test suite for user management API authorization."""
 

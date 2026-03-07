@@ -1420,6 +1420,39 @@ class TestLifecycle:
         assert strategy._heartbeat_task.cancelled()
         assert strategy._listen_task.cancelled()
 
+    def test_del_cleans_up_resources(self, strategy_config: StrategyConfig) -> None:
+        """Verify __del__ releases sockets, tasks, and context."""
+        strategy = SimpleTestStrategy(strategy_config)
+        heartbeat_task = MagicMock()
+        heartbeat_task.done.return_value = False
+        listen_task = MagicMock()
+        listen_task.done.return_value = False
+        mock_subscriber = MagicMock()
+        mock_publisher = MagicMock()
+        mock_context = MagicMock()
+        strategy._heartbeat_task = heartbeat_task
+        strategy._listen_task = listen_task
+        strategy.subscriber = mock_subscriber
+        strategy.publisher = mock_publisher
+        strategy.zmq_context = mock_context
+        strategy.__del__()
+        heartbeat_task.cancel.assert_called_once()
+        listen_task.cancel.assert_called_once()
+        mock_subscriber.close.assert_called_once()
+        mock_publisher.close.assert_called_once()
+        mock_context.destroy.assert_called_once_with(linger=0)
+        assert strategy.subscriber is None
+        assert strategy.publisher is None
+        assert strategy.zmq_context is None
+
+    def test_del_without_resources_is_noop(self, strategy_config: StrategyConfig) -> None:
+        """Verify __del__ tolerates strategies without allocated resources."""
+        strategy = SimpleTestStrategy(strategy_config)
+        strategy.__del__()
+        assert strategy.subscriber is None
+        assert strategy.publisher is None
+        assert strategy.zmq_context is None
+
 
 class TestListenLoop:
     """Test suite for strategy message listening loop."""

@@ -23,6 +23,8 @@ class TestValidatedPublisher:
         Then: Socket send_multipart called with encoded topic and payload.
         """
         mock_socket = AsyncMock()
+        mock_socket.setsockopt = MagicMock()
+        mock_socket.close = MagicMock()
         publisher = ValidatedPublisher(mock_socket)
         await publisher.send_multipart(
             topic="market.kraken.BTC-USD.candles.1m",
@@ -41,6 +43,8 @@ class TestValidatedPublisher:
         Then: TopicValidationError raised, socket not called.
         """
         mock_socket = AsyncMock()
+        mock_socket.setsockopt = MagicMock()
+        mock_socket.close = MagicMock()
         publisher = ValidatedPublisher(mock_socket)
         with pytest.raises(TopicValidationError, match="Invalid topic 'BTC-USD:1h'"):
             await publisher.send_multipart(
@@ -58,6 +62,8 @@ class TestValidatedPublisher:
         Then: Flag is passed to underlying socket.
         """
         mock_socket = AsyncMock()
+        mock_socket.setsockopt = MagicMock()
+        mock_socket.close = MagicMock()
         publisher = ValidatedPublisher(mock_socket)
         await publisher.send_multipart(
             topic="market.kraken.BTC-USD.candles.1m",
@@ -68,15 +74,36 @@ class TestValidatedPublisher:
         assert call_args[1]["flags"] == zmq.NOBLOCK
 
     def test_close_without_linger(self) -> None:
-        """Test close delegates to wrapped socket.
+        """Test close sets linger and delegates to wrapped socket.
 
         Given: ValidatedPublisher wrapping mock socket,
         When: Calling close(),
-        Then: Underlying socket close called.
+        Then: Linger is disabled and underlying socket close called.
         """
         mock_socket = MagicMock()
         publisher = ValidatedPublisher(mock_socket)
         publisher.close()
+        mock_socket.setsockopt.assert_called_once_with(zmq.LINGER, 0)
+        mock_socket.close.assert_called_once_with()
+
+    def test_del_closes_publisher_socket(self) -> None:
+        """Test publisher destructor closes the wrapped socket.
+
+        Given: ValidatedPublisher wrapping mock socket,
+        When: __del__ is invoked,
+        Then: Underlying socket is closed.
+        """
+        mock_socket = MagicMock()
+        publisher = ValidatedPublisher(mock_socket)
+        publisher.__del__()
+        mock_socket.close.assert_called_once_with()
+
+    def test_del_ignores_publisher_close_error(self) -> None:
+        """Test publisher destructor suppresses close errors."""
+        mock_socket = MagicMock()
+        mock_socket.close.side_effect = RuntimeError("close failed")
+        publisher = ValidatedPublisher(mock_socket)
+        publisher.__del__()
         mock_socket.close.assert_called_once_with()
 
 
@@ -147,6 +174,8 @@ class TestValidatedSubscriber:
         Then: Returns decoded topic string and raw payload bytes.
         """
         mock_socket = AsyncMock()
+        mock_socket.setsockopt = MagicMock()
+        mock_socket.close = MagicMock()
         mock_socket.recv_multipart.return_value = [
             b"market.kraken.BTC-USD.candles.1m",
             b'{"test": "data"}',
@@ -165,19 +194,42 @@ class TestValidatedSubscriber:
         Then: ValueError raised with expected parts count.
         """
         mock_socket = AsyncMock()
+        mock_socket.setsockopt = MagicMock()
+        mock_socket.close = MagicMock()
         mock_socket.recv_multipart.return_value = [b"only_one_part"]
         subscriber = ValidatedSubscriber(mock_socket)
         with pytest.raises(ValueError, match="Expected 2-part message, got 1 parts"):
             await subscriber.recv_multipart()
 
     def test_close(self) -> None:
-        """Test close delegates to wrapped socket.
+        """Test close sets linger and delegates to wrapped socket.
 
         Given: ValidatedSubscriber wrapping mock socket,
         When: Calling close(),
-        Then: Underlying socket close called.
+        Then: Linger is disabled and underlying socket close called.
         """
         mock_socket = MagicMock()
         subscriber = ValidatedSubscriber(mock_socket)
         subscriber.close()
+        mock_socket.setsockopt.assert_called_once_with(zmq.LINGER, 0)
+        mock_socket.close.assert_called_once()
+
+    def test_del_closes_subscriber_socket(self) -> None:
+        """Test subscriber destructor closes the wrapped socket.
+
+        Given: ValidatedSubscriber wrapping mock socket,
+        When: __del__ is invoked,
+        Then: Underlying socket is closed.
+        """
+        mock_socket = MagicMock()
+        subscriber = ValidatedSubscriber(mock_socket)
+        subscriber.__del__()
+        mock_socket.close.assert_called_once()
+
+    def test_del_ignores_subscriber_close_error(self) -> None:
+        """Test subscriber destructor suppresses close errors."""
+        mock_socket = MagicMock()
+        mock_socket.close.side_effect = RuntimeError("close failed")
+        subscriber = ValidatedSubscriber(mock_socket)
+        subscriber.__del__()
         mock_socket.close.assert_called_once()
