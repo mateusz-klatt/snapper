@@ -26,11 +26,11 @@ jobs:
         with:
           node-version: '25'
 
-      - name: UI setup and build
-        run: make ui-setup ui-build
-
       - name: Install system dependencies
         run: make system-deps
+
+      - name: UI setup and build
+        run: make ui-setup ui-build
 
       - name: Setup development environment
         run: make setup
