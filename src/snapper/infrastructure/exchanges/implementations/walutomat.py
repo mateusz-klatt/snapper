@@ -67,7 +67,7 @@ class _RaisingAsyncIterator[T](AsyncIterator[T]):
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    def __aiter__(self) -> "_RaisingAsyncIterator[T]":
+    def __aiter__(self) -> _RaisingAsyncIterator[T]:
         return self
 
     async def __anext__(self) -> T:

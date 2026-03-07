@@ -213,7 +213,7 @@ async def _shutdown_zmq_bridge(app: FastAPI) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Application lifespan context manager.
 
     Manages startup and shutdown sequences including:

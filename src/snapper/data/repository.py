@@ -632,10 +632,10 @@ class SQLAlchemyRepository(Repository):
             ]
 
 
-_repository_cache: dict[str, "Repository"] = {}
+_repository_cache: dict[str, Repository] = {}
 
 
-def get_repository(db_url: str) -> "Repository":
+def get_repository(db_url: str) -> Repository:
     """Get or create a cached repository instance.
 
     Returns an existing repository for the given URL or creates a new one.

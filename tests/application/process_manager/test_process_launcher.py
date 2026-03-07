@@ -1156,7 +1156,7 @@ class _DummyResult:
             return self.setting[0] if self.setting else None
         return self.setting
 
-    def scalars(self) -> "_DummyResult":
+    def scalars(self) -> _DummyResult:
         return self
 
     def all(self) -> list[Setting]:
@@ -1175,7 +1175,7 @@ class _DummySession:
         self.commit_called = False
         self.added: list[Any] = []
 
-    async def __aenter__(self) -> "_DummySession":
+    async def __aenter__(self) -> _DummySession:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -1209,7 +1209,7 @@ class _RunsResult:
     def __init__(self, runs: list[Any]) -> None:
         self.runs = runs
 
-    def scalars(self) -> "_RunsResult":
+    def scalars(self) -> _RunsResult:
         return self
 
     def all(self) -> list[Any]:
@@ -1223,7 +1223,7 @@ class _RunsSession:
         self.runs = runs
         self.committed = False
 
-    async def __aenter__(self) -> "_RunsSession":
+    async def __aenter__(self) -> _RunsSession:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -3432,7 +3432,7 @@ async def test_create_process_config_in_db_includes_tags_and_schema(
             super().__init__([])
             self.added_items: list[Any] = []
 
-        async def __aenter__(self) -> "_CaptureSession":
+        async def __aenter__(self) -> _CaptureSession:
             return self
 
         def add(self, item: Any) -> None:
@@ -3489,7 +3489,7 @@ async def test_create_process_config_in_db_omits_absent_optional_fields(
             super().__init__([])
             self.added_item: Any | None = None
 
-        async def __aenter__(self) -> "_MinimalSession":
+        async def __aenter__(self) -> _MinimalSession:
             return self
 
         def add(self, item: Any) -> None:

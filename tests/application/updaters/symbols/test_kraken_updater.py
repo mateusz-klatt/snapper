@@ -576,7 +576,7 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
     class FaultySession:
         """Session stub that fails on commit."""
 
-        def __enter__(self) -> "FaultySession":
+        def __enter__(self) -> FaultySession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:

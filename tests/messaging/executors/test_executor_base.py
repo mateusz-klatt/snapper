@@ -87,7 +87,7 @@ async def test_start_with_websocket_client(monkeypatch: pytest.MonkeyPatch) -> N
     class WebsocketClient:
         supports_websocket_executions = True
 
-        async def __aenter__(self) -> "WebsocketClient":
+        async def __aenter__(self) -> WebsocketClient:
             return self
 
         async def __aexit__(
@@ -146,7 +146,7 @@ async def test_start_without_websocket_client(monkeypatch: pytest.MonkeyPatch) -
     class NoWebsocketClient:
         supports_websocket_executions = False
 
-        async def __aenter__(self) -> "NoWebsocketClient":
+        async def __aenter__(self) -> NoWebsocketClient:
             return self
 
         async def __aexit__(
@@ -1865,7 +1865,7 @@ class MockExchangeClientWithAenter:
         """Initialize client stub."""
         self._entered = False
 
-    async def __aenter__(self) -> "MockExchangeClientWithAenter":
+    async def __aenter__(self) -> MockExchangeClientWithAenter:
         """Enter async context manager.
 
         Returns:
@@ -2941,7 +2941,7 @@ class TestExecutorCoverage:
         class MockExchangeClient:
             supports_websocket_executions = False
 
-            async def __aenter__(self) -> "MockExchangeClient":
+            async def __aenter__(self) -> MockExchangeClient:
                 return self
 
             async def __aexit__(
@@ -3222,7 +3222,7 @@ class TestExecutorCoverage:
         service_any.running = True
 
         class FailingIterator:
-            def __aiter__(self) -> "FailingIterator":
+            def __aiter__(self) -> FailingIterator:
                 return self
 
             async def __anext__(self) -> ExecutionUpdate:

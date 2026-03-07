@@ -66,7 +66,7 @@ class SettingsService:
         zmq_broker_xpub: ZMQ broker XPUB address for publishing changes.
     """
 
-    _instance: "SettingsService | None" = None
+    _instance: SettingsService | None = None
     _init_params: tuple[str, str] | None = None
     _initialized: bool = False
 
@@ -74,7 +74,7 @@ class SettingsService:
         cls,
         db_url: str,
         zmq_broker_xpub: str,
-    ) -> "SettingsService":
+    ) -> SettingsService:
         """Create or return existing singleton instance.
 
         Returns same instance if called with identical parameters.
@@ -338,7 +338,7 @@ class SettingsService:
         cls,
         db_url: str | None = None,
         zmq_broker_xpub: str | None = None,
-    ) -> "SettingsService | None":
+    ) -> SettingsService | None:
         """Get existing singleton or create new one.
 
         Args:

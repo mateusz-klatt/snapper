@@ -2827,6 +2827,20 @@ async def test_subscribe_candles_cleanup_aggregator_task(
 
 
 @pytest.mark.asyncio
+async def test_stop_candle_aggregator_noop_when_no_task() -> None:
+    """Test _stop_candle_aggregator is a no-op when task is None.
+
+    Given: Client with no aggregator task.
+    When: _stop_candle_aggregator is called.
+    Then: No error raised, task remains None.
+    """
+    client = ZondaExchangeClient(reconnect_delay=0)
+    client._candle_aggregator_task = None
+    await client._stop_candle_aggregator()
+    assert client._candle_aggregator_task is None
+
+
+@pytest.mark.asyncio
 async def test_subscribe_candles_aggregator_task_done_restarts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

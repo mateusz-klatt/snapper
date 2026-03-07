@@ -100,7 +100,7 @@ class MockResult:
         self.data = data
         self.rowcount = len(data) if data else 0
 
-    def scalars(self) -> "MockScalars":
+    def scalars(self) -> MockScalars:
         """Return MockScalars wrapper for result data."""
         return MockScalars(self.data)
 
@@ -127,7 +127,7 @@ class MockSession:
         self.commit = AsyncMock()
         self.close = AsyncMock()
 
-    def __aenter__(self) -> "MockSession":
+    def __aenter__(self) -> MockSession:
         """Magic method."""
         return self
 

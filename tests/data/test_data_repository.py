@@ -373,7 +373,7 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
     scalar_one_called: dict[str, bool] = {"value": False}
 
     class _SyncSavepoint:
-        def __enter__(self) -> "_SyncSavepoint":
+        def __enter__(self) -> _SyncSavepoint:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -390,7 +390,7 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
             return None
 
-        def begin_nested(self) -> "_SyncSavepoint":
+        def begin_nested(self) -> _SyncSavepoint:
             return _SyncSavepoint()
 
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
@@ -526,7 +526,7 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
 
                     return Inst()
 
-                def scalars(self) -> "Q":
+                def scalars(self) -> Q:
                     return self
 
                 def first(self) -> Any:
@@ -634,7 +634,7 @@ async def test_mssql_get_candles_returns_empty_when_no_instrument(monkeypatch: A
 
         def execute(self, stmt: Any, *_args: Any, **_kwargs: Any) -> Any:
             class Q:
-                def scalars(self) -> "Q":
+                def scalars(self) -> Q:
                     return self
 
                 def first(self) -> None:
@@ -692,7 +692,7 @@ async def test_mssql_get_candles_with_exchange_filter(monkeypatch: Any) -> None:
 
         def execute(self, stmt: Any, *_args: Any, **_kwargs: Any) -> Any:
             class Q:
-                def scalars(self) -> "Q":
+                def scalars(self) -> Q:
                     return self
 
                 def first(self) -> None:
@@ -738,7 +738,7 @@ async def test_mssql_get_trades_returns_empty_for_missing_instrument(
     """
 
     class NoInstrumentSession:
-        def __enter__(self) -> "NoInstrumentSession":
+        def __enter__(self) -> NoInstrumentSession:
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -746,7 +746,7 @@ async def test_mssql_get_trades_returns_empty_for_missing_instrument(
 
         def execute(self, stmt: Any) -> Any:
             class _Result:
-                def scalars(self) -> "_Result":
+                def scalars(self) -> _Result:
                     return self
 
                 def first(self) -> None:
@@ -784,7 +784,7 @@ async def test_mssql_get_trades_with_exchange_filter(
     """
 
     class NoInstrumentSession:
-        def __enter__(self) -> "NoInstrumentSession":
+        def __enter__(self) -> NoInstrumentSession:
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -792,7 +792,7 @@ async def test_mssql_get_trades_with_exchange_filter(
 
         def execute(self, stmt: Any) -> Any:
             class _Result:
-                def scalars(self) -> "_Result":
+                def scalars(self) -> _Result:
                     return self
 
                 def first(self) -> None:
@@ -845,7 +845,7 @@ async def test_mssql_get_market_snapshots_returns_results(
             self.high_24h = 42500.0
 
     class FakeSession:
-        def __enter__(self) -> "FakeSession":
+        def __enter__(self) -> FakeSession:
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -853,7 +853,7 @@ async def test_mssql_get_market_snapshots_returns_results(
 
         def execute(self, stmt: Any) -> Any:
             class _Result:
-                def scalars(self) -> "_Result":
+                def scalars(self) -> _Result:
                     return self
 
                 def all(self) -> list[FakeSnapshot]:
@@ -916,7 +916,7 @@ async def test_mssql_get_trades_returns_results(
     call_count = 0
 
     class FakeSession:
-        def __enter__(self) -> "FakeSession":
+        def __enter__(self) -> FakeSession:
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -928,7 +928,7 @@ async def test_mssql_get_trades_returns_results(
             if call_count == 1:
 
                 class _InstrumentResult:
-                    def scalars(self) -> "_InstrumentResult":
+                    def scalars(self) -> _InstrumentResult:
                         return self
 
                     def first(self) -> FakeInstrument:

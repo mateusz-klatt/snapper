@@ -64,7 +64,7 @@ _SOURCE_EXCHANGE_REQUIRED_MSG = "source_exchange required for paper market data 
 class _EmptyInstrumentsAsyncIterator(AsyncIterator[dict[str, Any]]):
     """Async iterator that yields nothing."""
 
-    def __aiter__(self) -> "_EmptyInstrumentsAsyncIterator":
+    def __aiter__(self) -> _EmptyInstrumentsAsyncIterator:
         return self
 
     async def __anext__(self) -> dict[str, Any]:

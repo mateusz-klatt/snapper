@@ -43,7 +43,7 @@ class _DummyWs:
         self.exception_occur = False
         self.closed = False
 
-    async def __aenter__(self) -> "_DummyWs":
+    async def __aenter__(self) -> _DummyWs:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -2679,7 +2679,7 @@ class _StubWsClient:
         self.subscribe = AsyncMock()
         self.exception_occur = False
 
-    async def __aenter__(self) -> "_StubWsClient":
+    async def __aenter__(self) -> _StubWsClient:
         return self
 
     async def __aexit__(
@@ -3879,7 +3879,7 @@ class TestKrakenAdditionalCoverage:
                 self.subscribe = AsyncMock()
                 self.exception_occur = False
 
-            async def __aenter__(self) -> "_StubWsClient":
+            async def __aenter__(self) -> _StubWsClient:
                 return self
 
             async def __aexit__(

@@ -24,7 +24,7 @@ class TestSignalService:
     """Test cases for SignalReadService basic functionality."""
 
     @pytest.fixture
-    async def test_repository(self, tmp_path: Path) -> AsyncGenerator[SQLAlchemyRepository, None]:
+    async def test_repository(self, tmp_path: Path) -> AsyncGenerator[SQLAlchemyRepository]:
         """Create test SQLAlchemy repository with temporary database."""
         db_path = tmp_path / "test.db"
         url = f"sqlite+aiosqlite:///{db_path.as_posix()}"

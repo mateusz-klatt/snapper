@@ -63,11 +63,11 @@ class SettingsEncryptionService:
         >>> decrypted = service.decrypt(encrypted)
     """
 
-    _instance: "SettingsEncryptionService | None" = None
+    _instance: SettingsEncryptionService | None = None
     _init_params: str | None = None
     _initialized: bool = False
 
-    def __new__(cls, master_password: str) -> "SettingsEncryptionService":
+    def __new__(cls, master_password: str) -> SettingsEncryptionService:
         """Create or return the singleton instance.
 
         Returns existing instance only if called with the same parameters.

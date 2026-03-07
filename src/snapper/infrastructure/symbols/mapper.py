@@ -153,10 +153,10 @@ class SymbolMapperService:
         "BTC-USD"
     """
 
-    _instance: "SymbolMapperService | None" = None
+    _instance: SymbolMapperService | None = None
     _initialized: bool = False
 
-    def __new__(cls) -> "SymbolMapperService":
+    def __new__(cls) -> SymbolMapperService:
         """Create or return the singleton instance.
 
         Returns:
@@ -391,7 +391,7 @@ class SymbolMapperService:
         self.load_cache_if_needed(fail_fast=fail_fast)
 
     @classmethod
-    def get_instance(cls) -> "SymbolMapperService":
+    def get_instance(cls) -> SymbolMapperService:
         """Get or create the singleton instance.
 
         Returns:

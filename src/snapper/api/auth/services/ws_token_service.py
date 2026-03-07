@@ -68,10 +68,10 @@ class WsTokenService:
         - jti: Unique token ID for replay prevention
     """
 
-    _instance: "WsTokenService | None" = None
+    _instance: WsTokenService | None = None
     _initialized: bool = False
 
-    def __new__(cls) -> "WsTokenService":
+    def __new__(cls) -> WsTokenService:
         """Create or return singleton instance.
 
         Returns:
@@ -202,7 +202,7 @@ class WsTokenService:
         self._store.mark_used(payload.jti, payload.exp)
 
     @classmethod
-    def get_instance(cls) -> "WsTokenService":
+    def get_instance(cls) -> WsTokenService:
         """Get or create the singleton instance.
 
         Returns:

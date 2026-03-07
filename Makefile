@@ -118,9 +118,9 @@ ifeq ($(OS),Windows_NT)
 else
   UNAME_S := $(shell uname -s)
   ifeq ($(UNAME_S),Darwin)
-    PYTHON := $(shell which python3.12 2>/dev/null || which python3)
+    PYTHON := $(shell which python3.14 2>/dev/null || which python3)
   else
-    PYTHON := python3
+    PYTHON := $(shell which python3.14 2>/dev/null || which python3)
   endif
   VENV_PY  := .venv/bin/python
 endif

@@ -36,7 +36,7 @@ class MockSession:
         self.delete = AsyncMock()
         self.commit = AsyncMock()
 
-    async def __aenter__(self) -> "MockSession":
+    async def __aenter__(self) -> MockSession:
         """Magic method."""
         return self
 
@@ -52,7 +52,7 @@ class MockResult:
         """Initialize the instance."""
         self.data = data
 
-    def scalars(self) -> "MockScalars":
+    def scalars(self) -> MockScalars:
         """Return MockScalars wrapper."""
         return MockScalars(self.data)
 

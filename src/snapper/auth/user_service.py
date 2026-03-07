@@ -24,10 +24,10 @@ class UserService:
     password management operations.
     """
 
-    _instance: "UserService | None" = None
+    _instance: UserService | None = None
     _initialized: bool = False
 
-    def __new__(cls) -> "UserService":
+    def __new__(cls) -> UserService:
         """Create or return singleton user service instance."""
         if cls._instance is None:
             instance = super().__new__(cls)
@@ -284,7 +284,7 @@ class UserService:
             return True
 
     @classmethod
-    def get_instance(cls) -> "UserService":
+    def get_instance(cls) -> UserService:
         """Get singleton instance.
 
         Returns:

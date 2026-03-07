@@ -907,7 +907,7 @@ def test_executor_runs_and_stops(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
 class _DummyResult:
     """Test dummy for SQLAlchemy result."""
 
-    def scalars(self) -> "_DummyResult":
+    def scalars(self) -> _DummyResult:
         return self
 
     def all(self) -> list[object]:
@@ -920,7 +920,7 @@ class _DummySession:
     def __init__(self) -> None:
         self.execute_calls = 0
 
-    async def __aenter__(self) -> "_DummySession":
+    async def __aenter__(self) -> _DummySession:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
@@ -2189,7 +2189,7 @@ class TestEncryptionRotateErrors:
                 def __init__(self, rows: list[Any]) -> None:
                     self._rows = rows
 
-                async def __aenter__(self) -> "_Session":
+                async def __aenter__(self) -> _Session:
                     return self
 
                 async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -2259,7 +2259,7 @@ class TestEncryptionRotateErrors:
                 def __init__(self, rows: list[Any]) -> None:
                     self._rows = rows
 
-                async def __aenter__(self) -> "_Session":
+                async def __aenter__(self) -> _Session:
                     return self
 
                 async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:

@@ -546,7 +546,7 @@ class MockRepository:
         self._session_result = session_result
         self._error = error
 
-    def session(self) -> "MockSession":
+    def session(self) -> MockSession:
         """Return mock session with configured result or error."""
         return MockSession(self._session_result, self._error)
 
@@ -559,7 +559,7 @@ class MockSession:
         self._result = result
         self._error = error
 
-    async def __aenter__(self) -> "MockSession":
+    async def __aenter__(self) -> MockSession:
         """Magic method."""
         if self._error:
             raise self._error
@@ -569,7 +569,7 @@ class MockSession:
         """Magic method."""
         pass
 
-    async def execute(self, query: Any) -> "MockResult":
+    async def execute(self, query: Any) -> MockResult:
         """Execute mock query and return configured result."""
         if self._error:
             raise self._error
@@ -587,7 +587,7 @@ class MockResult:
         """Return all result data as list."""
         return self._data
 
-    def scalars(self) -> "MockResult":
+    def scalars(self) -> MockResult:
         """Return self for scalar result chaining."""
         return self
 
@@ -1259,7 +1259,7 @@ class MockRepositoryV2:
         """Initialize the instance."""
         self._session_result = session_result
 
-    def session(self) -> "MockSession":
+    def session(self) -> MockSession:
         """Return mock session with configured result."""
         return MockSession(self._session_result)
 
@@ -1271,7 +1271,7 @@ class MockSessionV2:
         """Initialize the instance."""
         self._result = result
 
-    async def __aenter__(self) -> "MockSessionV2":
+    async def __aenter__(self) -> MockSessionV2:
         """Magic method."""
         return self
 
@@ -1279,7 +1279,7 @@ class MockSessionV2:
         """Magic method."""
         pass
 
-    async def execute(self, query: Any) -> "MockResult":
+    async def execute(self, query: Any) -> MockResult:
         """Execute mock query and return configured result."""
         return MockResult(self._result)
 
@@ -1295,7 +1295,7 @@ class MockResultV2:
         """Return all result data as list."""
         return self._data
 
-    def scalars(self) -> "MockResultV2":
+    def scalars(self) -> MockResultV2:
         """Return self for scalar result chaining."""
         return self
 
@@ -1810,7 +1810,7 @@ class TestCandlesHttpExceptionReraise:
 
 
 @pytest.fixture(autouse=True)
-def reset_dummy_process_log() -> Generator[None, None, None]:
+def reset_dummy_process_log() -> Generator[None]:
     """Provide clean process log for each test."""
     dummy_processes.reset_call_log()
     yield
@@ -1818,7 +1818,7 @@ def reset_dummy_process_log() -> Generator[None, None, None]:
 
 
 @contextlib.contextmanager
-def _set_argv(arguments: list[str]) -> Generator[None, None, None]:
+def _set_argv(arguments: list[str]) -> Generator[None]:
     original_argv = sys.argv[:]
     sys.argv = arguments
     try:

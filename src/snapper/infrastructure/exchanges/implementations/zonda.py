@@ -1031,10 +1031,15 @@ class ZondaExchangeClient(ExchangeClientBase):
                 except TimeoutError:
                     await asyncio.sleep(0.01)
         finally:
-            if self._candle_aggregator_task and not self._candle_aggregator_task.done():
-                self._candle_aggregator_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._candle_aggregator_task
+            await self._stop_candle_aggregator()
+
+    async def _stop_candle_aggregator(self) -> None:
+        """Cancel the candle aggregator task if it is still running."""
+        task = self._candle_aggregator_task
+        if task and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def _update_candle_builder(self, trade: TradeUpdate) -> None:
         """Update or create candle builder entry for a trade.

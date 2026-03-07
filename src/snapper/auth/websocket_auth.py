@@ -79,10 +79,10 @@ class WebSocketAuthManager:
     and provides role-based access control.
     """
 
-    _instance: "WebSocketAuthManager | None" = None
+    _instance: WebSocketAuthManager | None = None
     _initialized: bool = False
 
-    def __new__(cls) -> "WebSocketAuthManager":
+    def __new__(cls) -> WebSocketAuthManager:
         """Create or return singleton WebSocket auth manager instance."""
         if cls._instance is None:
             instance = super().__new__(cls)
@@ -314,7 +314,7 @@ class WebSocketAuthManager:
             state.hard_task = None
 
     @classmethod
-    def get_instance(cls) -> "WebSocketAuthManager":
+    def get_instance(cls) -> WebSocketAuthManager:
         """Get singleton instance.
 
         Returns:

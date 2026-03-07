@@ -49,7 +49,7 @@ class PolygonAgg(BaseModel):
     otc: bool | None = Field(default=None, description="Whether this is OTC data")
 
     @classmethod
-    def from_sdk_agg(cls, agg: Any) -> "PolygonAgg":
+    def from_sdk_agg(cls, agg: Any) -> PolygonAgg:
         """Create PolygonAgg from Polygon SDK response object.
 
         Args:
@@ -86,7 +86,7 @@ class PolygonGroupedAgg(BaseModel):
     transactions: int | None = Field(default=None, description="Number of transactions")
 
     @classmethod
-    def from_sdk_agg(cls, agg: Any) -> "PolygonGroupedAgg":
+    def from_sdk_agg(cls, agg: Any) -> PolygonGroupedAgg:
         """Create PolygonGroupedAgg from Polygon SDK response object.
 
         Args:
@@ -122,7 +122,7 @@ class PolygonPreviousClose(BaseModel):
     timestamp: int | None = Field(default=None, description=_TIMESTAMP_DESC)
 
     @classmethod
-    def from_sdk_agg(cls, ticker: str, agg: Any) -> "PolygonPreviousClose":
+    def from_sdk_agg(cls, ticker: str, agg: Any) -> PolygonPreviousClose:
         """Create PolygonPreviousClose from Polygon SDK response object.
 
         Args:
@@ -160,7 +160,7 @@ class PolygonTicker(BaseModel):
     last_updated_utc: str | None = Field(default=None, description="Last update timestamp")
 
     @classmethod
-    def from_sdk_ticker(cls, ticker: Any) -> "PolygonTicker":
+    def from_sdk_ticker(cls, ticker: Any) -> PolygonTicker:
         """Create PolygonTicker from Polygon SDK response object.
 
         Args:

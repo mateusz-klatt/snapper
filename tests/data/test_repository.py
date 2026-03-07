@@ -51,13 +51,13 @@ class _DummyAsyncSession:
         self.commit_called = False
         self.savepoint_rollbacks = 0
 
-    async def __aenter__(self) -> "_DummyAsyncSession":
+    async def __aenter__(self) -> _DummyAsyncSession:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         return False
 
-    def begin_nested(self) -> "_DummyAsyncSavepoint":
+    def begin_nested(self) -> _DummyAsyncSavepoint:
         return _DummyAsyncSavepoint(self)
 
     async def execute(self, stmt: Any) -> Any:
@@ -77,7 +77,7 @@ class _DummyAsyncSavepoint:
     def __init__(self, parent: _DummyAsyncSession) -> None:
         self._parent = parent
 
-    async def __aenter__(self) -> "_DummyAsyncSavepoint":
+    async def __aenter__(self) -> _DummyAsyncSavepoint:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -142,7 +142,7 @@ class _DummyInsert:
     def __init__(self) -> None:
         self.values_kwargs: dict[str, Any] | None = None
 
-    def values(self, **kwargs: Any) -> "_DummyInsert":
+    def values(self, **kwargs: Any) -> _DummyInsert:
         self.values_kwargs = kwargs
         return self
 
@@ -592,7 +592,7 @@ async def test_sqlalchemy_session_rolls_back_on_exception(monkeypatch: pytest.Mo
             self.committed = False
             self.rolled = False
 
-        async def __aenter__(self) -> "DummySession":
+        async def __aenter__(self) -> DummySession:
             return self
 
         async def __aexit__(
@@ -843,7 +843,7 @@ async def test_mssql_upsert_instrument_integrity_path(monkeypatch: pytest.Monkey
             self.rollback_calls = 0
             self._commit_failed = False
 
-        def __enter__(self) -> "IntegrityInstrumentSession":
+        def __enter__(self) -> IntegrityInstrumentSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -929,7 +929,7 @@ async def test_mssql_upsert_instrument_integrity_reraise(monkeypatch: pytest.Mon
             self.rollback_calls = 0
             self._commit_failed = False
 
-        def __enter__(self) -> "IntegrityReraisSession":
+        def __enter__(self) -> IntegrityReraisSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -1011,7 +1011,7 @@ async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch)
             self.id = 42
 
     class ExistingInstrumentSession:
-        def __enter__(self) -> "ExistingInstrumentSession":
+        def __enter__(self) -> ExistingInstrumentSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -1069,20 +1069,20 @@ async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -
             self.execute_calls = 0
             self.savepoint_rollbacks = 0
 
-        def __enter__(self) -> "IntegrityLoopSession":
+        def __enter__(self) -> IntegrityLoopSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
-        def begin_nested(self) -> "IntegrityLoopSession._Savepoint":
+        def begin_nested(self) -> IntegrityLoopSession._Savepoint:
             return IntegrityLoopSession._Savepoint(self)
 
         class _Savepoint:
-            def __init__(self, parent: "IntegrityLoopSession") -> None:
+            def __init__(self, parent: IntegrityLoopSession) -> None:
                 self._parent = parent
 
-            def __enter__(self) -> "IntegrityLoopSession._Savepoint":
+            def __enter__(self) -> IntegrityLoopSession._Savepoint:
                 return self
 
             def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -1172,20 +1172,20 @@ async def test_mssql_upsert_trades_integrity(monkeypatch: pytest.MonkeyPatch) ->
             self.execute_calls = 0
             self.savepoint_rollbacks = 0
 
-        def __enter__(self) -> "IntegrityTradeSession":
+        def __enter__(self) -> IntegrityTradeSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
-        def begin_nested(self) -> "IntegrityTradeSession._Savepoint":
+        def begin_nested(self) -> IntegrityTradeSession._Savepoint:
             return IntegrityTradeSession._Savepoint(self)
 
         class _Savepoint:
-            def __init__(self, parent: "IntegrityTradeSession") -> None:
+            def __init__(self, parent: IntegrityTradeSession) -> None:
                 self._parent = parent
 
-            def __enter__(self) -> "IntegrityTradeSession._Savepoint":
+            def __enter__(self) -> IntegrityTradeSession._Savepoint:
                 return self
 
             def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -1276,20 +1276,20 @@ async def test_mssql_upsert_candles_savepoint_preserves_earlier_inserts(
             self.execute_calls = 0
             self.savepoint_rollbacks = 0
 
-        def __enter__(self) -> "FailOnSecondSession":
+        def __enter__(self) -> FailOnSecondSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
-        def begin_nested(self) -> "FailOnSecondSession._Savepoint":
+        def begin_nested(self) -> FailOnSecondSession._Savepoint:
             return FailOnSecondSession._Savepoint(self)
 
         class _Savepoint:
-            def __init__(self, parent: "FailOnSecondSession") -> None:
+            def __init__(self, parent: FailOnSecondSession) -> None:
                 self._parent = parent
 
-            def __enter__(self) -> "FailOnSecondSession._Savepoint":
+            def __enter__(self) -> FailOnSecondSession._Savepoint:
                 return self
 
             def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -1400,20 +1400,20 @@ async def test_mssql_upsert_trades_savepoint_preserves_earlier_inserts(
             self.execute_calls = 0
             self.savepoint_rollbacks = 0
 
-        def __enter__(self) -> "FailOnSecondSession":
+        def __enter__(self) -> FailOnSecondSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
-        def begin_nested(self) -> "FailOnSecondSession._Savepoint":
+        def begin_nested(self) -> FailOnSecondSession._Savepoint:
             return FailOnSecondSession._Savepoint(self)
 
         class _Savepoint:
-            def __init__(self, parent: "FailOnSecondSession") -> None:
+            def __init__(self, parent: FailOnSecondSession) -> None:
                 self._parent = parent
 
-            def __enter__(self) -> "FailOnSecondSession._Savepoint":
+            def __enter__(self) -> FailOnSecondSession._Savepoint:
                 return self
 
             def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -1702,7 +1702,7 @@ class TestSQLAlchemyRepositoryDialects:
     """Tests for SQLAlchemy repository dialect-specific behaviors."""
 
     @pytest.fixture
-    def mock_postgres_repo(self) -> Generator[SQLAlchemyRepository, None, None]:
+    def mock_postgres_repo(self) -> Generator[SQLAlchemyRepository]:
         """Create mocked PostgreSQL repository for testing."""
         with patch("snapper.data.repository.create_async_engine") as mock_engine:
             mock_engine.return_value = Mock()
@@ -1711,7 +1711,7 @@ class TestSQLAlchemyRepositoryDialects:
                 yield repo
 
     @pytest.fixture
-    def mock_other_repo(self) -> Generator[SQLAlchemyRepository, None, None]:
+    def mock_other_repo(self) -> Generator[SQLAlchemyRepository]:
         """Create mocked non-PostgreSQL repository for testing."""
         with patch("snapper.data.repository.create_async_engine") as mock_engine:
             mock_engine.return_value = Mock()
@@ -2470,7 +2470,7 @@ async def test_mssql_insert_order_uses_sync_session(
             self.commit_called = False
             self.refreshed: _DummyOrder | None = None
 
-        def __enter__(self) -> "_Session":
+        def __enter__(self) -> _Session:
             return self
 
         def __exit__(self, *_: object) -> None:

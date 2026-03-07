@@ -26,7 +26,7 @@ class _IterWs:
     def __init__(self, messages: list[str]):
         self._messages = messages
 
-    def __aiter__(self) -> "_IterWs":
+    def __aiter__(self) -> _IterWs:
         return self
 
     async def __anext__(self) -> str:
@@ -38,7 +38,7 @@ class _IterWs:
 class _ClosedWs:
     """Test WebSocket that raises ConnectionClosed on iteration."""
 
-    def __aiter__(self) -> "_ClosedWs":
+    def __aiter__(self) -> _ClosedWs:
         return self
 
     async def __anext__(self) -> str:
@@ -137,7 +137,7 @@ class _IterWsV2:
     def __init__(self, messages: list[str]):
         self._messages = messages
 
-    def __aiter__(self) -> "_IterWsV2":
+    def __aiter__(self) -> _IterWsV2:
         return self
 
     async def __anext__(self) -> str:
@@ -167,9 +167,7 @@ async def test_subscribe_ticks_reuses_running_handler(monkeypatch: pytest.Monkey
     monkeypatch.setattr(client, "_resubscribe", fake_resubscribe)
     tick = cast(TickerUpdate, object())
     await client._tick_queue.put(tick)
-    gen = cast(
-        AsyncGenerator[TickerUpdate, None], client.subscribe_ticks(["BTC-PLN"], snapshot=False)
-    )
+    gen = cast(AsyncGenerator[TickerUpdate], client.subscribe_ticks(["BTC-PLN"], snapshot=False))
     result = await gen.__anext__()
     assert result is tick
     client._running = False
@@ -197,7 +195,7 @@ async def test_subscribe_ticks_raises_when_stopped_on_error(
 
     monkeypatch.setattr(client, "connect", fake_connect)
     gen = cast(
-        AsyncGenerator[TickerUpdate, None],
+        AsyncGenerator[TickerUpdate],
         client.subscribe_ticks(["BTC-PLN"], snapshot=False),
     )
     with pytest.raises(RuntimeError):
@@ -268,7 +266,7 @@ async def test_subscribe_trades_reuses_running_handler(monkeypatch: pytest.Monke
     trade = cast(TradeUpdate, object())
     await client._trade_queue.put(trade)
     gen = cast(
-        AsyncGenerator[TradeUpdate, None],
+        AsyncGenerator[TradeUpdate],
         client.subscribe_trades(["BTC-PLN"]),
     )
     result = await gen.__anext__()
@@ -297,7 +295,7 @@ async def test_subscribe_trades_raises_when_stopped_on_error(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(client, "connect", fake_connect)
-    gen = cast(AsyncGenerator[TradeUpdate, None], client.subscribe_trades(["BTC-PLN"]))
+    gen = cast(AsyncGenerator[TradeUpdate], client.subscribe_trades(["BTC-PLN"]))
     with pytest.raises(RuntimeError):
         await gen.__anext__()
     await gen.aclose()
@@ -326,7 +324,7 @@ async def test_subscribe_trades_sleeps_and_retries_on_exception(
 
     monkeypatch.setattr(client, "connect", fake_connect)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    gen = cast(AsyncGenerator[TradeUpdate, None], client.subscribe_trades(["BTC-PLN"]))
+    gen = cast(AsyncGenerator[TradeUpdate], client.subscribe_trades(["BTC-PLN"]))
     with pytest.raises(StopAsyncIteration):
         await anext(gen)
     assert sleep_calls
@@ -344,9 +342,7 @@ async def test_subscribe_candles_uses_existing_aggregator(monkeypatch: pytest.Mo
     client._candle_aggregator_task = asyncio.create_task(asyncio.sleep(0.1))
     candle = cast(CandleUpdate, object())
     await client._candle_queue.put(candle)
-    gen = cast(
-        AsyncGenerator[CandleUpdate, None], client.subscribe_candles(["BTC-PLN"], timeframe="1m")
-    )
+    gen = cast(AsyncGenerator[CandleUpdate], client.subscribe_candles(["BTC-PLN"], timeframe="1m"))
     result = await gen.__anext__()
     assert result is candle
     client._running = False
@@ -387,7 +383,7 @@ async def test_subscribe_candles_cleanup_skips_when_task_done(
     monkeypatch.setattr(client, "_candle_aggregator", fake_candle_aggregator)
     candle = cast(CandleUpdate, object())
     await client._candle_queue.put(candle)
-    gen = cast(AsyncGenerator[CandleUpdate, None], client.subscribe_candles(["BTC-PLN"]))
+    gen = cast(AsyncGenerator[CandleUpdate], client.subscribe_candles(["BTC-PLN"]))
     result = await gen.__anext__()
     assert result is candle
     await asyncio.sleep(0)
@@ -513,7 +509,7 @@ async def test_subscribe_executions_reuses_running_handler(monkeypatch: pytest.M
     monkeypatch.setattr(client, "connect", fake_connect)
     execution = cast(ExecutionUpdate, object())
     await client._execution_queue.put(execution)
-    gen = cast(AsyncGenerator[ExecutionUpdate, None], client.subscribe_executions())
+    gen = cast(AsyncGenerator[ExecutionUpdate], client.subscribe_executions())
     result = await gen.__anext__()
     assert result is execution
     client._running = False
@@ -540,7 +536,7 @@ async def test_subscribe_executions_raises_when_stopped_on_error(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(client, "connect", fake_connect)
-    gen = cast(AsyncGenerator[ExecutionUpdate, None], client.subscribe_executions())
+    gen = cast(AsyncGenerator[ExecutionUpdate], client.subscribe_executions())
     with pytest.raises(RuntimeError):
         await gen.__anext__()
     await gen.aclose()
@@ -569,7 +565,7 @@ async def test_subscribe_executions_sleeps_and_retries_on_exception(
 
     monkeypatch.setattr(client, "connect", fake_connect)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    gen = cast(AsyncGenerator[ExecutionUpdate, None], client.subscribe_executions())
+    gen = cast(AsyncGenerator[ExecutionUpdate], client.subscribe_executions())
     with pytest.raises(StopAsyncIteration):
         await anext(gen)
     assert sleep_calls

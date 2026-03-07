@@ -2466,7 +2466,7 @@ def mock_settings_v2() -> AppSettings:
 @pytest.fixture
 def zmq_bridge_v2(
     mock_connection_manager: MagicMock, mock_settings: AppSettings
-) -> Generator[ZmqWebSocketBridgeService, None, None]:
+) -> Generator[ZmqWebSocketBridgeService]:
     """Provide ZMQ bridge generator (v2)."""
     with (
         patch("snapper.interface.websocket.bridge.get_settings", return_value=mock_settings),
@@ -2659,7 +2659,7 @@ def mock_connection_manager_v2_v2() -> MagicMock:
 @pytest.fixture
 def zmq_bridge_v2_v2(
     mock_connection_manager: MagicMock, mock_settings: AppSettings
-) -> Generator[ZmqWebSocketBridgeService, None, None]:
+) -> Generator[ZmqWebSocketBridgeService]:
     """Provide ZMQ bridge generator (v2_v2)."""
     with (
         patch("snapper.interface.websocket.bridge.get_settings", return_value=mock_settings),

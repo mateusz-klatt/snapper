@@ -85,7 +85,7 @@ def block_external_requests(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def disable_rate_limiting() -> Generator[None, None, None]:
+def disable_rate_limiting() -> Generator[None]:
     """Disable slowapi rate limiting during tests to prevent 429 responses."""
     limiter.enabled = False
     yield
@@ -285,7 +285,7 @@ def mock_settings_for_tests(
 
 
 @pytest.fixture(autouse=True, scope="session")
-def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[None, None, None]:
+def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[None]:
     """Provide an isolated SQLite database copy for the test session."""
     template_path = Path(__file__).resolve().parent.parent / "data" / "snapper.db"
     if not template_path.exists():
@@ -314,7 +314,7 @@ def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[No
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_tmp_path_factory(
     tmp_path_factory: pytest.TempPathFactory,
-) -> Generator[None, None, None]:
+) -> Generator[None]:
     """Clean up temporary paths at the end of the test session."""
     base_temp = tmp_path_factory.getbasetemp()
     try:
@@ -340,7 +340,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
-def cleanup_all() -> Generator[None, None, None]:
+def cleanup_all() -> Generator[None]:
     """Clean up singletons and repository caches after each test."""
     yield
     mock.patch.stopall()
@@ -376,7 +376,7 @@ def cleanup_all() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True, scope="function")
-def cleanup_zmq_sockets() -> Generator[None, None, None]:
+def cleanup_zmq_sockets() -> Generator[None]:
     """Close all ZMQ sockets after each test function."""
     yield
     try:

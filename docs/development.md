@@ -4,9 +4,9 @@ Guidelines for developers working on the Snapper project.
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.14+
 - Poetry
-- Node.js 20+ and pnpm
+- Node.js 24+ and pnpm
 - TA-Lib (C library)
 - Pre-commit hooks
 
@@ -397,7 +397,7 @@ Type checker. Strict mode enabled:
 
 ```toml
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 ```
 

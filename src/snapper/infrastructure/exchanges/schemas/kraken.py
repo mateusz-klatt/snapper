@@ -51,7 +51,7 @@ from snapper.infrastructure.exchanges.schemas.base import EXCHANGE_SCHEMA_CONFIG
 from snapper.infrastructure.exchanges.schemas.base import STRICT_SCHEMA_CONFIG
 
 
-def _empty_pair_list() -> "list[KrakenInstrumentPairSchema]":
+def _empty_pair_list() -> list[KrakenInstrumentPairSchema]:
     """Create an empty list of instrument pairs.
 
     Returns:
@@ -60,7 +60,7 @@ def _empty_pair_list() -> "list[KrakenInstrumentPairSchema]":
     return []
 
 
-def _empty_asset_list() -> "list[KrakenInstrumentAssetSchema]":
+def _empty_asset_list() -> list[KrakenInstrumentAssetSchema]:
     """Create an empty list of instrument assets.
 
     Returns:

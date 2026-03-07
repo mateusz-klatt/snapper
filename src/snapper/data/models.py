@@ -87,8 +87,8 @@ class Instrument(Base):
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
     updated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
-    candles: Mapped[list["Candle"]] = relationship(back_populates="instrument")
-    trades: Mapped[list["Trade"]] = relationship(back_populates="instrument")
+    candles: Mapped[list[Candle]] = relationship(back_populates="instrument")
+    trades: Mapped[list[Trade]] = relationship(back_populates="instrument")
 
 
 class Candle(Base):
@@ -110,7 +110,7 @@ class Candle(Base):
     volume: Mapped[float] = mapped_column(Float)
     vwap: Mapped[float | None] = mapped_column(Float, nullable=True)
     trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    instrument: Mapped["Instrument"] = relationship(back_populates="candles")
+    instrument: Mapped[Instrument] = relationship(back_populates="candles")
 
 
 class Trade(Base):
@@ -128,7 +128,7 @@ class Trade(Base):
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
     trade_id: Mapped[str] = mapped_column(String(64))
-    instrument: Mapped["Instrument"] = relationship(back_populates="trades")
+    instrument: Mapped[Instrument] = relationship(back_populates="trades")
 
 
 class OrderRecord(Base):
@@ -195,7 +195,7 @@ class Execution(Base):
     size: Mapped[float] = mapped_column(Float)
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
-    order: Mapped["OrderRecord"] = relationship()
+    order: Mapped[OrderRecord] = relationship()
 
 
 class Position(Base):
@@ -224,7 +224,7 @@ class SignalEvent(Base):
     reason: Mapped[str] = mapped_column(String(256))
     strategy_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    instrument: Mapped["Instrument"] = relationship()
+    instrument: Mapped[Instrument] = relationship()
 
 
 class User(Base):
@@ -281,7 +281,7 @@ class SymbolCatalog(Base):
     asset_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="crypto")
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime())
-    aliases: Mapped[list["SymbolAlias"]] = relationship(back_populates="catalog")
+    aliases: Mapped[list[SymbolAlias]] = relationship(back_populates="catalog")
 
 
 class SymbolAlias(Base):
@@ -326,7 +326,7 @@ class SymbolAlias(Base):
     exchange_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime())
-    catalog: Mapped["SymbolCatalog"] = relationship(back_populates="aliases")
+    catalog: Mapped[SymbolCatalog] = relationship(back_populates="aliases")
 
 
 class SymbolExchangeCapability(Base):
@@ -381,7 +381,7 @@ class SymbolExchangeCapability(Base):
     reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime())
-    catalog: Mapped["SymbolCatalog"] = relationship()
+    catalog: Mapped[SymbolCatalog] = relationship()
 
 
 class ProcessRun(Base):

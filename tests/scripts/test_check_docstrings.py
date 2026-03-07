@@ -196,14 +196,14 @@ def test_check_class_reports_missing_docstring() -> None:
     assert any(issue.issue_type == "missing_class_docstring" for issue in result.issues)
 
 
-def test_check_class_with_init_hits_attribute_scan_branch() -> None:
-    """Verify check_class scans class bodies for __init__.
+def test_check_class_with_docstring_reports_no_issues() -> None:
+    """Verify check_class accepts class with valid docstring.
 
-    Given: A class with a docstring and an __init__ method,
+    Given: A class with a docstring,
     When: check_class is called,
-    Then: It does not report missing docstring issues.
+    Then: No issues are reported.
     """
-    tree = ast.parse('class A:\n    """A."""\n    def __init__(self) -> None:\n        return\n')
+    tree = ast.parse('class A:\n    """A."""\n    pass\n')
     node = next(n for n in tree.body if isinstance(n, ast.ClassDef))
     result = check_docstrings.ScanResult()
 

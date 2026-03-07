@@ -10,7 +10,7 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ /app/frontend/
 RUN pnpm build
 
-FROM python:3.12.13-slim AS py-build
+FROM python:3.14-slim AS py-build
 
 ENV PIP_NO_CACHE_DIR=1
 WORKDIR /app
@@ -29,7 +29,7 @@ RUN python -m pip install --upgrade pip poetry \
  && poetry install --only=main,cloud --no-root \
  && pip wheel --wheel-dir /wheels .
 
-FROM python:3.12.13-slim AS api
+FROM python:3.14-slim AS api
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

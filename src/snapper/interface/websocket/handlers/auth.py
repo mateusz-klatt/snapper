@@ -133,7 +133,7 @@ def create_deadline_tasks(
 async def authenticate_websocket(
     websocket: WebSocket,
     ws_auth_manager: WebSocketAuthManager,
-    ws_token_service: "WsTokenService",
+    ws_token_service: WsTokenService,
 ) -> AuthResult:
     """Authenticate a new WebSocket connection.
 
@@ -217,7 +217,7 @@ async def handle_reauth(
     message: WSReauthRequest,
     user: UserProfile,
     ws_auth_manager: WebSocketAuthManager,
-    ws_token_service: "WsTokenService",
+    ws_token_service: WsTokenService,
 ) -> bool:
     """Handle re-authentication request for existing connection.
 

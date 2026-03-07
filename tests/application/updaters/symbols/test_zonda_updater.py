@@ -422,7 +422,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
     class DummyRepo(SimpleNamespace):
         """Fake repository returning a context-managed fake session."""
 
-        def get_session(self) -> "DummyRepo":
+        def get_session(self) -> DummyRepo:
             """Return self as the context manager."""
             return self
 
@@ -591,7 +591,7 @@ async def test_update_database_handles_commit_error(monkeypatch: pytest.MonkeyPa
     class FaultySession:
         """Session stub that raises on commit."""
 
-        def __enter__(self) -> "FaultySession":
+        def __enter__(self) -> FaultySession:
             """Return self on context entry."""
             return self
 

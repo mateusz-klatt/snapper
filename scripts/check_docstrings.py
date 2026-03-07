@@ -322,23 +322,17 @@ def check_class(
         result: ScanResult to accumulate findings.
     """
     result.classes_checked += 1
-
-    docstring = get_docstring(node)
-    if not docstring:
-        result.issues.append(
-            Issue(
-                filepath=filepath,
-                line=node.lineno,
-                name=node.name,
-                issue_type="missing_class_docstring",
-                message=f"Class '{node.name}' lacks docstring",
-            )
-        )
+    if get_docstring(node):
         return
-
-    for item in node.body:
-        if isinstance(item, ast.FunctionDef) and item.name == "__init__":
-            """Skip __init__ - validated separately by type checker."""
+    result.issues.append(
+        Issue(
+            filepath=filepath,
+            line=node.lineno,
+            name=node.name,
+            issue_type="missing_class_docstring",
+            message=f"Class '{node.name}' lacks docstring",
+        )
+    )
 
 
 def _report_missing_docstring(

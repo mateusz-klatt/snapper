@@ -152,8 +152,8 @@ def _hash_password(password: str) -> str:
 def _timestamp_value(conn: Connection) -> datetime | str:
     """Build a UTC timestamp value compatible with the current SQL driver.
 
-    Python 3.12 deprecates sqlite3's implicit datetime adapter. Returning
-    an ISO-8601 string for SQLite avoids warnings while keeping UTC data.
+    sqlite3 no longer provides an implicit datetime adapter. Returning
+    an ISO-8601 string for SQLite avoids errors while keeping UTC data.
 
     Args:
         conn: Active SQLAlchemy connection.

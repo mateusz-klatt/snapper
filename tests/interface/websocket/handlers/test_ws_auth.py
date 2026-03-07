@@ -1601,7 +1601,7 @@ async def test_ws_endpoint_timeout_during_auth(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_ImmediateTimeout":
+        async def __aenter__(self) -> _ImmediateTimeout:
             raise TimeoutError()
 
         async def __aexit__(self, *_args: object) -> None:
@@ -1639,7 +1639,7 @@ async def test_ws_endpoint_rejects_invalid_json(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_PassthroughTimeout":
+        async def __aenter__(self) -> _PassthroughTimeout:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -1680,7 +1680,7 @@ async def test_ws_endpoint_rejects_invalid_message_type(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_PassthroughTimeout":
+        async def __aenter__(self) -> _PassthroughTimeout:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -1721,7 +1721,7 @@ async def test_ws_endpoint_requires_ws_token(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_PassthroughTimeout":
+        async def __aenter__(self) -> _PassthroughTimeout:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -1763,7 +1763,7 @@ async def test_ws_endpoint_handles_token_replay(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_PassthroughTimeout":
+        async def __aenter__(self) -> _PassthroughTimeout:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -1805,7 +1805,7 @@ async def test_ws_endpoint_handles_invalid_token(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_PassthroughTimeout":
+        async def __aenter__(self) -> _PassthroughTimeout:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -1856,7 +1856,7 @@ async def test_ws_endpoint_success_and_reauth_flow(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_PassthroughTimeout":
+        async def __aenter__(self) -> _PassthroughTimeout:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -3576,7 +3576,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
             self.executed = False
             self.committed = False
 
-        async def __aenter__(self) -> "FakeSession":
+        async def __aenter__(self) -> FakeSession:
             return self
 
         async def __aexit__(
@@ -3641,7 +3641,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
             return None
 
     class EmptySession:
-        async def __aenter__(self) -> "EmptySession":
+        async def __aenter__(self) -> EmptySession:
             return self
 
         async def __aexit__(
@@ -3685,7 +3685,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
 
 
 @pytest.fixture(name="client", scope="module")
-def client_fixture() -> Generator[TestClient, None, None]:
+def client_fixture() -> Generator[TestClient]:
     """Provide module-scoped TestClient with mocked process launcher."""
     with (
         patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
@@ -3705,7 +3705,7 @@ class TestAuthRoutesCoverage:
     """Coverage tests for authentication routes."""
 
     @pytest.fixture(autouse=True)
-    def _clear_cookies(self, client: TestClient) -> Generator[None, None, None]:
+    def _clear_cookies(self, client: TestClient) -> Generator[None]:
         client.cookies.clear()
         yield
         client.cookies.clear()

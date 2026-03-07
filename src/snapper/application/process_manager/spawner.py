@@ -143,7 +143,7 @@ class ProcessSpawnerService:
         method: str,
         args: list[Any],
         kwargs: dict[str, Any],
-        process: "subprocess.Popen[bytes]",
+        process: subprocess.Popen[bytes],
         exit_code: int | None = None,
     ) -> ProcessInstanceInfo:
         """Build a ProcessInstanceInfo instance.
@@ -180,7 +180,7 @@ class ProcessSpawnerService:
 
     def _build_early_exit_detail(
         self,
-        process: "subprocess.Popen[bytes]",
+        process: subprocess.Popen[bytes],
         status: int,
     ) -> str:
         """Build detail suffix for a process that exited immediately.
@@ -204,7 +204,7 @@ class ProcessSpawnerService:
             detail_suffix = "; see console output for details"
         return detail_suffix
 
-    def _launch_subprocess(self, cmd: list[str]) -> "subprocess.Popen[bytes]":
+    def _launch_subprocess(self, cmd: list[str]) -> subprocess.Popen[bytes]:
         """Create and start a subprocess with platform-appropriate settings.
 
         Args:
@@ -232,7 +232,7 @@ class ProcessSpawnerService:
         method: str,
         args: list[Any],
         kwargs: dict[str, Any],
-        process: "subprocess.Popen[bytes]",
+        process: subprocess.Popen[bytes],
         exit_code: int | None = None,
     ) -> ProcessInstanceInfo:
         """Build process info, store it in the registry, and return it.
@@ -303,7 +303,7 @@ class ProcessSpawnerService:
 
     @staticmethod
     def _send_signal_to_process(
-        process: "subprocess.Popen[bytes]",
+        process: subprocess.Popen[bytes],
         sig: int,
         name: str,
         *,

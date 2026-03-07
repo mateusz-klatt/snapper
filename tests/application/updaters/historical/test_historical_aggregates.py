@@ -58,7 +58,7 @@ class _StubSession:
     def __init__(self, responses: list[list[Any]]) -> None:
         self._responses = responses
 
-    def __enter__(self) -> "_StubSession":
+    def __enter__(self) -> _StubSession:
         return self
 
     def __exit__(
@@ -457,14 +457,14 @@ def test_get_all_mapped_symbols_filters_none(monkeypatch: pytest.MonkeyPatch) ->
     svc = PolygonAggregatesBackfillService()
 
     class DummyResult:
-        def scalars(self) -> "DummyResult":
+        def scalars(self) -> DummyResult:
             return self
 
         def all(self) -> list[str | None]:
             return ["X:BTCUSD", None, "X:ETHUSD"]
 
     class DummySession:
-        def __enter__(self) -> "DummySession":
+        def __enter__(self) -> DummySession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -763,7 +763,7 @@ def test_resolve_symbol_context_with_polygon_cache(monkeypatch: pytest.MonkeyPat
     class Session:
         """Session stub returning catalog then alias."""
 
-        def __enter__(self) -> "Session":
+        def __enter__(self) -> Session:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -804,7 +804,7 @@ def test_resolve_symbol_context_with_native_cache(monkeypatch: pytest.MonkeyPatc
     class Session:
         """Session stub returning None then alias then catalog."""
 
-        def __enter__(self) -> "Session":
+        def __enter__(self) -> Session:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -843,7 +843,7 @@ def test_resolve_symbol_context_not_found(monkeypatch: pytest.MonkeyPatch) -> No
             return None
 
     class Session:
-        def __enter__(self) -> "Session":
+        def __enter__(self) -> Session:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -904,7 +904,7 @@ def test_resolve_symbol_context_polygon_prefix_mapping_none_in_db(
             return None
 
     class Session:
-        def __enter__(self) -> "Session":
+        def __enter__(self) -> Session:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -945,7 +945,7 @@ def test_resolve_symbol_context_stock_fallback_mapping_none(
             return None
 
     class Session:
-        def __enter__(self) -> "Session":
+        def __enter__(self) -> Session:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -974,7 +974,7 @@ class _StubBackfillSession:
     def __init__(self, responses: list[list[Any]]) -> None:
         self._responses = responses
 
-    def __enter__(self) -> "_StubBackfillSession":
+    def __enter__(self) -> _StubBackfillSession:
         return self
 
     def __exit__(
@@ -1520,10 +1520,10 @@ class _DummyRepo:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def get_session(self) -> "_DummyRepo":
+    def get_session(self) -> _DummyRepo:
         return self
 
-    def __enter__(self) -> "_DummyRepo":
+    def __enter__(self) -> _DummyRepo:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -1688,11 +1688,11 @@ async def test_process_symbol_caps_to_max_ts(monkeypatch: pytest.MonkeyPatch) ->
         max = datetime.max
 
         @classmethod
-        def now(cls, tz: Any = None) -> "_FakeDateTime":
+        def now(cls, tz: Any = None) -> _FakeDateTime:
             return cls(2024, 1, 10, tzinfo=tz)
 
         @classmethod
-        def combine(cls, d: date, t: Any, tzinfo: Any | None = None) -> "_FakeDateTime":
+        def combine(cls, d: date, t: Any, tzinfo: Any | None = None) -> _FakeDateTime:
             cls.call_count += 1
             combined = datetime.combine(d, t, tzinfo=tzinfo)
             if cls.call_count == 1:
@@ -1762,7 +1762,7 @@ def test_resolve_symbol_context_missing_v2(monkeypatch: pytest.MonkeyPatch) -> N
     service._symbol_mapper = cast(Any, _Mapper())
 
     class _MissingSession:
-        def __enter__(self) -> "_MissingSession":
+        def __enter__(self) -> _MissingSession:
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -1800,7 +1800,7 @@ def test_resolve_symbol_context_stock_direct_lookup(monkeypatch: pytest.MonkeyPa
     class _Session:
         """Session stub returning alias then catalog for stock symbol."""
 
-        def __enter__(self) -> "_Session":
+        def __enter__(self) -> _Session:
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -1845,7 +1845,7 @@ def test_resolve_symbol_context_native_to_polygon_rest_cache(
     class _Session:
         """Session stub returning None then alias then catalog."""
 
-        def __enter__(self) -> "_Session":
+        def __enter__(self) -> _Session:
             return self
 
         def __exit__(self, *_: object) -> None:
@@ -2271,7 +2271,7 @@ def test_lookup_context_by_polygon_symbol_alias_found_catalog_missing() -> None:
     responses: list[Any] = [alias_stub, None]
 
     class _Session:
-        def __enter__(self) -> "_Session":
+        def __enter__(self) -> _Session:
             return self
 
         def __exit__(self, *_: object) -> None:

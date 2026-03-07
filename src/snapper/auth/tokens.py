@@ -44,10 +44,10 @@ class TokenManager:
     - Automatic blacklist cleanup
     """
 
-    _instance: "TokenManager | None" = None
+    _instance: TokenManager | None = None
     _initialized: bool = False
 
-    def __new__(cls) -> "TokenManager":
+    def __new__(cls) -> TokenManager:
         """Create or return singleton token manager instance.
 
         Returns:
@@ -309,7 +309,7 @@ class TokenManager:
         return secrets.compare_digest(token, expected)
 
     @classmethod
-    def get_instance(cls) -> "TokenManager":
+    def get_instance(cls) -> TokenManager:
         """Get singleton instance.
 
         Returns:
@@ -332,10 +332,10 @@ class WebSocketTokenRotator:
     registration, rotation, and expiration checking.
     """
 
-    _instance: "WebSocketTokenRotator | None" = None
+    _instance: WebSocketTokenRotator | None = None
     _initialized: bool = False
 
-    def __new__(cls, token_manager: TokenManager | None = None) -> "WebSocketTokenRotator":
+    def __new__(cls, token_manager: TokenManager | None = None) -> WebSocketTokenRotator:
         """Create or return singleton WebSocket token rotator instance.
 
         Args:
@@ -444,7 +444,7 @@ class WebSocketTokenRotator:
             logger.info(f"Unregistered WS connection {connection_id}")
 
     @classmethod
-    def get_instance(cls) -> "WebSocketTokenRotator":
+    def get_instance(cls) -> WebSocketTokenRotator:
         """Get singleton instance.
 
         Returns:

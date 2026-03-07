@@ -58,11 +58,11 @@ class DummyRepo(SimpleNamespace):
         self.saved: list[Any] = []
         self.committed = False
 
-    def session_factory(self) -> "DummyRepo":
+    def session_factory(self) -> DummyRepo:
         """Return self as session."""
         return self
 
-    def __enter__(self) -> "DummyRepo":
+    def __enter__(self) -> DummyRepo:
         """Enter the context manager."""
         return self
 
@@ -234,7 +234,7 @@ class DummySession:
         """Mark as committed."""
         self.committed = True
 
-    def __enter__(self) -> "DummySession":
+    def __enter__(self) -> DummySession:
         """Enter the context manager."""
         return self
 
@@ -361,7 +361,7 @@ async def test_collect_snapshots_with_timeout_handles_asyncio_timeout(
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_ImmediateTimeout":
+        async def __aenter__(self) -> _ImmediateTimeout:
             raise TimeoutError
 
         async def __aexit__(self, *_args: object) -> None:
@@ -535,7 +535,7 @@ async def test_collect_snapshots_handles_timeout(monkeypatch: pytest.MonkeyPatch
         def __init__(self, _delay: float | None) -> None:
             pass
 
-        async def __aenter__(self) -> "_ImmediateTimeout":
+        async def __aenter__(self) -> _ImmediateTimeout:
             raise TimeoutError
 
         async def __aexit__(self, *_args: object) -> None:

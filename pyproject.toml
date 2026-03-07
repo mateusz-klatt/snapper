@@ -13,7 +13,7 @@ keywords = ["trading", "kraken", "backtest", "rsi", "macd", "websocket"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
@@ -21,7 +21,7 @@ classifiers = [
 packages = [{include = "snapper", from = "src"}]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.14"
 aiohttp = "^3.13.3"
 httpx = {extras = ["http2"], version = "^0.28.1"}
 pydantic = "^2.12.5"
@@ -86,7 +86,7 @@ types-markdown = "^3.10.2.20260211"
 snapper = "snapper.__main__:main"
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 line-length = 100
 extend-exclude = [
     ".venv",
@@ -185,7 +185,7 @@ markers = [
 ]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true

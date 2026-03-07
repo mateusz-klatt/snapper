@@ -54,11 +54,11 @@ def test_intercept_handler_emits(monkeypatch: pytest.MonkeyPatch) -> None:
             self.exception: Any = None
             self.module: str | None = None
 
-        def bind(self, **kwargs: Any) -> "DummyLogger":
+        def bind(self, **kwargs: Any) -> DummyLogger:
             self.module = kwargs.get("module")
             return self
 
-        def opt(self, *, depth: int, exception: Any) -> "DummyLogger":
+        def opt(self, *, depth: int, exception: Any) -> DummyLogger:
             self.depth = depth
             self.exception = exception
             return self

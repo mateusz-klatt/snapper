@@ -59,7 +59,7 @@ async def send_auth_complete(
     websocket: WebSocket,
     _manager: WebSocketConnectionManager,
     user: UserProfile,
-    ws_payload: "WsTokenPayload",
+    ws_payload: WsTokenPayload,
     ws_auth_manager: WebSocketAuthManager,
 ) -> None:
     """Send authentication completion messages to client.
@@ -107,7 +107,7 @@ async def _handle_one_message(
     manager: WebSocketConnectionManager,
     user: UserProfile,
     ws_auth_manager: WebSocketAuthManager,
-    ws_token_service: "WsTokenService",
+    ws_token_service: WsTokenService,
     raw_message: str,
 ) -> bool:
     """Process a single incoming WebSocket message.
@@ -139,7 +139,7 @@ async def dispatch_messages(
     manager: WebSocketConnectionManager,
     user: UserProfile,
     ws_auth_manager: WebSocketAuthManager,
-    ws_token_service: "WsTokenService",
+    ws_token_service: WsTokenService,
 ) -> None:
     """Main message dispatch loop for WebSocket connection.
 

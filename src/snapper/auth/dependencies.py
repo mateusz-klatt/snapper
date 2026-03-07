@@ -140,10 +140,10 @@ class CSRFManager:
     with timestamp-based expiration.
     """
 
-    _instance: "CSRFManager | None" = None
+    _instance: CSRFManager | None = None
     _initialized: bool = False
 
-    def __new__(cls) -> "CSRFManager":
+    def __new__(cls) -> CSRFManager:
         """Create or return singleton CSRF manager instance.
 
         Returns:
@@ -280,7 +280,7 @@ class CSRFManager:
         pass
 
     @classmethod
-    def get_instance(cls) -> "CSRFManager":
+    def get_instance(cls) -> CSRFManager:
         """Get singleton instance.
 
         Returns:

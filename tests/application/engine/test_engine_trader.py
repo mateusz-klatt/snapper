@@ -1049,7 +1049,7 @@ async def test_listen_signals_handles_symbol_aliases_invalidation(
 
     class MockMapperService:
         @staticmethod
-        def get_instance() -> "MockMapperService":
+        def get_instance() -> MockMapperService:
             return MockMapperService()
 
         def trigger_cache_invalidation(self, *, fail_fast: bool = True) -> None:
@@ -1091,7 +1091,7 @@ async def test_listen_signals_handles_settings_update(
         _cache: dict[str, Any] = {}
 
         @staticmethod
-        def get_instance() -> "MockSettingsService":
+        def get_instance() -> MockSettingsService:
             return MockSettingsService()
 
         def _parse_value(self, value: str) -> Any:

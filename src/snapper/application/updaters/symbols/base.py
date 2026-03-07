@@ -499,5 +499,4 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             raise
         finally:
             self._cleanup_zmq()
-            if self.repository is not None:
-                self.repository = None
+            self.repository = None

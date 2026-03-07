@@ -117,7 +117,7 @@ class WalutomatMarketResponse(BaseModel):
     )
 
     @classmethod
-    def from_api_response(cls, data: list[dict[str, Any]]) -> "WalutomatMarketResponse":
+    def from_api_response(cls, data: list[dict[str, Any]]) -> WalutomatMarketResponse:
         """Create response from raw API data.
 
         Args:
