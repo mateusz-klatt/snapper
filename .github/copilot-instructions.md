@@ -84,18 +84,34 @@ the complete quality gate using the consolidated Makefile targets before creatin
 
 ## Git Commit Attribution (MANDATORY)
 
-Every commit created by an AI assistant MUST include a `Co-Authored-By` trailer with the model name and Anthropic/OpenAI no-reply email. Use a HEREDOC to pass the commit message:
+Every commit created by an AI assistant MUST include a `Co-authored-by:` trailer.
+
+Rules:
+
+- Use the canonical Git trailer form: `Co-authored-by: Name <email>`
+- Prefer the product name plus model/version when the assistant exposes it
+- If the assistant does not expose a reliable version, use the stable product identity only
+- Use a stable provider-controlled address for that assistant identity
+    - no-reply is preferred when available
+    - a provider contact/product address is acceptable when no no-reply address is defined
+- Do not invent a version string or email address
+
+Use a HEREDOC to pass the commit message:
 
 ```bash
 git commit -m "$(cat <<'EOF'
 commit message here
 
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
 )"
 ```
 
-Adjust the name to match the model used (e.g., `Claude Sonnet 4.6`, `GPT-4o`, `GitHub Copilot`).
+Examples:
+
+- `Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>`
+- `Co-authored-by: OpenAI Codex (GPT-5) <codex@openai.com>`
+- `Co-authored-by: GitHub Copilot <copilot@github.com>` only if that identity/address is explicitly configured and confirmed
 
 ## IMPORTANT: Task Completion Protocol
 
