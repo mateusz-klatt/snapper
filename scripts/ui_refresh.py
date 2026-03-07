@@ -159,14 +159,42 @@ def remove_node_modules(ui_dir: Path) -> bool:
     return False
 
 
-def ensure_pnpm_installed() -> None:
-    """Ensure pnpm is installed, installing via corepack if needed."""
+def ensure_corepack_installed() -> None:
+    """Ensure corepack is available, installing via npm if needed."""
     try:
-        run_cmd(["pnpm", "--version"], capture_output=True, check=True)
+        run_cmd(["corepack", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("Installing pnpm via corepack...")
-        run_cmd(["corepack", "enable"], check=True)
-        run_cmd(["corepack", "prepare", "pnpm@latest", "--activate"], check=True)
+        print("Installing corepack...")
+        run_cmd(
+            ["npm", "install", "-g", "--force", "--ignore-scripts", "corepack"],
+            check=True,
+        )
+    run_cmd(["corepack", "enable"], check=True)
+
+
+def upgrade_package_manager(ui_dir: Path) -> None:
+    """Upgrade pnpm to latest and update packageManager field in package.json.
+
+    Args:
+        ui_dir: Path to the UI directory containing package.json.
+    """
+    result = run_cmd(
+        ["npm", "view", "pnpm", "version"],
+        capture_output=True,
+        text=True,
+    )
+    latest = result.stdout.strip()
+    if not latest:
+        print("Could not determine latest pnpm version, skipping packageManager update")
+        return
+
+    package_json = ui_dir / "package.json"
+    package_data = read_package_json(package_json)
+    new_value = f"pnpm@{latest}"
+    if package_data.get("packageManager") != new_value:
+        print(f"Updating packageManager to {new_value}")
+        package_data["packageManager"] = new_value
+        write_package_json(package_json, package_data)
 
 
 def upgrade_dependencies(ui_dir: Path) -> None:
@@ -231,7 +259,8 @@ def refresh_ui(root: Path | None = None) -> None:
         root = Path(__file__).parent.parent
     ui_dir = root / "frontend"
 
-    ensure_pnpm_installed()
+    ensure_corepack_installed()
+    upgrade_package_manager(ui_dir)
     upgrade_dependencies(ui_dir)
     remove_lock_file(ui_dir)
     remove_node_modules(ui_dir)

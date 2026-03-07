@@ -1,7 +1,7 @@
 FROM node:25-alpine AS ui-build
 WORKDIR /app
 
-RUN pnpm --version 2>/dev/null || npm install -g --ignore-scripts pnpm
+RUN (corepack --version 2>/dev/null || npm install -g --force --ignore-scripts corepack) && corepack enable
 
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
 WORKDIR /app/frontend

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.ui_refresh import ensure_pnpm_installed
+from scripts.ui_refresh import ensure_corepack_installed
 from scripts.ui_refresh import get_dependency_spec
 from scripts.ui_refresh import install_dependencies
 from scripts.ui_refresh import main
@@ -20,6 +20,7 @@ from scripts.ui_refresh import remove_node_modules
 from scripts.ui_refresh import restore_dependency_spec
 from scripts.ui_refresh import run_cmd
 from scripts.ui_refresh import upgrade_dependencies
+from scripts.ui_refresh import upgrade_package_manager
 from scripts.ui_refresh import write_package_json
 
 
@@ -167,29 +168,32 @@ class TestRemoveNodeModules:
         assert result is False
 
 
-class TestEnsurePnpmInstalled:
-    """Test suite for EnsurePnpmInstalled functionality."""
+class TestEnsureCorepackInstalled:
+    """Test suite for EnsureCorepackInstalled functionality."""
 
-    def test_does_nothing_when_pnpm_available(self) -> None:
-        """Verify ensure_pnpm_installed skips installation when pnpm exists.
+    def test_skips_install_when_corepack_available(self) -> None:
+        """Verify ensure_corepack_installed skips npm install when corepack exists.
 
-        Given: pnpm --version command succeeds (pnpm is installed),
-        When: ensure_pnpm_installed is called,
-        Then: Only the version check is performed, no installation commands run.
+        Given: corepack --version command succeeds (corepack is installed),
+        When: ensure_corepack_installed is called,
+        Then: Only the version check and corepack enable run, no npm install.
         """
         with patch("scripts.ui_refresh.run_cmd") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0)
 
-            ensure_pnpm_installed()
+            ensure_corepack_installed()
 
-            mock_run.assert_called_once_with(["pnpm", "--version"], capture_output=True, check=True)
+            assert mock_run.call_args_list == [
+                call(["corepack", "--version"], capture_output=True, check=True),
+                call(["corepack", "enable"], check=True),
+            ]
 
-    def test_installs_pnpm_when_not_found(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Verify ensure_pnpm_installed triggers installation on FileNotFoundError.
+    def test_installs_corepack_when_not_found(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify ensure_corepack_installed triggers npm install on FileNotFoundError.
 
-        Given: pnpm --version command raises FileNotFoundError (pnpm not installed),
-        When: ensure_pnpm_installed is called,
-        Then: Installation via corepack is triggered and info message is printed.
+        Given: corepack --version raises FileNotFoundError (corepack not installed),
+        When: ensure_corepack_installed is called,
+        Then: npm install -g corepack is run, followed by corepack enable.
         """
         call_count = 0
 
@@ -201,17 +205,18 @@ class TestEnsurePnpmInstalled:
             return subprocess.CompletedProcess(args, 0)
 
         with patch("scripts.ui_refresh.run_cmd", side_effect=side_effect):
-            ensure_pnpm_installed()
+            ensure_corepack_installed()
 
         captured = capsys.readouterr()
-        assert "Installing pnpm via corepack" in captured.out
+        assert "Installing corepack" in captured.out
+        assert call_count == 3
 
-    def test_installs_pnpm_on_called_process_error(self) -> None:
-        """Verify ensure_pnpm_installed triggers installation on CalledProcessError.
+    def test_installs_corepack_on_called_process_error(self) -> None:
+        """Verify ensure_corepack_installed triggers npm install on CalledProcessError.
 
-        Given: pnpm --version command raises CalledProcessError (pnpm broken),
-        When: ensure_pnpm_installed is called,
-        Then: Three commands run: version check, corepack enable, and corepack prepare.
+        Given: corepack --version raises CalledProcessError (corepack broken),
+        When: ensure_corepack_installed is called,
+        Then: Three commands run: version check, npm install, corepack enable.
         """
         call_count = 0
 
@@ -223,9 +228,87 @@ class TestEnsurePnpmInstalled:
             return subprocess.CompletedProcess(args, 0)
 
         with patch("scripts.ui_refresh.run_cmd", side_effect=side_effect):
-            ensure_pnpm_installed()
+            ensure_corepack_installed()
 
         assert call_count == 3
+
+
+class TestUpgradePackageManager:
+    """Test suite for UpgradePackageManager functionality."""
+
+    def test_updates_package_manager_field(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify upgrade_package_manager updates packageManager to latest pnpm.
+
+        Given: package.json with packageManager set to an older pnpm version,
+        When: upgrade_package_manager is called and npm reports a newer version,
+        Then: packageManager field is updated to the latest version.
+        """
+        ui_dir = tmp_path / "frontend"
+        ui_dir.mkdir()
+        package_json = ui_dir / "package.json"
+        package_json.write_text(
+            json.dumps({"packageManager": "pnpm@10.0.0"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="10.30.3\n")
+
+            upgrade_package_manager(ui_dir)
+
+        updated = json.loads(package_json.read_text(encoding="utf-8"))
+        assert updated["packageManager"] == "pnpm@10.30.3"
+        captured = capsys.readouterr()
+        assert "Updating packageManager" in captured.out
+
+    def test_skips_when_already_latest(self, tmp_path: Path) -> None:
+        """Verify upgrade_package_manager is a no-op when version matches.
+
+        Given: package.json with packageManager already at latest version,
+        When: upgrade_package_manager is called,
+        Then: package.json is not rewritten.
+        """
+        ui_dir = tmp_path / "frontend"
+        ui_dir.mkdir()
+        package_json = ui_dir / "package.json"
+        content = json.dumps({"packageManager": "pnpm@10.30.3"}, indent=2) + "\n"
+        package_json.write_text(content, encoding="utf-8")
+
+        with (
+            patch("scripts.ui_refresh.run_cmd") as mock_run,
+            patch("scripts.ui_refresh.write_package_json") as mock_write,
+        ):
+            mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="10.30.3\n")
+
+            upgrade_package_manager(ui_dir)
+
+            mock_write.assert_not_called()
+
+    def test_skips_when_version_unavailable(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify upgrade_package_manager skips when npm view returns empty.
+
+        Given: npm view pnpm version returns empty output,
+        When: upgrade_package_manager is called,
+        Then: Prints skip message and does not modify package.json.
+        """
+        ui_dir = tmp_path / "frontend"
+        ui_dir.mkdir()
+
+        with (
+            patch("scripts.ui_refresh.run_cmd") as mock_run,
+            patch("scripts.ui_refresh.write_package_json") as mock_write,
+        ):
+            mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="")
+
+            upgrade_package_manager(ui_dir)
+
+            mock_write.assert_not_called()
+            captured = capsys.readouterr()
+            assert "Could not determine" in captured.out
 
 
 class TestUpgradeDependencies:
@@ -489,13 +572,18 @@ class TestRefreshUi:
         """
         ui_dir = tmp_path / "frontend"
         ui_dir.mkdir()
+        package_json = ui_dir / "package.json"
+        package_json.write_text(
+            json.dumps({"packageManager": "pnpm@10.30.3"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
         lock_file = ui_dir / "pnpm-lock.yaml"
         lock_file.write_text("content")
         node_modules = ui_dir / "node_modules"
         node_modules.mkdir()
 
         with patch("scripts.ui_refresh.run_cmd") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess([], 0)
+            mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="10.30.3\n")
 
             refresh_ui(tmp_path)
 
@@ -510,7 +598,8 @@ class TestRefreshUi:
         Then: The function executes successfully using default project root.
         """
         with (
-            patch("scripts.ui_refresh.ensure_pnpm_installed"),
+            patch("scripts.ui_refresh.ensure_corepack_installed"),
+            patch("scripts.ui_refresh.upgrade_package_manager"),
             patch("scripts.ui_refresh.upgrade_dependencies"),
             patch("scripts.ui_refresh.remove_lock_file"),
             patch("scripts.ui_refresh.remove_node_modules"),
