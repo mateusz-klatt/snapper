@@ -454,9 +454,9 @@ class MarkdownToPdf:
         generated_on = datetime.now().strftime("%Y-%m-%d")
         return textwrap.dedent(f"""
             <section class="cover">
-                <h1>Dokumentacja Snapper</h1>
-                <p>Kompleksowy przewodnik po projekcie</p>
-                <p class="document-meta">Wygenerowano {generated_on}</p>
+                <h1>Snapper Documentation</h1>
+                <p>Comprehensive project guide</p>
+                <p class="document-meta">Generated on {generated_on}</p>
             </section>
             """).strip()
 
@@ -466,7 +466,7 @@ class MarkdownToPdf:
         )
         return textwrap.dedent(f"""
             <section class="toc">
-                <h2>Spis treści</h2>
+                <h2>Table of Contents</h2>
                 <ul>
                     {items}
                 </ul>
@@ -516,10 +516,10 @@ class MarkdownToPdf:
     def _wrap_html(self, body: str) -> str:
         return textwrap.dedent(f"""
             <!DOCTYPE html>
-            <html lang="pl">
+            <html lang="en">
             <head>
                 <meta charset="utf-8" />
-                <title>Dokumentacja Snapper</title>
+                <title>Snapper Documentation</title>
             </head>
             <body>
                 {body}
