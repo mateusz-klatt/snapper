@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import prettier from 'eslint-config-prettier'
 import globals from 'globals'
 
-export default tseslint.config(
+export default [
   js.configs.recommended,
 
   prettier,
@@ -30,9 +30,13 @@ export default tseslint.config(
     },
   },
 
+  ...tseslint.configs.recommended.map(config => ({
+    ...config,
+    files: ['**/*.{ts,tsx}'],
+  })),
+
   {
     files: ['**/*.{ts,tsx}'],
-    extends: [...tseslint.configs.recommended],
     languageOptions: {
       parserOptions: {
         ecmaFeatures: {
@@ -82,7 +86,11 @@ export default tseslint.config(
         { blankLine: 'any', prev: 'import', next: 'import' },
         { blankLine: 'always', prev: '*', next: 'return' },
         { blankLine: 'always', prev: ['const', 'let', 'var'], next: '*' },
-        { blankLine: 'any', prev: ['const', 'let', 'var'], next: ['const', 'let', 'var'] },
+        {
+          blankLine: 'any',
+          prev: ['const', 'let', 'var'],
+          next: ['const', 'let', 'var'],
+        },
         { blankLine: 'always', prev: 'directive', next: '*' },
         { blankLine: 'always', prev: 'block-like', next: '*' },
         { blankLine: 'always', prev: '*', next: 'block-like' },
@@ -90,9 +98,13 @@ export default tseslint.config(
     },
   },
 
+  ...tseslint.configs.recommended.map(config => ({
+    ...config,
+    files: ['**/*.config.{ts,js}', 'eslint.config.js'],
+  })),
+
   {
     files: ['**/*.config.{ts,js}', 'eslint.config.js'],
-    extends: [...tseslint.configs.recommended],
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',
       'no-console': 'off',
@@ -115,5 +127,5 @@ export default tseslint.config(
       'vite.config.ts',
       'src/types/*.generated.ts',
     ],
-  }
-)
+  },
+]
