@@ -29,11 +29,11 @@ jobs:
       - name: Install system dependencies
         run: make system-deps
 
-      - name: UI setup and build
-        run: make ui-setup ui-build
-
       - name: Setup development environment
         run: make setup
+
+      - name: UI setup and build
+        run: make ui-setup ui-build
 
       - name: Initialize database
         run: make migrate
