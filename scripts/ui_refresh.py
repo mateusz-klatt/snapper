@@ -166,7 +166,7 @@ def ensure_corepack_installed() -> None:
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("Installing corepack...")
         run_cmd(
-            ["npm", "install", "-g", "--force", "--ignore-scripts", "corepack"],
+            ["npm", "install", "-g", "--ignore-scripts", "corepack"],
             check=True,
         )
     run_cmd(["corepack", "enable"], check=True)

@@ -156,6 +156,8 @@ else
 	@sudo apt-get update
 	@sudo apt-get install -y --no-install-recommends build-essential curl unixodbc-dev
 endif
+	@(corepack --version 2>/dev/null && echo "corepack already installed") || (echo "Installing corepack..." && sudo npm install -g --ignore-scripts corepack)
+	@corepack enable
 
 setup:
 	$(info Setting up development environment...)
@@ -326,7 +328,8 @@ migrate-prod: migrate
 	$(PYRUN) snapper db-seed --profile prod
 
 ui-setup:
-	@cd $(UI_DIR) && (corepack --version 2>/dev/null || npm install -g --force --ignore-scripts corepack) && corepack enable && pnpm install --frozen-lockfile
+	@command -v corepack >/dev/null 2>&1 || (echo "Error: corepack not found. Run 'make system-deps' first." && exit 1)
+	@cd $(UI_DIR) && pnpm install --frozen-lockfile
 
 ui-refresh:
 	$(PYTHON) scripts/ui_refresh.py
