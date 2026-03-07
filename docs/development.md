@@ -6,7 +6,7 @@ Guidelines for developers working on the Snapper project.
 
 - Python 3.14+
 - Poetry
-- Node.js 24+ and pnpm
+- Node.js 25+ and pnpm
 - TA-Lib (C library)
 - Pre-commit hooks
 

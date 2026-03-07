@@ -36,7 +36,7 @@ Open <http://localhost:8000/snapper/> and log in:
 
 - Python 3.14+
 - Poetry
-- Node.js 24+ and pnpm (for frontend)
+- Node.js 25+ and pnpm (for frontend)
 - TA-Lib (C library)
 
 ### Installation
