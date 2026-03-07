@@ -115,7 +115,9 @@ help:
 ifeq ($(OS),Windows_NT)
   PYTHON   := python
   VENV_PY  := .venv\Scripts\python
+  DEVNULL  := NUL
 else
+  DEVNULL  := /dev/null
   UNAME_S := $(shell uname -s)
   ifeq ($(UNAME_S),Darwin)
     PYTHON := $(shell which python3.14 2>/dev/null || which python3)
@@ -328,7 +330,7 @@ migrate-prod: migrate
 	$(PYRUN) snapper db-seed --profile prod
 
 ui-setup:
-	@corepack --version >/dev/null 2>&1 || (echo "Error: corepack not found. Run 'make system-deps' first." && exit 1)
+	@corepack --version >$(DEVNULL) 2>&1 || (echo "Error: corepack not found. Run 'make system-deps' first." && exit 1)
 	@cd $(UI_DIR) && pnpm install --frozen-lockfile
 
 ui-refresh:
