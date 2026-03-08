@@ -58,28 +58,28 @@ help:
 	$(info zmq-logger     Start ZMQ message logger [debug tool])
 	$(info )
 	$(info UI [pnpm]:)
-	$(info ui-setup         Install UI dependencies with pnpm)
-	$(info ui-refresh       Clean install UI dependencies)
-	$(info ui-dev           Start Vite dev server)
-	$(info ui-build         Build UI for production)
-	$(info ui-lint          Lint UI code)
-	$(info ui-lint-fix      Auto-fix UI linting errors)
-	$(info ui-format        Check UI code formatting [CI-style])
-	$(info ui-format-fix    Format UI code with Prettier)
-	$(info ui-dead-code     Check for dead code in UI)
-	$(info ui-dead-code-fix Auto-fix dead code in UI)
-	$(info ui-gen-api-types Generate TypeScript types from OpenAPI)
-	$(info ui-gen-ws-types  Generate TypeScript types from WebSocket)
-	$(info ui-gen-zod       Generate Zod schemas from WebSocket)
-	$(info ui-gen-api-zod   Generate Zod schemas from OpenAPI)
-	$(info ui-gen-entities  Generate entity types from WebSocket)
+	$(info ui-setup          Install UI dependencies with pnpm)
+	$(info ui-refresh        Clean install UI dependencies)
+	$(info ui-dev            Start Vite dev server)
+	$(info ui-build          Build UI for production)
+	$(info ui-lint           Lint UI code)
+	$(info ui-lint-fix       Auto-fix UI linting errors)
+	$(info ui-format         Check UI code formatting [CI-style])
+	$(info ui-format-fix     Format UI code with Prettier)
+	$(info ui-dead-code      Check for dead code in UI)
+	$(info ui-dead-code-fix  Auto-fix dead code in UI)
+	$(info ui-gen-api-types  Generate TypeScript types from OpenAPI)
+	$(info ui-gen-ws-types   Generate TypeScript types from WebSocket)
+	$(info ui-gen-zod        Generate Zod schemas from WebSocket)
+	$(info ui-gen-api-zod    Generate Zod schemas from OpenAPI)
+	$(info ui-gen-entities   Generate entity types from WebSocket)
 	$(info ui-gen-permissions Generate permissions types from backend)
-	$(info ui-gen-types     Generate all frontend types)
-	$(info ui-check-types   Check for uncommitted type drift [CI])
-	$(info ui-test          Run UI tests [vitest])
-	$(info ui-cov           Run UI tests with coverage)
-	$(info ui-check         UI quality checks [lint + format + dead-code])
-	$(info ui-fix           UI quality fixes)
+	$(info ui-gen-types      Generate all frontend types)
+	$(info ui-check-types    Check for uncommitted type drift [CI])
+	$(info ui-test           Run UI tests [vitest])
+	$(info ui-cov            Run UI tests with coverage)
+	$(info ui-check          UI quality checks [lint + format + dead-code])
+	$(info ui-fix            UI quality fixes)
 	$(info )
 	$(info iOS [Xcode]:)
 	$(info ios-setup     Setup iOS project [xcodegen + test target])
@@ -128,18 +128,29 @@ else
   VENV_PY  := .venv/bin/python
 endif
 
-PYRUN := $(VENV_PY) -m
+DOCKER_NAME := snapper
 IMAGE_NAME := klattm/snapper
 IMAGE_TAG := latest
-UI_DIR := frontend
-ROOT_DIR := $(CURDIR)
 IOS_DIR := ios
-IOS_PROJECT := $(IOS_DIR)/Snapper.xcodeproj
 IOS_SCHEME ?= Snapper
-IOS_SIMULATOR_DESTINATION ?= platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2
+PYRUN := $(VENV_PY) -m
+PYTEST_TIMEOUT := --timeout=15 --timeout-method=thread
+ROOT_DIR := $(CURDIR)
+SERVER_PORT ?= 8000
+UI_DIR := frontend
+
+DOCKER_BASE := docker run --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data
+DOCKER_RUN := $(DOCKER_BASE) --rm $(IMAGE_NAME):$(IMAGE_TAG)
+GENSCRIPT := @$(VENV_PY) scripts/generate_types.py
 IOS_ARCHIVE_PATH ?= $(IOS_DIR)/build/$(IOS_SCHEME).xcarchive
-IOS_EXPORT_PATH ?= $(IOS_DIR)/build/export
 IOS_EXPORT_OPTIONS ?= $(IOS_DIR)/ExportOptions.plist
+IOS_EXPORT_PATH ?= $(IOS_DIR)/build/export
+IOS_PROJECT := $(IOS_DIR)/Snapper.xcodeproj
+IOS_SIMULATOR_DESTINATION ?= platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2
+PNPM := @cd $(UI_DIR) && pnpm
+PRETTIER := $(PNPM) exec prettier --write
+PYTEST_PARALLEL := -n $(shell $(PYTHON) -c "import os,math; print(math.ceil(os.cpu_count()/2))")
+PY_DIRS := src tests scripts $(wildcard proprietary/src) $(wildcard proprietary/tests)
 
 system-deps:
 ifeq ($(OS),Windows_NT)
@@ -188,8 +199,6 @@ pre-refresh:
 	$(VENV_PY) scripts/sync_precommit.py
 	$(info Pre-commit hooks refreshed!)
 
-PY_DIRS := src tests scripts $(wildcard proprietary/src) $(wildcard proprietary/tests)
-
 fmt:
 	$(PYRUN) ruff check $(PY_DIRS)
 	$(PYRUN) black --check $(PY_DIRS)
@@ -209,19 +218,17 @@ lint-fix:
 typecheck:
 	$(PYRUN) mypy $(PY_DIRS)
 
-PYTEST_PARALLEL := -n $(shell $(PYTHON) -c "import os,math; print(math.ceil(os.cpu_count()/2))")
-
 test:
-	$(PYRUN) pytest $(PYTEST_PARALLEL) --timeout=15 --timeout-method=thread --max-worker-restart=0
+	$(PYRUN) pytest $(PYTEST_PARALLEL) $(PYTEST_TIMEOUT) --max-worker-restart=0
 
 test-serial:
-	$(PYRUN) pytest --timeout=15 --timeout-method=thread
+	$(PYRUN) pytest $(PYTEST_TIMEOUT)
 
 cov:
-	$(PYRUN) pytest $(PYTEST_PARALLEL) --cov --timeout=15 --timeout-method=thread --max-worker-restart=0
+	$(PYRUN) pytest $(PYTEST_PARALLEL) --cov $(PYTEST_TIMEOUT) --max-worker-restart=0
 
 cov-serial:
-	$(PYRUN) pytest --cov --timeout=15 --timeout-method=thread
+	$(PYRUN) pytest --cov $(PYTEST_TIMEOUT)
 
 cov-xml:
 	$(PYRUN) coverage xml -o coverage.xml
@@ -280,7 +287,7 @@ dev-frontend:
 	$(info Starting frontend dev server...)
 	$(info Frontend URL: http://localhost:3000/)
 	$(info API proxy: http://localhost:3000/api -> http://localhost:8000/api)
-	@cd $(UI_DIR) && pnpm dev --host 0.0.0.0
+	$(PNPM) dev --host 0.0.0.0
 
 run-static:
 	$(PYRUN) snapper update-kraken-symbols --force
@@ -332,31 +339,31 @@ migrate-prod: migrate
 
 ui-setup:
 	@corepack --version >$(DEVNULL) 2>&1 || (echo "Error: corepack not found. Run 'make system-deps' first." && exit 1)
-	@cd $(UI_DIR) && pnpm install --frozen-lockfile
+	$(PNPM) install --frozen-lockfile
 
 ui-refresh:
 	$(PYTHON) scripts/ui_refresh.py
 
 ui-dev:
-	@cd $(UI_DIR) && pnpm dev
+	$(PNPM) dev
 
 ui-build:
-	@cd $(UI_DIR) && pnpm build
+	$(PNPM) build
 
 ui-typecheck:
-	@cd $(UI_DIR) && pnpm typecheck
+	$(PNPM) typecheck
 
 ui-lint:
-	@cd $(UI_DIR) && pnpm lint
+	$(PNPM) lint
 
 ui-lint-fix:
-	@cd $(UI_DIR) && pnpm lint:fix
+	$(PNPM) lint:fix
 
 ui-format:
-	@cd $(UI_DIR) && pnpm format:check
+	$(PNPM) format:check
 
 ui-format-fix:
-	@cd $(UI_DIR) && pnpm format
+	$(PNPM) format
 
 ui-check: ui-lint ui-format ui-dead-code
 	$(info UI quality checks passed [lint + format + dead code])
@@ -365,50 +372,50 @@ ui-fix: ui-lint-fix ui-format-fix ui-dead-code-fix
 	$(info UI quality fixes applied [lint + format + dead code])
 
 ui-dead-code:
-	@cd $(UI_DIR) && pnpm dead-code
+	$(PNPM) dead-code
 
 ui-dead-code-fix:
-	@cd $(UI_DIR) && pnpm dead-code:fix
+	$(PNPM) dead-code:fix
 
 ui-gen-api-types:
 	$(info Generating TypeScript types from OpenAPI schema...)
 	$(info Exporting OpenAPI schema from FastAPI...)
-	@$(VENV_PY) scripts/generate_types.py --openapi
-	@cd $(UI_DIR) && pnpm gen:api-types
-	@$(VENV_PY) scripts/generate_types.py --postprocess-openapi-types
-	@cd $(UI_DIR) && pnpm exec prettier --write src/types/api.generated.ts
+	$(GENSCRIPT) --openapi
+	$(PNPM) gen:api-types
+	$(GENSCRIPT) --postprocess-openapi-types
+	$(PRETTIER) src/types/api.generated.ts
 	$(info Generated frontend/src/types/api.generated.ts)
 
 ui-gen-ws-types:
 	$(info Generating TypeScript types from WebSocket schemas...)
-	@$(VENV_PY) scripts/generate_types.py --export
-	@cd $(UI_DIR) && pnpm gen:ws-types
-	@$(VENV_PY) scripts/generate_types.py --strip-eslint-disable
-	@cd $(UI_DIR) && pnpm exec prettier --write src/types/ws.generated.ts
+	$(GENSCRIPT) --export
+	$(PNPM) gen:ws-types
+	$(GENSCRIPT) --strip-eslint-disable
+	$(PRETTIER) src/types/ws.generated.ts
 	$(info Generated frontend/src/types/ws.generated.ts)
 
 ui-gen-zod:
 	$(info Generating Zod schemas from WebSocket JSON Schema...)
-	@$(VENV_PY) scripts/generate_types.py --frontend-ws
-	@cd $(UI_DIR) && pnpm exec prettier --write src/lib/schemas/ws.generated.zod.ts
+	$(GENSCRIPT) --frontend-ws
+	$(PRETTIER) src/lib/schemas/ws.generated.zod.ts
 	$(info Generated frontend/src/lib/schemas/ws.generated.zod.ts)
 
 ui-gen-api-zod:
 	$(info Generating Zod schemas from OpenAPI schema...)
-	@$(VENV_PY) scripts/generate_types.py --frontend-api
-	@cd $(UI_DIR) && pnpm exec prettier --write src/lib/schemas/api.generated.zod.ts
+	$(GENSCRIPT) --frontend-api
+	$(PRETTIER) src/lib/schemas/api.generated.zod.ts
 	$(info Generated frontend/src/lib/schemas/api.generated.zod.ts)
 
 ui-gen-entities:
 	$(info Generating entity types...)
-	@$(VENV_PY) scripts/generate_types.py --entities
-	@cd $(UI_DIR) && pnpm exec prettier --write src/types/entities.ts
+	$(GENSCRIPT) --entities
+	$(PRETTIER) src/types/entities.ts
 	$(info Generated frontend/src/types/entities.ts)
 
 ui-gen-permissions:
 	$(info Generating permissions types...)
-	@$(VENV_PY) scripts/generate_types.py --permissions
-	@cd $(UI_DIR) && pnpm exec prettier --write src/types/permissions.generated.ts
+	$(GENSCRIPT) --permissions
+	$(PRETTIER) src/types/permissions.generated.ts
 	$(info Generated frontend/src/types/permissions.generated.ts)
 
 ui-gen-types: ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions
@@ -419,10 +426,10 @@ ui-check-types:
 	@$(VENV_PY) scripts/check_type_drift.py
 
 ui-test:
-	@cd $(UI_DIR) && pnpm test:run
+	$(PNPM) test:run
 
 ui-cov:
-	@cd $(UI_DIR) && pnpm test:coverage
+	$(PNPM) test:coverage
 
 docs-pdf:
 	$(VENV_PY) scripts/build_docs_pdf.py
@@ -438,7 +445,7 @@ ios-setup:
 
 ios-gen-types:
 	$(info Generating Swift types from backend schemas...)
-	@$(VENV_PY) scripts/generate_types.py --openapi --export --ios
+	$(GENSCRIPT) --openapi --export --ios
 	$(info Generated iOS types in ios/Snapper/Models/Generated/)
 
 ios-build:
@@ -471,35 +478,33 @@ docker-build:
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
 docker-migrate:
-	docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-init
+	$(DOCKER_RUN) db-init
 
 docker-seed:
-	docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-seed --profile dev
+	$(DOCKER_RUN) db-seed --profile dev
 
 docker-migrate-dev: docker-migrate docker-seed
 
 docker-migrate-prod: docker-migrate
-	docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-seed --profile prod
+	$(DOCKER_RUN) db-seed --profile prod
 
 docker-push:
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)
 
 docker-run:
-	docker run -d --name snapper --rm --env-file "$(CURDIR)/.env" -p 127.0.0.1:8000:8000 -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) server
-
-DOCKER_STATIC := docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG)
+	$(DOCKER_BASE) -d --rm --name $(DOCKER_NAME) -p 127.0.0.1:$(SERVER_PORT):$(SERVER_PORT) $(IMAGE_NAME):$(IMAGE_TAG) server
 
 docker-run-static:
-	$(DOCKER_STATIC) update-kraken-symbols --force
-	$(DOCKER_STATIC) update-zonda-symbols --force
-	$(DOCKER_STATIC) update-walutomat-symbols --force
-	$(DOCKER_STATIC) update-polygon-symbols --force || true
-	$(DOCKER_STATIC) update-kraken-market-snapshot
-	$(DOCKER_STATIC) update-zonda-market-snapshot
-	$(DOCKER_STATIC) update-walutomat-market-snapshot
+	$(DOCKER_RUN) update-kraken-symbols --force
+	$(DOCKER_RUN) update-zonda-symbols --force
+	$(DOCKER_RUN) update-walutomat-symbols --force
+	$(DOCKER_RUN) update-polygon-symbols --force || true
+	$(DOCKER_RUN) update-kraken-market-snapshot
+	$(DOCKER_RUN) update-zonda-market-snapshot
+	$(DOCKER_RUN) update-walutomat-market-snapshot
 
 docker-stop:
-	-docker stop snapper
+	-docker stop $(DOCKER_NAME)
 	$(info Container stopped)
 
 server-check:
