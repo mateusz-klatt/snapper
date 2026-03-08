@@ -470,7 +470,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange = setting_key.split("_")[0]
         set_log_context(f"sym:{exchange}")
         try:
-            self.repository = DatabaseRepository()
+            self.repository = DatabaseRepository(self.settings.db_url)
             logger.info("Repository initialized")
             settings_service = await get_settings_service(
                 self.settings.db_url,

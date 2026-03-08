@@ -1151,7 +1151,7 @@ class DatabaseRepository:
         session_factory: Sync session factory.
     """
 
-    def __init__(self, db_url: str = "sqlite:///data/snapper.db"):
+    def __init__(self, db_url: str) -> None:
         """Initialize sync database repository.
 
         Args:

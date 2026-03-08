@@ -99,6 +99,7 @@ help:
 	$(info docker-migrate-prod Run migrations + seed prod data in Docker)
 	$(info docker-push         Push Docker image)
 	$(info docker-run          Run Docker container [background])
+	$(info docker-run-static   Refresh verified symbol mappings in Docker)
 	$(info docker-stop         Stop Docker container)
 	$(info server-check        Health check server [cross-platform])
 	$(info )
@@ -485,6 +486,17 @@ docker-push:
 
 docker-run:
 	docker run -d --name snapper --rm --env-file "$(CURDIR)/.env" -p 127.0.0.1:8000:8000 -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) server
+
+DOCKER_STATIC := docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG)
+
+docker-run-static:
+	$(DOCKER_STATIC) update-kraken-symbols --force
+	$(DOCKER_STATIC) update-zonda-symbols --force
+	$(DOCKER_STATIC) update-walutomat-symbols --force
+	$(DOCKER_STATIC) update-polygon-symbols --force || true
+	$(DOCKER_STATIC) update-kraken-market-snapshot
+	$(DOCKER_STATIC) update-zonda-market-snapshot
+	$(DOCKER_STATIC) update-walutomat-market-snapshot
 
 docker-stop:
 	-docker stop snapper
