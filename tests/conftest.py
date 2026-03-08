@@ -378,6 +378,10 @@ def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[No
     temp_dir = tmp_path_factory.mktemp(f"sqlite-{worker_id}")
     db_path = temp_dir / "snapper.db"
     shutil.copy2(template_path, db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM users")
+    conn.commit()
+    conn.close()
     original_db_url = os.environ.get("DB_URL")
     os.environ["DB_URL"] = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     settings.get_bootstrap_settings.cache_clear()
