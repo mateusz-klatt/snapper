@@ -367,24 +367,40 @@ def mock_settings_for_tests(
     ws_token_service.set_settings_service(mock_settings_service)
 
 
+def _extract_sqlite_path(db_url: str) -> Path | None:
+    """Return the file path from a SQLite URL, or None for other engines."""
+    for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+        if db_url.startswith(prefix):
+            return Path(db_url[len(prefix) :]).resolve()
+    return None
+
+
 @pytest.fixture(autouse=True, scope="session")
 def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[None]:
-    """Provide an isolated SQLite database copy for the test session."""
-    template_path = Path(__file__).resolve().parent.parent / "data" / "snapper.db"
-    if not template_path.exists():
-        yield
-        return
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "session")
-    temp_dir = tmp_path_factory.mktemp(f"sqlite-{worker_id}")
-    db_path = temp_dir / "snapper.db"
-    shutil.copy2(template_path, db_path)
-    conn = sqlite3.connect(db_path)
-    conn.execute("DELETE FROM users")
-    conn.commit()
-    conn.close()
+    """Provide an isolated database for the test session.
+
+    SQLite: copies the file to a temp directory so the original is
+    never modified.  Other engines (Postgres, etc.): keeps DB_URL
+    as-is but still seeds dev users.  In both cases ``run_seed``
+    ensures test credentials are available.
+    """
     original_db_url = os.environ.get("DB_URL")
-    os.environ["DB_URL"] = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     settings.get_bootstrap_settings.cache_clear()
+    configured_url = BootstrapSettingsLoader().db_url
+    sqlite_path = _extract_sqlite_path(configured_url)
+
+    if sqlite_path and sqlite_path.exists():
+        worker_id = os.environ.get("PYTEST_XDIST_WORKER", "session")
+        temp_dir = tmp_path_factory.mktemp(f"sqlite-{worker_id}")
+        db_path = temp_dir / "snapper.db"
+        shutil.copy2(sqlite_path, db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM users")
+        conn.commit()
+        conn.close()
+        os.environ["DB_URL"] = f"sqlite+aiosqlite:///{db_path.as_posix()}"
+        settings.get_bootstrap_settings.cache_clear()
+
     settings.get_settings.cache_clear()
     run_seed("dev")
     try:
