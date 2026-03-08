@@ -471,7 +471,7 @@ docker-build:
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
 docker-migrate:
-	docker run --rm -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-init
+	docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-init
 
 docker-seed:
 	docker run --rm --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data $(IMAGE_NAME):$(IMAGE_TAG) db-seed --profile dev
