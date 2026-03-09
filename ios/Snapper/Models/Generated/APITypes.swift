@@ -352,7 +352,10 @@ struct CreateUserRequest: Codable, Sendable {
 struct ExecutionRecord: Codable, Sendable {
     let id: Int
     let orderId: Int
+    let execId: String?
+    let tradeId: String?
     let timestamp: Date
+    let executedAt: Date?
     let price: Double
     let size: Double
     let fee: Double
@@ -364,7 +367,10 @@ struct ExecutionRecord: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id
         case orderId = "order_id"
+        case execId = "exec_id"
+        case tradeId = "trade_id"
         case timestamp
+        case executedAt = "executed_at"
         case price
         case size
         case fee
@@ -439,6 +445,8 @@ struct OrderStatus: Codable, Sendable {
     let type: String
     let price: Double?
     let size: Double
+    let filledSize: Double?
+    let averagePrice: Double?
     let status: String
     let timeInForce: String?
     let error: String?
@@ -455,6 +463,8 @@ struct OrderStatus: Codable, Sendable {
         case type
         case price
         case size
+        case filledSize = "filled_size"
+        case averagePrice = "average_price"
         case status
         case timeInForce = "time_in_force"
         case error

@@ -582,6 +582,13 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
     ms_repo = MSSQLRepository("mssql+pyodbc://user:pass@server:1433/db")
     await ms_repo.update_order(
         order_id=1,
+        status="partially_filled",
+        updated_at=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
+        filled_size=0.5,
+        average_price=99.5,
+    )
+    await ms_repo.update_order(
+        order_id=1,
         status="filled",
         updated_at=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
         exchange_order_id="ex-123",

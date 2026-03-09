@@ -473,6 +473,13 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     )
     await repo.update_order(
         order_id=order_id,
+        status="partially_filled",
+        updated_at=base_ts + timedelta(minutes=1),
+        filled_size=0.5,
+        average_price=10.55,
+    )
+    await repo.update_order(
+        order_id=order_id,
         status="filled",
         updated_at=base_ts + timedelta(minutes=2),
         exchange_order_id="ex-1",

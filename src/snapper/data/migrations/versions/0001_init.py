@@ -246,6 +246,8 @@ def upgrade() -> None:
         sa.Column("type", sa.String(16), nullable=False),
         sa.Column("price", sa.Float(), nullable=True),
         sa.Column("size", sa.Float(), nullable=False),
+        sa.Column("filled_size", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("average_price", sa.Float(), nullable=True),
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("time_in_force", sa.String(16), nullable=True),
         sa.Column("error", sa.String(512), nullable=True),
@@ -280,6 +282,7 @@ def upgrade() -> None:
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("fee", sa.Float(), nullable=False),
         sa.Column("fee_asset", sa.String(16), nullable=False),
+        sa.Column("executed_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["order_id"], ["orders.id"]),
         sa.PrimaryKeyConstraint("id"),
     )

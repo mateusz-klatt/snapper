@@ -178,6 +178,8 @@ class Repository(ABC):
         updated_at: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
+        filled_size: float | None = None,
+        average_price: float | None = None,
     ) -> None:
         """Update order status and metadata."""
         ...
@@ -193,6 +195,7 @@ class Repository(ABC):
         fee_asset: str,
         exec_id: str | None = None,
         trade_id: str | None = None,
+        executed_at: datetime | None = None,
     ) -> int:
         """Insert execution record, returning execution ID."""
         ...
@@ -494,6 +497,8 @@ class SQLAlchemyRepository(Repository):
                 type=order_type,
                 price=price,
                 size=size,
+                filled_size=0.0,
+                average_price=None,
                 status=status,
                 time_in_force=time_in_force,
                 error=None,
@@ -510,23 +515,26 @@ class SQLAlchemyRepository(Repository):
         updated_at: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
+        filled_size: float | None = None,
+        average_price: float | None = None,
     ) -> None:
         """Update order status, timestamp, and optional fields."""
         async with self.session() as s:
-            stmt = (
-                update(OrderRecord)
-                .where(OrderRecord.id == order_id)
-                .values(
-                    status=status,
-                    updated_at=updated_at,
-                    exchange_order_id=(
-                        exchange_order_id
-                        if exchange_order_id is not None
-                        else OrderRecord.exchange_order_id
-                    ),
-                    error=error if error is not None else OrderRecord.error,
-                )
-            )
+            values: dict[str, Any] = {
+                "status": status,
+                "updated_at": updated_at,
+                "exchange_order_id": (
+                    exchange_order_id
+                    if exchange_order_id is not None
+                    else OrderRecord.exchange_order_id
+                ),
+                "error": error if error is not None else OrderRecord.error,
+            }
+            if filled_size is not None:
+                values["filled_size"] = filled_size
+            if average_price is not None:
+                values["average_price"] = average_price
+            stmt = update(OrderRecord).where(OrderRecord.id == order_id).values(**values)
             await s.execute(stmt)
             await s.commit()
 
@@ -540,6 +548,7 @@ class SQLAlchemyRepository(Repository):
         fee_asset: str,
         exec_id: str | None = None,
         trade_id: str | None = None,
+        executed_at: datetime | None = None,
     ) -> int:
         """Insert execution record and return generated ID."""
         async with self.session() as s:
@@ -548,6 +557,7 @@ class SQLAlchemyRepository(Repository):
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
+                executed_at=executed_at,
                 price=price,
                 size=size,
                 fee=fee,
@@ -1004,6 +1014,8 @@ class MSSQLRepository(Repository):
                 type=order_type,
                 price=price,
                 size=size,
+                filled_size=0.0,
+                average_price=None,
                 status=status,
                 time_in_force=time_in_force,
                 error=None,
@@ -1022,24 +1034,27 @@ class MSSQLRepository(Repository):
         updated_at: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
+        filled_size: float | None = None,
+        average_price: float | None = None,
     ) -> None:
         """Update order status via sync thread."""
 
         def _do(s: SyncSession) -> None:
-            stmt = (
-                update(OrderRecord)
-                .where(OrderRecord.id == order_id)
-                .values(
-                    status=status,
-                    updated_at=updated_at,
-                    exchange_order_id=(
-                        exchange_order_id
-                        if exchange_order_id is not None
-                        else OrderRecord.exchange_order_id
-                    ),
-                    error=error if error is not None else OrderRecord.error,
-                )
-            )
+            values: dict[str, Any] = {
+                "status": status,
+                "updated_at": updated_at,
+                "exchange_order_id": (
+                    exchange_order_id
+                    if exchange_order_id is not None
+                    else OrderRecord.exchange_order_id
+                ),
+                "error": error if error is not None else OrderRecord.error,
+            }
+            if filled_size is not None:
+                values["filled_size"] = filled_size
+            if average_price is not None:
+                values["average_price"] = average_price
+            stmt = update(OrderRecord).where(OrderRecord.id == order_id).values(**values)
             s.execute(stmt)
             s.commit()
 
@@ -1055,6 +1070,7 @@ class MSSQLRepository(Repository):
         fee_asset: str,
         exec_id: str | None = None,
         trade_id: str | None = None,
+        executed_at: datetime | None = None,
     ) -> int:
         """Insert execution record via sync thread."""
 
@@ -1064,6 +1080,7 @@ class MSSQLRepository(Repository):
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
+                executed_at=executed_at,
                 price=price,
                 size=size,
                 fee=fee,

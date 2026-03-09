@@ -19,7 +19,10 @@ class ExecutionRecord(StrictApiSchema):
     Attributes:
         id: Unique execution identifier.
         order_id: Related order identifier.
-        timestamp: Execution timestamp.
+        exec_id: Exchange-assigned execution ID.
+        trade_id: Exchange-assigned trade ID.
+        timestamp: Wall-clock timestamp when execution was recorded.
+        executed_at: Exchange-provided execution time.
         price: Execution price.
         size: Executed quantity.
         fee: Transaction fee.
@@ -31,7 +34,10 @@ class ExecutionRecord(StrictApiSchema):
 
     id: int
     order_id: int
+    exec_id: str | None = None
+    trade_id: str | None = None
     timestamp: datetime
+    executed_at: datetime | None = None
     price: float
     size: float
     fee: float

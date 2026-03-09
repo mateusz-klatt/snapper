@@ -30,6 +30,8 @@ class OrderStatus(StrictApiSchema):
         type: Order type (market/limit).
         price: Limit price (None for market orders).
         size: Order quantity.
+        filled_size: Cumulative filled quantity.
+        average_price: Volume-weighted average fill price.
         status: Current order status.
         time_in_force: Order time-in-force setting.
         error: Error message if order failed.
@@ -46,6 +48,8 @@ class OrderStatus(StrictApiSchema):
     type: OrderType
     price: float | None = None
     size: float
+    filled_size: float = 0.0
+    average_price: float | None = None
     status: OrderStatusLiteral
     time_in_force: str | None = None
     error: str | None = None

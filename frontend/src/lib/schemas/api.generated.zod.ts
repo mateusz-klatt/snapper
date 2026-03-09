@@ -81,7 +81,10 @@ export const ExecutionRecordSchema = z
   .object({
     id: z.number().int(),
     order_id: z.number().int(),
+    exec_id: z.string().nullable().optional(),
+    trade_id: z.string().nullable().optional(),
     timestamp: z.iso.datetime(),
+    executed_at: z.iso.datetime().nullable().optional(),
     price: z.number(),
     size: z.number(),
     fee: z.number(),
@@ -126,6 +129,8 @@ export const OrderStatusSchema = z
     type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
     price: z.number().nullable().optional(),
     size: z.number(),
+    filled_size: z.number(),
+    average_price: z.number().nullable().optional(),
     status: z.enum([
       'new',
       'submitted',

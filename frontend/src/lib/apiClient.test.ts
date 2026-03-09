@@ -682,6 +682,7 @@ describe('domain API methods', () => {
           type: 'limit',
           price: 50000,
           size: 1,
+          filled_size: 1,
           status: 'filled',
         },
       ],

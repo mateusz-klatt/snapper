@@ -204,6 +204,8 @@ class TestOrderModel:
             type="limit",
             price=50000.0,
             size=1.0,
+            filled_size=0.0,
+            average_price=None,
             status="pending",
         )
         assert order.instrument_id == 1
@@ -213,6 +215,8 @@ class TestOrderModel:
         assert order.type == "limit"
         assert order.price == pytest.approx(50000.0)
         assert order.size == pytest.approx(1.0)
+        assert order.filled_size == pytest.approx(0.0)
+        assert order.average_price is None
         assert order.status == "pending"
 
     def test_market_order(self) -> None:
@@ -278,6 +282,7 @@ class TestExecutionModel:
         assert execution.size == pytest.approx(1.0)
         assert execution.fee == pytest.approx(5.0)
         assert execution.fee_asset == "USD"
+        assert execution.executed_at is None
 
     def test_execution_fee_calculation(self) -> None:
         """Test Execution fee percentage is valid.

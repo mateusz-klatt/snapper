@@ -1124,7 +1124,10 @@ export type Components = {
          *     Attributes:
          *         id: Unique execution identifier.
          *         order_id: Related order identifier.
-         *         timestamp: Execution timestamp.
+         *         exec_id: Exchange-assigned execution ID.
+         *         trade_id: Exchange-assigned trade ID.
+         *         timestamp: Wall-clock timestamp when execution was recorded.
+         *         executed_at: Exchange-provided execution time.
          *         price: Execution price.
          *         size: Executed quantity.
          *         fee: Transaction fee.
@@ -1138,11 +1141,17 @@ export type Components = {
             id: number;
             /** Order Id */
             order_id: number;
+            /** Exec Id */
+            exec_id?: string | null;
+            /** Trade Id */
+            trade_id?: string | null;
             /**
              * Timestamp
              * Format: date-time
              */
             timestamp: string;
+            /** Executed At */
+            executed_at?: string | null;
             /** Price */
             price: number;
             /** Size */
@@ -1295,6 +1304,8 @@ export type Components = {
          *         type: Order type (market/limit).
          *         price: Limit price (None for market orders).
          *         size: Order quantity.
+         *         filled_size: Cumulative filled quantity.
+         *         average_price: Volume-weighted average fill price.
          *         status: Current order status.
          *         time_in_force: Order time-in-force setting.
          *         error: Error message if order failed.
@@ -1334,6 +1345,13 @@ export type Components = {
             price?: number | null;
             /** Size */
             size: number;
+            /**
+             * Filled Size
+             * @default 0
+             */
+            filled_size: number;
+            /** Average Price */
+            average_price?: number | null;
             /**
              * Status
              * @enum {string}

@@ -164,6 +164,8 @@ class OrderRecord(Base):
     size: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(16))
     time_in_force: Mapped[str | None] = mapped_column(String(16))
+    filled_size: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str | None] = mapped_column(String(512))
 
 
@@ -196,6 +198,7 @@ class Execution(Base):
     size: Mapped[float] = mapped_column(Float)
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
+    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     order: Mapped[OrderRecord] = relationship()
 
 

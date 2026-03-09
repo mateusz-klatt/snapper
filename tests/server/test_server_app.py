@@ -1242,6 +1242,8 @@ class MockOrderRecord:
         self.price = 50000.0
         self.size = 1.0
         self.status = "filled"
+        self.filled_size = 1.0
+        self.average_price = 50000.0
         self.time_in_force = "GTC"
         self.error = None
 
@@ -1268,7 +1270,10 @@ class MockExecution:
         """Initialize the instance."""
         self.id = 1
         self.order_id = 1
+        self.exec_id = "exec-001"
+        self.trade_id = "trade-001"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 1, tzinfo=dt.UTC)
+        self.executed_at = dt.datetime(2024, 1, 1, 12, 1, tzinfo=dt.UTC)
         self.price = 50000.0
         self.size = 1.0
         self.fee = 10.0
@@ -1381,6 +1386,8 @@ class TestOrdersSuccessPath:
         assert data[0]["instrument"] == "BTC-USD"
         assert data[0]["exchange"] == "kraken"
         assert data[0]["side"] == "buy"
+        assert data[0]["filled_size"] == pytest.approx(1.0)
+        assert data[0]["average_price"] == pytest.approx(50000.0)
         assert data[0]["status"] == "filled"
 
     def test_get_orders_with_symbol_filter(self) -> None:
@@ -1496,6 +1503,9 @@ class TestExecutionsSuccessPath:
         assert data[0]["size"] == pytest.approx(1.0)
         assert data[0]["fee"] == pytest.approx(10.0)
         assert data[0]["fee_asset"] == "USD"
+        assert data[0]["exec_id"] == "exec-001"
+        assert data[0]["trade_id"] == "trade-001"
+        assert data[0]["executed_at"] is not None
 
     def test_get_executions_empty(self) -> None:
         """Verify executions endpoint returns empty list when no data.
