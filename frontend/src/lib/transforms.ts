@@ -184,15 +184,11 @@ export function candleFromAPI(api: CandleSnapshot): Candle {
     volume: api.volume,
     vwap: api.vwap ?? undefined,
     trades: api.trades ?? undefined,
-    timestamp: new Date(api.timestamp),
+    openAt: new Date(api.open_at),
   }
 }
 
 export function barFromWS(ws: BarEnvelope): Bar {
-  if (!ws.timestamp) {
-    throw new Error('BarEnvelope missing required field: timestamp')
-  }
-
   if (ws.timeframe === null || ws.timeframe === undefined) {
     throw new Error('BarEnvelope missing required field: timeframe')
   }
@@ -223,7 +219,8 @@ export function barFromWS(ws: BarEnvelope): Bar {
     volume: ws.volume,
     vwap: ws.vwap ?? undefined,
     trades: ws.trades ?? undefined,
-    timestamp: new Date(ws.timestamp),
+    openAt: new Date(ws.open_at),
+    timestamp: ws.timestamp ? new Date(ws.timestamp) : undefined,
     exchange: ws.exchange,
   }
 }

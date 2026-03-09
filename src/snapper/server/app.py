@@ -456,7 +456,7 @@ def _create_candles_signals_router() -> APIRouter:
                         instrument=instrument,
                         exchange=exchange,
                         timeframe=candle.timeframe,
-                        timestamp=candle.timestamp,
+                        open_at=candle.timestamp,
                         open=candle.open,
                         high=candle.high,
                         low=candle.low,

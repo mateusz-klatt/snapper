@@ -194,7 +194,7 @@ export class WSDispatcher {
       instrument: bar.instrument,
       exchange: bar.exchange,
       timeframe: bar.timeframe,
-      timestamp: bar.timestamp ?? new Date().toISOString(),
+      open_at: bar.open_at,
       open: bar.open,
       high: bar.high,
       low: bar.low,
@@ -204,9 +204,9 @@ export class WSDispatcher {
       trades: bar.trades ?? null,
     }
 
-    const incomingTime = new Date(incoming.timestamp).getTime()
+    const incomingTime = new Date(incoming.open_at).getTime()
     const lastCandle = existing[existing.length - 1]
-    const lastTime = lastCandle ? new Date(lastCandle.timestamp).getTime() : 0
+    const lastTime = lastCandle ? new Date(lastCandle.open_at).getTime() : 0
 
     if (incomingTime === lastTime) {
       const updated = [...existing]

@@ -172,6 +172,7 @@ struct BarEnvelope: Codable, Sendable {
     let instrument: String
     let exchange: String
     let timeframe: String
+    let openAt: Date
     let open: Double
     let high: Double
     let low: Double
@@ -179,6 +180,23 @@ struct BarEnvelope: Codable, Sendable {
     let volume: Double
     let vwap: Double?
     let trades: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case timestamp
+        case meta
+        case instrument
+        case exchange
+        case timeframe
+        case openAt = "open_at"
+        case open
+        case high
+        case low
+        case close
+        case volume
+        case vwap
+        case trades
+    }
 }
 
 struct FillEnvelope: Codable, Sendable {
@@ -471,9 +489,22 @@ struct TradeEnvelope: Codable, Sendable {
     let meta: [String: AnyCodable]?
     let instrument: String
     let exchange: String
+    let executedAt: Date?
     let price: Double
     let volume: Double
     let side: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case timestamp
+        case meta
+        case instrument
+        case exchange
+        case executedAt = "executed_at"
+        case price
+        case volume
+        case side
+    }
 }
 
 struct WSAuthCompleteResponse: Codable, Sendable {

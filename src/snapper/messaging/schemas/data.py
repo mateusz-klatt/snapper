@@ -59,6 +59,7 @@ class CandleData(BaseModel):
         instrument: Trading pair symbol (e.g., 'BTC-USD').
         exchange: Source exchange producing this candle data.
         timeframe: Bar duration (e.g., '1m', '1h', '1d').
+        open_at: Exchange-provided candle interval start time.
         open: Opening price of the bar.
         high: Highest price during the bar.
         low: Lowest price during the bar.
@@ -71,6 +72,7 @@ class CandleData(BaseModel):
     instrument: str
     exchange: MarketDataExchange
     timeframe: str
+    open_at: datetime
     open: float
     high: float
     low: float
@@ -89,6 +91,7 @@ class TradeData(BaseModel):
     Attributes:
         instrument: Trading pair symbol (e.g., 'BTC-USD').
         exchange: Source exchange where the trade occurred.
+        executed_at: Exchange-provided trade execution timestamp.
         price: Execution price of the trade.
         volume: Size of the trade.
         side: Trade direction ('buy'/'sell') if available.
@@ -96,6 +99,7 @@ class TradeData(BaseModel):
 
     instrument: str
     exchange: MarketDataExchange
+    executed_at: datetime | None = None
     price: float
     volume: float
     side: str | None = None

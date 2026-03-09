@@ -56,6 +56,7 @@ class TestMessages:
             close=3000.0,
             vwap=2998.5,
             trades=42,
+            open_at=datetime.now(UTC),
         )
         json_str = msg.to_json()
         parsed = BarEnvelope.from_json(json_str)

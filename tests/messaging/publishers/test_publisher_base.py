@@ -234,6 +234,7 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
             price=100.0,
             quantity=1.0,
             side="buy",
+            timestamp=datetime.now(UTC),
         )
         pub.running = False
 
@@ -287,6 +288,7 @@ async def test_publish_message_skips_when_not_running() -> None:
             low=1.0,
             close=1.0,
             exchange="kraken",
+            open_at=datetime.now(UTC),
         ),
     )
     pub.publisher.send_multipart.assert_not_awaited()
@@ -316,6 +318,7 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
             low=1.0,
             close=1.0,
             exchange="kraken",
+            open_at=datetime.now(UTC),
         ),
     )
     failing.send_multipart.assert_awaited_once()
@@ -392,6 +395,7 @@ async def test_save_to_db_handles_non_bar_and_missing_repo(monkeypatch: pytest.M
         trades=None,
         timestamp=datetime.now(tz=UTC),
         exchange="kraken",
+        open_at=datetime.now(UTC),
     )
     await pub._save_to_db("BTC-USD", bar)
     repo.upsert_instrument.assert_awaited_once()
@@ -689,6 +693,7 @@ async def test_save_to_db_logs_errors() -> None:
         close=10.0,
         timestamp=datetime.now(tz=UTC),
         exchange="kraken",
+        open_at=datetime.now(UTC),
     )
     await pub._save_to_db("BTC-USD", bar)
 
@@ -831,7 +836,9 @@ async def test_trade_loop_breaks_when_not_running(monkeypatch: pytest.MonkeyPatc
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(symbol="BTC-USD", price=1.0, quantity=1.0, side="buy")
+        yield SimpleNamespace(
+            symbol="BTC-USD", price=1.0, quantity=1.0, side="buy", timestamp=datetime.now(UTC)
+        )
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
@@ -878,6 +885,7 @@ async def test_save_to_db_invalid_symbol_logs_warning() -> None:
         close=1.0,
         timestamp=datetime.now(tz=UTC),
         exchange="kraken",
+        open_at=datetime.now(UTC),
     )
     await pub._save_to_db("INVALID", bar)
 
@@ -903,6 +911,7 @@ async def test_save_to_db_uses_cached_instrument() -> None:
         close=1.0,
         timestamp=datetime.now(tz=UTC),
         exchange="kraken",
+        open_at=datetime.now(UTC),
     )
     await pub._save_to_db("BTC-USD", bar)
     pub.repository.upsert_candles.assert_awaited_once()
@@ -1642,6 +1651,7 @@ class TestFeedPublisherCoverage:
             close=110.0,
             vwap=109.5,
             trades=7,
+            open_at=datetime.now(UTC),
         )
         await publisher_any._save_to_db("BTC-USD", bar_message)
         mock_repository.upsert_instrument.assert_awaited_once()
@@ -1716,6 +1726,7 @@ def _build_bar_message(instrument: str) -> BarEnvelope:
         close=1.24,
         vwap=1.23,
         trades=7,
+        open_at=datetime.now(UTC),
     )
 
 
@@ -2007,6 +2018,7 @@ class TestFeedPublisherPublishMessage:
             high=50100.0,
             low=49800.0,
             close=50000.0,
+            open_at=datetime.now(UTC),
         )
         await publisher_any._publish_message(
             "market.kraken.BTC-USD.candles.1m",
@@ -2043,6 +2055,7 @@ class TestFeedPublisherPublishMessage:
             high=50000.0,
             low=50000.0,
             close=50000.0,
+            open_at=datetime.now(UTC),
         )
         await publisher_any._publish_message(
             "market.kraken.BTC-USD.candles.1m",
@@ -2074,6 +2087,7 @@ class TestFeedPublisherPublishMessage:
             high=50000.0,
             low=50000.0,
             close=50000.0,
+            open_at=datetime.now(UTC),
         )
         await publisher_any._publish_message(
             "market.kraken.BTC-USD.candles.1m",
@@ -2105,6 +2119,7 @@ class TestFeedPublisherPublishMessage:
             high=50000.0,
             low=50000.0,
             close=50000.0,
+            open_at=datetime.now(UTC),
         )
         await publisher_any._publish_message(
             "market.kraken.BTC-USD.candles.1m",

@@ -187,8 +187,8 @@ describe('MarketData', () => {
   })
   it('displays stats when candles data is available', async () => {
     const mockCandles = [
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
-      { timestamp: '2024-01-01T01:00:00Z', open: 1.082, high: 1.086, low: 1.081, close: 1.085 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
+      { open_at: '2024-01-01T01:00:00Z', open: 1.082, high: 1.086, low: 1.081, close: 1.085 },
     ]
     const { useCandles } = await import('../../hooks/queries')
 
@@ -209,8 +209,8 @@ describe('MarketData', () => {
   })
   it('displays chart when candles data is available', async () => {
     const mockCandles = [
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
-      { timestamp: '2024-01-01T01:00:00Z', open: 1.082, high: 1.086, low: 1.081, close: 1.085 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
+      { open_at: '2024-01-01T01:00:00Z', open: 1.082, high: 1.086, low: 1.081, close: 1.085 },
     ]
     const { useCandles } = await import('../../hooks/queries')
 
@@ -226,11 +226,11 @@ describe('MarketData', () => {
       expect(screen.getByText('Price Chart')).toBeInTheDocument()
     })
   })
-  it('handles duplicate timestamps by keeping the last one', async () => {
+  it('handles duplicate open_at by keeping the last one', async () => {
     const mockCandles = [
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.0825, high: 1.0855, low: 1.08, close: 1.084 },
-      { timestamp: '2024-01-01T01:00:00Z', open: 1.084, high: 1.087, low: 1.083, close: 1.086 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.0825, high: 1.0855, low: 1.08, close: 1.084 },
+      { open_at: '2024-01-01T01:00:00Z', open: 1.084, high: 1.087, low: 1.083, close: 1.086 },
     ]
     const { useCandles } = await import('../../hooks/queries')
 
@@ -248,8 +248,8 @@ describe('MarketData', () => {
   })
   it('displays positive change with green color', async () => {
     const mockCandles = [
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.08 },
-      { timestamp: '2024-01-01T01:00:00Z', open: 1.08, high: 1.086, low: 1.079, close: 1.085 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.08 },
+      { open_at: '2024-01-01T01:00:00Z', open: 1.08, high: 1.086, low: 1.079, close: 1.085 },
     ]
     const { useCandles } = await import('../../hooks/queries')
 
@@ -270,8 +270,8 @@ describe('MarketData', () => {
   })
   it('displays negative change with red color', async () => {
     const mockCandles = [
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.085 },
-      { timestamp: '2024-01-01T01:00:00Z', open: 1.085, high: 1.086, low: 1.079, close: 1.08 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.085 },
+      { open_at: '2024-01-01T01:00:00Z', open: 1.085, high: 1.086, low: 1.079, close: 1.08 },
     ]
     const { useCandles } = await import('../../hooks/queries')
 
@@ -361,7 +361,7 @@ describe('MarketData', () => {
   })
   it('returns empty chartData when isFetching', async () => {
     const mockCandles = [
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
     ]
     const { useCandles } = await import('../../hooks/queries')
 
@@ -399,7 +399,7 @@ describe('MarketData', () => {
   })
   it('calculates stats from single candle', async () => {
     const mockCandles = [
-      { timestamp: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
+      { open_at: '2024-01-01T00:00:00Z', open: 1.08, high: 1.085, low: 1.079, close: 1.082 },
     ]
     const { useCandles } = await import('../../hooks/queries')
 

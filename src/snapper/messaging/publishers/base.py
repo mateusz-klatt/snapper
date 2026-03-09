@@ -262,7 +262,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     instrument=native_symbol,
                     volume=candle.volume,
                     timeframe=timeframe,
-                    timestamp=candle.interval_begin,
+                    open_at=candle.interval_begin,
                     open=candle.open,
                     high=candle.high,
                     low=candle.low,
@@ -324,6 +324,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 trade_msg = TradeEnvelope(
                     exchange=exchange,
                     instrument=native_symbol,
+                    executed_at=trade.timestamp,
                     price=trade.price,
                     volume=trade.quantity,
                     side=trade.side if trade.side in ["buy", "sell"] else None,
@@ -433,7 +434,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             trades = bar_msg.trades if bar_msg.trades is not None else 0
             candle_row: dict[str, Any] = {
                 "instrument_id": instrument_id,
-                "timestamp": bar_msg.timestamp,
+                "timestamp": bar_msg.open_at,
                 "timeframe": timeframe,
                 "open": open_price,
                 "high": high_price,

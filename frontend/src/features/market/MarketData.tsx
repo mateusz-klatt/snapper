@@ -108,15 +108,15 @@ export function MarketData() {
   const chartData: FormattedCandle[] = useMemo(() => {
     if (!candles || isFetching) return []
     const sortedCandles = [...candles].sort((a, b) => {
-      const timeA = new Date(a.timestamp).getTime()
-      const timeB = new Date(b.timestamp).getTime()
+      const timeA = new Date(a.open_at).getTime()
+      const timeB = new Date(b.open_at).getTime()
 
       return timeA - timeB
     })
     const deduped: FormattedCandle[] = []
 
     for (const candle of sortedCandles) {
-      const unixTime = Math.floor(new Date(candle.timestamp).getTime() / 1000)
+      const unixTime = Math.floor(new Date(candle.open_at).getTime() / 1000)
       const previous = deduped[deduped.length - 1]
 
       if (previous?.time === unixTime) {

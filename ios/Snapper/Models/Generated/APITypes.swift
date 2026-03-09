@@ -222,7 +222,7 @@ struct CandleSnapshot: Codable, Sendable {
     let instrument: String
     let exchange: String
     let timeframe: String
-    let timestamp: Date
+    let openAt: Date
     let open: Double
     let high: Double
     let low: Double
@@ -230,6 +230,20 @@ struct CandleSnapshot: Codable, Sendable {
     let volume: Double
     let vwap: Double?
     let trades: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case instrument
+        case exchange
+        case timeframe
+        case openAt = "open_at"
+        case open
+        case high
+        case low
+        case close
+        case volume
+        case vwap
+        case trades
+    }
 }
 
 struct ChangePasswordRequest: Codable, Sendable {

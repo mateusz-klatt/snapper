@@ -103,6 +103,7 @@ export type Ask = number | null;
 export type Last = number | null;
 export type Type14 = "trade";
 export type Exchange9 = "kraken" | "zonda" | "walutomat" | "polygon";
+export type ExecutedAt = string | null;
 export type Side4 = string | null;
 /**
  * Message type discriminator
@@ -275,6 +276,7 @@ export interface BarEnvelope {
   instrument: string;
   exchange: Exchange;
   timeframe: string;
+  open_at: string;
   open: number;
   high: number;
   low: number;
@@ -652,6 +654,7 @@ export interface TradeEnvelope {
   meta?: Meta14;
   instrument: string;
   exchange: Exchange9;
+  executed_at?: ExecutedAt;
   price: number;
   volume: number;
   side?: Side4;

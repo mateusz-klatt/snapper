@@ -625,7 +625,7 @@ describe('domain API methods', () => {
           instrument: 'BTC/USD',
           exchange: 'kraken',
           timeframe: '1h',
-          timestamp: '2024-01-01T00:00:00Z',
+          open_at: '2024-01-01T00:00:00Z',
           open: 1,
           high: 1.1,
           low: 0.9,

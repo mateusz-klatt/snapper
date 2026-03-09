@@ -114,6 +114,7 @@ export function createError(overrides: { message?: string } = {}) {
 export function createCandle(
   overrides: {
     timestamp?: string
+    open_at?: string
     meta?: Record<string, unknown>
     instrument?: string
     exchange?: string
@@ -132,6 +133,7 @@ export function createCandle(
   return {
     type: 'bar' as const,
     timestamp: overrides.timestamp ?? now,
+    open_at: overrides.open_at ?? now,
     meta: overrides.meta,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',

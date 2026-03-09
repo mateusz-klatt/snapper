@@ -66,6 +66,7 @@ def make_bar_envelope(
         volume=1000.0,
         exchange=exchange,
         timestamp=datetime.fromtimestamp(ts, tz=UTC) if ts else datetime.now(UTC),
+        open_at=datetime.fromtimestamp(ts, tz=UTC) if ts else datetime.now(UTC),
     )
 
 

@@ -306,7 +306,7 @@ describe('WSDispatcher', () => {
         instrument: 'BTC/USD',
         exchange: 'kraken',
         timeframe: '1m',
-        timestamp: nowIso,
+        open_at: nowIso,
         open: 49000,
         high: 51000,
         low: 48500,
@@ -329,7 +329,7 @@ describe('WSDispatcher', () => {
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
-        timestamp: nowIso,
+        open_at: nowIso,
         open: 49000,
         high: 51000,
         low: 48500,
@@ -348,7 +348,7 @@ describe('WSDispatcher', () => {
           instrument: 'BTC-USD',
           exchange: 'kraken',
           timeframe: '1m',
-          timestamp: nowIso,
+          open_at: nowIso,
           open: 49000,
           high: 50000,
           low: 48000,
@@ -373,7 +373,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: nowIso,
+        open_at: nowIso,
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -498,7 +498,7 @@ describe('WSDispatcher', () => {
       expect(capturedPredicate?.({ queryKey: ['orders'] })).toBe(false)
       invalidateQueriesSpy.mockRestore()
     })
-    it('candle message appends new candle when timestamp is newer', () => {
+    it('candle message appends new candle when open_at is newer', () => {
       const oldTime = '2026-01-15T10:00:00Z'
       const newTime = '2026-01-15T10:01:00Z'
       const existingCandles = [
@@ -506,7 +506,7 @@ describe('WSDispatcher', () => {
           instrument: 'BTC-USD',
           exchange: 'kraken',
           timeframe: '1m',
-          timestamp: oldTime,
+          open_at: oldTime,
           open: 49000,
           high: 50000,
           low: 48000,
@@ -531,7 +531,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: newTime,
+        open_at: newTime,
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -545,7 +545,7 @@ describe('WSDispatcher', () => {
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
-        timestamp: new Date(Date.UTC(2026, 0, 15, 10, i)).toISOString(),
+        open_at: new Date(Date.UTC(2026, 0, 15, 10, i)).toISOString(),
         open: 49000 + i * 100,
         high: 49500 + i * 100,
         low: 48500 + i * 100,
@@ -569,7 +569,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: new Date(Date.UTC(2026, 0, 15, 10, 5)).toISOString(),
+        open_at: new Date(Date.UTC(2026, 0, 15, 10, 5)).toISOString(),
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -601,7 +601,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: nowIso,
+        open_at: nowIso,
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -625,7 +625,7 @@ describe('WSDispatcher', () => {
         low: 2900,
         close: 3050,
         volume: 200,
-        timestamp: nowIso,
+        open_at: nowIso,
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -633,7 +633,7 @@ describe('WSDispatcher', () => {
       expect(setQueryDataSpy).not.toHaveBeenCalled()
       setQueryDataSpy.mockRestore()
     })
-    it('candle message ignores old candle timestamps', () => {
+    it('candle message ignores old candle open_at', () => {
       const oldTime = '2026-01-15T10:01:00Z'
       const olderTime = '2026-01-15T10:00:00Z'
       const existingCandles = [
@@ -641,7 +641,7 @@ describe('WSDispatcher', () => {
           instrument: 'BTC-USD',
           exchange: 'kraken',
           timeframe: '1m',
-          timestamp: oldTime,
+          open_at: oldTime,
           open: 49000,
           high: 50000,
           low: 48000,
@@ -666,7 +666,7 @@ describe('WSDispatcher', () => {
         low: 47000,
         close: 48500,
         volume: 30,
-        timestamp: olderTime,
+        open_at: olderTime,
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -676,13 +676,13 @@ describe('WSDispatcher', () => {
       expect(cached).toHaveLength(1)
       expect(cached?.[0]).toMatchObject({ close: 49500 })
     })
-    it('candle message uses fallback timestamp when bar has no timestamp', () => {
+    it('candle message includes open_at on merged candle', () => {
       const existingCandles = [
         {
           instrument: 'BTC-USD',
           exchange: 'kraken',
           timeframe: '1m',
-          timestamp: '2020-01-01T00:00:00Z',
+          open_at: '2020-01-01T00:00:00Z',
           open: 49000,
           high: 50000,
           low: 48000,
@@ -697,7 +697,7 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage = {
+      const candleMessage: BarEnvelope = {
         type: 'bar',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -707,11 +707,12 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-      } as unknown as BarEnvelope
+        open_at: '2020-01-01T00:01:00Z',
+      }
       const candleHandler = messageHandlers.get('bar')
 
       candleHandler?.(candleMessage)
-      const cached = queryClient.getQueryData<{ timestamp: string }[]>([
+      const cached = queryClient.getQueryData<{ open_at: string }[]>([
         'candles',
         'BTC-USD',
         'kraken',
@@ -719,7 +720,7 @@ describe('WSDispatcher', () => {
       ])
 
       expect(cached).toHaveLength(2)
-      expect(cached?.[1]?.timestamp).toBeDefined()
+      expect(cached?.[1]?.open_at).toBeDefined()
     })
     it('candle message handles empty existing cache array', () => {
       queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], [])
@@ -736,7 +737,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: '2026-01-15T10:00:00Z',
+        open_at: '2026-01-15T10:00:00Z',
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -761,7 +762,7 @@ describe('WSDispatcher', () => {
         low: 2900,
         close: 3050,
         volume: 200,
-        timestamp: '2026-01-15T10:00:00Z',
+        open_at: '2026-01-15T10:00:00Z',
       }
       const candleHandler = messageHandlers.get('bar')
 
@@ -785,7 +786,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: '2026-01-15T10:00:00Z',
+        open_at: '2026-01-15T10:00:00Z',
       }
       const bar2: BarEnvelope = {
         type: 'bar',
@@ -797,7 +798,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 51000,
         volume: 150,
-        timestamp: '2026-01-15T10:00:00Z',
+        open_at: '2026-01-15T10:00:00Z',
       }
 
       candleHandler?.(bar1)
@@ -809,7 +810,7 @@ describe('WSDispatcher', () => {
             instrument: 'BTC-USD',
             exchange: 'kraken',
             timeframe: '1m',
-            timestamp: '2026-01-15T10:00:00Z',
+            open_at: '2026-01-15T10:00:00Z',
             open: 50000,
             high: 50800,
             low: 49500,
@@ -860,7 +861,7 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: '2026-01-15T10:00:00Z',
+        open_at: '2026-01-15T10:00:00Z',
       })
       dispatcher.stopBuffering('BTC-USD', 'kraken', '1m')
       queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], [])

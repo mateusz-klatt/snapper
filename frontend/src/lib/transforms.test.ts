@@ -328,7 +328,7 @@ describe('Candle Transformers', () => {
     const apiCandle: CandleSnapshot = {
       instrument: 'BTC/USD',
       timeframe: '1h',
-      timestamp: '2026-01-15T10:00:00Z',
+      open_at: '2026-01-15T10:00:00Z',
       open: 49000,
       high: 50500,
       low: 48500,
@@ -343,7 +343,7 @@ describe('Candle Transformers', () => {
     expect(result.timeframe).toBe('1h')
     expect(result.vwap).toBe(49750)
     expect(result.trades).toBe(5000)
-    expect(result.timestamp).toEqual(new Date('2026-01-15T10:00:00Z'))
+    expect(result.openAt).toEqual(new Date('2026-01-15T10:00:00Z'))
   })
   it('transforms WebSocket candle to canonical entity', () => {
     const wsCandle: BarEnvelope = {
@@ -356,17 +356,18 @@ describe('Candle Transformers', () => {
       low: 2980,
       close: 3020,
       volume: 500,
-      timestamp: '2026-01-15T10:00:00Z',
+      open_at: '2026-01-15T10:00:00Z',
     }
     const result = barFromWS(wsCandle)
 
     expect(result.instrument).toBe('ETH/USD')
     expect(result.timeframe).toBe('5m')
     expect(result.vwap).toBeUndefined()
-    expect(result.timestamp).toEqual(new Date('2026-01-15T10:00:00Z'))
+    expect(result.openAt).toEqual(new Date('2026-01-15T10:00:00Z'))
+    expect(result.timestamp).toBeUndefined()
   })
-  it('throws on missing timestamp in WebSocket candle', () => {
-    const wsCandle = {
+  it('includes envelope timestamp when present in WebSocket candle', () => {
+    const wsCandle: BarEnvelope = {
       type: 'bar',
       instrument: 'ETH/USD',
       exchange: 'kraken',
@@ -376,9 +377,13 @@ describe('Candle Transformers', () => {
       low: 2980,
       close: 3020,
       volume: 500,
-    } as unknown as BarEnvelope
+      open_at: '2026-01-15T10:00:00Z',
+      timestamp: '2026-01-15T10:00:01Z',
+    }
+    const result = barFromWS(wsCandle)
 
-    expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: timestamp')
+    expect(result.openAt).toEqual(new Date('2026-01-15T10:00:00Z'))
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:00:01Z'))
   })
   it('throws on missing timeframe in WebSocket candle', () => {
     const wsCandle = {
@@ -391,7 +396,7 @@ describe('Candle Transformers', () => {
       low: 2980,
       close: 3020,
       volume: 500,
-      timestamp: '2026-01-15T10:00:00Z',
+      open_at: '2026-01-15T10:00:00Z',
     } as unknown as BarEnvelope
 
     expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: timeframe')
@@ -407,7 +412,7 @@ describe('Candle Transformers', () => {
       low: 2980,
       close: 3020,
       volume: 500,
-      timestamp: '2026-01-15T10:00:00Z',
+      open_at: '2026-01-15T10:00:00Z',
     } as unknown as BarEnvelope
 
     expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: open')
@@ -423,7 +428,7 @@ describe('Candle Transformers', () => {
       low: 2980,
       close: 3020,
       volume: 500,
-      timestamp: '2026-01-15T10:00:00Z',
+      open_at: '2026-01-15T10:00:00Z',
     } as unknown as BarEnvelope
 
     expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: high')
@@ -439,7 +444,7 @@ describe('Candle Transformers', () => {
       low: null,
       close: 3020,
       volume: 500,
-      timestamp: '2026-01-15T10:00:00Z',
+      open_at: '2026-01-15T10:00:00Z',
     } as unknown as BarEnvelope
 
     expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: low')
@@ -455,7 +460,7 @@ describe('Candle Transformers', () => {
       low: 2980,
       close: null,
       volume: 500,
-      timestamp: '2026-01-15T10:00:00Z',
+      open_at: '2026-01-15T10:00:00Z',
     } as unknown as BarEnvelope
 
     expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: close')
@@ -660,7 +665,7 @@ describe('Batch Transformers', () => {
       {
         instrument: 'BTC/USD',
         timeframe: '1h',
-        timestamp: '2026-01-15T10:00:00Z',
+        open_at: '2026-01-15T10:00:00Z',
         open: 49000,
         high: 50500,
         low: 48500,

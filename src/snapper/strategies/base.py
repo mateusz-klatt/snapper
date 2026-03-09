@@ -389,7 +389,7 @@ class BaseStrategy(ABC):
             Optional signal from the bar handler.
         """
         bar = BarEnvelope.from_json(payload)
-        self._last_data_ts = bar.timestamp.timestamp()
+        self._last_data_ts = bar.open_at.timestamp()
         if instrument not in self.candle_buffer:
             self.candle_buffer[instrument] = []
         self.candle_buffer[instrument].append(bar)
@@ -419,7 +419,7 @@ class BaseStrategy(ABC):
             return await self.on_tick(instrument, tick)
         if ".trades" in topic:
             trade = TradeEnvelope.from_json(payload)
-            self._last_data_ts = trade.timestamp.timestamp()
+            self._last_data_ts = (trade.executed_at or trade.timestamp).timestamp()
             return await self.on_trade(instrument, trade)
         logger.warning(f"Strategy {self.name}: Unknown market data topic type: {topic}")
         return None

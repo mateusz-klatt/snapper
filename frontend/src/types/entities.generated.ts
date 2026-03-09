@@ -27,6 +27,7 @@ export interface Bar {
   instrument: string
   exchange: Exchange
   timeframe: string
+  openAt: Date
   open: number
   high: number
   low: number
@@ -225,6 +226,7 @@ export interface Trade {
   timestamp?: Date
   instrument: string
   exchange: Exchange
+  executedAt?: Date | null
   price: number
   volume: number
   side?: string | null
@@ -238,7 +240,7 @@ export interface Candle {
   instrument: string
   exchange: Exchange
   timeframe: string
-  timestamp: Date
+  openAt: Date
   open: number
   high: number
   low: number

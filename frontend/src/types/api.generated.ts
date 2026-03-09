@@ -876,20 +876,9 @@ export type Components = {
          * CandleSnapshot
          * @description OHLCV candle snapshot response schema.
          *
-         *     Represents a single candlestick data point.
-         *
-         *     Attributes:
-         *         instrument: Trading instrument symbol.
-         *         exchange: Source exchange that produced this candle data.
-         *         timeframe: Candle timeframe (e.g., '1m', '1h', '1d').
-         *         timestamp: Candle open timestamp.
-         *         open: Opening price.
-         *         high: Highest price in the period.
-         *         low: Lowest price in the period.
-         *         close: Closing price.
-         *         volume: Trading volume.
-         *         vwap: Volume-weighted average price (optional).
-         *         trades: Number of trades in the period (optional).
+         *     Inherits all candle fields from CandleData (instrument, exchange,
+         *     timeframe, open_at, OHLCV, vwap, trades). The StrictApiSchema
+         *     mixin adds strict validation for REST responses.
          */
         CandleSnapshot: {
             /** Instrument */
@@ -902,10 +891,10 @@ export type Components = {
             /** Timeframe */
             timeframe: string;
             /**
-             * Timestamp
+             * Open At
              * Format: date-time
              */
-            timestamp: string;
+            open_at: string;
             /** Open */
             open: number;
             /** High */

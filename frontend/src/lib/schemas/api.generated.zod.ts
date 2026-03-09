@@ -29,7 +29,7 @@ export const CandleSnapshotSchema = z
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     timeframe: z.string(),
-    timestamp: z.iso.datetime(),
+    open_at: z.iso.datetime(),
     open: z.number(),
     high: z.number(),
     low: z.number(),
