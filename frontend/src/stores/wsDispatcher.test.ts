@@ -341,12 +341,28 @@ describe('WSDispatcher', () => {
       candleHandler?.(candleMessage)
       expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()
     })
-    it('handles candle message with instrument/timeframe - invalidates specific candle queries', () => {
-      const invalidateQueriesSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    it('handles candle message with instrument/timeframe - merges into cache', () => {
+      const nowIso = new Date().toISOString()
+      const existingCandles = [
+        {
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          timeframe: '1m',
+          timestamp: nowIso,
+          open: 49000,
+          high: 50000,
+          low: 48000,
+          close: 49500,
+          volume: 50,
+          vwap: null,
+          trades: null,
+        },
+      ]
+
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
       const candleMessage: BarEnvelope = {
         type: 'bar',
         instrument: 'BTC-USD',
@@ -362,9 +378,10 @@ describe('WSDispatcher', () => {
       const candleHandler = messageHandlers.get('bar')
 
       candleHandler?.(candleMessage)
-      expect(invalidateQueriesSpy).toHaveBeenCalledWith({
-        queryKey: ['candles', 'BTC-USD', 'kraken', '1m'],
-      })
+      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]).toMatchObject({ close: 50500, volume: 100 })
     })
     it('order invalidation predicate correctly filters queries', () => {
       let capturedPredicate: ((query: { queryKey: unknown[] }) => boolean) | undefined
@@ -481,18 +498,26 @@ describe('WSDispatcher', () => {
       expect(capturedPredicate?.({ queryKey: ['orders'] })).toBe(false)
       invalidateQueriesSpy.mockRestore()
     })
-    it('candle message with instrument and timeframe uses specific queryKey', () => {
-      let capturedQueryKey: unknown[] | undefined
-      const invalidateQueriesSpy = vi
-        .spyOn(queryClient, 'invalidateQueries')
-        .mockImplementation(options => {
-          if (options && typeof options === 'object' && 'queryKey' in options) {
-            capturedQueryKey = options.queryKey as unknown[]
-          }
+    it('candle message appends new candle when timestamp is newer', () => {
+      const oldTime = '2026-01-15T10:00:00Z'
+      const newTime = '2026-01-15T10:01:00Z'
+      const existingCandles = [
+        {
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          timeframe: '1m',
+          timestamp: oldTime,
+          open: 49000,
+          high: 50000,
+          low: 48000,
+          close: 49500,
+          volume: 50,
+          vwap: null,
+          trades: null,
+        },
+      ]
 
-          return Promise.resolve()
-        })
-      const nowIso = new Date().toISOString()
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -506,28 +531,62 @@ describe('WSDispatcher', () => {
         low: 49000,
         close: 50500,
         volume: 100,
-        timestamp: nowIso,
+        timestamp: newTime,
       }
       const candleHandler = messageHandlers.get('bar')
 
       candleHandler?.(candleMessage)
-      expect(capturedQueryKey).toBeDefined()
-      expect(capturedQueryKey).toEqual(['candles', 'BTC-USD', 'kraken', '1m'])
-      invalidateQueriesSpy.mockRestore()
-    })
-    it('candle message without instrument/timeframe invalidates via predicate', () => {
-      let capturedPredicate: ((query: { queryKey: unknown[] }) => boolean) | undefined
-      const invalidateQueriesSpy = vi
-        .spyOn(queryClient, 'invalidateQueries')
-        .mockImplementation(options => {
-          if (options && typeof options === 'object' && 'predicate' in options) {
-            capturedPredicate = options.predicate as unknown as (query: {
-              queryKey: unknown[]
-            }) => boolean
-          }
+      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
 
-          return Promise.resolve()
-        })
+      expect(cached).toHaveLength(2)
+    })
+    it('candle message trims cache to maxCandles sliding window', () => {
+      const existingCandles = Array.from({ length: 5 }, (_, i) => ({
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        timestamp: new Date(Date.UTC(2026, 0, 15, 10, i)).toISOString(),
+        open: 49000 + i * 100,
+        high: 49500 + i * 100,
+        low: 48500 + i * 100,
+        close: 49200 + i * 100,
+        volume: 50,
+        vwap: null,
+        trades: null,
+      }))
+
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      const dispatcher = new WSDispatcher({ queryClient, maxCandles: 5 })
+
+      dispatcher.attach(mockWsClient)
+      const candleMessage: BarEnvelope = {
+        type: 'bar',
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 50000,
+        high: 51000,
+        low: 49000,
+        close: 50500,
+        volume: 100,
+        timestamp: new Date(Date.UTC(2026, 0, 15, 10, 5)).toISOString(),
+      }
+      const candleHandler = messageHandlers.get('bar')
+
+      candleHandler?.(candleMessage)
+      const cached = queryClient.getQueryData<{ close: number }[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+      ])
+
+      expect(cached).toHaveLength(5)
+      expect(cached?.[0]?.close).toBe(49300)
+      expect(cached?.[4]?.close).toBe(50500)
+    })
+    it('candle message without instrument/timeframe does not update cache', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -547,10 +606,268 @@ describe('WSDispatcher', () => {
       const candleHandler = messageHandlers.get('bar')
 
       candleHandler?.(candleMessage)
-      expect(capturedPredicate).toBeDefined()
-      expect(capturedPredicate?.({ queryKey: ['candles'] })).toBe(true)
-      expect(capturedPredicate?.({ queryKey: ['orders'] })).toBe(false)
-      invalidateQueriesSpy.mockRestore()
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('candle message skips merge when no cache exists', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const nowIso = new Date().toISOString()
+      const candleMessage: BarEnvelope = {
+        type: 'bar',
+        instrument: 'ETH-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 3000,
+        high: 3100,
+        low: 2900,
+        close: 3050,
+        volume: 200,
+        timestamp: nowIso,
+      }
+      const candleHandler = messageHandlers.get('bar')
+
+      candleHandler?.(candleMessage)
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('candle message ignores old candle timestamps', () => {
+      const oldTime = '2026-01-15T10:01:00Z'
+      const olderTime = '2026-01-15T10:00:00Z'
+      const existingCandles = [
+        {
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          timeframe: '1m',
+          timestamp: oldTime,
+          open: 49000,
+          high: 50000,
+          low: 48000,
+          close: 49500,
+          volume: 50,
+          vwap: null,
+          trades: null,
+        },
+      ]
+
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const candleMessage: BarEnvelope = {
+        type: 'bar',
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 48000,
+        high: 49000,
+        low: 47000,
+        close: 48500,
+        volume: 30,
+        timestamp: olderTime,
+      }
+      const candleHandler = messageHandlers.get('bar')
+
+      candleHandler?.(candleMessage)
+      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]).toMatchObject({ close: 49500 })
+    })
+    it('candle message uses fallback timestamp when bar has no timestamp', () => {
+      const existingCandles = [
+        {
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          timeframe: '1m',
+          timestamp: '2020-01-01T00:00:00Z',
+          open: 49000,
+          high: 50000,
+          low: 48000,
+          close: 49500,
+          volume: 50,
+          vwap: null,
+          trades: null,
+        },
+      ]
+
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const candleMessage = {
+        type: 'bar',
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 50000,
+        high: 51000,
+        low: 49000,
+        close: 50500,
+        volume: 100,
+      } as unknown as BarEnvelope
+      const candleHandler = messageHandlers.get('bar')
+
+      candleHandler?.(candleMessage)
+      const cached = queryClient.getQueryData<{ timestamp: string }[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+      ])
+
+      expect(cached).toHaveLength(2)
+      expect(cached?.[1]?.timestamp).toBeDefined()
+    })
+    it('candle message handles empty existing cache array', () => {
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], [])
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const candleMessage: BarEnvelope = {
+        type: 'bar',
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 50000,
+        high: 51000,
+        low: 49000,
+        close: 50500,
+        volume: 100,
+        timestamp: '2026-01-15T10:00:00Z',
+      }
+      const candleHandler = messageHandlers.get('bar')
+
+      candleHandler?.(candleMessage)
+      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+
+      expect(cached).toHaveLength(1)
+    })
+    it('buffers candle messages when buffering is active and no cache exists', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startBuffering('ETH-USD', 'kraken', '1m')
+      const candleMessage: BarEnvelope = {
+        type: 'bar',
+        instrument: 'ETH-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 3000,
+        high: 3100,
+        low: 2900,
+        close: 3050,
+        volume: 200,
+        timestamp: '2026-01-15T10:00:00Z',
+      }
+      const candleHandler = messageHandlers.get('bar')
+
+      candleHandler?.(candleMessage)
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('flushBuffer replays buffered candles onto cache', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startBuffering('BTC-USD', 'kraken', '1m')
+      const candleHandler = messageHandlers.get('bar')
+      const bar1: BarEnvelope = {
+        type: 'bar',
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 50000,
+        high: 51000,
+        low: 49000,
+        close: 50500,
+        volume: 100,
+        timestamp: '2026-01-15T10:00:00Z',
+      }
+      const bar2: BarEnvelope = {
+        type: 'bar',
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 50000,
+        high: 51500,
+        low: 49000,
+        close: 51000,
+        volume: 150,
+        timestamp: '2026-01-15T10:00:00Z',
+      }
+
+      candleHandler?.(bar1)
+      candleHandler?.(bar2)
+      queryClient.setQueryData(
+        ['candles', 'BTC-USD', 'kraken', '1m'],
+        [
+          {
+            instrument: 'BTC-USD',
+            exchange: 'kraken',
+            timeframe: '1m',
+            timestamp: '2026-01-15T10:00:00Z',
+            open: 50000,
+            high: 50800,
+            low: 49500,
+            close: 50200,
+            volume: 80,
+            vwap: null,
+            trades: null,
+          },
+        ]
+      )
+      dispatcher.flushBuffer('BTC-USD', 'kraken', '1m')
+      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+
+      expect(cached).toHaveLength(1)
+      expect((cached as { close: number }[])[0].close).toBe(51000)
+    })
+    it('flushBuffer is a no-op when no buffer exists', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.flushBuffer('XYZ', 'kraken', '1m')
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('flushBuffer is a no-op when buffer is empty', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.startBuffering('BTC-USD', 'kraken', '1m')
+      dispatcher.flushBuffer('BTC-USD', 'kraken', '1m')
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('stopBuffering discards buffered candles', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startBuffering('BTC-USD', 'kraken', '1m')
+      const candleHandler = messageHandlers.get('bar')
+
+      candleHandler?.({
+        type: 'bar',
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+        open: 50000,
+        high: 51000,
+        low: 49000,
+        close: 50500,
+        volume: 100,
+        timestamp: '2026-01-15T10:00:00Z',
+      })
+      dispatcher.stopBuffering('BTC-USD', 'kraken', '1m')
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], [])
+      dispatcher.flushBuffer('BTC-USD', 'kraken', '1m')
+      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+
+      expect(cached).toHaveLength(0)
     })
     it('handles tick message without last price - calculates mid price', () => {
       const dispatcher = new WSDispatcher({ queryClient })

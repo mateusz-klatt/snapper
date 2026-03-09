@@ -805,6 +805,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
             vwap=1.2,
             volume=10.0,
             trades=5,
+            interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
         )
         pub.running = False
 

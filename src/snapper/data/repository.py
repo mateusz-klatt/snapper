@@ -145,7 +145,7 @@ class Repository(ABC):
 
     @abstractmethod
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        """Insert candles, skipping duplicates. Return inserted count."""
+        """Insert or update candles. Return affected row count."""
         ...
 
     @abstractmethod
@@ -394,10 +394,72 @@ class SQLAlchemyRepository(Repository):
                 return inserted
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        """Insert candles with dialect-specific conflict handling."""
+        """Insert or update candles using dialect-specific ON CONFLICT DO UPDATE.
+
+        When a candle with the same (instrument_id, timeframe, timestamp) already
+        exists, the OHLCV columns are replaced with the incoming values.  This is
+        essential for live-updating partial candles (e.g. Kraken publishes
+        intra-interval updates that must overwrite earlier snapshots).
+        """
         if not rows:
             return 0
-        return await self._upsert_batch(Candle, rows, ["instrument_id", "timeframe", "timestamp"])
+        index_elements = ["instrument_id", "timeframe", "timestamp"]
+        update_cols = {
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "close": "close",
+            "volume": "volume",
+            "vwap": "vwap",
+            "trades": "trades",
+        }
+        name = self.dialect_name
+        if name == "sqlite":
+            async with self.session() as s:
+                stmt = sqlite_insert(Candle).values(rows)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=index_elements,
+                    set_={col: getattr(stmt.excluded, src) for col, src in update_cols.items()},
+                )
+                res = await s.execute(stmt)
+                await s.commit()
+                return int(cast(Any, res).rowcount or 0)
+        elif name.startswith("postgres"):
+            async with self.session() as s:
+                stmt_pg = pg_insert(Candle).values(rows)
+                stmt_pg = stmt_pg.on_conflict_do_update(
+                    index_elements=index_elements,
+                    set_={col: getattr(stmt_pg.excluded, src) for col, src in update_cols.items()},
+                )
+                res = await s.execute(stmt_pg)
+                await s.commit()
+                return int(cast(Any, res).rowcount or 0)
+        else:
+            async with self.session() as s:
+                count = 0
+                for r in rows:
+                    existing = (
+                        await s.execute(
+                            select(Candle).where(
+                                and_(
+                                    Candle.instrument_id == r["instrument_id"],
+                                    Candle.timeframe == r["timeframe"],
+                                    Candle.timestamp == r["timestamp"],
+                                )
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing:
+                        await s.execute(
+                            update(Candle)
+                            .where(Candle.id == existing.id)
+                            .values({col: r[col] for col in update_cols if col in r})
+                        )
+                    else:
+                        await s.execute(insert(Candle).values(**r))
+                    count += 1
+                await s.commit()
+                return count
 
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         """Insert trades with dialect-specific conflict handling."""
@@ -873,10 +935,40 @@ class MSSQLRepository(Repository):
         return await self._run_sync(_do)
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        """Insert candles via sync thread, skipping duplicates."""
+        """Insert or update candles via sync thread.
+
+        Uses SELECT + UPDATE/INSERT per row so partial candle updates
+        overwrite stale data rather than being silently dropped.
+        """
         if not rows:
             return 0
-        return await self._run_sync(lambda s: self._sync_upsert_batch(s, Candle, rows))
+        update_cols = ["open", "high", "low", "close", "volume", "vwap", "trades"]
+
+        def _do(s: SyncSession) -> int:
+            count = 0
+            for r in rows:
+                existing = s.execute(
+                    select(Candle).where(
+                        and_(
+                            Candle.instrument_id == r["instrument_id"],
+                            Candle.timeframe == r["timeframe"],
+                            Candle.timestamp == r["timestamp"],
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing:
+                    s.execute(
+                        update(Candle)
+                        .where(Candle.id == existing.id)
+                        .values({col: r[col] for col in update_cols if col in r})
+                    )
+                else:
+                    s.execute(insert(Candle).values(**r))
+                count += 1
+            s.commit()
+            return count
+
+        return await self._run_sync(_do)
 
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         """Insert trades via sync thread, skipping duplicates."""

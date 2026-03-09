@@ -148,22 +148,45 @@ class _DummyInsert:
 
 
 @pytest.mark.asyncio
-async def test_upsert_candles_other_dialect_skips_duplicates(
+async def test_upsert_candles_other_dialect_updates_existing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test upsert_candles skips duplicates in other dialects.
+    """Test upsert_candles updates existing rows in other dialects.
 
-    Given: Session that fails on second execute,
-    When: upsert_candles is called with two rows,
-    Then: Returns 1 and savepoint rolled back for failed row.
+    Given: Session where SELECT returns an existing candle,
+    When: upsert_candles is called,
+    Then: UPDATE is executed and count reflects the affected row.
     """
-    session = _DummyAsyncSession(fail_on=2)
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    existing_candle = SimpleNamespace(id=42)
+    call_count = 0
+
+    async def _execute(stmt: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalar_one_or_none=lambda: existing_candle)
+        return SimpleNamespace(rowcount=1)
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
-    monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
-    rows = [{"instrument_id": 1}, {"instrument_id": 2}]
+    rows = [
+        {
+            "instrument_id": 1,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+        },
+    ]
     inserted = await repo.upsert_candles(rows)
     assert inserted == 1
-    assert session.savepoint_rollbacks == 1
     assert session.commit_called is True
 
 
@@ -188,22 +211,44 @@ async def test_upsert_trades_other_dialect_skips_duplicates(
 
 
 @pytest.mark.asyncio
-async def test_upsert_candles_savepoint_preserves_earlier_inserts(
+async def test_upsert_candles_other_dialect_inserts_new_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify SAVEPOINT does not roll back previously inserted rows.
+    """Verify upsert_candles inserts new rows when no existing match.
 
-    Given: 3-row batch where the second row is a duplicate,
+    Given: Session where SELECT returns None (no existing candle),
     When: upsert_candles is called via the fallback dialect path,
-    Then: First and third rows are counted (inserted == 2).
+    Then: INSERT is executed and count reflects the affected row.
     """
-    session = _DummyAsyncSession(fail_on=2)
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    call_count = 0
+
+    async def _execute(stmt: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+        return SimpleNamespace(rowcount=1)
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
-    monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
-    rows = [{"instrument_id": 1}, {"instrument_id": 2}, {"instrument_id": 3}]
+    rows = [
+        {
+            "instrument_id": 1,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+        },
+    ]
     inserted = await repo.upsert_candles(rows)
-    assert inserted == 2
-    assert session.savepoint_rollbacks == 1
+    assert inserted == 1
     assert session.commit_called is True
 
 
@@ -1049,8 +1094,13 @@ async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify MSSQL upsert_candles handles integrity errors correctly."""
+async def test_mssql_upsert_candles_updates_existing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_candles updates an existing candle row.
+
+    Given: A session where SELECT returns an existing candle,
+    When: upsert_candles is called,
+    Then: UPDATE is executed and count reflects the affected row.
+    """
 
     class DummyEngine:
         class _URL:
@@ -1064,36 +1114,21 @@ async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -
         def __init__(self) -> None:
             self.url = self._URL()
 
-    class IntegrityLoopSession:
+    class UpsertSession:
         def __init__(self) -> None:
             self.execute_calls = 0
-            self.savepoint_rollbacks = 0
 
-        def __enter__(self) -> IntegrityLoopSession:
+        def __enter__(self) -> UpsertSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
-        def begin_nested(self) -> IntegrityLoopSession._Savepoint:
-            return IntegrityLoopSession._Savepoint(self)
-
-        class _Savepoint:
-            def __init__(self, parent: IntegrityLoopSession) -> None:
-                self._parent = parent
-
-            def __enter__(self) -> IntegrityLoopSession._Savepoint:
-                return self
-
-            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-                if exc_type is not None:
-                    self._parent.savepoint_rollbacks += 1
-
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self.execute_calls += 1
-            if self.execute_calls == 1:
-                raise IntegrityError("duplicate", {}, Exception())
-            return object()
+            if self.execute_calls % 2 == 1:
+                return SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(id=42))
+            return SimpleNamespace(rowcount=1)
 
         def commit(self) -> None:
             return None
@@ -1101,13 +1136,13 @@ async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -
     async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         return func(*args, **kwargs)
 
-    created_sessions: list[IntegrityLoopSession] = []
+    created_sessions: list[UpsertSession] = []
 
     def make_session_factory(
         _engine: Any, expire_on_commit: bool = False, class_: Any = None
-    ) -> Callable[[], IntegrityLoopSession]:
-        def factory() -> IntegrityLoopSession:
-            session = IntegrityLoopSession()
+    ) -> Callable[[], UpsertSession]:
+        def factory() -> UpsertSession:
+            session = UpsertSession()
             created_sessions.append(session)
             return session
 
@@ -1133,22 +1168,10 @@ async def test_mssql_upsert_candles_integrity(monkeypatch: pytest.MonkeyPatch) -
             "vwap": None,
             "trades": 5,
         },
-        {
-            "instrument_id": 1,
-            "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
-            "timeframe": "1m",
-            "open": 1.2,
-            "high": 1.6,
-            "low": 0.8,
-            "close": 1.4,
-            "volume": 12.0,
-            "vwap": None,
-            "trades": 6,
-        },
     ]
     result = await repo.upsert_candles(rows)
     assert result == 1
-    assert created_sessions[0].savepoint_rollbacks == 1
+    assert created_sessions[0].execute_calls == 2
 
 
 @pytest.mark.asyncio
@@ -1247,14 +1270,14 @@ async def test_mssql_upsert_trades_integrity(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
-async def test_mssql_upsert_candles_savepoint_preserves_earlier_inserts(
+async def test_mssql_upsert_candles_inserts_new_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify MSSQL SAVEPOINT keeps first/third row when second is duplicate.
+    """Verify MSSQL upsert_candles inserts rows when no existing match.
 
-    Given: 3 candle rows where the second triggers IntegrityError,
-    When: upsert_candles is called,
-    Then: inserted == 2 and exactly one savepoint rollback.
+    Given: A session where SELECT returns None (no existing candle),
+    When: upsert_candles is called with 2 rows,
+    Then: INSERT is executed for each and count == 2.
     """
 
     class DummyEngine:
@@ -1269,38 +1292,23 @@ async def test_mssql_upsert_candles_savepoint_preserves_earlier_inserts(
         def __init__(self) -> None:
             self.url = self._URL()
 
-    class FailOnSecondSession:
-        """Session that raises IntegrityError on the second execute call."""
+    class InsertSession:
+        """Session where SELECT returns None so INSERT path runs."""
 
         def __init__(self) -> None:
             self.execute_calls = 0
-            self.savepoint_rollbacks = 0
 
-        def __enter__(self) -> FailOnSecondSession:
+        def __enter__(self) -> InsertSession:
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
             return None
 
-        def begin_nested(self) -> FailOnSecondSession._Savepoint:
-            return FailOnSecondSession._Savepoint(self)
-
-        class _Savepoint:
-            def __init__(self, parent: FailOnSecondSession) -> None:
-                self._parent = parent
-
-            def __enter__(self) -> FailOnSecondSession._Savepoint:
-                return self
-
-            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-                if exc_type is not None:
-                    self._parent.savepoint_rollbacks += 1
-
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self.execute_calls += 1
-            if self.execute_calls == 2:
-                raise IntegrityError("duplicate", {}, Exception())
-            return object()
+            if self.execute_calls % 2 == 1:
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
+            return SimpleNamespace(rowcount=1)
 
         def commit(self) -> None:
             return None
@@ -1308,13 +1316,13 @@ async def test_mssql_upsert_candles_savepoint_preserves_earlier_inserts(
     async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         return func(*args, **kwargs)
 
-    created_sessions: list[FailOnSecondSession] = []
+    created_sessions: list[InsertSession] = []
 
     def make_session_factory(
         _engine: Any, expire_on_commit: bool = False, class_: Any = None
-    ) -> Callable[[], FailOnSecondSession]:
-        def factory() -> FailOnSecondSession:
-            session = FailOnSecondSession()
+    ) -> Callable[[], InsertSession]:
+        def factory() -> InsertSession:
+            session = InsertSession()
             created_sessions.append(session)
             return session
 
@@ -1328,18 +1336,6 @@ async def test_mssql_upsert_candles_savepoint_preserves_earlier_inserts(
     monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
     repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
     rows: list[dict[str, Any]] = [
-        {
-            "instrument_id": 1,
-            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
-            "timeframe": "1m",
-            "open": 1.0,
-            "high": 1.5,
-            "low": 0.5,
-            "close": 1.2,
-            "volume": 10.0,
-            "vwap": None,
-            "trades": 5,
-        },
         {
             "instrument_id": 1,
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
@@ -1367,7 +1363,7 @@ async def test_mssql_upsert_candles_savepoint_preserves_earlier_inserts(
     ]
     result = await repo.upsert_candles(rows)
     assert result == 2
-    assert created_sessions[0].savepoint_rollbacks == 1
+    assert created_sessions[0].execute_calls == 4
 
 
 @pytest.mark.asyncio
@@ -1781,63 +1777,21 @@ class TestSQLAlchemyRepositoryDialects:
     async def test_upsert_candles_other_dialect(
         self, mock_other_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_candles uses row-by-row insert for non-PostgreSQL.
+        """Verify upsert_candles uses SELECT + INSERT for non-PostgreSQL.
 
-        Given: MySQL repository,
-        When: upsert_candles is called,
-        Then: Inserts rows individually.
+        Given: MySQL repository with no existing candles,
+        When: upsert_candles is called with two rows,
+        Then: Each row triggers a SELECT (returning None) then INSERT.
         """
         mock_session = AsyncMock()
-        _patch_begin_nested(mock_session)
-        with patch.object(mock_other_repo, "session") as mock_session_ctx:
-            mock_session_ctx.return_value.__aenter__.return_value = mock_session
-            mock_session_ctx.return_value.__aexit__.return_value = None
-            rows: list[dict[str, Any]] = [
-                {
-                    "instrument_id": 1,
-                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
-                    "timeframe": "1m",
-                    "open": 100.0,
-                    "high": 101.0,
-                    "low": 99.0,
-                    "close": 100.5,
-                    "volume": 1000.0,
-                    "vwap": None,
-                    "trades": 10,
-                },
-                {
-                    "instrument_id": 1,
-                    "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
-                    "timeframe": "1m",
-                    "open": 100.5,
-                    "high": 101.5,
-                    "low": 99.5,
-                    "close": 101.0,
-                    "volume": 1200.0,
-                    "vwap": None,
-                    "trades": 12,
-                },
-            ]
-            result = await mock_other_repo.upsert_candles(rows)
-            assert result == 2
-            assert mock_session.execute.call_count == 2
-            mock_session.commit.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_upsert_candles_other_dialect_with_integrity_error(
-        self, mock_other_repo: SQLAlchemyRepository
-    ) -> None:
-        """Verify upsert_candles handles integrity errors gracefully.
-
-        Given: MySQL repository with duplicate key,
-        When: upsert_candles is called,
-        Then: Savepoint rolls back failed row and continues.
-        """
-        mock_session = AsyncMock()
-        _patch_begin_nested(mock_session)
+        select_result = Mock()
+        select_result.scalar_one_or_none.return_value = None
+        insert_result = Mock(rowcount=1)
         mock_session.execute.side_effect = [
-            IntegrityError("duplicate", "params", Exception()),
-            None,
+            select_result,
+            insert_result,
+            select_result,
+            insert_result,
         ]
         with patch.object(mock_other_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
@@ -1869,9 +1823,49 @@ class TestSQLAlchemyRepositoryDialects:
                 },
             ]
             result = await mock_other_repo.upsert_candles(rows)
+            assert result == 2
+            assert mock_session.execute.call_count == 4
+            mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_candles_other_dialect_updates_existing(
+        self, mock_other_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify upsert_candles updates existing candle in non-PostgreSQL.
+
+        Given: MySQL repository with an existing candle,
+        When: upsert_candles is called with matching key,
+        Then: SELECT finds existing row and UPDATE is executed.
+        """
+        mock_session = AsyncMock()
+        existing_candle = SimpleNamespace(id=42)
+        select_result = Mock()
+        select_result.scalar_one_or_none.return_value = existing_candle
+        update_result = Mock(rowcount=1)
+        mock_session.execute.side_effect = [
+            select_result,
+            update_result,
+        ]
+        with patch.object(mock_other_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            rows: list[dict[str, Any]] = [
+                {
+                    "instrument_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "timeframe": "1m",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000.0,
+                    "vwap": None,
+                    "trades": 10,
+                },
+            ]
+            result = await mock_other_repo.upsert_candles(rows)
             assert result == 1
             assert mock_session.execute.call_count == 2
-            assert mock_session.begin_nested.call_count == 2
             mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio

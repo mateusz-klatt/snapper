@@ -14,6 +14,8 @@ import {
   isTrade,
   isHeartbeat,
 } from '../types/ws'
+import type { BarEnvelope } from '../types/ws'
+import type { CandleSnapshot } from '../types/api'
 import { ProcessStatus } from '../types/ui'
 import { orderFromWS, executionFromWS, signalFromWS } from '../lib/transforms'
 
@@ -22,16 +24,22 @@ interface DispatcherConfig {
   queryClient: QueryClient
   topics?: string[]
   directStoreUpdates?: boolean
+  maxCandles?: number
 }
+
+const DEFAULT_MAX_CANDLES = 100
 
 export class WSDispatcher {
   private wsClient: WebSocketClient | null = null
   private readonly queryClient: QueryClient
   private unsubscribers: UnsubscribeFn[] = []
   private readonly topics: string[]
+  private readonly maxCandles: number
   private readonly directStoreUpdates: boolean
+  private readonly candleBuffers: Map<string, BarEnvelope[]> = new Map()
   constructor(config: DispatcherConfig) {
     this.queryClient = config.queryClient
+    this.maxCandles = config.maxCandles ?? DEFAULT_MAX_CANDLES
     this.topics = config.topics ?? [
       'orders.',
       'executions.',
@@ -140,13 +148,77 @@ export class WSDispatcher {
     const timeframe = message.timeframe
 
     if (instrument && exchange && timeframe) {
-      this.queryClient.invalidateQueries({
-        queryKey: ['candles', instrument, exchange, timeframe],
-      })
-    } else {
-      this.queryClient.invalidateQueries({
-        predicate: query => query.queryKey[0] === 'candles',
-      })
+      this.mergeCandleIntoCache(message)
+    }
+  }
+  startBuffering(instrument: string, exchange: string, timeframe: string): void {
+    const bufferKey = `${instrument}:${exchange}:${timeframe}`
+
+    this.candleBuffers.set(bufferKey, [])
+  }
+  flushBuffer(instrument: string, exchange: string, timeframe: string): void {
+    const bufferKey = `${instrument}:${exchange}:${timeframe}`
+    const buffered = this.candleBuffers.get(bufferKey)
+
+    this.candleBuffers.delete(bufferKey)
+
+    if (!buffered || buffered.length === 0) {
+      return
+    }
+
+    for (const bar of buffered) {
+      this.mergeCandleIntoCache(bar)
+    }
+  }
+  stopBuffering(instrument: string, exchange: string, timeframe: string): void {
+    const bufferKey = `${instrument}:${exchange}:${timeframe}`
+
+    this.candleBuffers.delete(bufferKey)
+  }
+  private mergeCandleIntoCache(bar: BarEnvelope): void {
+    const queryKey = ['candles', bar.instrument, bar.exchange, bar.timeframe]
+    const existing = this.queryClient.getQueryData<CandleSnapshot[]>(queryKey)
+
+    if (!existing) {
+      const bufferKey = `${bar.instrument}:${bar.exchange}:${bar.timeframe}`
+      const buffer = this.candleBuffers.get(bufferKey)
+
+      if (buffer) {
+        buffer.push(bar)
+      }
+
+      return
+    }
+
+    const incoming: CandleSnapshot = {
+      instrument: bar.instrument,
+      exchange: bar.exchange,
+      timeframe: bar.timeframe,
+      timestamp: bar.timestamp ?? new Date().toISOString(),
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.volume,
+      vwap: bar.vwap ?? null,
+      trades: bar.trades ?? null,
+    }
+
+    const incomingTime = new Date(incoming.timestamp).getTime()
+    const lastCandle = existing[existing.length - 1]
+    const lastTime = lastCandle ? new Date(lastCandle.timestamp).getTime() : 0
+
+    if (incomingTime === lastTime) {
+      const updated = [...existing]
+
+      updated[updated.length - 1] = incoming
+      this.queryClient.setQueryData<CandleSnapshot[]>(queryKey, updated)
+    } else if (incomingTime > lastTime) {
+      const appended = [...existing, incoming]
+      const trimmed =
+        appended.length > this.maxCandles ? appended.slice(-this.maxCandles) : appended
+
+      this.queryClient.setQueryData<CandleSnapshot[]>(queryKey, trimmed)
     }
   }
   private handleTickMessage(message: WebSocketMessages): void {

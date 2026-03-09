@@ -3,6 +3,9 @@ import { Card, LoadingSpinner } from '../../components/ui'
 import { LightweightChart } from '../../components/LightweightChart'
 import { useCandles, useExchanges, useExchangeInstruments } from '../../hooks/queries'
 import { useMarketStore } from '../../stores/market'
+import { useMarketSubscription } from '../../hooks/useMarketSubscription'
+import { useWebSocketStore } from '../../stores/websocket'
+import { useWSDispatcher } from '../../hooks/useWSDispatcher'
 import * as Select from '@radix-ui/react-select'
 import { ChevronDownIcon } from 'lucide-react'
 import { Time } from 'lightweight-charts'
@@ -33,6 +36,16 @@ export function MarketData() {
     setSelectedInstrument,
     setSelectedTimeframe,
   } = useMarketStore()
+
+  const { isConnected } = useWebSocketStore()
+  const dispatcher = useWSDispatcher()
+  const subscribed = useMarketSubscription({
+    instrument: selectedInstrument,
+    exchange: selectedExchange,
+    timeframe: selectedTimeframe,
+    dispatcher,
+  })
+  const snapshotEnabled = subscribed || !isConnected
   const { data: exchanges } = useExchanges()
   const { data: instruments } = useExchangeInstruments(selectedExchange)
   const {
@@ -40,7 +53,31 @@ export function MarketData() {
     isLoading,
     error,
     isFetching,
-  } = useCandles(selectedInstrument ?? '', selectedExchange ?? '', selectedTimeframe)
+  } = useCandles(
+    selectedInstrument ?? '',
+    selectedExchange ?? '',
+    selectedTimeframe,
+    100,
+    snapshotEnabled
+  )
+  const flushedRef = useRef(false)
+
+  useEffect(() => {
+    flushedRef.current = false
+  }, [selectedInstrument, selectedExchange, selectedTimeframe])
+  useEffect(() => {
+    if (
+      candles &&
+      !isFetching &&
+      dispatcher &&
+      selectedInstrument &&
+      selectedExchange &&
+      !flushedRef.current
+    ) {
+      dispatcher.flushBuffer(selectedInstrument, selectedExchange, selectedTimeframe)
+      flushedRef.current = true
+    }
+  }, [candles, isFetching, dispatcher, selectedInstrument, selectedExchange, selectedTimeframe])
   const [instrumentSearch, setInstrumentSearch] = useState('')
   const [instrumentDropdownOpen, setInstrumentDropdownOpen] = useState(false)
   const instrumentRef = useRef<HTMLDivElement>(null)

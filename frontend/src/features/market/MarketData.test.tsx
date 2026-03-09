@@ -37,6 +37,21 @@ vi.mock('../../stores/market', () => ({
     setSelectedTimeframe: mockSetSelectedTimeframe,
   })),
 }))
+vi.mock('../../hooks/useMarketSubscription', () => ({
+  useMarketSubscription: vi.fn(() => true),
+}))
+vi.mock('../../stores/websocket', () => ({
+  useWebSocketStore: vi.fn(() => ({
+    isConnected: true,
+  })),
+}))
+vi.mock('../../hooks/useWSDispatcher', () => ({
+  useWSDispatcher: vi.fn(() => ({
+    startBuffering: vi.fn(),
+    flushBuffer: vi.fn(),
+    stopBuffering: vi.fn(),
+  })),
+}))
 vi.mock('../../components/LightweightChart', () => ({
   LightweightChart: ({ data }: { data: unknown[] }) => (
     <div data-testid='lightweight-chart'>Chart with {data.length} candles</div>
@@ -142,7 +157,18 @@ describe('MarketData', () => {
       setSelectedTimeframe: mockSetSelectedTimeframe,
     })
     renderWithProviders(<MarketData />)
-    expect(useCandles).toHaveBeenCalledWith('', '', '1h')
+    expect(useCandles).toHaveBeenCalledWith('', '', '1h', 100, true)
+  })
+  it('enables snapshot when WebSocket is disconnected (fallback)', async () => {
+    const { useCandles } = await import('../../hooks/queries')
+    const { useMarketSubscription } = await import('../../hooks/useMarketSubscription')
+    const { useWebSocketStore } = await import('../../stores/websocket')
+
+    vi.mocked(useMarketSubscription).mockReturnValue(false)
+    vi.mocked(useWebSocketStore).mockReturnValue({ isConnected: false } as never)
+    renderWithProviders(<MarketData />)
+
+    expect(useCandles).toHaveBeenCalledWith('EUR-USD', 'kraken', '1h', 100, true)
   })
   it('shows unknown error message when error has no message', async () => {
     const { useCandles } = await import('../../hooks/queries')
@@ -451,15 +477,16 @@ describe('MarketData', () => {
   })
   it('disables instrument input when no exchange selected', async () => {
     const { useMarketStore } = await import('../../stores/market')
-
-    vi.mocked(useMarketStore).mockReturnValueOnce({
+    const nullExchangeState = {
       selectedExchange: null,
       selectedInstrument: null,
       selectedTimeframe: '1h',
       setSelectedExchange: mockSetSelectedExchange,
       setSelectedInstrument: mockSetSelectedInstrument,
       setSelectedTimeframe: mockSetSelectedTimeframe,
-    })
+    }
+
+    vi.mocked(useMarketStore).mockReturnValue(nullExchangeState)
     renderWithProviders(<MarketData />)
     const input = screen.getByLabelText('Instrument:')
 

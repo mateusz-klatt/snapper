@@ -262,6 +262,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     instrument=native_symbol,
                     volume=candle.volume,
                     timeframe=timeframe,
+                    timestamp=candle.interval_begin,
                     open=candle.open,
                     high=candle.high,
                     low=candle.low,
