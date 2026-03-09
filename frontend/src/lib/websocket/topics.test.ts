@@ -3,9 +3,11 @@ import {
   buildMarketTopic,
   getMessageTopic,
   shouldThrottle,
-  getAllTopics,
+  getSubscriptionTopics,
   MARKET_TOPIC_PREFIX,
   ORDERS_TOPIC_PREFIX,
+  ORDERS_COMMANDS_PREFIX,
+  ORDERS_EVENTS_PREFIX,
   EXECUTIONS_TOPIC_PREFIX,
   SIGNALS_TOPIC_PREFIX,
   STRATEGY_TOPIC_PREFIX,
@@ -167,10 +169,16 @@ describe('topics', () => {
     it('exports MARKET_TOPIC_PREFIX', () => {
       expect(MARKET_TOPIC_PREFIX).toBe('market.')
     })
-    it('exports ORDERS_TOPIC_PREFIX', () => {
+    it('exports ORDERS_TOPIC_PREFIX for internal routing', () => {
       expect(ORDERS_TOPIC_PREFIX).toBe('orders.')
     })
-    it('exports EXECUTIONS_TOPIC_PREFIX', () => {
+    it('exports ORDERS_COMMANDS_PREFIX for subscription', () => {
+      expect(ORDERS_COMMANDS_PREFIX).toBe('orders.commands.')
+    })
+    it('exports ORDERS_EVENTS_PREFIX for subscription', () => {
+      expect(ORDERS_EVENTS_PREFIX).toBe('orders.events.')
+    })
+    it('exports EXECUTIONS_TOPIC_PREFIX for internal routing', () => {
       expect(EXECUTIONS_TOPIC_PREFIX).toBe('executions.')
     })
     it('exports SIGNALS_TOPIC_PREFIX', () => {
@@ -183,21 +191,21 @@ describe('topics', () => {
       expect(HEARTBEATS_TOPIC_PREFIX).toBe('system.heartbeats.')
     })
   })
-  describe('getAllTopics', () => {
-    it('returns array of all topic prefixes', () => {
-      const topics = getAllTopics()
+  describe('getSubscriptionTopics', () => {
+    it('returns array of valid subscription prefixes', () => {
+      const topics = getSubscriptionTopics()
 
       expect(topics).toEqual([
         'market.',
-        'orders.',
-        'executions.',
+        'orders.commands.',
+        'orders.events.',
         'signals.',
         'strategy.',
         'system.heartbeats.',
       ])
     })
     it('returns 6 topics', () => {
-      expect(getAllTopics()).toHaveLength(6)
+      expect(getSubscriptionTopics()).toHaveLength(6)
     })
   })
 })

@@ -612,7 +612,6 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_123",
             username="testuser",
             email="test@example.com",
             role=UserRole.OPERATOR,
@@ -628,7 +627,7 @@ class TestTokenManager:
             token_manager.settings.auth_secret_key,
             algorithms=[token_manager.settings.auth_algorithm],
         )
-        assert access_payload["sub"] == user.id
+        assert access_payload["sub"] == user.username
         assert access_payload["username"] == user.username
         assert access_payload["role"] == user.role.value
         assert "permissions" in access_payload
@@ -638,7 +637,7 @@ class TestTokenManager:
             token_manager.settings.auth_secret_key,
             algorithms=[token_manager.settings.auth_algorithm],
         )
-        assert refresh_payload["sub"] == user.id
+        assert refresh_payload["sub"] == user.username
         assert refresh_payload["username"] == user.username
         assert refresh_payload["permissions"] == []
         assert refresh_payload["jti"].startswith("refresh_")
@@ -652,7 +651,6 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_456",
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -681,7 +679,6 @@ class TestTokenManager:
         token_manager = TokenManager()
         for role in UserRole:
             user = UserProfile(
-                id=f"test_user_{role.value}",
                 username=f"user_{role.value}",
                 role=role,
                 is_active=True,
@@ -701,7 +698,6 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_789",
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -709,12 +705,12 @@ class TestTokenManager:
         token_pair = token_manager.create_tokens(user)
         access_data = token_manager.verify_token(token_pair.access_token)
         assert access_data is not None
-        assert access_data.sub == user.id
+        assert access_data.sub == user.username
         assert access_data.username == user.username
         assert access_data.role == user.role
         refresh_data = token_manager.verify_token(token_pair.refresh_token)
         assert refresh_data is not None
-        assert refresh_data.sub == user.id
+        assert refresh_data.sub == user.username
         assert refresh_data.jti.startswith("refresh_")
 
     def test_verify_token_invalid_jwt(self) -> None:
@@ -836,7 +832,6 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_blacklist",
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -873,7 +868,6 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_refresh",
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -885,7 +879,7 @@ class TestTokenManager:
         assert new_tokens.refresh_token != initial_tokens.refresh_token
         new_access_data = token_manager.verify_token(new_tokens.access_token)
         assert new_access_data is not None
-        assert new_access_data.sub == user.id
+        assert new_access_data.sub == user.username
         old_refresh_result = token_manager.verify_token(initial_tokens.refresh_token)
         assert old_refresh_result is not None
 
@@ -909,7 +903,6 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_not_refresh",
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -940,7 +933,6 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_invalidate",
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -1031,7 +1023,6 @@ class TestWebSocketTokenRotator:
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
         user = UserProfile(
-            id="test_user_ws",
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1093,7 +1084,6 @@ class TestWebSocketTokenRotator:
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
         user = UserProfile(
-            id="test_user_not_expired",
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1144,7 +1134,6 @@ class TestWebSocketTokenRotator:
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
         user = UserProfile(
-            id="test_user_rotate",
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -1181,7 +1170,6 @@ class TestWebSocketTokenRotator:
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
         user = UserProfile(
-            id="test_user_unregister",
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1256,7 +1244,6 @@ class TestIntegrationScenarios:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="test_user_lifecycle",
             username="lifecycleuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1287,7 +1274,6 @@ class TestIntegrationScenarios:
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
         user = UserProfile(
-            id="test_user_ws_scenario",
             username="wsuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -1342,7 +1328,6 @@ class TestIntegrationScenarios:
         token_manager = TokenManager()
         for role in UserRole:
             user = UserProfile(
-                id=f"permission_test_{role.value}",
                 username=f"user_{role.value}",
                 role=role,
                 is_active=True,
@@ -1362,7 +1347,6 @@ class TestIntegrationScenarios:
         """
         token_manager = TokenManager()
         user = UserProfile(
-            id="concurrent_user",
             username="concurrentuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1423,7 +1407,6 @@ class TestGetCurrentUser:
             mock_get_token_manager.return_value = mock_token_manager
             result = get_current_user(request)
             assert result is not None
-            assert result.id == "user123"
             assert result.username == "testuser"
             assert result.role == UserRole.OPERATOR
             assert request.state.user == result
@@ -1456,7 +1439,7 @@ class TestRequireAuthentication:
         When: require_authentication is called,
         Then: Same user is returned.
         """
-        user = UserProfile(id="user123", username="testuser", role=UserRole.OPERATOR)
+        user = UserProfile(username="testuser", role=UserRole.OPERATOR)
         result = require_authentication(user)
         assert result == user
 
@@ -1483,7 +1466,7 @@ class TestRequirePermission:
         When: Permission checker is called,
         Then: User is returned.
         """
-        user = UserProfile(id="user123", username="testuser", role=UserRole.ADMIN)
+        user = UserProfile(username="testuser", role=UserRole.ADMIN)
         permission_checker = require_permission(Permission.MANAGE_PROCESSES)
         with patch(
             "snapper.auth.domain.permissions.ROLE_PERMISSIONS",
@@ -1499,7 +1482,7 @@ class TestRequirePermission:
         When: Permission checker is called,
         Then: HTTPException with 403 status is raised.
         """
-        user = UserProfile(id="user123", username="testuser", role=UserRole.VIEWER)
+        user = UserProfile(username="testuser", role=UserRole.VIEWER)
         permission_checker = require_permission(Permission.MANAGE_PROCESSES)
         with patch("snapper.auth.domain.permissions.ROLE_PERMISSIONS", {UserRole.VIEWER: set()}):
             with pytest.raises(HTTPException) as exc_info:
@@ -1580,7 +1563,7 @@ class TestRequireRole:
         When: Role checker is called,
         Then: User is returned.
         """
-        user = UserProfile(id="user123", username="testuser", role=UserRole.ADMIN)
+        user = UserProfile(username="testuser", role=UserRole.ADMIN)
         role_checker = require_role(UserRole.OPERATOR)
         result = role_checker(user)
         assert result == user
@@ -1592,7 +1575,7 @@ class TestRequireRole:
         When: Role checker is called,
         Then: User is returned.
         """
-        user = UserProfile(id="user123", username="testuser", role=UserRole.OPERATOR)
+        user = UserProfile(username="testuser", role=UserRole.OPERATOR)
         role_checker = require_role(UserRole.OPERATOR)
         result = role_checker(user)
         assert result == user
@@ -1604,7 +1587,7 @@ class TestRequireRole:
         When: Role checker is called,
         Then: HTTPException with 403 status is raised.
         """
-        user = UserProfile(id="user123", username="testuser", role=UserRole.VIEWER)
+        user = UserProfile(username="testuser", role=UserRole.VIEWER)
         role_checker = require_role(UserRole.ADMIN)
         with pytest.raises(HTTPException) as exc_info:
             role_checker(user)

@@ -94,16 +94,18 @@ export function shouldThrottle(messageType: string): boolean {
 
 export const MARKET_TOPIC_PREFIX = 'market.'
 export const ORDERS_TOPIC_PREFIX = 'orders.'
+export const ORDERS_COMMANDS_PREFIX = 'orders.commands.'
+export const ORDERS_EVENTS_PREFIX = 'orders.events.'
 export const EXECUTIONS_TOPIC_PREFIX = 'executions.'
 export const SIGNALS_TOPIC_PREFIX = 'signals.'
 export const STRATEGY_TOPIC_PREFIX = 'strategy.'
 export const HEARTBEATS_TOPIC_PREFIX = 'system.heartbeats.'
 
-export function getAllTopics(): string[] {
+export function getSubscriptionTopics(): string[] {
   return [
     MARKET_TOPIC_PREFIX,
-    ORDERS_TOPIC_PREFIX,
-    EXECUTIONS_TOPIC_PREFIX,
+    ORDERS_COMMANDS_PREFIX,
+    ORDERS_EVENTS_PREFIX,
     SIGNALS_TOPIC_PREFIX,
     STRATEGY_TOPIC_PREFIX,
     HEARTBEATS_TOPIC_PREFIX,

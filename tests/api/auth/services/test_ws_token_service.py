@@ -65,7 +65,7 @@ async def test_dispatch_messages_handles_unknown_type() -> None:
     manager = DummyManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(id="u1", username="alice", role=UserRole.VIEWER)
+    user = UserProfile(username="alice", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
@@ -103,7 +103,7 @@ async def test_dispatch_messages_handles_disconnect() -> None:
     manager = DummyManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(id="u1", username="alice", role=UserRole.VIEWER)
+    user = UserProfile(username="alice", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
@@ -141,7 +141,7 @@ async def test_dispatch_messages_handles_unexpected_exception() -> None:
     manager = DummyManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(id="u1", username="bob", role=UserRole.VIEWER)
+    user = UserProfile(username="bob", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
@@ -201,7 +201,7 @@ async def test_dispatch_messages_loop_continues_after_ping() -> None:
     manager = MockConnectionManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(id="u1", username="alice", role=UserRole.VIEWER)
+    user = UserProfile(username="alice", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),

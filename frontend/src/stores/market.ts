@@ -16,8 +16,6 @@ export const useMarketStore = create<MarketDataStore>()(
     selectedInstrument: 'EUR-USD',
     selectedTimeframe: '1m',
     lastPrice: null,
-    candles: {},
-    ticks: {},
     lastUpdate: Date.now(),
     setSelectedExchange: exchange => {
       set({
@@ -40,8 +38,6 @@ export const useMarketStore = create<MarketDataStore>()(
         selectedInstrument: null,
         selectedTimeframe: '1m',
         lastPrice: null,
-        candles: {},
-        ticks: {},
         lastUpdate: Date.now(),
       }),
   }))

@@ -48,7 +48,6 @@ describe('UserProfile', () => {
     mockUseAuth.mockReturnValue(
       createMockAuth({
         user: {
-          id: '123',
           username: 'testuser',
           role: 'admin',
           is_active: true,
@@ -78,7 +77,7 @@ describe('UserProfile', () => {
 
     renderWithMocks(<UserProfile />)
     await user.click(screen.getByText('testuser'))
-    expect(screen.getByText('ID: 123')).toBeInTheDocument()
+    expect(screen.getByText('Permissions:')).toBeInTheDocument()
   })
   it('shows admin permissions in dropdown', async () => {
     const user = userEvent.setup()
@@ -91,7 +90,6 @@ describe('UserProfile', () => {
     mockUseAuth.mockReturnValue(
       createMockAuth({
         user: {
-          id: '123',
           username: 'operator',
           role: 'operator',
           is_active: true,
@@ -114,7 +112,6 @@ describe('UserProfile', () => {
     mockUseAuth.mockReturnValue(
       createMockAuth({
         user: {
-          id: '123',
           username: 'operator',
           role: 'operator',
           is_active: true,
@@ -130,7 +127,6 @@ describe('UserProfile', () => {
     mockUseAuth.mockReturnValue(
       createMockAuth({
         user: {
-          id: '123',
           username: 'viewer',
           role: 'viewer',
           is_active: true,
@@ -154,7 +150,6 @@ describe('UserProfile', () => {
     mockUseAuth.mockReturnValue(
       createMockAuth({
         user: {
-          id: '123',
           username: 'testuser',
           role: 'admin',
           is_active: true,
@@ -174,7 +169,6 @@ describe('UserProfile', () => {
     mockUseAuth.mockReturnValue(
       createMockAuth({
         user: {
-          id: '123',
           username: 'unknown',
           role: 'custom_role',
           is_active: true,
@@ -280,7 +274,7 @@ describe('UserProfile', () => {
       await user.type(screen.getByLabelText('Confirm New Password'), 'newpassword123')
       await user.click(screen.getByRole('button', { name: 'Change Password' }))
       await waitFor(() => {
-        expect(mockChangePassword).toHaveBeenCalledWith('123', 'oldpassword', 'newpassword123')
+        expect(mockChangePassword).toHaveBeenCalledWith('testuser', 'oldpassword', 'newpassword123')
       })
       await waitFor(() => {
         expect(screen.getByText('Password changed successfully')).toBeInTheDocument()

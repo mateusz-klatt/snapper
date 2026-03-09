@@ -257,7 +257,7 @@ make ui-setup
 make ui-dev
 ```
 
-Frontend at `http://localhost:3000/snapper/` with backend proxy.
+Frontend at `http://localhost:3000/` with backend proxy.
 
 ### Quality Checks
 

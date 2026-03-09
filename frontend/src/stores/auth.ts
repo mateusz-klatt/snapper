@@ -73,7 +73,7 @@ export const useAuthStore = create<AuthState>()(
               isLoading: false,
               error: null,
             })
-            localStorage.setItem('auth_user_id', data.user.id)
+            localStorage.setItem('auth_user_id', data.user.username)
           } catch (error) {
             set({
               isLoading: false,
@@ -175,7 +175,7 @@ export const useAuthStore = create<AuthState>()(
             })
 
             if (userData) {
-              localStorage.setItem('auth_user_id', userData.id)
+              localStorage.setItem('auth_user_id', userData.username)
             }
           } catch (error) {
             console.error('Token refresh failed:', error)

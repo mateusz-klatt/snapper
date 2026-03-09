@@ -180,7 +180,7 @@ async def authenticate_websocket(
     try:
         ws_payload = ws_token_service.verify(
             ws_token_value,
-            expected_sub=user.id,
+            expected_sub=user.username,
             expected_sid_hash=expected_sid_hash,
         )
     except WsTokenAlreadyUsedError:
@@ -245,7 +245,7 @@ async def handle_reauth(
     try:
         new_payload = ws_token_service.verify(
             ws_token_candidate,
-            expected_sub=user.id,
+            expected_sub=user.username,
             expected_sid_hash=expected_hash,
         )
     except WsTokenAlreadyUsedError:

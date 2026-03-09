@@ -113,7 +113,7 @@ def test_register_connection_tracks_state() -> None:
     websocket = DummyWebSocket()
     manager.register_connection(
         cast(Any, websocket),
-        UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR),
+        UserProfile(username="alice", role=UserRole.OPERATOR),
         token_data,
         payload,
         warn_task=None,
@@ -151,7 +151,7 @@ async def _run_update_ws_token_state() -> None:
     hard_task = asyncio.create_task(_pending())
     manager.register_connection(
         cast(Any, websocket),
-        UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR),
+        UserProfile(username="alice", role=UserRole.OPERATOR),
         token_data,
         initial_payload,
         warn_task=warn_task,
@@ -197,10 +197,10 @@ def test_connection_stats() -> None:
     ws1 = DummyWebSocket()
     ws2 = DummyWebSocket()
     manager.authenticated_connections[cast(Any, ws1)] = UserProfile(
-        id="1", username="viewer", role=UserRole.VIEWER
+        username="viewer", role=UserRole.VIEWER
     )
     manager.authenticated_connections[cast(Any, ws2)] = UserProfile(
-        id="2", username="admin", role=UserRole.ADMIN
+        username="admin", role=UserRole.ADMIN
     )
     stats = manager.get_connection_stats()
     assert isinstance(stats, AuthConnectionStats)
@@ -338,7 +338,7 @@ async def _run_cancel_tasks_test() -> None:
     hard_task = asyncio.create_task(_pending())
     manager.register_connection(
         cast(Any, websocket),
-        UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR),
+        UserProfile(username="alice", role=UserRole.OPERATOR),
         token_data,
         payload,
         warn_task=warn_task,
@@ -377,7 +377,7 @@ async def _run_cancel_tasks_none_warn_test() -> None:
     hard_task = asyncio.create_task(_pending())
     manager.register_connection(
         cast(Any, websocket),
-        UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR),
+        UserProfile(username="alice", role=UserRole.OPERATOR),
         token_data,
         payload,
         warn_task=None,
@@ -415,7 +415,7 @@ async def _run_cancel_tasks_none_hard_test() -> None:
     warn_task = asyncio.create_task(_pending())
     manager.register_connection(
         cast(Any, websocket),
-        UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR),
+        UserProfile(username="alice", role=UserRole.OPERATOR),
         token_data,
         payload,
         warn_task=warn_task,
@@ -512,7 +512,7 @@ def test_get_expirations_return_values_when_state_exists() -> None:
     websocket = DummyWebSocket()
     manager.register_connection(
         cast(Any, websocket),
-        UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR),
+        UserProfile(username="alice", role=UserRole.OPERATOR),
         token_data,
         payload,
         warn_task=None,

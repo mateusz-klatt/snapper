@@ -467,7 +467,6 @@ export const UpdateUserRequestSchema = z
 
 export const UserProfileSchema = z
   .object({
-    id: z.string(),
     username: z.string(),
     email: z.string().nullable().optional(),
     role: UserRoleSchema,

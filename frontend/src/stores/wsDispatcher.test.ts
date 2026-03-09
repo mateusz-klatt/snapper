@@ -73,6 +73,7 @@ describe('WSDispatcher', () => {
       }),
       subscribe: vi.fn(),
       isConnected: vi.fn(() => true),
+      getSubscribedTopics: vi.fn(() => []),
     } as unknown as WebSocketClient
     const mockTradeStore = {
       orders: [],
@@ -1116,6 +1117,19 @@ describe('WSDispatcher', () => {
 
       connectionHandler?.(false)
       expect(useAppStore.getState().setConnected).toHaveBeenCalledWith(false)
+    })
+    it('skips subscribe when all topics already subscribed on reconnect', () => {
+      const dispatcher = new WSDispatcher({ queryClient, topics: ['test.topic'] })
+
+      vi.mocked(mockWsClient.isConnected).mockReturnValue(false)
+      dispatcher.attach(mockWsClient)
+      vi.mocked(mockWsClient.isConnected).mockReturnValue(true)
+      vi.mocked(mockWsClient.getSubscribedTopics).mockReturnValue(['test.topic'])
+      const connectionHandler = connectionHandlers[0]
+
+      connectionHandler?.(true)
+      expect(mockWsClient.subscribe).not.toHaveBeenCalled()
+      expect(useAppStore.getState().setSubscribedTopics).toHaveBeenCalledWith(['test.topic'])
     })
     it('clears subscribed topics on disconnect', () => {
       const dispatcher = new WSDispatcher({ queryClient, topics: ['test.topic'] })

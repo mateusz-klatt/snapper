@@ -89,7 +89,6 @@ class TestSettingsRoutes:
     @staticmethod
     def _make_user(role: UserRole = UserRole.ADMIN) -> UserProfile:
         return UserProfile(
-            id="test_id",
             username="test_user",
             email="test@example.com",
             role=role,

@@ -28,7 +28,6 @@ async def test_get_current_user_info_returns_user_directly() -> None:
     Then: The same user object is returned unchanged.
     """
     mock_user = UserProfile(
-        id="test-user-id",
         username="testuser",
         role=UserRole.VIEWER,
         is_active=True,
@@ -132,7 +131,6 @@ class TestUserManagementBasic:
         mock_user_service = AsyncMock()
         mock_user_service.get_all_users.return_value = [
             UserProfile(
-                id="test-id",
                 username="testuser",
                 role=UserRole.VIEWER,
                 is_active=True,
@@ -140,7 +138,6 @@ class TestUserManagementBasic:
         ]
         mock_get_service.return_value = mock_user_service
         mock_admin_user = UserProfile(
-            id="admin-id",
             username="admin",
             role=UserRole.ADMIN,
             is_active=True,
@@ -273,7 +270,7 @@ class TestUserService:
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         auth_user = await user_service.get_user_by_id("test_user")
         assert auth_user is not None
-        assert auth_user.id == "test_user"
+        assert auth_user.username == "testuser"
 
     @pytest.mark.asyncio
     async def test_get_user_by_id_not_found(self, user_service: UserService) -> None:

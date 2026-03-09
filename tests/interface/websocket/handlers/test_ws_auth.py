@@ -102,7 +102,7 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
         return None
 
     def skip_authentication() -> UserProfile:
-        return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+        return UserProfile(username="test_user", role=UserRole.ADMIN)
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
     app.dependency_overrides[require_authentication] = skip_authentication
@@ -1214,7 +1214,7 @@ async def test_bridge_creation_when_manager_zmq_bridge_is_none() -> None:
     )
     with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
         mock_auth_manager = MagicMock()
-        user = UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR)
+        user = UserProfile(username="alice", role=UserRole.OPERATOR)
         mock_auth_manager.verify_session_cookie.return_value = (user, token_data)
         mock_auth_manager.get_connection_expiration.return_value = datetime.now(UTC)
         mock_auth.return_value = mock_auth_manager
@@ -1262,7 +1262,7 @@ async def test_websocket_endpoint_handles_unexpected_exception() -> None:
     )
     with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
         mock_auth_manager = MagicMock()
-        user = UserProfile(id="user-1", username="alice", role=UserRole.OPERATOR)
+        user = UserProfile(username="alice", role=UserRole.OPERATOR)
         mock_auth_manager.verify_session_cookie.return_value = (user, token_data)
         mock_auth_manager.get_connection_expiration.return_value = datetime.now(UTC)
         mock_auth.return_value = mock_auth_manager
@@ -2224,7 +2224,6 @@ def mock_websocket() -> MagicMock:
 def mock_user() -> UserProfile:
     """Provide mock admin user profile."""
     return UserProfile(
-        id="user-123",
         username="testuser",
         email="test@example.com",
         role=UserRole.ADMIN,
@@ -2921,9 +2920,7 @@ class StubUserService:
             raise self.create_user_error
         if self.create_user_result:
             return self.create_user_result
-        user = UserProfile(
-            id=username, username=username, email=email, role=role, is_active=is_active
-        )
+        user = UserProfile(username=username, email=email, role=role, is_active=is_active)
         self.created_users.append(
             {
                 "username": username,
@@ -2976,7 +2973,7 @@ def auth_app(
     app = FastAPI()
     app.state.settings = settings
     app.include_router(routes.router)
-    current_user = UserProfile(id="1", username="alice", role=UserRole.ADMIN)
+    current_user = UserProfile(username="alice", role=UserRole.ADMIN)
     app.dependency_overrides[validate_csrf_token] = lambda: None
     app.dependency_overrides[require_authentication] = lambda: current_user
     client = TestClient(app)
@@ -2993,7 +2990,7 @@ def test_login_success_sets_cookies(
     Then: Sets access_token, refresh_token and csrf_token cookies.
     """
     client, user_service, token_manager, csrf_manager = auth_app
-    user = UserProfile(id="123", username="bob", email="bob@example.com", role=UserRole.OPERATOR)
+    user = UserProfile(username="bob", email="bob@example.com", role=UserRole.OPERATOR)
     user_service.authenticated_user = user
     csrf_manager.token = "csrf-new"
     token_manager.create_tokens_response = TokenPair(
@@ -3053,7 +3050,7 @@ def test_refresh_token_success(
         jti="refresh-jti",
         sid="session-123",
     )
-    user = UserProfile(id="123", username="bob", role=UserRole.OPERATOR)
+    user = UserProfile(username="bob", role=UserRole.OPERATOR)
     user_service.user_by_id = user
     token_manager.create_tokens_response = TokenPair(
         access_token="rotated-access",
@@ -3073,7 +3070,6 @@ def test_refresh_token_success(
     assert payload["ws_token"]
     assert isinstance(payload["ws_token_exp"], str)
     assert payload["csrf_token"] == "csrf-rot"
-    assert payload["user"]["id"] == "123"
     assert payload["user"]["username"] == "bob"
     assert payload["user"]["role"] == "operator"
 
@@ -3091,7 +3087,6 @@ def test_get_current_user_profile_returns_user(
     response = client.get("/auth/me")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["id"] == "1"
     assert payload["username"] == "alice"
     assert payload["role"] == "admin"
 
@@ -3224,8 +3219,8 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     stub_service.all_users = [
-        UserProfile(id="1", username="alice", role=UserRole.ADMIN),
-        UserProfile(id="2", username="bob", role=UserRole.OPERATOR),
+        UserProfile(username="alice", role=UserRole.ADMIN),
+        UserProfile(username="bob", role=UserRole.OPERATOR),
     ]
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.get_users(current_user=stub_service.all_users[0], include_inactive=False)
@@ -3242,7 +3237,7 @@ async def test_create_user_success(monkeypatch: Any) -> None:
     Then: Returns created user profile.
     """
     stub_service = StubUserService()
-    created_user = UserProfile(id="u3", username="charlie", role=UserRole.VIEWER)
+    created_user = UserProfile(username="charlie", role=UserRole.VIEWER)
     stub_service.create_user_result = created_user
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     request = CreateUserRequest(
@@ -3254,7 +3249,7 @@ async def test_create_user_success(monkeypatch: Any) -> None:
     )
     result = await routes.create_user(
         user_data=request,
-        current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.username == "charlie"
@@ -3281,7 +3276,7 @@ async def test_create_user_value_error(monkeypatch: Any) -> None:
     with pytest.raises(HTTPException) as exc:
         await routes.create_user(
             user_data=request,
-            current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 400
@@ -3307,7 +3302,7 @@ async def test_update_user_not_found(monkeypatch: Any) -> None:
         await routes.update_user(
             user_id="missing",
             user_data=request,
-            current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 404
@@ -3322,7 +3317,7 @@ async def test_update_user_success(monkeypatch: Any) -> None:
     Then: Returns updated user profile.
     """
     stub_service = StubUserService()
-    updated_user = UserProfile(id="u4", username="dora", role=UserRole.OPERATOR, is_active=True)
+    updated_user = UserProfile(username="dora", role=UserRole.OPERATOR, is_active=True)
     stub_service.update_user_result = updated_user
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     request = UpdateUserRequest(
@@ -3333,7 +3328,7 @@ async def test_update_user_success(monkeypatch: Any) -> None:
     result = await routes.update_user(
         user_id="u4",
         user_data=request,
-        current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.username == "dora"
@@ -3353,7 +3348,7 @@ async def test_delete_user_success(monkeypatch: Any) -> None:
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.delete_user(
         user_id="user-2",
-        current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.message == "User 'user-2' has been deactivated"
@@ -3373,7 +3368,7 @@ async def test_delete_user_self_forbidden(monkeypatch: Any) -> None:
     with pytest.raises(HTTPException) as exc:
         await routes.delete_user(
             user_id="self",
-            current_user=UserProfile(id="self", username="self", role=UserRole.ADMIN),
+            current_user=UserProfile(username="self", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 400
@@ -3393,7 +3388,7 @@ async def test_delete_user_not_found(monkeypatch: Any) -> None:
     with pytest.raises(HTTPException) as exc:
         await routes.delete_user(
             user_id="missing",
-            current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 404
@@ -3414,7 +3409,7 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
         request=MagicMock(spec=Request),
         user_id="self",
         password_data=pwd_request,
-        current_user=UserProfile(id="self", username="self", role=UserRole.OPERATOR),
+        current_user=UserProfile(username="self", role=UserRole.OPERATOR),
         _csrf=None,
     )
     assert result.message == "Password changed successfully"
@@ -3437,7 +3432,7 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
             request=MagicMock(spec=Request),
             user_id="other",
             password_data=pwd_request,
-            current_user=UserProfile(id="self", username="self", role=UserRole.VIEWER),
+            current_user=UserProfile(username="self", role=UserRole.VIEWER),
             _csrf=None,
         )
     assert exc.value.status_code == 403
@@ -3460,7 +3455,7 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
             request=MagicMock(spec=Request),
             user_id="self",
             password_data=pwd_request,
-            current_user=UserProfile(id="self", username="self", role=UserRole.OPERATOR),
+            current_user=UserProfile(username="self", role=UserRole.OPERATOR),
             _csrf=None,
         )
     assert exc.value.status_code == 400
@@ -3481,7 +3476,7 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
         request=MagicMock(spec=Request),
         user_id="target",
         password_data=pwd_request,
-        current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.message == "Password changed successfully"
@@ -3545,7 +3540,7 @@ async def test_admin_reset_password_handles_repository_error(
             request=MagicMock(spec=Request),
             user_id="user-1",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
-            current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 500
@@ -3621,7 +3616,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
         request=MagicMock(spec=Request),
         user_id="user-1",
         password_data=AdminResetPasswordRequest(new_password="super-secret"),
-        current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.message == "Password reset successfully for user target"
@@ -3680,7 +3675,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
             request=MagicMock(spec=Request),
             user_id="missing",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
-            current_user=UserProfile(id="admin", username="admin", role=UserRole.ADMIN),
+            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 404
@@ -4004,7 +3999,6 @@ class TestTokenManager:
         """
         token_manager = get_token_manager()
         user = UserProfile(
-            id="test_user",
             username="testuser",
             email="test@example.com",
             role=UserRole.OPERATOR,
@@ -4016,12 +4010,12 @@ class TestTokenManager:
         assert tokens.token_type == "bearer"
         token_data = token_manager.verify_token(tokens.access_token)
         assert token_data is not None
-        assert token_data.sub == user.id
+        assert token_data.sub == user.username
         assert token_data.username == user.username
         assert token_data.role == user.role
         refresh_data = token_manager.verify_token(tokens.refresh_token)
         assert refresh_data is not None
-        assert refresh_data.sub == user.id
+        assert refresh_data.sub == user.username
 
     def test_token_creation_with_remember_me(self) -> None:
         """Token creation with remember_me flag.
@@ -4032,7 +4026,6 @@ class TestTokenManager:
         """
         token_manager = get_token_manager()
         user = UserProfile(
-            id="test_user",
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -4052,7 +4045,6 @@ class TestTokenManager:
         """
         token_manager = get_token_manager()
         user = UserProfile(
-            id="test_user",
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -4085,7 +4077,6 @@ class TestTokenManager:
         """
         token_manager = get_token_manager()
         user = UserProfile(
-            id="test_user",
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -4160,7 +4151,6 @@ class TestWebSocketAuthManager:
         ws_auth_manager = get_ws_auth_manager()
         token_manager = get_token_manager()
         user = UserProfile(
-            id="test_user",
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -4184,7 +4174,6 @@ class TestWebSocketAuthManager:
         ws_auth_manager = get_ws_auth_manager()
         websocket = MagicMock(spec=WebSocket)
         user = UserProfile(
-            id="test_user",
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -4211,9 +4200,9 @@ class TestWebSocketAuthManager:
         ws1 = MagicMock(spec=WebSocket)
         ws2 = MagicMock(spec=WebSocket)
         ws3 = MagicMock(spec=WebSocket)
-        user1 = UserProfile(id="1", username="user1", role=UserRole.VIEWER, is_active=True)
-        user2 = UserProfile(id="2", username="user2", role=UserRole.OPERATOR, is_active=True)
-        user3 = UserProfile(id="3", username="user3", role=UserRole.ADMIN, is_active=True)
+        user1 = UserProfile(username="user1", role=UserRole.VIEWER, is_active=True)
+        user2 = UserProfile(username="user2", role=UserRole.OPERATOR, is_active=True)
+        user3 = UserProfile(username="user3", role=UserRole.ADMIN, is_active=True)
         ws_auth_manager.authenticated_connections[ws1] = user1
         ws_auth_manager.authenticated_connections[ws2] = user2
         ws_auth_manager.authenticated_connections[ws3] = user3
@@ -4358,13 +4347,12 @@ class TestUserManagementCoverage:
         Then: All fields accessible and correct.
         """
         user = UserProfile(
-            id="test_id",
             username="testuser",
             email="test@example.com",
             role=UserRole.ADMIN,
             is_active=True,
         )
-        assert user.id == "test_id"
+        assert user.username == "testuser"
         assert user.username == "testuser"
         assert user.email == "test@example.com"
         assert user.role == UserRole.ADMIN

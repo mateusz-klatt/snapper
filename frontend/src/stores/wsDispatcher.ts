@@ -40,13 +40,7 @@ export class WSDispatcher {
   constructor(config: DispatcherConfig) {
     this.queryClient = config.queryClient
     this.maxCandles = config.maxCandles ?? DEFAULT_MAX_CANDLES
-    this.topics = config.topics ?? [
-      'orders.',
-      'executions.',
-      'signals.',
-      'market.',
-      'system.heartbeats.',
-    ]
+    this.topics = config.topics ?? []
     this.directStoreUpdates = config.directStoreUpdates ?? true
   }
   attach(client: WebSocketClient): void {
@@ -63,7 +57,13 @@ export class WSDispatcher {
       client.onMessage('pong', this.handlePongMessage.bind(this)),
       client.onConnection((connected: boolean) => {
         if (connected && this.topics.length > 0) {
-          client.subscribe(this.topics)
+          const existing = new Set(client.getSubscribedTopics())
+          const newTopics = this.topics.filter(t => !existing.has(t))
+
+          if (newTopics.length > 0) {
+            client.subscribe(newTopics)
+          }
+
           useAppStore.getState().setSubscribedTopics(this.topics)
         } else if (!connected) {
           useAppStore.getState().setSubscribedTopics([])
@@ -143,11 +143,7 @@ export class WSDispatcher {
       }
     }
 
-    const instrument = message.instrument
-    const exchange = message.exchange
-    const timeframe = message.timeframe
-
-    if (instrument && exchange && timeframe) {
+    if (message.instrument && message.exchange && message.timeframe) {
       this.mergeCandleIntoCache(message)
     }
   }
@@ -175,46 +171,46 @@ export class WSDispatcher {
 
     this.candleBuffers.delete(bufferKey)
   }
-  private mergeCandleIntoCache(candle: CandleEnvelope): void {
-    const queryKey = ['candles', candle.instrument, candle.exchange, candle.timeframe]
+  private mergeCandleIntoCache(envelope: CandleEnvelope): void {
+    const queryKey = ['candles', envelope.instrument, envelope.exchange, envelope.timeframe]
     const existing = this.queryClient.getQueryData<CandleData[]>(queryKey)
 
     if (!existing) {
-      const bufferKey = `${candle.instrument}:${candle.exchange}:${candle.timeframe}`
+      const bufferKey = `${envelope.instrument}:${envelope.exchange}:${envelope.timeframe}`
       const buffer = this.candleBuffers.get(bufferKey)
 
       if (buffer) {
-        buffer.push(candle)
+        buffer.push(envelope)
       }
 
       return
     }
 
-    const incoming: CandleData = {
-      instrument: candle.instrument,
-      exchange: candle.exchange,
-      timeframe: candle.timeframe,
-      open_at: candle.open_at,
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-      volume: candle.volume,
-      vwap: candle.vwap ?? null,
-      trades: candle.trades ?? null,
+    const candle: CandleData = {
+      instrument: envelope.instrument,
+      exchange: envelope.exchange,
+      timeframe: envelope.timeframe,
+      open_at: envelope.open_at,
+      open: envelope.open,
+      high: envelope.high,
+      low: envelope.low,
+      close: envelope.close,
+      volume: envelope.volume,
+      vwap: envelope.vwap ?? null,
+      trades: envelope.trades ?? null,
     }
 
-    const incomingTime = new Date(incoming.open_at).getTime()
+    const incomingTime = new Date(candle.open_at).getTime()
     const lastCandle = existing[existing.length - 1]
     const lastTime = lastCandle ? new Date(lastCandle.open_at).getTime() : 0
 
     if (incomingTime === lastTime) {
       const updated = [...existing]
 
-      updated[updated.length - 1] = incoming
+      updated[updated.length - 1] = candle
       this.queryClient.setQueryData<CandleData[]>(queryKey, updated)
     } else if (incomingTime > lastTime) {
-      const appended = [...existing, incoming]
+      const appended = [...existing, candle]
       const trimmed =
         appended.length > this.maxCandles ? appended.slice(-this.maxCandles) : appended
 

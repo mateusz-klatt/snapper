@@ -1,4 +1,3 @@
-import type { CandleEnvelope, TickEnvelope } from './ws'
 import type { OrderStatus, Fill, Signal, Position } from './entities'
 
 export interface AppState {
@@ -13,8 +12,6 @@ export interface MarketDataState {
   selectedInstrument: string | null
   selectedTimeframe: string
   lastPrice: number | null
-  candles: Record<string, CandleEnvelope>
-  ticks: Record<string, TickEnvelope>
   lastUpdate: number
 }
 export interface TradeState {

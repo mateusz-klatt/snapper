@@ -200,7 +200,7 @@ class TestCreateApiRouter:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication
@@ -437,7 +437,7 @@ class TestWebSocketEndpoints:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication
@@ -641,7 +641,7 @@ def create_test_client() -> TestClient:
         return None
 
     def skip_authentication() -> UserProfile:
-        return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+        return UserProfile(username="test_user", role=UserRole.ADMIN)
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
     app.dependency_overrides[require_authentication] = skip_authentication
@@ -794,7 +794,7 @@ class TestOrdersEndpointWithErrors:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         def get_error_repo() -> MockRepository:
             return MockRepository(error=Exception("Database connection failed"))
@@ -824,7 +824,7 @@ class TestSignalsEndpointWithErrors:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         def get_error_repo() -> MockRepository:
             return MockRepository(error=Exception("Signal query failed"))
@@ -854,7 +854,7 @@ class TestExecutionsEndpointWithErrors:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         def get_error_repo() -> MockRepository:
             return MockRepository(error=Exception("Execution query failed"))
@@ -884,7 +884,7 @@ class TestPositionsEndpointWithErrors:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         def get_error_repo() -> MockRepository:
             return MockRepository(error=Exception("Position query failed"))
@@ -914,7 +914,7 @@ class TestCandlesEndpointWithErrors:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -947,7 +947,7 @@ class TestZmqHealthCheckErrors:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1001,7 +1001,7 @@ class TestSystemStatusEdgeCases:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1029,7 +1029,7 @@ class TestSystemStatusEdgeCases:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1059,7 +1059,7 @@ class TestSystemStatusEdgeCases:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1085,7 +1085,7 @@ class TestSystemStatusEdgeCases:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1111,7 +1111,7 @@ class TestAppCoverageImprovement:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication
@@ -1355,7 +1355,7 @@ def create_app_with_overrides(repo: MockRepository | None = None) -> TestClient:
         return None
 
     def skip_authentication() -> UserProfile:
-        return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+        return UserProfile(username="test_user", role=UserRole.ADMIN)
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
     app.dependency_overrides[require_authentication] = skip_authentication
@@ -1578,7 +1578,7 @@ class TestZmqHealthCheckContextError:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1615,7 +1615,7 @@ class TestSystemStatusProcessError:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1649,7 +1649,7 @@ class TestSystemStatusProcessError:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication
@@ -1840,7 +1840,7 @@ class TestCandlesHttpExceptionReraise:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         app.dependency_overrides[require_authentication] = skip_authentication

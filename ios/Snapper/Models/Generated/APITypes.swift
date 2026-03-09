@@ -883,7 +883,6 @@ struct UserListResponse: Codable, Sendable {
 }
 
 struct UserProfile: Codable, Sendable {
-    let id: String
     let username: String
     let email: String?
     let role: UserRole
@@ -892,7 +891,6 @@ struct UserProfile: Codable, Sendable {
     let lastLogin: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id
         case username
         case email
         case role

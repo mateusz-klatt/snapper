@@ -24,7 +24,7 @@ class TestDatabaseEndpoints:
             return None
 
         def skip_authentication() -> UserProfile:
-            return UserProfile(id="test_id", username="test_user", role=UserRole.ADMIN)
+            return UserProfile(username="test_user", role=UserRole.ADMIN)
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication

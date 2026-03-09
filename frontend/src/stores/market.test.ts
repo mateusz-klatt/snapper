@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useMarketStore } from './market'
-import type { CandleEnvelope, TickEnvelope } from '../types/ws'
 
 describe('useMarketStore', () => {
   beforeEach(() => {
@@ -9,8 +8,6 @@ describe('useMarketStore', () => {
       selectedInstrument: 'EUR-USD',
       selectedTimeframe: '1h',
       lastPrice: null,
-      candles: {},
-      ticks: {},
       lastUpdate: Date.now(),
     })
   })
@@ -22,8 +19,6 @@ describe('useMarketStore', () => {
       expect(state.selectedInstrument).toBe('EUR-USD')
       expect(state.selectedTimeframe).toBe('1h')
       expect(state.lastPrice).toBeNull()
-      expect(state.candles).toEqual({})
-      expect(state.ticks).toEqual({})
     })
   })
   describe('setSelectedExchange', () => {
@@ -84,35 +79,11 @@ describe('useMarketStore', () => {
   })
   describe('clearMarketData', () => {
     it('resets all state to defaults', () => {
-      const mockCandle: CandleEnvelope = {
-        type: 'candle',
-        instrument: 'BTC-USD',
-        exchange: 'binance',
-        timeframe: '1m',
-        open: 45000,
-        high: 46000,
-        low: 44000,
-        close: 45500,
-        volume: 1000,
-        timestamp: '2024-01-01T00:00:00Z',
-      }
-      const mockTick: TickEnvelope = {
-        type: 'tick',
-        instrument: 'BTC-USD',
-        exchange: 'binance',
-        bid: 45000,
-        ask: 45100,
-        volume: 0,
-        timestamp: '2024-01-01T00:00:00Z',
-      }
-
       useMarketStore.setState({
         selectedExchange: 'kraken',
         selectedInstrument: 'BTC-USD',
         selectedTimeframe: '4h',
         lastPrice: 50000,
-        candles: { 'BTC-USD': mockCandle },
-        ticks: { 'BTC-USD': mockTick },
       })
       useMarketStore.getState().clearMarketData()
       const state = useMarketStore.getState()
@@ -121,8 +92,6 @@ describe('useMarketStore', () => {
       expect(state.selectedInstrument).toBeNull()
       expect(state.selectedTimeframe).toBe('1m')
       expect(state.lastPrice).toBeNull()
-      expect(state.candles).toEqual({})
-      expect(state.ticks).toEqual({})
     })
   })
 })

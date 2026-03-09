@@ -341,7 +341,7 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id TEXT PRIMARY KEY, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP)"
                 )
@@ -358,7 +358,7 @@ class TestSeedUsers:
             count = seed_users(conn, users)
             conn.commit()
             assert count == 1
-            row = conn.execute(text("SELECT * FROM users WHERE id = 'testadmin'")).fetchone()
+            row = conn.execute(text("SELECT * FROM users WHERE username = 'testadmin'")).fetchone()
             assert row is not None
             assert row[1] == "testadmin"
             assert row[3].startswith("$2b$")
@@ -377,7 +377,7 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id TEXT PRIMARY KEY, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP)"
                 )
@@ -420,7 +420,7 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id TEXT PRIMARY KEY, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP)"
                 )
@@ -452,7 +452,7 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id TEXT PRIMARY KEY, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP)"
                 )
@@ -483,7 +483,7 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id TEXT PRIMARY KEY, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP)"
                 )
@@ -667,7 +667,7 @@ class TestRunSeed:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id TEXT PRIMARY KEY, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP)"
                 )
@@ -712,7 +712,7 @@ class TestRunSeed:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id TEXT PRIMARY KEY, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP)"
                 )

@@ -20,8 +20,7 @@ class UserProfile(StrictApiSchema):
     endpoints and stored in request state.
 
     Attributes:
-        id: Unique user identifier.
-        username: User's login name.
+        username: User's login name (also the primary key).
         email: Optional email address.
         role: User's role (VIEWER, OPERATOR, ADMIN).
         is_active: Whether user account is active.
@@ -29,7 +28,6 @@ class UserProfile(StrictApiSchema):
         last_login: Last successful login timestamp.
     """
 
-    id: str
     username: str
     email: str | None = None
     role: UserRole

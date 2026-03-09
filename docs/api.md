@@ -27,7 +27,7 @@ The server sets HTTP-only cookies and returns user info:
 ```json
 {
     "user": {
-        "id": 1,
+        "id": "admin",
         "username": "admin",
         "role": "admin",
         "is_active": true
@@ -99,8 +99,11 @@ GET /api/health
     "timestamp": "2026-01-18T12:00:00Z",
     "version": "0.1.0",
     "connections": {
-        "active": 5,
-        "total": 100
+        "active_connections": 5,
+        "zmq_subscribers": 12,
+        "subscriber_tasks": 12,
+        "active_topics": 8,
+        "active_clients": 3
     },
     "topics": {
         "available": 50,
@@ -130,8 +133,9 @@ X-CSRF-Token: <csrf_token>
 [
     {
         "instrument": "BTC-USD",
+        "exchange": "kraken",
         "timeframe": "1h",
-        "timestamp": "2026-01-18T11:00:00Z",
+        "open_at": "2026-01-18T11:00:00Z",
         "open": 42000.0,
         "high": 42500.0,
         "low": 41800.0,
@@ -174,6 +178,8 @@ X-CSRF-Token: <csrf_token>
         "type": "limit",
         "price": 42000.0,
         "size": 0.1,
+        "filled_size": 0.1,
+        "average_price": 42000.0,
         "status": "filled",
         "time_in_force": "GTC",
         "error": null
@@ -229,7 +235,10 @@ X-CSRF-Token: <csrf_token>
     {
         "id": 1,
         "order_id": 123,
+        "exec_id": "TEXEC-123",
+        "trade_id": "TTRAD-456",
         "timestamp": "2026-01-18T12:01:00Z",
+        "executed_at": "2026-01-18T12:00:59Z",
         "price": 42000.0,
         "size": 0.1,
         "fee": 0.001,
@@ -468,22 +477,27 @@ Response:
 
 ### Server Messages
 
-#### Market Data (Bar)
+#### Candle (OHLCV)
+
+Messages are flat envelopes (no `"data"` wrapper). ZMQ payloads are
+forwarded directly to WebSocket clients.
 
 ```json
 {
     "type": "candle",
-    "topic": "market.kraken.BTC-USD.candles.1h",
-    "data": {
-        "open": 42000.0,
-        "high": 42500.0,
-        "low": 41800.0,
-        "close": 42300.0,
-        "volume": 1234.56,
-        "timestamp": 1705579200,
-        "timeframe": "1h",
-        "instrument": "BTC-USD"
-    }
+    "timestamp": "2026-01-18T11:00:00Z",
+    "meta": {},
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "timeframe": "1h",
+    "open_at": "2026-01-18T11:00:00Z",
+    "open": 42000.0,
+    "high": 42500.0,
+    "low": 41800.0,
+    "close": 42300.0,
+    "volume": 1234.56,
+    "vwap": 42150.0,
+    "trades": 5678
 }
 ```
 
@@ -492,13 +506,14 @@ Response:
 ```json
 {
     "type": "tick",
-    "topic": "market.kraken.BTC-USD.ticks",
-    "data": {
-        "price": 42150.0,
-        "volume": 0.5,
-        "timestamp": 1705579200123,
-        "instrument": "BTC-USD"
-    }
+    "timestamp": "2026-01-18T12:00:00Z",
+    "meta": {},
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "volume": 1234.5,
+    "bid": 42000.0,
+    "ask": 42001.0,
+    "last": 42000.5
 }
 ```
 
@@ -507,37 +522,59 @@ Response:
 ```json
 {
     "type": "signal",
-    "topic": "signals.paper.BTC-USD.rsi_btc_1h",
-    "data": {
-        "instrument": "BTC-USD",
-        "side": "buy",
-        "strength": 0.85,
-        "reason": "RSI 28.5 <= 30",
-        "price": 42000.0,
-        "timestamp": 1705579200,
-        "metadata": {
-            "rsi_value": 28.5,
-            "period": 14
-        }
-    }
+    "timestamp": "2026-01-18T12:00:00Z",
+    "meta": {},
+    "instrument": "BTC-USD",
+    "exchange": "paper",
+    "side": "buy",
+    "strength": 0.85,
+    "reason": "RSI 28.5 <= 30",
+    "price": 42000.0,
+    "strategy_name": "rsi_btc_1h"
 }
 ```
 
-#### Trade Execution
+#### Fill
 
 ```json
 {
-    "type": "trade",
-    "topic": "fills.paper.BTC-USD",
-    "data": {
-        "order_id": "ord_123",
-        "instrument": "BTC-USD",
-        "side": "buy",
-        "price": 42000.0,
-        "size": 0.1,
-        "fee": 0.001,
-        "timestamp": 1705579200
-    }
+    "type": "fill",
+    "timestamp": "2026-01-18T12:01:00Z",
+    "meta": {},
+    "client_order_id": "signal-a1b2c3d4",
+    "exchange_order_id": "KRAKEN-456",
+    "trade_id": "TTRAD-789",
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "side": "buy",
+    "size": 0.1,
+    "price": 42000.0,
+    "fee": 0.001,
+    "fee_asset": "USD",
+    "status": "filled",
+    "executed_at": "2026-01-18T12:00:59Z"
+}
+```
+
+#### Order Status
+
+```json
+{
+    "type": "order_status",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "meta": {},
+    "exchange_order_id": "KRAKEN-456",
+    "client_order_id": "signal-a1b2c3d4",
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "side": "buy",
+    "status": "submitted",
+    "order_type": "limit",
+    "size": 0.1,
+    "filled_size": 0.0,
+    "price": 42000.0,
+    "average_price": null,
+    "created_at": "2026-01-18T12:00:00Z"
 }
 ```
 
@@ -546,12 +583,12 @@ Response:
 ```json
 {
     "type": "heartbeat",
-    "topic": "system.heartbeat",
-    "data": {
-        "component": "zmq_broker",
-        "status": "healthy",
-        "timestamp": 1705579200
-    }
+    "timestamp": "2026-01-18T12:00:00Z",
+    "meta": {},
+    "component": "zmq_broker",
+    "sequence": 42,
+    "status": "healthy",
+    "lag_ms": 5
 }
 ```
 
@@ -647,7 +684,7 @@ ws.onopen = () => {
 
 ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
-    console.log('Received:', message.type, message.data);
+    console.log('Received:', message.type, message);
 };
 
 // Heartbeat

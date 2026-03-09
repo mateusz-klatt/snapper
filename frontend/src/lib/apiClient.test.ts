@@ -1094,11 +1094,11 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({ message: 'Password changed successfully' }),
     })
-    const result = await apiClient.changePassword('user-123', 'oldPassword', 'newPassword')
+    const result = await apiClient.changePassword('testuser', 'oldPassword', 'newPassword')
 
     expect(result).toEqual({ message: 'Password changed successfully' })
     expect(mockFetch).toHaveBeenCalledWith(
-      '/api/auth/users/user-123/change-password',
+      '/api/auth/users/testuser/change-password',
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({

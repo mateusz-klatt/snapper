@@ -159,7 +159,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
       {}
       <div className='md:hidden space-y-3'>
         {users.map(user => (
-          <div key={user.id} className='bg-alpine-50 border border-dark-600 rounded-lg p-3'>
+          <div key={user.username} className='bg-alpine-50 border border-dark-600 rounded-lg p-3'>
             <div className='flex items-start justify-between gap-2'>
               <div className='min-w-0'>
                 <div className='text-sm font-medium text-alpine-900'>{user.username}</div>
@@ -233,7 +233,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
             </thead>
             <tbody className='bg-alpine-50 divide-y divide-dark-600'>
               {users.map(user => (
-                <tr key={user.id} className='hover:bg-dark-700'>
+                <tr key={user.username} className='hover:bg-dark-700'>
                   <td className='px-3 py-4 whitespace-nowrap'>
                     <div>
                       <div className='text-sm font-medium text-alpine-900'>{user.username}</div>
@@ -309,7 +309,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
         confirmText='Deactivate'
         variant='danger'
         onConfirm={() => {
-          deleteUserMutation.mutate((userToDelete as UserProfile).id)
+          deleteUserMutation.mutate((userToDelete as UserProfile).username)
           setUserToDelete(null)
         }}
         onCancel={() => setUserToDelete(null)}

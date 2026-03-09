@@ -93,7 +93,6 @@ describe('UserForm', () => {
   })
   it('shows edit mode with existing user', () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -176,7 +175,6 @@ describe('UserForm', () => {
   })
   it('updates user successfully', async () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -193,7 +191,7 @@ describe('UserForm', () => {
 
     await userEvent.click(submitButton)
     await waitFor(() => {
-      expect(api).toHaveBeenCalledWith('/auth/users/1', {
+      expect(api).toHaveBeenCalledWith('/auth/users/testuser', {
         method: 'PUT',
         body: expect.stringContaining('updated@example.com'),
       })
@@ -203,7 +201,6 @@ describe('UserForm', () => {
   })
   it('shows reset password checkbox in edit mode', () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -216,7 +213,6 @@ describe('UserForm', () => {
   })
   it('resets user password successfully', async () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -236,7 +232,7 @@ describe('UserForm', () => {
 
     await userEvent.click(submitButton)
     await waitFor(() => {
-      expect(api).toHaveBeenCalledWith('/auth/users/1/admin-reset-password', {
+      expect(api).toHaveBeenCalledWith('/auth/users/testuser/admin-reset-password', {
         method: 'POST',
         body: expect.stringContaining('newpassword123'),
       })
@@ -261,7 +257,6 @@ describe('UserForm', () => {
   })
   it('renders with correct initial state for existing user', async () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'existing',
       email: 'existing@test.com',
       role: 'viewer',
@@ -350,7 +345,6 @@ describe('UserForm', () => {
   })
   it('validates password length when resetting in edit mode', async () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -375,7 +369,6 @@ describe('UserForm', () => {
   })
   it('validates password required when reset checked but empty', async () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -401,7 +394,6 @@ describe('UserForm', () => {
       statusText: 'Internal Server Error',
     } as Response)
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -428,7 +420,6 @@ describe('UserForm', () => {
       statusText: 'Internal Server Error',
     } as Response)
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -448,46 +439,6 @@ describe('UserForm', () => {
       expect(toast.error).toHaveBeenCalled()
     })
   })
-  it('shows error when editing user without id', async () => {
-    const existingUser = {
-      id: '',
-      username: 'testuser',
-      email: 'test@example.com',
-      role: 'viewer' as const,
-      is_active: true,
-      created_at: '2024-01-01T00:00:00Z',
-    }
-
-    renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
-    const submitButton = screen.getByRole('button', { name: /save/i })
-
-    await userEvent.click(submitButton)
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith('User ID is required for update')
-    })
-  })
-  it('shows error when resetting password without id', async () => {
-    const existingUser = {
-      id: '',
-      username: 'testuser',
-      email: 'test@example.com',
-      role: 'viewer' as const,
-      is_active: true,
-      created_at: '2024-01-01T00:00:00Z',
-    }
-
-    renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
-    const resetCheckbox = screen.getByLabelText(/reset user password/i)
-
-    await userEvent.click(resetCheckbox)
-    await userEvent.type(screen.getByLabelText(/new password/i), 'newpassword123')
-    const submitButton = screen.getByRole('button', { name: /save/i })
-
-    await userEvent.click(submitButton)
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith('User ID is required for password reset')
-    })
-  })
   it('uses fallback toast message on create error without message', async () => {
     vi.mocked(api).mockRejectedValue(new Error(''))
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} />)
@@ -504,7 +455,6 @@ describe('UserForm', () => {
   it('uses fallback toast message on update error without message', async () => {
     vi.mocked(api).mockRejectedValue(new Error(''))
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -523,7 +473,6 @@ describe('UserForm', () => {
   it('uses fallback toast message on reset error without message', async () => {
     vi.mocked(api).mockRejectedValue(new Error(''))
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -545,7 +494,6 @@ describe('UserForm', () => {
   })
   it('toggles password visibility in reset password mode', async () => {
     const existingUser: UserProfile = {
-      id: '1',
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
@@ -572,7 +520,6 @@ describe('UserForm', () => {
   })
   it('handles user with null email', () => {
     const existingUser: UserProfile = {
-      id: '2',
       username: 'nullemail',
       email: null,
       role: 'viewer',

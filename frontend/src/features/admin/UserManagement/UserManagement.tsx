@@ -41,7 +41,7 @@ const UserManagement: React.FC = () => {
     <div className='space-y-6'>
       <UserList onCreateUser={handleCreateUser} onEditUser={handleEditUser} />
       <UserForm
-        key={editingUser?.id ?? 'new'}
+        key={editingUser?.username ?? 'new'}
         user={editingUser}
         open={showUserForm}
         onClose={handleCloseForm}

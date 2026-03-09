@@ -193,7 +193,7 @@ async def refresh_token(
     )
     ws_token_service = get_ws_token_service()
     session_id = token_data.sid
-    ws_token_result = ws_token_service.generate(user_id=user.id, session_id=session_id)
+    ws_token_result = ws_token_service.generate(user_id=user.username, session_id=session_id)
     return RefreshResponse(
         message="session refreshed",
         ws_token=ws_token_result.token,
@@ -416,7 +416,7 @@ async def delete_user(
         HTTPException: If user not found or trying to delete self.
     """
     user_service = get_user_service()
-    if user_id == current_user.id:
+    if user_id == current_user.username:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete your own account"
         )
@@ -454,7 +454,7 @@ async def change_user_password(
         HTTPException: If forbidden or invalid current password.
     """
     user_service = get_user_service()
-    if user_id != current_user.id:
+    if user_id != current_user.username:
         user_permissions = ROLE_PERMISSIONS.get(current_user.role, set())
         if Permission.MANAGE_USERS not in user_permissions:
             raise HTTPException(
@@ -501,7 +501,7 @@ async def admin_reset_user_password(
     user_service = get_user_service()
     try:
         async with user_service.repository.session() as session:
-            stmt = select(User).where(User.id == user_id)
+            stmt = select(User).where(User.username == user_id)
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:

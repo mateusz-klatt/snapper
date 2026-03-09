@@ -23,11 +23,11 @@ import {
   shouldThrottle,
   buildMarketTopic,
   MARKET_TOPIC_PREFIX,
-  ORDERS_TOPIC_PREFIX,
-  EXECUTIONS_TOPIC_PREFIX,
+  ORDERS_COMMANDS_PREFIX,
+  ORDERS_EVENTS_PREFIX,
   SIGNALS_TOPIC_PREFIX,
   HEARTBEATS_TOPIC_PREFIX,
-  getAllTopics,
+  getSubscriptionTopics,
 } from './topics'
 import {
   calculateReconnectDelay,
@@ -65,6 +65,9 @@ class WebSocketClient {
   private readonly pendingMessages = new Map<string, WebSocketMessages>()
   private readonly lastMessageTime = new Map<string, number>()
   private pingSentAt: number | null = null
+  private pendingSubscribes = new Set<string>()
+  private pendingUnsubscribes = new Set<string>()
+  private subscriptionFlushScheduled = false
   constructor(options: WebSocketClientOptions = {}) {
     this.secure = options.secure || false
     this.url = options.url || buildWebSocketUrl()
@@ -148,8 +151,8 @@ class WebSocketClient {
   }
   private onConnectionReady(): void {
     this.isAuthenticated = true
-    this.notifyConnectionHandlers(true)
     this.resubscribeTopics()
+    this.notifyConnectionHandlers(true)
     this.startHeartbeat()
   }
   private handleMessage(event: MessageEvent): void {
@@ -505,18 +508,53 @@ class WebSocketClient {
     }
   }
   subscribe(topics: string[]): void {
-    topics.forEach(topic => this.subscribedTopics.add(topic))
+    topics.forEach(topic => {
+      this.subscribedTopics.add(topic)
+      this.pendingSubscribes.add(topic)
+      this.pendingUnsubscribes.delete(topic)
+    })
+    this.scheduleSubscriptionFlush()
+  }
+  unsubscribe(topics: string[]): void {
+    topics.forEach(topic => {
+      this.subscribedTopics.delete(topic)
+      this.pendingUnsubscribes.add(topic)
+      this.pendingSubscribes.delete(topic)
+    })
+    this.scheduleSubscriptionFlush()
+  }
+  private scheduleSubscriptionFlush(): void {
+    if (this.subscriptionFlushScheduled) {
+      return
+    }
 
-    if (this.isConnected()) {
+    this.subscriptionFlushScheduled = true
+    queueMicrotask(() => {
+      this.subscriptionFlushScheduled = false
+      this.flushSubscriptionChanges()
+    })
+  }
+  private flushSubscriptionChanges(): void {
+    if (!this.isConnected()) {
+      this.pendingSubscribes.clear()
+      this.pendingUnsubscribes.clear()
+
+      return
+    }
+
+    if (this.pendingSubscribes.size > 0) {
+      const topics = Array.from(this.pendingSubscribes)
+
+      this.pendingSubscribes.clear()
       const message: WSSubscribeRequest = { type: 'subscribe', topics }
 
       this.send(message)
     }
-  }
-  unsubscribe(topics: string[]): void {
-    topics.forEach(topic => this.subscribedTopics.delete(topic))
 
-    if (this.isConnected()) {
+    if (this.pendingUnsubscribes.size > 0) {
+      const topics = Array.from(this.pendingUnsubscribes)
+
+      this.pendingUnsubscribes.clear()
       const message: WSUnsubscribeRequest = { type: 'unsubscribe', topics }
 
       this.send(message)
@@ -580,10 +618,10 @@ class WebSocketClient {
     }
   }
   subscribeToOrders(): void {
-    this.subscribe([ORDERS_TOPIC_PREFIX])
+    this.subscribe([ORDERS_COMMANDS_PREFIX, ORDERS_EVENTS_PREFIX])
   }
   subscribeToExecutions(): void {
-    this.subscribe([EXECUTIONS_TOPIC_PREFIX])
+    this.subscribe([ORDERS_EVENTS_PREFIX])
   }
   subscribeToSignals(): void {
     this.subscribe([SIGNALS_TOPIC_PREFIX])
@@ -592,7 +630,7 @@ class WebSocketClient {
     this.subscribe([HEARTBEATS_TOPIC_PREFIX])
   }
   subscribeToAll(): void {
-    this.subscribe(getAllTopics())
+    this.subscribe(getSubscriptionTopics())
   }
   async getAvailableTopics(): Promise<string[]> {
     return new Promise((resolve, reject) => {

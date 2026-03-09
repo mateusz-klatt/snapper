@@ -114,7 +114,6 @@ class WebSocketAuthManager:
         if not token_data:
             return None
         user = UserProfile(
-            id=token_data.sub,
             username=token_data.username,
             role=token_data.role,
         )

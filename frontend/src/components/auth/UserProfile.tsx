@@ -56,7 +56,7 @@ const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) =
     setIsChangingPassword(true)
 
     try {
-      await apiClient.changePassword(user.id, currentPassword, newPassword)
+      await apiClient.changePassword(user.username, currentPassword, newPassword)
       setPasswordSuccess('Password changed successfully')
       resetPasswordForm()
       setTimeout(() => {
@@ -131,7 +131,6 @@ const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) =
               </div>
               <div>
                 <div className='font-medium text-alpine-900'>{user.username}</div>
-                <div className='text-sm text-muted-500'>ID: {user.id}</div>
                 <div
                   className={`text-xs px-2 py-0.5 rounded-full inline-block mt-1 ${getRoleColor(user.role)}`}
                 >

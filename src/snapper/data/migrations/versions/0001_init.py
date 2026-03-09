@@ -332,7 +332,7 @@ def upgrade() -> None:
     op.create_index("ix_signal_events_timestamp", "signal_events", ["timestamp"])
     op.create_table(
         "users",
-        sa.Column("id", sa.String(255), nullable=False),
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("username", sa.String(64), nullable=False),
         sa.Column("email", sa.String(255), nullable=True),
         sa.Column("password_hash", sa.String(255), nullable=False),

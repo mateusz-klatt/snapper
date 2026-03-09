@@ -81,7 +81,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'admin',
               email: 'admin@example.com',
               role: 'admin',
@@ -104,7 +103,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'testuser',
               email: 'test@example.com',
               role: 'admin',
@@ -127,7 +125,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'inactive_user',
               email: 'inactive@example.com',
               role: 'viewer',
@@ -150,7 +147,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'testuser',
               email: 'test@example.com',
               role: 'viewer',
@@ -197,7 +193,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'testuser',
               email: 'test@example.com',
               role: 'viewer',
@@ -221,7 +216,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: 'cancel-delete',
               username: 'canceluser',
               email: 'cancel@example.com',
               role: 'viewer',
@@ -259,7 +253,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: 'del-user',
               username: 'deleteuser',
               email: 'del@example.com',
               role: 'viewer',
@@ -293,7 +286,7 @@ describe('UserList', () => {
     })
     await userEvent.click(screen.getByText('Deactivate'))
     await waitFor(() => {
-      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/del-user', { method: 'DELETE' })
+      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/deleteuser', { method: 'DELETE' })
     })
   })
   it('handles delete API error', async () => {
@@ -304,7 +297,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: 'fail-del',
               username: 'failuser',
               email: 'fail@example.com',
               role: 'viewer',
@@ -338,7 +330,7 @@ describe('UserList', () => {
     })
     await userEvent.click(screen.getByText('Deactivate'))
     await waitFor(() => {
-      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/fail-del', { method: 'DELETE' })
+      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/failuser', { method: 'DELETE' })
     })
   })
   it('falls back to empty users list when response has no users field', async () => {
@@ -359,7 +351,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: 'empty-error',
               username: 'emptyerror',
               email: 'empty@example.com',
               role: 'viewer',
@@ -389,7 +380,7 @@ describe('UserList', () => {
     })
     await userEvent.click(screen.getByText('Deactivate'))
     await waitFor(() => {
-      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/empty-error', { method: 'DELETE' })
+      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/emptyerror', { method: 'DELETE' })
     })
   })
   it('displays operator role badge', async () => {
@@ -399,7 +390,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'operator_user',
               email: 'operator@example.com',
               role: 'operator',
@@ -422,7 +412,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'viewer_user',
               email: 'viewer@example.com',
               role: 'viewer',
@@ -445,7 +434,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'unknown_user',
               email: 'unknown@example.com',
               role: 'custom_role',
@@ -468,7 +456,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'dateuser',
               email: 'date@example.com',
               role: 'viewer',
@@ -506,7 +493,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'newuser',
               email: 'new@example.com',
               role: 'viewer',
@@ -550,7 +536,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'user1',
               email: 'user1@example.com',
               role: 'viewer',
@@ -558,7 +543,6 @@ describe('UserList', () => {
               created_at: '2024-01-01T00:00:00Z',
             },
             {
-              id: '2',
               username: 'user2',
               email: 'user2@example.com',
               role: 'admin',
@@ -581,7 +565,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'editableuser',
               email: 'edit@example.com',
               role: 'viewer',
@@ -616,7 +599,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '3',
               username: 'nocreated',
               email: 'nocreated@test.com',
               role: 'viewer',
@@ -640,7 +622,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'alice',
               email: 'alice@example.com',
               role: 'admin',
@@ -648,7 +629,6 @@ describe('UserList', () => {
               created_at: '2024-01-01T00:00:00Z',
             },
             {
-              id: '2',
               username: 'bob',
               email: 'bob@example.com',
               role: 'viewer',
@@ -679,7 +659,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'alice',
               email: 'alice@example.com',
               role: 'admin',
@@ -708,7 +687,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '1',
               username: 'carduser',
               email: 'card@example.com',
               role: 'viewer',
@@ -732,9 +710,7 @@ describe('UserList', () => {
       await userEvent.click(editButton)
     }
 
-    expect(mockOnEditUser).toHaveBeenCalledWith(
-      expect.objectContaining({ id: '1', username: 'carduser' })
-    )
+    expect(mockOnEditUser).toHaveBeenCalledWith(expect.objectContaining({ username: 'carduser' }))
   })
   it('opens deactivate dialog from mobile card view', async () => {
     vi.mocked(api).mockResolvedValue({
@@ -743,7 +719,6 @@ describe('UserList', () => {
         Promise.resolve({
           users: [
             {
-              id: '2',
               username: 'carddelete',
               email: 'carddelete@example.com',
               role: 'operator',

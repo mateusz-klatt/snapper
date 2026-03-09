@@ -72,7 +72,7 @@ describe('auth store', () => {
   })
   it('useAuth exposes store selectors', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'viewer', role: 'viewer', is_active: true },
+      user: { username: 'viewer', role: 'viewer', is_active: true },
       isAuthenticated: true,
       isLoading: false,
       error: null,
@@ -91,7 +91,7 @@ describe('auth store', () => {
   })
   it('hasRole returns true for user role', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+      user: { username: 'admin', role: 'admin', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -100,7 +100,7 @@ describe('auth store', () => {
   })
   it('hasRole supports role hierarchy - admin has operator role', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+      user: { username: 'admin', role: 'admin', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -110,7 +110,7 @@ describe('auth store', () => {
   })
   it('hasRole supports role hierarchy - operator has viewer role', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'operator', role: 'operator', is_active: true },
+      user: { username: 'operator', role: 'operator', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -125,7 +125,7 @@ describe('auth store', () => {
   })
   it('hasPermission returns true for admin with all permissions', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+      user: { username: 'admin', role: 'admin', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -136,7 +136,7 @@ describe('auth store', () => {
   })
   it('hasPermission checks operator permissions', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'operator', role: 'operator', is_active: true },
+      user: { username: 'operator', role: 'operator', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -147,7 +147,7 @@ describe('auth store', () => {
   })
   it('hasPermission checks viewer permissions', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'viewer', role: 'viewer', is_active: true },
+      user: { username: 'viewer', role: 'viewer', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -159,7 +159,6 @@ describe('auth store', () => {
   it('hasPermission falls back to empty permissions for unknown role', () => {
     useAuthStore.setState({
       user: {
-        id: '1',
         username: 'mystery',
         role: 'unknown' as unknown as 'viewer',
         is_active: true,
@@ -177,7 +176,7 @@ describe('auth store', () => {
   })
   it('canAccess checks admin resource access', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+      user: { username: 'admin', role: 'admin', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -188,7 +187,7 @@ describe('auth store', () => {
   })
   it('canAccess checks operator resource access', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'operator', role: 'operator', is_active: true },
+      user: { username: 'operator', role: 'operator', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -200,7 +199,7 @@ describe('auth store', () => {
   })
   it('canAccess checks viewer resource access', () => {
     useAuthStore.setState({
-      user: { id: '1', username: 'viewer', role: 'viewer', is_active: true },
+      user: { username: 'viewer', role: 'viewer', is_active: true },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -216,7 +215,7 @@ describe('auth store', () => {
   })
   describe('login', () => {
     it('successfully logs in user', async () => {
-      const mockUser = { id: '1', username: 'testuser', role: 'admin' as const, is_active: true }
+      const mockUser = { username: 'testuser', role: 'admin' as const, is_active: true }
 
       vi.mocked(apiClient.post).mockResolvedValueOnce({
         ok: true,
@@ -283,7 +282,7 @@ describe('auth store', () => {
               ok: true,
               json: () =>
                 Promise.resolve({
-                  user: { id: '1', username: 'test', role: 'admin', is_active: true },
+                  user: { username: 'test', role: 'admin', is_active: true },
                 }),
             } as Response)
           })
@@ -297,7 +296,7 @@ describe('auth store', () => {
   describe('logout', () => {
     beforeEach(() => {
       useAuthStore.setState({
-        user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+        user: { username: 'admin', role: 'admin', is_active: true },
         isAuthenticated: true,
         csrfToken: 'test-csrf',
       })
@@ -341,12 +340,12 @@ describe('auth store', () => {
   describe('refreshToken', () => {
     beforeEach(() => {
       useAuthStore.setState({
-        user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+        user: { username: 'admin', role: 'admin', is_active: true },
         isAuthenticated: true,
       })
     })
     it('successfully refreshes token', async () => {
-      const mockUser = { id: '1', username: 'admin', role: 'admin' as const, is_active: true }
+      const mockUser = { username: 'admin', role: 'admin' as const, is_active: true }
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
         ws_token: 'new-ws-token',
@@ -369,7 +368,7 @@ describe('auth store', () => {
       })
       vi.mocked(apiClient.get).mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ id: '1', username: 'admin', role: 'admin', is_active: true }),
+        json: () => Promise.resolve({ username: 'admin', role: 'admin', is_active: true }),
       } as Response)
       const state = useAuthStore.getState()
 
@@ -390,7 +389,7 @@ describe('auth store', () => {
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
         csrf_token: 'csrf',
-        user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+        user: { username: 'admin', role: 'admin', is_active: true },
       })
       const state = useAuthStore.getState()
 
@@ -403,7 +402,7 @@ describe('auth store', () => {
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
         csrf_token: 'csrf',
         ws_token: 'token',
-        user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+        user: { username: 'admin', role: 'admin', is_active: true },
       })
       const state = useAuthStore.getState()
 
@@ -411,7 +410,7 @@ describe('auth store', () => {
       expect(storeWsTicket).toHaveBeenCalledWith(null)
     })
     it('sets null csrf token when refresh response omits it', async () => {
-      const mockUser = { id: '1', username: 'admin', role: 'admin' as const, is_active: true }
+      const mockUser = { username: 'admin', role: 'admin' as const, is_active: true }
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
         ws_token: 'token',
@@ -471,7 +470,7 @@ describe('auth store', () => {
   describe('silentLogout', () => {
     beforeEach(() => {
       useAuthStore.setState({
-        user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+        user: { username: 'admin', role: 'admin', is_active: true },
         isAuthenticated: true,
         csrfToken: 'test-csrf',
       })
@@ -505,7 +504,7 @@ describe('auth store', () => {
   describe('canAccess with unknown resource', () => {
     it('returns false for unknown resource', () => {
       useAuthStore.setState({
-        user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+        user: { username: 'admin', role: 'admin', is_active: true },
         isAuthenticated: true,
       })
       const state = useAuthStore.getState()
@@ -528,7 +527,7 @@ describe('auth store', () => {
         status: 200,
       } as Response)
       useAuthStore.setState({
-        user: { id: '1', username: 'admin', role: 'admin', is_active: true },
+        user: { username: 'admin', role: 'admin', is_active: true },
         isAuthenticated: true,
       })
       const callback = (window as Window & { authLogoutCallback?: () => void }).authLogoutCallback

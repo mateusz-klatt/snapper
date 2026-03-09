@@ -109,7 +109,7 @@ class TokenManager:
         session_identifier = session_id or str(uuid.uuid4())
         access_token_expires = timedelta(minutes=self.settings.auth_access_token_expire_minutes)
         access_token_payload = TokenClaims(
-            sub=user.id,
+            sub=user.username,
             username=user.username,
             role=user.role,
             permissions=[p.value for p in ROLE_PERMISSIONS[user.role]],
@@ -125,7 +125,7 @@ class TokenManager:
         )
         refresh_token_expires = timedelta(days=refresh_token_expires_days)
         refresh_token_payload = TokenClaims(
-            sub=user.id,
+            sub=user.username,
             username=user.username,
             role=user.role,
             permissions=[],
@@ -237,7 +237,6 @@ class TokenManager:
             return None
         self.blacklist_token(token_data.jti)
         user = UserProfile(
-            id=token_data.sub,
             username=token_data.username,
             role=token_data.role,
         )

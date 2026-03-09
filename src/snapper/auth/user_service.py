@@ -77,7 +77,6 @@ class UserService:
             UserProfile schema instance.
         """
         return UserProfile(
-            id=db_user.id,
             username=db_user.username,
             email=db_user.email,
             role=UserRole(db_user.role),
@@ -120,7 +119,7 @@ class UserService:
             UserProfile if found and active, None otherwise.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.id == user_id, User.is_active)
+            stmt = select(User).where(User.username == user_id, User.is_active)
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -190,7 +189,6 @@ class UserService:
                 raise ValueError(f"User with username '{username}' already exists")
             password_hash = self.hash_password(password)
             db_user = User(
-                id=username,
                 username=username,
                 email=email,
                 password_hash=password_hash,
@@ -224,7 +222,7 @@ class UserService:
             Updated UserProfile or None if not found.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.id == user_id)
+            stmt = select(User).where(User.username == user_id)
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -249,7 +247,7 @@ class UserService:
             True if deleted, False if not found.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.id == user_id)
+            stmt = select(User).where(User.username == user_id)
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -272,7 +270,7 @@ class UserService:
             True if changed, False if user not found or wrong password.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.id == user_id, User.is_active)
+            stmt = select(User).where(User.username == user_id, User.is_active)
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:

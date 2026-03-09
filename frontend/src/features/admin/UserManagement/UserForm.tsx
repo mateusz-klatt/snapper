@@ -79,11 +79,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
   })
   const updateUserMutation = useMutation({
     mutationFn: async (data: UpdateUserRequest) => {
-      if (!user?.id) {
-        throw new Error('User ID is required for update')
-      }
-
-      const response = await api(`/auth/users/${user.id}`, {
+      const response = await api(`/auth/users/${formData.username}`, {
         method: 'PUT',
         body: JSON.stringify(data),
       })
@@ -105,11 +101,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
   })
   const adminResetPasswordMutation = useMutation({
     mutationFn: async (data: AdminResetPasswordRequest) => {
-      if (!user?.id) {
-        throw new Error('User ID is required for password reset')
-      }
-
-      const response = await api(`/auth/users/${user.id}/admin-reset-password`, {
+      const response = await api(`/auth/users/${formData.username}/admin-reset-password`, {
         method: 'POST',
         body: JSON.stringify(data),
       })

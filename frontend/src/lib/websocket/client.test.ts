@@ -33,12 +33,19 @@ vi.mock('./topics', () => ({
     ['candle', 'order_status', 'fill', 'position'].includes(type)
   ),
   buildMarketTopic: vi.fn((type: string, inst: string) => `market:${type}:${inst}`),
-  MARKET_TOPIC_PREFIX: 'market',
-  ORDERS_TOPIC_PREFIX: 'orders',
-  EXECUTIONS_TOPIC_PREFIX: 'executions',
-  SIGNALS_TOPIC_PREFIX: 'signals',
-  HEARTBEATS_TOPIC_PREFIX: 'heartbeats',
-  getAllTopics: vi.fn(() => ['market', 'orders', 'executions', 'signals', 'heartbeats']),
+  MARKET_TOPIC_PREFIX: 'market.',
+  ORDERS_COMMANDS_PREFIX: 'orders.commands.',
+  ORDERS_EVENTS_PREFIX: 'orders.events.',
+  SIGNALS_TOPIC_PREFIX: 'signals.',
+  HEARTBEATS_TOPIC_PREFIX: 'system.heartbeats.',
+  getSubscriptionTopics: vi.fn(() => [
+    'market.',
+    'orders.commands.',
+    'orders.events.',
+    'signals.',
+    'strategy.',
+    'system.heartbeats.',
+  ]),
 }))
 vi.mock('./reconnect', () => ({
   calculateReconnectDelay: vi.fn(() => 100),
@@ -306,6 +313,7 @@ describe('WebSocketClient', () => {
       client.connect()
       await vi.advanceTimersByTimeAsync(50)
       client.subscribe(['topic1', 'topic2'])
+      await Promise.resolve()
       expect((client as any).ws.send).toHaveBeenCalledWith(
         JSON.stringify({ type: 'subscribe', topics: ['topic1', 'topic2'] })
       )
@@ -329,15 +337,17 @@ describe('WebSocketClient', () => {
       isConnectedSpy.mockRestore()
       sendSpy.mockRestore()
     })
-    it('covers subscribe connection branch', () => {
+    it('covers subscribe connection branch', async () => {
       const sendSpy = vi.spyOn(client, 'send')
       const isConnectedSpy = vi.spyOn(client, 'isConnected')
 
-      isConnectedSpy.mockReturnValueOnce(false)
+      isConnectedSpy.mockReturnValue(false)
       client.subscribe(['topicA'])
+      await Promise.resolve()
       expect(sendSpy).not.toHaveBeenCalled()
-      isConnectedSpy.mockReturnValueOnce(true)
+      isConnectedSpy.mockReturnValue(true)
       client.subscribe(['topicB'])
+      await Promise.resolve()
       expect(sendSpy).toHaveBeenCalledWith({ type: 'subscribe', topics: ['topicB'] })
       isConnectedSpy.mockRestore()
       sendSpy.mockRestore()
@@ -348,8 +358,10 @@ describe('WebSocketClient', () => {
       client.connect()
       await vi.advanceTimersByTimeAsync(50)
       client.subscribe(['topic1', 'topic2'])
+      await Promise.resolve()
       ;(client as any).ws.send.mockClear()
       client.unsubscribe(['topic1'])
+      await Promise.resolve()
       expect((client as any).ws.send).toHaveBeenCalledWith(
         JSON.stringify({ type: 'unsubscribe', topics: ['topic1'] })
       )
@@ -506,7 +518,7 @@ describe('WebSocketClient', () => {
     })
     it('subscribeToCandles without instrument', () => {
       client.subscribeToCandles()
-      expect(client.getSubscribedTopics()).toContain('market')
+      expect(client.getSubscribedTopics()).toContain('market.')
     })
     it('subscribeToTicks with instrument', () => {
       client.subscribeToTicks('ETH-USD')
@@ -514,28 +526,30 @@ describe('WebSocketClient', () => {
     })
     it('subscribeToTicks without instrument', () => {
       client.subscribeToTicks()
-      expect(client.getSubscribedTopics()).toContain('market')
+      expect(client.getSubscribedTopics()).toContain('market.')
     })
     it('subscribeToOrders', () => {
       client.subscribeToOrders()
-      expect(client.getSubscribedTopics()).toContain('orders')
+      expect(client.getSubscribedTopics()).toContain('orders.commands.')
+      expect(client.getSubscribedTopics()).toContain('orders.events.')
     })
     it('subscribeToExecutions', () => {
       client.subscribeToExecutions()
-      expect(client.getSubscribedTopics()).toContain('executions')
+      expect(client.getSubscribedTopics()).toContain('orders.events.')
     })
     it('subscribeToSignals', () => {
       client.subscribeToSignals()
-      expect(client.getSubscribedTopics()).toContain('signals')
+      expect(client.getSubscribedTopics()).toContain('signals.')
     })
     it('subscribeToHeartbeats', () => {
       client.subscribeToHeartbeats()
-      expect(client.getSubscribedTopics()).toContain('heartbeats')
+      expect(client.getSubscribedTopics()).toContain('system.heartbeats.')
     })
     it('subscribeToAll', () => {
       client.subscribeToAll()
-      expect(client.getSubscribedTopics()).toContain('market')
-      expect(client.getSubscribedTopics()).toContain('orders')
+      expect(client.getSubscribedTopics()).toContain('market.')
+      expect(client.getSubscribedTopics()).toContain('orders.commands.')
+      expect(client.getSubscribedTopics()).toContain('orders.events.')
     })
   })
   describe('message handling', () => {
@@ -1992,7 +2006,7 @@ describe('WebSocketClient secure mode', () => {
     consoleSpy.mockRestore()
     localClient.disconnect()
   })
-  it('sends unsubscribe message when connected', () => {
+  it('sends unsubscribe message when connected', async () => {
     const localClient = new WebSocketClient()
 
     localClient.connect()
@@ -2001,6 +2015,7 @@ describe('WebSocketClient secure mode', () => {
     mockWs.readyState = WebSocket.OPEN
     localClient.subscribe(['topic1'])
     localClient.unsubscribe(['topic1'])
+    await Promise.resolve()
     expect(mockWs.send).toHaveBeenCalledWith(
       JSON.stringify({ type: 'unsubscribe', topics: ['topic1'] })
     )

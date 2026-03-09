@@ -193,11 +193,10 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
         password_hash = _hash_password(user.password)
         conn.execute(
             text(
-                "INSERT INTO users (id, username, email, password_hash, role, is_active, created_at)"
-                " VALUES (:id, :username, :email, :password_hash, :role, 1, :created_at)"
+                "INSERT INTO users (username, email, password_hash, role, is_active, created_at)"
+                " VALUES (:username, :email, :password_hash, :role, 1, :created_at)"
             ),
             {
-                "id": user.username,
                 "username": user.username,
                 "email": user.email,
                 "password_hash": password_hash,
