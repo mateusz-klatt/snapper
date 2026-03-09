@@ -3,7 +3,7 @@ import { getCookie } from './utils'
 import { storeWsTicket } from './wsTicketCache'
 import { validateResponse } from './schemas/api'
 import {
-  CandleSnapshotSchema,
+  CandleDataSchema,
   OrderStatusSchema,
   ExecutionRecordSchema,
   PositionSnapshotSchema,
@@ -25,7 +25,7 @@ import {
 } from './schemas/api.generated.zod'
 import type {
   SystemStatus,
-  CandleSnapshot,
+  CandleData,
   OrderStatus,
   ExecutionRecord,
   PositionSnapshot,
@@ -289,7 +289,7 @@ class APIClient {
     exchange: string,
     timeframe: string = '1m',
     limit: number = 100
-  ): Promise<CandleSnapshot[]> {
+  ): Promise<CandleData[]> {
     const params = new URLSearchParams({ instrument, exchange, timeframe, limit: String(limit) })
     const response = await this.get(`/api/candles?${params}`)
 
@@ -303,7 +303,7 @@ class APIClient {
 
     const data = await response.json()
 
-    return validateResponse(data, z.array(CandleSnapshotSchema), '/candles')
+    return validateResponse(data, z.array(CandleDataSchema), '/candles')
   }
   async getOrders(
     symbol?: string,

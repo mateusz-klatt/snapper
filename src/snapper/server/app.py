@@ -78,7 +78,6 @@ from snapper.api.schemas.health import ZmqBridgeStats
 from snapper.api.schemas.health import ZmqComponents
 from snapper.api.schemas.health import ZmqConfig
 from snapper.api.schemas.health import ZmqHealthResponse
-from snapper.api.schemas.market_data import CandleSnapshot
 from snapper.api.schemas.orders import OrderStatus
 from snapper.api.schemas.portfolio import PositionSnapshot
 from snapper.api.schemas.process import ProcessStatus
@@ -115,6 +114,7 @@ from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
+from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.topics.schemas import get_all_topic_names
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.process_routes import router as process_router
@@ -418,7 +418,7 @@ def _create_candles_signals_router() -> APIRouter:
 
     @router.get(
         "/candles",
-        response_model=list[CandleSnapshot],
+        response_model=list[CandleData],
         responses={500: {"description": "Internal server error"}},
     )
     async def get_candles(
@@ -428,7 +428,7 @@ def _create_candles_signals_router() -> APIRouter:
         exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
         timeframe: Annotated[str, Query(description="Timeframe")],
         limit: Annotated[int, Query(le=1000, description="Number of candles to return")] = 100,
-    ) -> list[CandleSnapshot] | Response:
+    ) -> list[CandleData] | Response:
         settings = get_settings()
         repo = get_repository(settings.db_url)
         try:
@@ -452,7 +452,7 @@ def _create_candles_signals_router() -> APIRouter:
                 )
                 candles = candles_query.scalars().all()
                 return [
-                    CandleSnapshot(
+                    CandleData(
                         instrument=instrument,
                         exchange=exchange,
                         timeframe=candle.timeframe,

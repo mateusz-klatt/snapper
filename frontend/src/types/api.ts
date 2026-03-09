@@ -1,7 +1,7 @@
 export type { Components, Operations, Paths } from './api.generated'
 import type { Components } from './api.generated'
 
-export type CandleSnapshot = Components['schemas']['CandleSnapshot']
+export type CandleData = Components['schemas']['CandleData']
 export type OrderStatus = Components['schemas']['OrderStatus']
 export type ExecutionRecord = Components['schemas']['ExecutionRecord']
 export type PositionSnapshot = Components['schemas']['PositionSnapshot']

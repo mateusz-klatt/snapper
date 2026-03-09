@@ -3,7 +3,7 @@ import type {
   ExecutionRecord,
   TradingSignal,
   PositionSnapshot,
-  CandleSnapshot,
+  CandleData,
 } from '../types/api'
 import type {
   OrderStatusEnvelope,
@@ -172,7 +172,7 @@ export function positionFromAPI(api: PositionSnapshot): Position {
   }
 }
 
-export function candleFromAPI(api: CandleSnapshot): Candle {
+export function candleFromAPI(api: CandleData): Candle {
   return {
     instrument: api.instrument,
     exchange: api.exchange,
@@ -271,7 +271,7 @@ export function positionsFromAPI(apis: PositionSnapshot[]): Position[] {
   return apis.map(positionFromAPI)
 }
 
-export function candlesFromAPI(apis: CandleSnapshot[]): Candle[] {
+export function candlesFromAPI(apis: CandleData[]): Candle[] {
   return apis.map(candleFromAPI)
 }
 

@@ -15,7 +15,7 @@ enum AvailableProcessRole: String, Codable, Sendable {
     case backtest
 }
 
-enum CandleSnapshotExchange: String, Codable, Sendable {
+enum CandleDataExchange: String, Codable, Sendable {
     case kraken
     case zonda
     case walutomat
@@ -218,7 +218,7 @@ struct AvailableProcessesResponse: Codable, Sendable {
     let count: Int
 }
 
-struct CandleSnapshot: Codable, Sendable {
+struct CandleData: Codable, Sendable {
     let instrument: String
     let exchange: String
     let timeframe: String

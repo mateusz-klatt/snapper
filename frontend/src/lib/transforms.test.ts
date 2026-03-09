@@ -28,7 +28,7 @@ import type {
   ExecutionRecord,
   TradingSignal,
   PositionSnapshot,
-  CandleSnapshot,
+  CandleData,
 } from '../types/api'
 import type {
   OrderStatusEnvelope,
@@ -325,7 +325,7 @@ describe('Position Transformers', () => {
 })
 describe('Candle Transformers', () => {
   it('transforms REST API candle to canonical entity', () => {
-    const apiCandle: CandleSnapshot = {
+    const apiCandle: CandleData = {
       instrument: 'BTC/USD',
       timeframe: '1h',
       open_at: '2026-01-15T10:00:00Z',
@@ -661,7 +661,7 @@ describe('Batch Transformers', () => {
     expect(result[0].averagePrice).toBe(48000)
   })
   it('transforms array of candles', () => {
-    const apiCandles: CandleSnapshot[] = [
+    const apiCandles: CandleData[] = [
       {
         instrument: 'BTC/USD',
         timeframe: '1h',

@@ -15,7 +15,7 @@ import {
   isHeartbeat,
 } from '../types/ws'
 import type { BarEnvelope } from '../types/ws'
-import type { CandleSnapshot } from '../types/api'
+import type { CandleData } from '../types/api'
 import { ProcessStatus } from '../types/ui'
 import { orderFromWS, executionFromWS, signalFromWS } from '../lib/transforms'
 
@@ -177,7 +177,7 @@ export class WSDispatcher {
   }
   private mergeCandleIntoCache(bar: BarEnvelope): void {
     const queryKey = ['candles', bar.instrument, bar.exchange, bar.timeframe]
-    const existing = this.queryClient.getQueryData<CandleSnapshot[]>(queryKey)
+    const existing = this.queryClient.getQueryData<CandleData[]>(queryKey)
 
     if (!existing) {
       const bufferKey = `${bar.instrument}:${bar.exchange}:${bar.timeframe}`
@@ -190,7 +190,7 @@ export class WSDispatcher {
       return
     }
 
-    const incoming: CandleSnapshot = {
+    const incoming: CandleData = {
       instrument: bar.instrument,
       exchange: bar.exchange,
       timeframe: bar.timeframe,
@@ -212,13 +212,13 @@ export class WSDispatcher {
       const updated = [...existing]
 
       updated[updated.length - 1] = incoming
-      this.queryClient.setQueryData<CandleSnapshot[]>(queryKey, updated)
+      this.queryClient.setQueryData<CandleData[]>(queryKey, updated)
     } else if (incomingTime > lastTime) {
       const appended = [...existing, incoming]
       const trimmed =
         appended.length > this.maxCandles ? appended.slice(-this.maxCandles) : appended
 
-      this.queryClient.setQueryData<CandleSnapshot[]>(queryKey, trimmed)
+      this.queryClient.setQueryData<CandleData[]>(queryKey, trimmed)
     }
   }
   private handleTickMessage(message: WebSocketMessages): void {

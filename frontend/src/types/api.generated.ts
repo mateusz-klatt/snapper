@@ -873,14 +873,26 @@ export type Components = {
             count: number;
         };
         /**
-         * CandleSnapshot
-         * @description OHLCV candle snapshot response schema.
+         * CandleData
+         * @description OHLCV candlestick bar data for technical analysis.
          *
-         *     Inherits all candle fields from CandleData (instrument, exchange,
-         *     timeframe, open_at, OHLCV, vwap, trades). The StrictApiSchema
-         *     mixin adds strict validation for REST responses.
+         *     Represents aggregated price action over a specific timeframe.
+         *     Used by strategies for pattern recognition and indicator calculation.
+         *
+         *     Attributes:
+         *         instrument: Trading pair symbol (e.g., 'BTC-USD').
+         *         exchange: Source exchange producing this candle data.
+         *         timeframe: Bar duration (e.g., '1m', '1h', '1d').
+         *         open_at: Exchange-provided candle interval start time.
+         *         open: Opening price of the bar.
+         *         high: Highest price during the bar.
+         *         low: Lowest price during the bar.
+         *         close: Closing price of the bar.
+         *         volume: Total traded volume during the bar.
+         *         vwap: Volume-weighted average price (optional).
+         *         trades: Number of trades in the bar (optional).
          */
-        CandleSnapshot: {
+        CandleData: {
             /** Instrument */
             instrument: string;
             /**
@@ -3253,7 +3265,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["CandleSnapshot"][];
+                    "application/json": Components["schemas"]["CandleData"][];
                 };
             };
             /** @description Validation Error */

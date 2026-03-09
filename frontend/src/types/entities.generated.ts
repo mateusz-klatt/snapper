@@ -233,24 +233,6 @@ export interface Trade {
 }
 
 /**
- * Canonical Candle entity.
- * From REST API CandleSnapshot.
- */
-export interface Candle {
-  instrument: string
-  exchange: Exchange
-  timeframe: string
-  openAt: Date
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
-  vwap?: number | null
-  trades?: number | null
-}
-
-/**
  * Canonical Position entity.
  * From REST API PositionSnapshot.
  */

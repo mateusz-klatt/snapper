@@ -24,7 +24,7 @@ export const AvailableProcessSchema = z
   })
   .strict()
 
-export const CandleSnapshotSchema = z
+export const CandleDataSchema = z
   .object({
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
@@ -534,7 +534,7 @@ export const UserListResponseSchema = z
 // Type exports
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
-export type CandleSnapshot = z.infer<typeof CandleSnapshotSchema>
+export type CandleData = z.infer<typeof CandleDataSchema>
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
 export type ConnectionStatsSchema = z.infer<typeof ConnectionStatsSchemaSchema>
