@@ -447,7 +447,7 @@ def _create_candles_signals_router() -> APIRouter:
                 candles_query = await session.execute(
                     select(Candle)
                     .where(Candle.instrument_id == inst.id, Candle.timeframe == timeframe)
-                    .order_by(desc(Candle.timestamp))
+                    .order_by(desc(Candle.open_at))
                     .limit(limit)
                 )
                 candles = candles_query.scalars().all()
@@ -456,7 +456,7 @@ def _create_candles_signals_router() -> APIRouter:
                         instrument=instrument,
                         exchange=exchange,
                         timeframe=candle.timeframe,
-                        open_at=candle.timestamp,
+                        open_at=candle.open_at,
                         open=candle.open,
                         high=candle.high,
                         low=candle.low,

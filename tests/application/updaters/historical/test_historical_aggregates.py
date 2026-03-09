@@ -2148,6 +2148,7 @@ def test_build_candle_rows_converts_values_decimal() -> None:
     assert rows == [
         {
             "instrument_id": 7,
+            "open_at": candle.timestamp,
             "timestamp": candle.timestamp,
             "timeframe": "1m",
             "open": 1.0,

@@ -462,7 +462,7 @@ class PaperExchangeClient(ExchangeClientBase):
         )
         ohlcv_list = [
             OhlcvSnapshot(
-                timestamp=c["timestamp"].timestamp(),
+                timestamp=c["open_at"].timestamp(),
                 open=c["open"],
                 high=c["high"],
                 low=c["low"],
@@ -603,7 +603,7 @@ class PaperExchangeClient(ExchangeClientBase):
                 replay_candles.append(
                     CandleUpdate(
                         symbol=symbol,
-                        interval_begin=candle_dict["timestamp"],
+                        interval_begin=candle_dict["open_at"],
                         interval=interval_minutes,
                         open=candle_dict["open"],
                         high=candle_dict["high"],

@@ -668,7 +668,7 @@ class _ReplayRepo:
         ]
         self.candles = [
             {
-                "timestamp": now,
+                "open_at": now,
                 "open": 1.0,
                 "high": 2.0,
                 "low": 0.5,
@@ -887,9 +887,9 @@ async def test_get_ohlcv_limits_results() -> None:
     repo = _ReplayRepo()
     now = datetime.now(tz=UTC)
     repo.candles = [
-        {"timestamp": now, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 100},
-        {"timestamp": now, "open": 2, "high": 3, "low": 1.5, "close": 2.5, "volume": 200},
-        {"timestamp": now, "open": 3, "high": 4, "low": 2.5, "close": 3.5, "volume": 300},
+        {"open_at": now, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 100},
+        {"open_at": now, "open": 2, "high": 3, "low": 1.5, "close": 2.5, "volume": 200},
+        {"open_at": now, "open": 3, "high": 4, "low": 2.5, "close": 3.5, "volume": 300},
     ]
     client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
     await client.connect()

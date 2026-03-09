@@ -202,6 +202,7 @@ def upgrade() -> None:
         "candles",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
+        sa.Column("open_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timeframe", sa.String(8), nullable=False),
         sa.Column("open", sa.Float(), nullable=False),
@@ -213,10 +214,10 @@ def upgrade() -> None:
         sa.Column("trades", sa.Integer(), nullable=True),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("instrument_id", "timeframe", "timestamp", name="uq_candle_itf_ts"),
+        sa.UniqueConstraint("instrument_id", "timeframe", "open_at", name="uq_candle_itf_open"),
     )
     op.create_index("ix_candles_instrument_id", "candles", ["instrument_id"])
-    op.create_index("ix_candle_instrument_ts", "candles", ["instrument_id", "timestamp"])
+    op.create_index("ix_candle_instrument_open", "candles", ["instrument_id", "open_at"])
     op.create_table(
         "trades",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),

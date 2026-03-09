@@ -174,6 +174,7 @@ async def test_upsert_candles_other_dialect_updates_existing(
     rows = [
         {
             "instrument_id": 1,
+            "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
             "open": 100.0,
@@ -236,6 +237,7 @@ async def test_upsert_candles_other_dialect_inserts_new_rows(
     rows = [
         {
             "instrument_id": 1,
+            "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
             "open": 100.0,
@@ -397,6 +399,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         {
             "instrument_id": instrument_id,
             "timeframe": "1m",
+            "open_at": base_ts,
             "timestamp": base_ts,
             "open": 10.0,
             "high": 12.0,
@@ -409,6 +412,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         {
             "instrument_id": instrument_id,
             "timeframe": "1m",
+            "open_at": base_ts + timedelta(minutes=1),
             "timestamp": base_ts + timedelta(minutes=1),
             "open": 11.0,
             "high": 12.5,
@@ -1158,6 +1162,7 @@ async def test_mssql_upsert_candles_updates_existing(monkeypatch: pytest.MonkeyP
     rows: list[dict[str, Any]] = [
         {
             "instrument_id": 1,
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
             "open": 1.0,
@@ -1338,6 +1343,7 @@ async def test_mssql_upsert_candles_inserts_new_rows(
     rows: list[dict[str, Any]] = [
         {
             "instrument_id": 1,
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
             "open": 1.0,
@@ -1350,6 +1356,7 @@ async def test_mssql_upsert_candles_inserts_new_rows(
         },
         {
             "instrument_id": 2,
+            "open_at": datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
             "timeframe": "1m",
             "open": 2.0,
@@ -1757,6 +1764,7 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "instrument_id": 1,
+                    "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
                     "open": 100.0,
@@ -1799,6 +1807,7 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "instrument_id": 1,
+                    "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
                     "open": 100.0,
@@ -1811,6 +1820,7 @@ class TestSQLAlchemyRepositoryDialects:
                 },
                 {
                     "instrument_id": 1,
+                    "open_at": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
                     "timeframe": "1m",
                     "open": 100.5,
@@ -1852,6 +1862,7 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "instrument_id": 1,
+                    "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
                     "open": 100.0,
@@ -2084,7 +2095,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_inst_result.scalars.return_value = mock_inst_scalars
         mock_candles_result = Mock()
         mock_row = Mock()
-        mock_row.timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+        mock_row.open_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_row.timeframe = "1m"
         mock_row.open = 100.0
         mock_row.high = 101.0
@@ -2105,7 +2116,7 @@ class TestSQLAlchemyRepositoryDialects:
             )
             expected: list[dict[str, Any]] = [
                 {
-                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
                     "open": 100.0,
                     "high": 101.0,
@@ -2281,6 +2292,7 @@ class TestMSSQLRepository:
             rows: list[dict[str, Any]] = [
                 {
                     "instrument_id": 1,
+                    "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
                     "open": 100.0,

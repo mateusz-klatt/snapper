@@ -96,11 +96,12 @@ class Candle(Base):
 
     __tablename__ = "candles"
     __table_args__ = (
-        UniqueConstraint("instrument_id", "timeframe", "timestamp", name="uq_candle_itf_ts"),
-        Index("ix_candle_instrument_ts", "instrument_id", "timestamp"),
+        UniqueConstraint("instrument_id", "timeframe", "open_at", name="uq_candle_itf_open"),
+        Index("ix_candle_instrument_open", "instrument_id", "open_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    open_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     timeframe: Mapped[str] = mapped_column(String(8))
     open: Mapped[float] = mapped_column(Float)

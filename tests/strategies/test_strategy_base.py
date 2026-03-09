@@ -9,6 +9,7 @@ from collections.abc import Coroutine
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import SupportsIndex
 from typing import cast
@@ -1452,6 +1453,22 @@ class TestLifecycle:
         strategy.__del__()
         assert strategy.subscriber is None
         assert strategy.publisher is None
+        assert strategy.zmq_context is None
+
+    def test_del_falls_back_to_term_when_destroy_missing(
+        self, strategy_config: StrategyConfig
+    ) -> None:
+        """Verify __del__ calls zmq_context.term() when destroy is absent.
+
+        Given: Strategy with zmq_context that has no destroy attribute,
+        When: __del__ is called,
+        Then: Falls back to zmq_context.term().
+        """
+        strategy = SimpleTestStrategy(strategy_config)
+        mock_context = SimpleNamespace(term=MagicMock())
+        strategy.zmq_context = mock_context
+        strategy.__del__()
+        mock_context.term.assert_called_once()
         assert strategy.zmq_context is None
 
 

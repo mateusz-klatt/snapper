@@ -61,7 +61,7 @@ async def fake_get_candles(
     """Return fake candle data for testing."""
     return [
         {
-            "timestamp": datetime.now(tz=UTC),
+            "open_at": datetime.now(tz=UTC),
             "open": 50000.0,
             "high": 51000.0,
             "low": 49000.0,
@@ -628,7 +628,7 @@ class TestPaperMarketDataMethods:
                 if symbol == "BTC-USD":
                     return [
                         {
-                            "timestamp": base.replace(minute=2),
+                            "open_at": base.replace(minute=2),
                             "open": 2.0,
                             "high": 2.1,
                             "low": 1.9,
@@ -641,7 +641,7 @@ class TestPaperMarketDataMethods:
                 if symbol == "ETH-USD":
                     return [
                         {
-                            "timestamp": base.replace(minute=1),
+                            "open_at": base.replace(minute=1),
                             "open": 1.0,
                             "high": 1.1,
                             "low": 0.9,

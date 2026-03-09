@@ -460,6 +460,7 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
         [
             {
                 "instrument_id": 1,
+                "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                 "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 "timeframe": "1m",
                 "open": 1.0,
@@ -537,7 +538,7 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
 
                 def all(self) -> list[Any]:
                     class Row:
-                        timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+                        open_at = datetime(2024, 1, 1, tzinfo=UTC)
                         timeframe = "1m"
                         open = 1.0
                         high = 2.0
@@ -1000,6 +1001,7 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
         [
             {
                 "instrument_id": inst_id,
+                "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                 "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 "timeframe": "1m",
                 "open": 1.0,

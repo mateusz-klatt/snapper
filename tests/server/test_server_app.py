@@ -268,6 +268,7 @@ class TestCreateApiRouter:
         mock_inst_result.scalars.return_value.first.return_value = mock_instrument
         mock_candle = MagicMock(spec=Candle)
         mock_candle.timeframe = "1h"
+        mock_candle.open_at = datetime(2023, 1, 1, 12, 0)
         mock_candle.timestamp = datetime(2023, 1, 1, 12, 0)
         mock_candle.open = 50000.0
         mock_candle.high = 51000.0

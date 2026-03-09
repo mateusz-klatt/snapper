@@ -434,7 +434,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             trades = bar_msg.trades if bar_msg.trades is not None else 0
             candle_row: dict[str, Any] = {
                 "instrument_id": instrument_id,
-                "timestamp": bar_msg.open_at,
+                "open_at": bar_msg.open_at,
+                "timestamp": datetime.now(UTC),
                 "timeframe": timeframe,
                 "open": open_price,
                 "high": high_price,

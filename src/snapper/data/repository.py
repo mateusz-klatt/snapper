@@ -396,15 +396,17 @@ class SQLAlchemyRepository(Repository):
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Insert or update candles using dialect-specific ON CONFLICT DO UPDATE.
 
-        When a candle with the same (instrument_id, timeframe, timestamp) already
-        exists, the OHLCV columns are replaced with the incoming values.  This is
-        essential for live-updating partial candles (e.g. Kraken publishes
-        intra-interval updates that must overwrite earlier snapshots).
+        When a candle with the same (instrument_id, timeframe, open_at) already
+        exists, the OHLCV columns and wall-clock timestamp are replaced with the
+        incoming values.  This is essential for live-updating partial candles
+        (e.g. Kraken publishes intra-interval updates that must overwrite earlier
+        snapshots).
         """
         if not rows:
             return 0
-        index_elements = ["instrument_id", "timeframe", "timestamp"]
+        index_elements = ["instrument_id", "timeframe", "open_at"]
         update_cols = {
+            "timestamp": "timestamp",
             "open": "open",
             "high": "high",
             "low": "low",
@@ -444,7 +446,7 @@ class SQLAlchemyRepository(Repository):
                                 and_(
                                     Candle.instrument_id == r["instrument_id"],
                                     Candle.timeframe == r["timeframe"],
-                                    Candle.timestamp == r["timestamp"],
+                                    Candle.open_at == r["open_at"],
                                 )
                             )
                         )
@@ -576,7 +578,7 @@ class SQLAlchemyRepository(Repository):
                 return []
             q = await s.execute(
                 select(
-                    Candle.timestamp,
+                    Candle.open_at,
                     Candle.timeframe,
                     Candle.open,
                     Candle.high,
@@ -590,16 +592,16 @@ class SQLAlchemyRepository(Repository):
                     and_(
                         Candle.instrument_id == inst.id,
                         Candle.timeframe == timeframe,
-                        Candle.timestamp >= start,
-                        Candle.timestamp <= end,
+                        Candle.open_at >= start,
+                        Candle.open_at <= end,
                     )
                 )
-                .order_by(Candle.timestamp.asc())
+                .order_by(Candle.open_at.asc())
             )
             rows = q.all()
             return [
                 {
-                    "timestamp": r.timestamp,
+                    "open_at": r.open_at,
                     "timeframe": r.timeframe,
                     "open": r.open,
                     "high": r.high,
@@ -1095,7 +1097,7 @@ class MSSQLRepository(Repository):
                 return []
             q = s.execute(
                 select(
-                    Candle.timestamp,
+                    Candle.open_at,
                     Candle.timeframe,
                     Candle.open,
                     Candle.high,
@@ -1109,16 +1111,16 @@ class MSSQLRepository(Repository):
                     and_(
                         Candle.instrument_id == inst.id,
                         Candle.timeframe == timeframe,
-                        Candle.timestamp >= start,
-                        Candle.timestamp <= end,
+                        Candle.open_at >= start,
+                        Candle.open_at <= end,
                     )
                 )
-                .order_by(Candle.timestamp.asc())
+                .order_by(Candle.open_at.asc())
             )
             rows = q.all()
             return [
                 {
-                    "timestamp": r.timestamp,
+                    "open_at": r.open_at,
                     "timeframe": r.timeframe,
                     "open": r.open,
                     "high": r.high,
