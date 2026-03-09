@@ -12,9 +12,9 @@ export const WsMessageBaseSchema = z
   })
   .strict()
 
-export const BarEnvelopeSchema = z
+export const CandleEnvelopeSchema = z
   .object({
-    type: z.literal('bar'),
+    type: z.literal('candle'),
     timestamp: z.iso.datetime().optional(),
     meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),

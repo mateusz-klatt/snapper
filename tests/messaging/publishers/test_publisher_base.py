@@ -20,7 +20,7 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.messaging.schemas.messages import HeartbeatEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
@@ -279,7 +279,7 @@ async def test_publish_message_skips_when_not_running() -> None:
     pub.running = False
     await pub._publish_message(
         "topic",
-        BarEnvelope(
+        CandleEnvelope(
             instrument="i",
             volume=1.0,
             timeframe="1m",
@@ -309,7 +309,7 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
     pub.running = True
     await pub._publish_message(
         "topic",
-        BarEnvelope(
+        CandleEnvelope(
             instrument="i",
             volume=1.0,
             timeframe="1m",
@@ -371,19 +371,21 @@ async def test_symbol_aliases_loop_invokes_invalidation(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_save_to_db_handles_non_bar_and_missing_repo(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test save_to_db handles non-bar messages.
+async def test_save_to_db_handles_non_candle_and_missing_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test save_to_db handles non-candle messages.
 
     Given: A publisher with optional repository,
-    When: Non-bar or bar message is saved,
-    Then: Only bar messages are persisted.
+    When: Non-candle or candle message is saved,
+    Then: Only candle messages are persisted.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     msg = TickEnvelope(instrument="i", volume=0.0, last=1.0, exchange="kraken")
     await pub._save_to_db("i", msg)
     repo = SimpleNamespace(upsert_instrument=AsyncMock(return_value=1), upsert_candles=AsyncMock())
     pub.repository = repo
-    bar = BarEnvelope(
+    candle = CandleEnvelope(
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -397,7 +399,7 @@ async def test_save_to_db_handles_non_bar_and_missing_repo(monkeypatch: pytest.M
         exchange="kraken",
         open_at=datetime.now(UTC),
     )
-    await pub._save_to_db("BTC-USD", bar)
+    await pub._save_to_db("BTC-USD", candle)
     repo.upsert_instrument.assert_awaited_once()
     repo.upsert_candles.assert_awaited_once()
 
@@ -683,7 +685,7 @@ async def test_save_to_db_logs_errors() -> None:
         upsert_instrument=AsyncMock(side_effect=RuntimeError("db fail")),
         upsert_candles=AsyncMock(),
     )
-    bar = BarEnvelope(
+    candle = CandleEnvelope(
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -695,7 +697,7 @@ async def test_save_to_db_logs_errors() -> None:
         exchange="kraken",
         open_at=datetime.now(UTC),
     )
-    await pub._save_to_db("BTC-USD", bar)
+    await pub._save_to_db("BTC-USD", candle)
 
 
 @pytest.mark.asyncio
@@ -875,7 +877,7 @@ async def test_save_to_db_invalid_symbol_logs_warning() -> None:
     Then: Warning is logged.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    bar = BarEnvelope(
+    candle = CandleEnvelope(
         instrument="BAD",
         volume=1.0,
         timeframe="1m",
@@ -887,7 +889,7 @@ async def test_save_to_db_invalid_symbol_logs_warning() -> None:
         exchange="kraken",
         open_at=datetime.now(UTC),
     )
-    await pub._save_to_db("INVALID", bar)
+    await pub._save_to_db("INVALID", candle)
 
 
 @pytest.mark.asyncio
@@ -901,7 +903,7 @@ async def test_save_to_db_uses_cached_instrument() -> None:
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub._instrument_cache["BTC-USD"] = 7
     pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
-    bar = BarEnvelope(
+    candle = CandleEnvelope(
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -913,7 +915,7 @@ async def test_save_to_db_uses_cached_instrument() -> None:
         exchange="kraken",
         open_at=datetime.now(UTC),
     )
-    await pub._save_to_db("BTC-USD", bar)
+    await pub._save_to_db("BTC-USD", candle)
     pub.repository.upsert_candles.assert_awaited_once()
 
 
@@ -1628,7 +1630,7 @@ class TestFeedPublisherCoverage:
         """Verify save_to_db inserts candle to database.
 
         Given: A publisher with mock repository,
-        When: _save_to_db is called with bar message,
+        When: _save_to_db is called with candle message,
         Then: Instrument and candle are upserted.
         """
         mock_settings = MagicMock()
@@ -1640,7 +1642,7 @@ class TestFeedPublisherCoverage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.repository = mock_repository
         publisher_any = cast(Any, publisher)
-        bar_message = BarEnvelope(
+        bar_message = CandleEnvelope(
             instrument="BTC-USD",
             exchange="kraken",
             volume=5.0,
@@ -1714,8 +1716,8 @@ class DummyRepository:
         return len(rows)
 
 
-def _build_bar_message(instrument: str) -> BarEnvelope:
-    return BarEnvelope(
+def _build_bar_message(instrument: str) -> CandleEnvelope:
+    return CandleEnvelope(
         instrument=instrument,
         exchange="kraken",
         volume=12.5,
@@ -1866,14 +1868,14 @@ class TestFeedPublisherCandleLoop:
 
         mock_exchange_client.subscribe_candles = mock_subscribe
         publisher_any._exchange_client = mock_exchange_client
-        published_messages: list[tuple[str, BarEnvelope]] = []
+        published_messages: list[tuple[str, CandleEnvelope]] = []
 
-        async def publish_stub(topic: str, message: BarEnvelope) -> None:
+        async def publish_stub(topic: str, message: CandleEnvelope) -> None:
             published_messages.append((topic, message))
 
-        saved_payloads: list[tuple[str, BarEnvelope]] = []
+        saved_payloads: list[tuple[str, CandleEnvelope]] = []
 
-        async def save_stub(symbol: str, envelope: BarEnvelope) -> None:
+        async def save_stub(symbol: str, envelope: CandleEnvelope) -> None:
             saved_payloads.append((symbol, envelope))
 
         publisher_any._publish_message = publish_stub
@@ -1885,8 +1887,8 @@ class TestFeedPublisherCandleLoop:
         assert len(published_messages) == 2
         first_topic, btc_msg = published_messages[0]
         assert first_topic == "market.kraken.BTC-USD.candles.1m"
-        assert isinstance(btc_msg, BarEnvelope)
-        assert btc_msg.type == "bar"
+        assert isinstance(btc_msg, CandleEnvelope)
+        assert btc_msg.type == "candle"
         assert btc_msg.instrument == "BTC-USD"
         assert btc_msg.close == pytest.approx(50000.0)
         assert btc_msg.volume == pytest.approx(100.5)
@@ -1897,8 +1899,8 @@ class TestFeedPublisherCandleLoop:
         assert btc_msg.trades == 42
         second_topic, eth_msg = published_messages[1]
         assert second_topic == "market.kraken.ETH-USD.candles.1m"
-        assert isinstance(eth_msg, BarEnvelope)
-        assert eth_msg.type == "bar"
+        assert isinstance(eth_msg, CandleEnvelope)
+        assert eth_msg.type == "candle"
         assert eth_msg.instrument == "ETH-USD"
         assert eth_msg.close == pytest.approx(3000.0)
         assert len(saved_payloads) == 2
@@ -1946,7 +1948,7 @@ class TestFeedPublisherCandleLoop:
         publisher_any._exchange_client = mock_exchange_client
         published_topics: list[str] = []
 
-        async def publish_stub(topic: str, message: BarEnvelope) -> None:
+        async def publish_stub(topic: str, message: CandleEnvelope) -> None:
             published_topics.append(topic)
 
         publisher_any._publish_message = publish_stub
@@ -1998,7 +2000,7 @@ class TestFeedPublisherPublishMessage:
         """Verify publish_message sends multipart message.
 
         Given: A running publisher with socket stub,
-        When: _publish_message is called with bar message,
+        When: _publish_message is called with candle message,
         Then: Message is sent with correct topic and payload.
         """
         mock_settings = MagicMock()
@@ -2009,7 +2011,7 @@ class TestFeedPublisherPublishMessage:
         publisher_any = cast(Any, publisher)
         pub_socket = PublisherSocketStub()
         publisher_any.publisher = pub_socket
-        message = BarEnvelope(
+        message = CandleEnvelope(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2027,7 +2029,7 @@ class TestFeedPublisherPublishMessage:
         assert len(pub_socket.calls) == 1
         topic_str, payload_bytes = pub_socket.calls[0]
         assert topic_str == "market.kraken.BTC-USD.candles.1m"
-        assert b'"type":"bar"' in payload_bytes
+        assert b'"type":"candle"' in payload_bytes
         assert b'"instrument":"BTC-USD"' in payload_bytes
 
     @patch("snapper.config.settings.get_settings")
@@ -2046,7 +2048,7 @@ class TestFeedPublisherPublishMessage:
         publisher_any = cast(Any, publisher)
         pub_socket = PublisherSocketStub()
         publisher_any.publisher = pub_socket
-        message = BarEnvelope(
+        message = CandleEnvelope(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2078,7 +2080,7 @@ class TestFeedPublisherPublishMessage:
         publisher.running = True
         publisher.publisher = None
         publisher_any = cast(Any, publisher)
-        message = BarEnvelope(
+        message = CandleEnvelope(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2110,7 +2112,7 @@ class TestFeedPublisherPublishMessage:
         publisher_any = cast(Any, publisher)
         pub_socket = PublisherSocketStub(error=RuntimeError("Send failed"))
         publisher_any.publisher = pub_socket
-        message = BarEnvelope(
+        message = CandleEnvelope(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,

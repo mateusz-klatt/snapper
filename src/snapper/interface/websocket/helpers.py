@@ -202,7 +202,7 @@ def determine_topic_category(topic: str) -> str | None:
     if topic.startswith("admin."):
         return "admin"
     category_map = {
-        "bar": "market",
+        "candle": "market",
         "tick": "market",
         "signal": "strategy",
         "order": "trade",

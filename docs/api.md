@@ -472,7 +472,7 @@ Response:
 
 ```json
 {
-    "type": "bar",
+    "type": "candle",
     "topic": "market.kraken.BTC-USD.candles.1h",
     "data": {
         "open": 42000.0,

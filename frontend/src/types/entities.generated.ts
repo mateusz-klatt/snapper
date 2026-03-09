@@ -19,10 +19,10 @@ type Exchange2 = 'paper' | 'kraken' | 'zonda' | 'walutomat'
 type Side = 'buy' | 'sell'
 
 /**
- * Canonical Bar entity.
- * From WebSocket BarEnvelope.
+ * Canonical Candle entity.
+ * From WebSocket CandleEnvelope.
  */
-export interface Bar {
+export interface Candle {
   timestamp?: Date
   instrument: string
   exchange: Exchange

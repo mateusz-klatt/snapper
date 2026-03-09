@@ -28,7 +28,7 @@ from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.messaging.schemas.messages import HeartbeatEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
@@ -49,14 +49,14 @@ from snapper.strategies.macd import MACDCrossover
 from snapper.strategies.rsi import RSIReversion
 
 
-def make_bar_envelope(
+def make_candle_envelope(
     instrument: str = "BTC-USD",
     close: float = 50000.0,
     ts: float | None = None,
     exchange: str = "kraken",
-) -> BarEnvelope:
-    """Create a BarEnvelope with default test values."""
-    return BarEnvelope(
+) -> CandleEnvelope:
+    """Create a CandleEnvelope with default test values."""
+    return CandleEnvelope(
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -76,15 +76,15 @@ async def feed_bar_to_strategy(
     close: float,
     exchange: str = "kraken",
 ) -> Signal | None:
-    """Feed a single bar to strategy and return resulting signal."""
-    bar = make_bar_envelope(instrument, close, exchange=exchange)
+    """Feed a single candle to strategy and return resulting signal."""
+    candle = make_candle_envelope(instrument, close, exchange=exchange)
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
-    strategy.candle_buffer[instrument].append(bar)
+    strategy.candle_buffer[instrument].append(candle)
     max_buffer_size = strategy.params.get("buffer_size", 100)
     if len(strategy.candle_buffer[instrument]) > max_buffer_size:
         strategy.candle_buffer[instrument].pop(0)
-    return await strategy.on_bar(instrument, bar)
+    return await strategy.on_candle(instrument, candle)
 
 
 async def feed_closes_to_strategy(
@@ -110,8 +110,8 @@ def prefill_candle_buffer(
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
     for close in closes:
-        bar = make_bar_envelope(instrument, close, exchange=exchange)
-        strategy.candle_buffer[instrument].append(bar)
+        candle = make_candle_envelope(instrument, close, exchange=exchange)
+        strategy.candle_buffer[instrument].append(candle)
     max_buffer_size = strategy.params.get("buffer_size", 100)
     while len(strategy.candle_buffer[instrument]) > max_buffer_size:
         strategy.candle_buffer[instrument].pop(0)
@@ -287,26 +287,26 @@ class MockStrategy(BaseStrategy):
     def __init__(self, config: StrategyConfig) -> None:
         """Initialize the instance."""
         super().__init__(config)
-        self.bars_received: list[tuple[str, BarEnvelope]] = []
+        self.candles_received: list[tuple[str, CandleEnvelope]] = []
         self.signals_emitted: list[Signal] = []
         self._trigger_signal: bool = False
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar data and return optional signal."""
-        self.bars_received.append((instrument, bar))
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle data and return optional signal."""
+        self.candles_received.append((instrument, candle))
         if self._trigger_signal:
             return Signal(
                 instrument=instrument,
                 side="buy",
                 strength=0.8,
-                price=bar.close,
+                price=candle.close,
                 reason="test trigger",
             )
         return None
 
     async def reset(self) -> None:
         """Reset strategy state."""
-        self.bars_received.clear()
+        self.candles_received.clear()
         self.signals_emitted.clear()
         self._trigger_signal = False
 
@@ -371,11 +371,11 @@ class TestBaseStrategy:
         assert strategy._running is False
 
     @pytest.mark.asyncio
-    async def test_on_bar_processing(self) -> None:
-        """Verify on_bar processes bars and optionally returns signals.
+    async def test_on_candle_processing(self) -> None:
+        """Verify on_candle processes candles and optionally returns signals.
 
         Given: MockStrategy with _trigger_signal flag,
-        When: on_bar called with and without trigger,
+        When: on_candle called with and without trigger,
         Then: Signal returned only when triggered.
         """
         config = StrategyConfig(
@@ -385,23 +385,23 @@ class TestBaseStrategy:
             outputs=["BTC-USD"],
         )
         strategy = MockStrategy(config)
-        bar = make_bar_envelope("BTC-USD", 50000.0)
-        signal = await strategy.on_bar("BTC-USD", bar)
+        candle = make_candle_envelope("BTC-USD", 50000.0)
+        signal = await strategy.on_candle("BTC-USD", candle)
         assert signal is None
-        assert len(strategy.bars_received) == 1
+        assert len(strategy.candles_received) == 1
         strategy._trigger_signal = True
-        signal = await strategy.on_bar("BTC-USD", bar)
+        signal = await strategy.on_candle("BTC-USD", candle)
         assert signal is not None
         assert signal.instrument == "BTC-USD"
         assert signal.side == "buy"
-        assert len(strategy.bars_received) == 2
+        assert len(strategy.candles_received) == 2
 
     @pytest.mark.asyncio
     async def test_strategy_processes_all_instruments(self) -> None:
-        """Verify strategy processes bars from multiple instruments.
+        """Verify strategy processes candles from multiple instruments.
 
         Given: MockStrategy,
-        When: on_bar called for BTC-USD and ETH-USD,
+        When: on_candle called for BTC-USD and ETH-USD,
         Then: Both bars are received and stored.
         """
         config = StrategyConfig(
@@ -411,12 +411,12 @@ class TestBaseStrategy:
             outputs=["BTC-USD"],
         )
         strategy = MockStrategy(config)
-        bar1 = make_bar_envelope("BTC-USD", 50000.0)
-        await strategy.on_bar("BTC-USD", bar1)
-        assert len(strategy.bars_received) == 1
-        bar2 = make_bar_envelope("ETH-USD", 3000.0)
-        await strategy.on_bar("ETH-USD", bar2)
-        assert len(strategy.bars_received) == 2
+        bar1 = make_candle_envelope("BTC-USD", 50000.0)
+        await strategy.on_candle("BTC-USD", bar1)
+        assert len(strategy.candles_received) == 1
+        bar2 = make_candle_envelope("ETH-USD", 3000.0)
+        await strategy.on_candle("ETH-USD", bar2)
+        assert len(strategy.candles_received) == 2
 
 
 class DummyRawSocket:
@@ -547,7 +547,7 @@ class DummyZMQContext:
 
 
 class FakeStrategy(BaseStrategy):
-    """Fake strategy that records bar reception and emits signals."""
+    """Fake strategy that records candle reception and emits signals."""
 
     def __init__(self, config: StrategyConfig, publisher: DummyPublisher | None = None) -> None:
         """Initialize the instance."""
@@ -555,17 +555,17 @@ class FakeStrategy(BaseStrategy):
         if publisher is not None:
             self.publisher = cast(ValidatedPublisher, publisher)
         self.reset_called = False
-        self.received: list[tuple[str, BarEnvelope]] = []
+        self.received: list[tuple[str, CandleEnvelope]] = []
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar data and return optional signal."""
-        self.received.append((instrument, bar))
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle data and return optional signal."""
+        self.received.append((instrument, candle))
         return Signal(
             instrument=instrument,
             side="buy",
             strength=0.5,
             reason="test",
-            price=bar.close,
+            price=candle.close,
         )
 
     async def reset(self) -> None:
@@ -610,7 +610,7 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
         lag_ms=12,
         meta={"symbol_count": 3},
     )
-    bar = make_bar_envelope("BTC-USD", 101.0, ts=123.0, exchange="kraken")
+    candle = make_candle_envelope("BTC-USD", 101.0, ts=123.0, exchange="kraken")
     messages = [
         ("system.symbol_aliases", b"{}"),
         (
@@ -621,7 +621,7 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
         ("system.replay.end", b"{}"),
         (
             "market.kraken.BTC-USD.candles.1h",
-            bar.to_json().encode(),
+            candle.to_json().encode(),
         ),
     ]
     strategy = FakeStrategy(
@@ -660,10 +660,10 @@ async def test_listen_loop_returns_when_no_subscriber() -> None:
 
 @pytest.mark.asyncio
 async def test_default_handlers_return_none() -> None:
-    """Verify default on_bar/on_tick/on_trade handlers return None.
+    """Verify default on_candle/on_tick/on_trade handlers return None.
 
     Given: Minimal strategy with default handlers,
-    When: on_bar, on_tick, on_trade called,
+    When: on_candle, on_tick, on_trade called,
     Then: All return None.
     """
 
@@ -673,8 +673,8 @@ async def test_default_handlers_return_none() -> None:
             pass
 
     strategy = MinimalStrategy(_strategy_config())
-    bar = make_bar_envelope("BTC-USD", 50000.0)
-    assert await strategy.on_bar("BTC-USD", bar) is None
+    candle = make_candle_envelope("BTC-USD", 50000.0)
+    assert await strategy.on_candle("BTC-USD", candle) is None
     tick = TickEnvelope(
         instrument="BTC-USD",
         volume=100.0,
@@ -1016,18 +1016,18 @@ class SimpleTestStrategy(BaseStrategy):
         """Initialize the instance."""
         super().__init__(config)
         self.signals_generated: list[Signal] = []
-        self.bars_processed: list[tuple[str, BarEnvelope]] = []
+        self.candles_processed: list[tuple[str, CandleEnvelope]] = []
         self._generate_signal: bool = False
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar data and return optional signal."""
-        self.bars_processed.append((instrument, bar))
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle data and return optional signal."""
+        self.candles_processed.append((instrument, candle))
         if self._generate_signal:
             signal = Signal(
                 instrument=instrument,
                 side="buy",
                 strength=0.7,
-                price=bar.close,
+                price=candle.close,
                 reason="Test signal",
             )
             self.signals_generated.append(signal)
@@ -1037,7 +1037,7 @@ class SimpleTestStrategy(BaseStrategy):
     async def reset(self) -> None:
         """Reset strategy state."""
         self.signals_generated.clear()
-        self.bars_processed.clear()
+        self.candles_processed.clear()
         self._generate_signal = False
 
 
@@ -1487,24 +1487,24 @@ class TestListenLoop:
         strategy.subscriber = None
         strategy._running = True
         await strategy._listen_loop()
-        assert len(strategy.bars_processed) == 0
+        assert len(strategy.candles_processed) == 0
 
     @pytest.mark.asyncio
     async def test_listen_loop_receives_market_data(self, strategy_config: StrategyConfig) -> None:
         """Verify listen_loop processes market data messages.
 
-        Given: Strategy with mocked subscriber sending bar data,
+        Given: Strategy with mocked subscriber sending candle data,
         When: _listen_loop runs,
-        Then: Bar processed and received in bars_processed.
+        Then: Bar processed and received in candles_processed.
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
-        bar = make_bar_envelope("BTC-USD", 50000.0, exchange="kraken")
+        candle = make_candle_envelope("BTC-USD", 50000.0, exchange="kraken")
         mock_recv = AsyncMock(
             side_effect=[
                 (
                     "market.kraken.BTC-USD.candles.1h",
-                    bar.to_json().encode(),
+                    candle.to_json().encode(),
                 ),
                 asyncio.CancelledError(),
             ]
@@ -1514,10 +1514,10 @@ class TestListenLoop:
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
-        assert len(strategy.bars_processed) == 1
-        instrument, received_bar = strategy.bars_processed[0]
+        assert len(strategy.candles_processed) == 1
+        instrument, received_candle = strategy.candles_processed[0]
         assert instrument == "BTC-USD"
-        assert received_bar.close == pytest.approx(50000.0)
+        assert received_candle.close == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_receives_signal_data(self, strategy_config: StrategyConfig) -> None:
@@ -1525,7 +1525,7 @@ class TestListenLoop:
 
         Given: Strategy receiving signal topic message,
         When: _listen_loop runs,
-        Then: Signal not processed as bar.
+        Then: Signal not processed as candle.
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
@@ -1546,22 +1546,22 @@ class TestListenLoop:
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
-        assert len(strategy.bars_processed) == 0
+        assert len(strategy.candles_processed) == 0
 
     @pytest.mark.asyncio
     async def test_listen_loop_buffers_candles(self, strategy_config: StrategyConfig) -> None:
         """Verify listen_loop buffers candles for instrument.
 
-        Given: Strategy receiving multiple bar messages,
+        Given: Strategy receiving multiple candle messages,
         When: _listen_loop processes messages,
         Then: Candle buffer populated with bars.
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
         bars = [
-            make_bar_envelope("BTC-USD", 100.0, exchange="kraken"),
-            make_bar_envelope("BTC-USD", 101.0, exchange="kraken"),
-            make_bar_envelope("BTC-USD", 102.0, exchange="kraken"),
+            make_candle_envelope("BTC-USD", 100.0, exchange="kraken"),
+            make_candle_envelope("BTC-USD", 101.0, exchange="kraken"),
+            make_candle_envelope("BTC-USD", 102.0, exchange="kraken"),
         ]
         mock_recv = AsyncMock(
             side_effect=[
@@ -1577,7 +1577,7 @@ class TestListenLoop:
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
         assert len(strategy.candle_buffer["BTC-USD"]) == 3
-        assert len(strategy.bars_processed) == 3
+        assert len(strategy.candles_processed) == 3
         assert strategy.candle_buffer["BTC-USD"][-1].close == pytest.approx(102.0)
 
     @pytest.mark.asyncio
@@ -1592,10 +1592,10 @@ class TestListenLoop:
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
         bars = [
-            make_bar_envelope("BTC-USD", 100.0, exchange="kraken"),
-            make_bar_envelope("BTC-USD", 101.0, exchange="kraken"),
-            make_bar_envelope("BTC-USD", 102.0, exchange="kraken"),
-            make_bar_envelope("BTC-USD", 103.0, exchange="kraken"),
+            make_candle_envelope("BTC-USD", 100.0, exchange="kraken"),
+            make_candle_envelope("BTC-USD", 101.0, exchange="kraken"),
+            make_candle_envelope("BTC-USD", 102.0, exchange="kraken"),
+            make_candle_envelope("BTC-USD", 103.0, exchange="kraken"),
         ]
         mock_recv = AsyncMock(
             side_effect=[
@@ -1617,19 +1617,19 @@ class TestListenLoop:
 
     @pytest.mark.asyncio
     async def test_listen_loop_emits_signals(self, strategy_config: StrategyConfig) -> None:
-        """Verify listen_loop calls on_bar handler.
+        """Verify listen_loop calls on_candle handler.
 
-        Given: Strategy receiving bar message,
+        Given: Strategy receiving candle message,
         When: _listen_loop processes message,
-        Then: on_bar invoked and bar recorded.
+        Then: on_candle invoked and candle recorded.
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
         strategy._generate_signal = False
-        bar = make_bar_envelope("BTC-USD", 50000.0, exchange="kraken")
+        candle = make_candle_envelope("BTC-USD", 50000.0, exchange="kraken")
         mock_recv = AsyncMock(
             side_effect=[
-                ("market.kraken.BTC-USD.candles.1h", bar.to_json().encode()),
+                ("market.kraken.BTC-USD.candles.1h", candle.to_json().encode()),
                 asyncio.CancelledError(),
             ]
         )
@@ -1638,10 +1638,10 @@ class TestListenLoop:
         strategy.subscriber = mock_subscriber
         with pytest.raises(asyncio.CancelledError):
             await strategy._listen_loop()
-        assert len(strategy.bars_processed) == 1
-        instrument, received_bar = strategy.bars_processed[0]
+        assert len(strategy.candles_processed) == 1
+        instrument, received_candle = strategy.candles_processed[0]
         assert instrument == "BTC-USD"
-        assert received_bar.close == pytest.approx(50000.0)
+        assert received_candle.close == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
     async def test_listen_loop_handles_exception(self, strategy_config: StrategyConfig) -> None:
@@ -1728,9 +1728,9 @@ class TestListenLoop:
     async def test_listen_loop_updates_last_ts_from_market(self) -> None:
         """Verify listen_loop updates _last_data_ts from market data.
 
-        Given: Strategy receiving bar with timestamp,
-        When: _listen_loop processes bar,
-        Then: _last_data_ts updated to bar timestamp.
+        Given: Strategy receiving candle with timestamp,
+        When: _listen_loop processes candle,
+        Then: _last_data_ts updated to candle timestamp.
         """
         config = StrategyConfig(
             name="ts_market",
@@ -1740,11 +1740,11 @@ class TestListenLoop:
         )
         strategy = SimpleTestStrategy(config)
         strategy._running = True
-        bar = make_bar_envelope("BTC-USD", 100.0, ts=42.5, exchange="kraken")
+        candle = make_candle_envelope("BTC-USD", 100.0, ts=42.5, exchange="kraken")
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[
-                ("market.kraken.BTC-USD.candles.1h", bar.to_json().encode()),
+                ("market.kraken.BTC-USD.candles.1h", candle.to_json().encode()),
                 asyncio.CancelledError(),
             ]
         )
@@ -2267,7 +2267,7 @@ class TestCompositeStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
         config = StrategyConfig(
@@ -2292,7 +2292,7 @@ class TestCompositeStrategy:
         """Verify adding sub-strategy to composite."""
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
         config = StrategyConfig(
@@ -2323,7 +2323,7 @@ class TestCompositeStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
         config = StrategyConfig(
@@ -2353,7 +2353,7 @@ class TestCompositeStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
         config = StrategyConfig(
@@ -3294,7 +3294,7 @@ class TestCompositeReset:
         """Verify reset propagates to sub-strategies."""
 
         class TestComposite(CompositeStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
         config = StrategyConfig(
@@ -3311,10 +3311,10 @@ class TestCompositeReset:
             outputs=["BTC-USD"],
         )
         sub = SimpleTestStrategy(sub_config)
-        sub.bars_processed = [("BTC-USD", make_bar_envelope("BTC-USD", 100.0))]
+        sub.candles_processed = [("BTC-USD", make_candle_envelope("BTC-USD", 100.0))]
         await composite.add_sub_strategy(sub)
         await composite.reset()
-        assert sub.bars_processed == []
+        assert sub.candles_processed == []
 
 
 class TestTopicValidationPhase4:
@@ -3716,7 +3716,7 @@ class TestBaseStrategyFeedHeartbeat:
         """
 
         class TestStrategy(BaseStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
             async def reset(self) -> None:
@@ -3759,7 +3759,7 @@ class TestBaseStrategyEmitSignal:
         """
 
         class TestStrategy(BaseStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
             async def reset(self) -> None:
@@ -3798,11 +3798,11 @@ class TestCompositeStrategyAddSubStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
         class TestSubStrategy(BaseStrategy):
-            async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
                 return None
 
             async def reset(self) -> None:
@@ -3920,47 +3920,49 @@ class TestCointegrationDataProcessing:
     """Test suite for cointegration data processing."""
 
     @pytest.mark.asyncio
-    async def test_on_bar_with_unknown_instrument(self, strategy: CointegrationPairs) -> None:
+    async def test_on_candle_with_unknown_instrument(self, strategy: CointegrationPairs) -> None:
         """Verify unknown instrument returns None.
 
         Given: Strategy configured for BTC-USD and ETH-USD,
-        When: on_bar called with UNKNOWN-USD,
+        When: on_candle called with UNKNOWN-USD,
         Then: Signal is None.
         """
         signal = await feed_bar_to_strategy(strategy, "UNKNOWN-USD", 50000.0)
         assert signal is None
 
     @pytest.mark.asyncio
-    async def test_on_bar_with_empty_buffer(self, strategy: CointegrationPairs) -> None:
+    async def test_on_candle_with_empty_buffer(self, strategy: CointegrationPairs) -> None:
         """Verify empty buffer returns None.
 
         Given: Strategy with no candle history,
-        When: on_bar called,
+        When: on_candle called,
         Then: Signal is None.
         """
         signal = await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0)
         assert signal is None
 
     @pytest.mark.asyncio
-    async def test_on_bar_with_empty_candle_buffer_list(self, strategy: CointegrationPairs) -> None:
+    async def test_on_candle_with_empty_candle_buffer_list(
+        self, strategy: CointegrationPairs
+    ) -> None:
         """Verify empty candle_buffer list returns None.
 
         Given: Strategy with empty list in candle_buffer,
-        When: on_bar called,
+        When: on_candle called,
         Then: Signal is None and list still empty.
         """
         strategy.candle_buffer["BTC-USD"] = []
-        bar = make_bar_envelope("BTC-USD", 50000.0)
-        signal = await strategy.on_bar("BTC-USD", bar)
+        candle = make_candle_envelope("BTC-USD", 50000.0)
+        signal = await strategy.on_candle("BTC-USD", candle)
         assert signal is None
         assert strategy.candle_buffer["BTC-USD"] == []
 
     @pytest.mark.asyncio
-    async def test_on_bar_builds_candle_buffer(self, strategy: CointegrationPairs) -> None:
-        """Verify on_bar populates candle_buffer.
+    async def test_on_candle_builds_candle_buffer(self, strategy: CointegrationPairs) -> None:
+        """Verify on_candle populates candle_buffer.
 
         Given: Strategy receiving bars,
-        When: on_bar called,
+        When: on_candle called,
         Then: candle_buffer contains bars.
         """
         await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0)
@@ -3969,13 +3971,13 @@ class TestCointegrationDataProcessing:
         assert strategy.candle_buffer["BTC-USD"][0].close == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
-    async def test_on_bar_returns_none_with_single_instrument_data(
+    async def test_on_candle_returns_none_with_single_instrument_data(
         self, strategy: CointegrationPairs
     ) -> None:
         """Verify single instrument data returns None.
 
         Given: Strategy with only BTC-USD data,
-        When: on_bar called,
+        When: on_candle called,
         Then: Signal is None (needs both instruments).
         """
         closes = [50000.0 + i for i in range(35)]
@@ -3983,13 +3985,13 @@ class TestCointegrationDataProcessing:
         assert signal is None
 
     @pytest.mark.asyncio
-    async def test_on_bar_returns_none_with_insufficient_data_points(
+    async def test_on_candle_returns_none_with_insufficient_data_points(
         self, strategy: CointegrationPairs
     ) -> None:
         """Verify insufficient data points returns None.
 
         Given: Strategy with less than min_data_points,
-        When: on_bar called,
+        When: on_candle called,
         Then: Signal is None.
         """
         for i in range(20):
@@ -4001,7 +4003,7 @@ class TestCointegrationDataProcessing:
         assert signal is None
 
     @pytest.mark.asyncio
-    async def test_on_bar_respects_buffer_size(self, strategy: CointegrationPairs) -> None:
+    async def test_on_candle_respects_buffer_size(self, strategy: CointegrationPairs) -> None:
         """Verify candle_buffer respects buffer_size limit.
 
         Given: Strategy with buffer_size=50,
@@ -4069,7 +4071,7 @@ class TestCointegrationSignalGeneration:
         """Verify ETH hedge signal after BTC entry.
 
         Given: Short spread position opened on BTC,
-        When: ETH bar received,
+        When: ETH candle received,
         Then: Hedge signal for ETH with beta-adjusted strength.
         """
         for i in range(35):
@@ -4210,7 +4212,7 @@ class TestCointegrationSignalGeneration:
         """Verify no signal when std is zero.
 
         Given: Constant prices (zero std),
-        When: on_bar called,
+        When: on_candle called,
         Then: No signal (cannot compute z-score).
         """
         for _ in range(35):
@@ -4308,7 +4310,7 @@ async def test_macd_bullish_crossover_signal(monkeypatch: pytest.MonkeyPatch) ->
     """Verify bullish crossover generates buy signal.
 
     Given: MACD histogram crosses above zero,
-    When: Second bar after crossover,
+    When: Second candle after crossover,
     Then: Buy signal with positive strength.
     """
     config = StrategyConfig(
@@ -4351,7 +4353,7 @@ async def test_macd_bearish_crossover(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify bearish crossover generates sell signal.
 
     Given: MACD histogram crosses below zero,
-    When: Second bar after crossover,
+    When: Second candle after crossover,
     Then: Sell signal with positive strength.
     """
     config = StrategyConfig(
@@ -4602,7 +4604,7 @@ async def test_macd_insufficient_data(macd_strategy: MACDCrossover) -> None:
     """Verify insufficient data returns None.
 
     Given: Only two bars,
-    When: on_bar called,
+    When: on_candle called,
     Then: Signal is None.
     """
     closes = [100.0, 101.0]
@@ -4715,11 +4717,11 @@ async def test_macd_missing_closes(macd_strategy: MACDCrossover) -> None:
     """Verify missing closes returns None.
 
     Given: Empty candle buffer,
-    When: Single bar,
+    When: Single candle,
     Then: Signal is None.
     """
-    bar = make_bar_envelope(INSTRUMENT_BTC, 100.0)
-    signal = await macd_strategy.on_bar(INSTRUMENT_BTC, bar)
+    candle = make_candle_envelope(INSTRUMENT_BTC, 100.0)
+    signal = await macd_strategy.on_candle(INSTRUMENT_BTC, candle)
     assert signal is None
 
 
@@ -4728,11 +4730,11 @@ async def test_macd_empty_closes(macd_strategy: MACDCrossover) -> None:
     """Verify empty closes returns None.
 
     Given: No prior data,
-    When: Single bar,
+    When: Single candle,
     Then: Signal is None.
     """
-    bar = make_bar_envelope(INSTRUMENT_BTC, 100.0)
-    signal = await macd_strategy.on_bar(INSTRUMENT_BTC, bar)
+    candle = make_candle_envelope(INSTRUMENT_BTC, 100.0)
+    signal = await macd_strategy.on_candle(INSTRUMENT_BTC, candle)
     assert signal is None
 
 
@@ -4740,8 +4742,8 @@ async def test_macd_empty_closes(macd_strategy: MACDCrossover) -> None:
 async def test_macd_single_close(macd_strategy: MACDCrossover) -> None:
     """Verify single close returns None.
 
-    Given: Only one bar,
-    When: on_bar called,
+    Given: Only one candle,
+    When: on_candle called,
     Then: Signal is None.
     """
     signal = await feed_bar_to_strategy(macd_strategy, INSTRUMENT_BTC, 100.0)
@@ -4770,7 +4772,7 @@ async def test_macd_wrong_instrument(macd_strategy: MACDCrossover) -> None:
     """Verify wrong instrument returns None.
 
     Given: MACD for BTC,
-    When: ETH bars fed,
+    When: ETH candles fed,
     Then: Signal is None.
     """
     closes = [100.0 + i for i in range(50)]
@@ -5141,7 +5143,7 @@ class TestRSIReversion:
         """Verify insufficient data returns None.
 
         Given: Only three bars,
-        When: on_bar called,
+        When: on_candle called,
         Then: Signal is None.
         """
         closes = [100.0, 101.0, 102.0]
@@ -5296,8 +5298,8 @@ def test_strategy_config_requires_non_empty_fields() -> None:
 class _TestStrategy(BaseStrategy):
     """Test strategy implementation for exchange validation tests."""
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar data and return optional signal."""
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle data and return optional signal."""
         return None
 
     async def reset(self) -> None:
@@ -5325,8 +5327,8 @@ def test_invalid_exchange_raises_error() -> None:
 class MockMACDCrossover(BaseStrategy):
     """Mock MACD crossover strategy for factory testing."""
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar data and return optional signal."""
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle data and return optional signal."""
         return None
 
     async def reset(self) -> None:
@@ -5337,8 +5339,8 @@ class MockMACDCrossover(BaseStrategy):
 class MockRSIReversion(BaseStrategy):
     """Mock RSI reversion strategy for factory testing."""
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar data and return optional signal."""
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle data and return optional signal."""
         return None
 
     async def reset(self) -> None:

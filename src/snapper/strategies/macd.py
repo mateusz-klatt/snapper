@@ -8,7 +8,7 @@ import pandas as pd
 from loguru import logger
 
 from snapper.indicators.ta_lib_adapter import macd
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
@@ -55,12 +55,12 @@ class MACDCrossover(BaseStrategy):
         self.signal_period = self.params.get("signal_period", 9)
         self._last_hist: dict[str, float] = {}
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar and generate signal on histogram crossover.
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle and generate signal on histogram crossover.
 
         Args:
             instrument: The instrument symbol.
-            bar: The bar envelope with OHLCV data.
+            candle: The candle envelope with OHLCV data.
 
         Returns:
             Buy signal on bullish crossover, sell signal on bearish,

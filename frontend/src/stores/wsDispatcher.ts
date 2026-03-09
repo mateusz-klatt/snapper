@@ -14,7 +14,7 @@ import {
   isTrade,
   isHeartbeat,
 } from '../types/ws'
-import type { BarEnvelope } from '../types/ws'
+import type { CandleEnvelope } from '../types/ws'
 import type { CandleData } from '../types/api'
 import { ProcessStatus } from '../types/ui'
 import { orderFromWS, executionFromWS, signalFromWS } from '../lib/transforms'
@@ -36,7 +36,7 @@ export class WSDispatcher {
   private readonly topics: string[]
   private readonly maxCandles: number
   private readonly directStoreUpdates: boolean
-  private readonly candleBuffers: Map<string, BarEnvelope[]> = new Map()
+  private readonly candleBuffers: Map<string, CandleEnvelope[]> = new Map()
   constructor(config: DispatcherConfig) {
     this.queryClient = config.queryClient
     this.maxCandles = config.maxCandles ?? DEFAULT_MAX_CANDLES
@@ -56,7 +56,7 @@ export class WSDispatcher {
       client.onMessage('order_status', this.handleOrderMessage.bind(this)),
       client.onMessage('fill', this.handleExecutionMessage.bind(this)),
       client.onMessage('signal', this.handleSignalMessage.bind(this)),
-      client.onMessage('bar', this.handleCandleMessage.bind(this)),
+      client.onMessage('candle', this.handleCandleMessage.bind(this)),
       client.onMessage('tick', this.handleTickMessage.bind(this)),
       client.onMessage('trade', this.handleTradeMessage.bind(this)),
       client.onMessage('heartbeat', this.handleHeartbeatMessage.bind(this)),
@@ -166,8 +166,8 @@ export class WSDispatcher {
       return
     }
 
-    for (const bar of buffered) {
-      this.mergeCandleIntoCache(bar)
+    for (const candle of buffered) {
+      this.mergeCandleIntoCache(candle)
     }
   }
   stopBuffering(instrument: string, exchange: string, timeframe: string): void {
@@ -175,33 +175,33 @@ export class WSDispatcher {
 
     this.candleBuffers.delete(bufferKey)
   }
-  private mergeCandleIntoCache(bar: BarEnvelope): void {
-    const queryKey = ['candles', bar.instrument, bar.exchange, bar.timeframe]
+  private mergeCandleIntoCache(candle: CandleEnvelope): void {
+    const queryKey = ['candles', candle.instrument, candle.exchange, candle.timeframe]
     const existing = this.queryClient.getQueryData<CandleData[]>(queryKey)
 
     if (!existing) {
-      const bufferKey = `${bar.instrument}:${bar.exchange}:${bar.timeframe}`
+      const bufferKey = `${candle.instrument}:${candle.exchange}:${candle.timeframe}`
       const buffer = this.candleBuffers.get(bufferKey)
 
       if (buffer) {
-        buffer.push(bar)
+        buffer.push(candle)
       }
 
       return
     }
 
     const incoming: CandleData = {
-      instrument: bar.instrument,
-      exchange: bar.exchange,
-      timeframe: bar.timeframe,
-      open_at: bar.open_at,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-      volume: bar.volume,
-      vwap: bar.vwap ?? null,
-      trades: bar.trades ?? null,
+      instrument: candle.instrument,
+      exchange: candle.exchange,
+      timeframe: candle.timeframe,
+      open_at: candle.open_at,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+      vwap: candle.vwap ?? null,
+      trades: candle.trades ?? null,
     }
 
     const incomingTime = new Date(incoming.open_at).getTime()

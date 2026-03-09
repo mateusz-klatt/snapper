@@ -400,7 +400,7 @@ class TestStripPrimitiveTitles:
 
     def test_preserves_title_with_const(self) -> None:
         """Preserves title when const is present."""
-        schema: dict[str, Any] = {"title": "Type", "type": "string", "const": "bar"}
+        schema: dict[str, Any] = {"title": "Type", "type": "string", "const": "candle"}
         result = strip_primitive_titles(schema)
         assert isinstance(result, dict)
         assert result["title"] == "Type"
@@ -415,13 +415,13 @@ class TestStripPrimitiveTitles:
     def test_preserves_title_on_object_type(self) -> None:
         """Does not strip title from object type definitions."""
         schema: dict[str, Any] = {
-            "title": "BarEnvelope",
+            "title": "CandleEnvelope",
             "type": "object",
             "properties": {"open": {"title": "Open", "type": "number"}},
         }
         result = strip_primitive_titles(schema)
         assert isinstance(result, dict)
-        assert result["title"] == "BarEnvelope"
+        assert result["title"] == "CandleEnvelope"
         props = result["properties"]
         assert isinstance(props, dict)
         assert "title" not in props["open"]

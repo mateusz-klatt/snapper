@@ -8,7 +8,7 @@ import pandas as pd
 from loguru import logger
 
 from snapper.core.types import TradeSide
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.messaging.topics.builders import parse_market_topic
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import Signal
@@ -95,12 +95,12 @@ class CointegrationPairs(BaseStrategy):
             return parsed.instrument
         return topic
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Process incoming bar and generate spread trading signal.
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Process incoming candle and generate spread trading signal.
 
         Args:
             instrument: The instrument symbol.
-            bar: The bar envelope with OHLCV data.
+            candle: The candle envelope with OHLCV data.
 
         Returns:
             Signal based on spread z-score, or None.

@@ -1996,7 +1996,7 @@ def test_determine_topic_category_fallbacks() -> None:
     assert DETERMINE_TOPIC_CATEGORY("orders.commands.kraken.BTC-USD.submit") == "trade"
     assert DETERMINE_TOPIC_CATEGORY("orders.events.kraken.BTC-USD.fill") == "trade"
     assert DETERMINE_TOPIC_CATEGORY("unknown.topic") is None
-    assert DETERMINE_TOPIC_CATEGORY("bar") == "market"
+    assert DETERMINE_TOPIC_CATEGORY("candle") == "market"
     assert DETERMINE_TOPIC_CATEGORY("tick") == "market"
     assert DETERMINE_TOPIC_CATEGORY("fill") == "trade"
     assert DETERMINE_TOPIC_CATEGORY("heartbeat") == "system"

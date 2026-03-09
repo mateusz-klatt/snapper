@@ -128,12 +128,12 @@ tick = TickEnvelope(
 | `volume` | float | Volume |
 | `timestamp` | datetime | Timestamp |
 
-### BarEnvelope
+### CandleEnvelope
 
 ```python
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 
-bar = BarEnvelope(
+candle = CandleEnvelope(
     instrument="BTC-USD",
     exchange="kraken",
     timeframe="1h",
@@ -150,7 +150,7 @@ bar = BarEnvelope(
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `type` | string | `"bar"` |
+| `type` | string | `"candle"` |
 | `instrument` | string | Symbol |
 | `exchange` | string | Exchange |
 | `timeframe` | string | Timeframe (`1m`, `5m`, `1h`, etc.) |
@@ -242,14 +242,14 @@ Publishing messages via validated socket:
 
 ```python
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 
 async def publish_bars():
     publisher = ValidatedPublisher()
     await publisher.connect()
 
     topic = "market.kraken.BTC-USD.candles.1h"
-    bar = BarEnvelope(
+    candle = CandleEnvelope(
         instrument="BTC-USD",
         exchange="kraken",
         timeframe="1h",

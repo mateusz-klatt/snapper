@@ -29,7 +29,7 @@ describe('parseWsMessage', () => {
     expect(result).toMatchObject(message)
   })
   it('logs error for known message types with invalid data', () => {
-    const result = parseWsMessage({ type: 'bar', invalid: true })
+    const result = parseWsMessage({ type: 'candle', invalid: true })
 
     expect(result).toBeNull()
     expect(console.error).toHaveBeenCalledWith(

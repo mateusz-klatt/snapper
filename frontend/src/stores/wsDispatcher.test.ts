@@ -10,7 +10,7 @@ import type {
   OrderStatusEnvelope,
   FillEnvelope,
   SignalEnvelope,
-  BarEnvelope,
+  CandleEnvelope,
   TradeEnvelope,
   HeartbeatEnvelope,
 } from '../types/ws'
@@ -132,7 +132,7 @@ describe('WSDispatcher', () => {
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('order_status', expect.any(Function))
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('fill', expect.any(Function))
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('signal', expect.any(Function))
-      expect(mockWsClient.onMessage).toHaveBeenCalledWith('bar', expect.any(Function))
+      expect(mockWsClient.onMessage).toHaveBeenCalledWith('candle', expect.any(Function))
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('tick', expect.any(Function))
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('heartbeat', expect.any(Function))
       expect(mockWsClient.onConnection).toHaveBeenCalled()
@@ -301,8 +301,8 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -313,7 +313,7 @@ describe('WSDispatcher', () => {
         close: 50500,
         volume: 100,
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       expect(candleHandler).toBeDefined()
       candleHandler?.(candleMessage)
@@ -325,7 +325,7 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
       const candleMessage = {
-        type: 'bar',
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -335,8 +335,8 @@ describe('WSDispatcher', () => {
         low: 48500,
         close: undefined,
         volume: 100,
-      } as unknown as BarEnvelope
-      const candleHandler = messageHandlers.get('bar')
+      } as unknown as CandleEnvelope
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()
@@ -363,8 +363,8 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -375,7 +375,7 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: nowIso,
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
@@ -521,8 +521,8 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -533,7 +533,7 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: newTime,
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
@@ -559,8 +559,8 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient, maxCandles: 5 })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -571,7 +571,7 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: new Date(Date.UTC(2026, 0, 15, 10, 5)).toISOString(),
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       const cached = queryClient.getQueryData<{ close: number }[]>([
@@ -591,8 +591,8 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: '',
         exchange: 'kraken',
         timeframe: '',
@@ -603,7 +603,7 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: nowIso,
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       expect(setQueryDataSpy).not.toHaveBeenCalled()
@@ -615,8 +615,8 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'ETH-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -627,7 +627,7 @@ describe('WSDispatcher', () => {
         volume: 200,
         open_at: nowIso,
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       expect(setQueryDataSpy).not.toHaveBeenCalled()
@@ -656,8 +656,8 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -668,7 +668,7 @@ describe('WSDispatcher', () => {
         volume: 30,
         open_at: olderTime,
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
@@ -697,8 +697,8 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -709,7 +709,7 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: '2020-01-01T00:01:00Z',
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       const cached = queryClient.getQueryData<{ open_at: string }[]>([
@@ -727,8 +727,8 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -739,7 +739,7 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: '2026-01-15T10:00:00Z',
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
@@ -752,8 +752,8 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       dispatcher.startBuffering('ETH-USD', 'kraken', '1m')
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'ETH-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -764,7 +764,7 @@ describe('WSDispatcher', () => {
         volume: 200,
         open_at: '2026-01-15T10:00:00Z',
       }
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
       expect(setQueryDataSpy).not.toHaveBeenCalled()
@@ -775,9 +775,9 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       dispatcher.startBuffering('BTC-USD', 'kraken', '1m')
-      const candleHandler = messageHandlers.get('bar')
-      const bar1: BarEnvelope = {
-        type: 'bar',
+      const candleHandler = messageHandlers.get('candle')
+      const candle1: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -788,8 +788,8 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: '2026-01-15T10:00:00Z',
       }
-      const bar2: BarEnvelope = {
-        type: 'bar',
+      const candle2: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -801,8 +801,8 @@ describe('WSDispatcher', () => {
         open_at: '2026-01-15T10:00:00Z',
       }
 
-      candleHandler?.(bar1)
-      candleHandler?.(bar2)
+      candleHandler?.(candle1)
+      candleHandler?.(candle2)
       queryClient.setQueryData(
         ['candles', 'BTC-USD', 'kraken', '1m'],
         [
@@ -849,10 +849,10 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       dispatcher.startBuffering('BTC-USD', 'kraken', '1m')
-      const candleHandler = messageHandlers.get('bar')
+      const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.({
-        type: 'bar',
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -1203,8 +1203,8 @@ describe('WSDispatcher', () => {
         strategy_name: 'test_strategy',
         timestamp: nowIso,
       }
-      const candleMessage: BarEnvelope = {
-        type: 'bar',
+      const candleMessage: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -1236,7 +1236,7 @@ describe('WSDispatcher', () => {
 
       messageHandlers.get('fill')?.(execMessage)
       messageHandlers.get('signal')?.(signalMessage)
-      messageHandlers.get('bar')?.(candleMessage)
+      messageHandlers.get('candle')?.(candleMessage)
       messageHandlers.get('tick')?.(tickMessage)
       messageHandlers.get('trade')?.(tradeMessage)
       expect(useTradeStore.getState().addExecution).not.toHaveBeenCalled()
@@ -1421,7 +1421,7 @@ describe('WSDispatcher', () => {
         const dispatcher = new WSDispatcher({ queryClient })
 
         dispatcher.attach(mockWsClient)
-        const candleHandler = messageHandlers.get('bar')
+        const candleHandler = messageHandlers.get('candle')
 
         candleHandler?.({ type: 'fill' })
         expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()

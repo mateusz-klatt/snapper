@@ -874,7 +874,7 @@ export type Components = {
         };
         /**
          * CandleData
-         * @description OHLCV candlestick bar data for technical analysis.
+         * @description OHLCV candlestick data for technical analysis.
          *
          *     Represents aggregated price action over a specific timeframe.
          *     Used by strategies for pattern recognition and indicator calculation.
@@ -882,15 +882,15 @@ export type Components = {
          *     Attributes:
          *         instrument: Trading pair symbol (e.g., 'BTC-USD').
          *         exchange: Source exchange producing this candle data.
-         *         timeframe: Bar duration (e.g., '1m', '1h', '1d').
+         *         timeframe: Candle duration (e.g., '1m', '1h', '1d').
          *         open_at: Exchange-provided candle interval start time.
-         *         open: Opening price of the bar.
-         *         high: Highest price during the bar.
-         *         low: Lowest price during the bar.
-         *         close: Closing price of the bar.
-         *         volume: Total traded volume during the bar.
+         *         open: Opening price of the candle.
+         *         high: Highest price during the candle.
+         *         low: Lowest price during the candle.
+         *         close: Closing price of the candle.
+         *         volume: Total traded volume during the candle.
          *         vwap: Volume-weighted average price (optional).
-         *         trades: Number of trades in the bar (optional).
+         *         trades: Number of trades in the candle (optional).
          */
         CandleData: {
             /** Instrument */

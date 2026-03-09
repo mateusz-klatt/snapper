@@ -166,7 +166,7 @@ async def test_subscription_loop_fatal_error_path(bridge: ZmqWebSocketBridgeServ
 def _make_candle_json() -> str:
     return json.dumps(
         {
-            "type": "bar",
+            "type": "candle",
             "instrument": "BTCUSD",
             "exchange": "kraken",
             "timestamp": datetime.now(tz=UTC).isoformat(),
@@ -595,7 +595,7 @@ async def test_handle_zmq_messages_forwards_raw_json(
     topic = "market.candles."
     config = bridge.available_topics[topic]
     mock_socket = MagicMock()
-    raw_json = '{"type":"bar","instrument":"BTCUSD","exchange":"kraken"}'
+    raw_json = '{"type":"candle","instrument":"BTCUSD","exchange":"kraken"}'
     mock_socket.recv_multipart = AsyncMock(
         side_effect=[
             [topic.encode(), raw_json.encode()],
@@ -684,7 +684,7 @@ class TestZMQBridgeRemainingCoverage:
         )
         topic_bytes = b"test.topic"
         data_dict: dict[str, Any] = {
-            "type": "bar",
+            "type": "candle",
             "instrument": "EUR-USD",
             "exchange": "kraken",
             "open": 1.1000,
@@ -773,7 +773,7 @@ class TestZMQBridgeRemainingCoverage:
             forward_func = bridge._forward_to_websockets
             test_data_str = json.dumps(
                 {
-                    "type": "bar",
+                    "type": "candle",
                     "instrument": "BTC-USD",
                     "exchange": "kraken",
                     "timeframe": "1m",
@@ -807,7 +807,7 @@ class TestZMQBridgeRemainingCoverage:
         forward_func = bridge._forward_to_websockets
         test_data_str = json.dumps(
             {
-                "type": "bar",
+                "type": "candle",
                 "instrument": "BTC-USD",
                 "exchange": "kraken",
                 "timeframe": "1m",
@@ -841,7 +841,7 @@ class TestZMQBridgeRemainingCoverage:
         forward_func = bridge._forward_to_websockets
         test_data_str = json.dumps(
             {
-                "type": "bar",
+                "type": "candle",
                 "instrument": "BTC-USD",
                 "exchange": "kraken",
                 "timeframe": "1m",
@@ -877,7 +877,7 @@ class TestZMQBridgeRemainingCoverage:
         forward_func = bridge._forward_to_websockets
         test_data_str = json.dumps(
             {
-                "type": "bar",
+                "type": "candle",
                 "instrument": "BTC-USD",
                 "exchange": "kraken",
                 "timeframe": "1m",
@@ -2111,7 +2111,7 @@ class TestZMQBridgeIntegration:
         zmq_bridge.topic_subscriptions[topic] = [subscription]
         valid_candle_payload = json.dumps(
             {
-                "type": "bar",
+                "type": "candle",
                 "instrument": "BTC-USD",
                 "exchange": "kraken",
                 "timeframe": "1m",
@@ -3115,7 +3115,7 @@ class TestBackpressure:
         )
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        raw_json = '{"type": "bar", "instrument": "BTC-USD"}'
+        raw_json = '{"type": "candle", "instrument": "BTC-USD"}'
         await bridge._forward_to_clients(topic, "market.candles.BTC-USD.1m", raw_json)
         mock_ws.send_text.assert_not_awaited()
         assert bridge.topic_metrics[topic].dropped_count == 1

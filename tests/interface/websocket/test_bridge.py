@@ -609,7 +609,7 @@ class TestForwardToWebsocketsTimeoutCoverage:
         bridge.topic_metrics[topic] = TopicMetricsModel()
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
-        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"bar"}')
+        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"candle"}')
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
         assert bridge.topic_metrics[topic].timeout_count == 1
 
@@ -629,7 +629,7 @@ class TestForwardToWebsocketsTimeoutCoverage:
         bridge.topic_subscriptions[topic] = [sub]
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
-        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"bar"}')
+        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"candle"}')
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
 
     @pytest.mark.asyncio
@@ -682,7 +682,7 @@ class TestForwardToWebsocketsTimeoutCoverage:
                 bridge.topic_subscriptions[topic].clear()
 
         bridge.disconnect_client = AsyncMock(side_effect=disconnect_clears_list)
-        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"bar"}')
+        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"candle"}')
         assert bridge.disconnect_client.await_count == 2
 
 
@@ -1035,7 +1035,7 @@ class TestForwardToWebsockets:
             TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
         ]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "bar", "instrument": "BTC-USD"}'
+        message_str = '{"type": "candle", "instrument": "BTC-USD"}'
         await bridge._forward_to_websockets(topic, topic, message_str)
         mock_ws.send_text.assert_awaited_once_with(message_str)
 
@@ -1055,7 +1055,7 @@ class TestForwardToWebsockets:
             TopicSubscriptionModel(websocket=mock_ws, throttle_ms=1000, last_sent=now)
         ]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "bar"}'
+        message_str = '{"type": "candle"}'
         await bridge._forward_to_websockets(topic, topic, message_str)
         mock_ws.send_text.assert_not_awaited()
 
@@ -1249,7 +1249,7 @@ class TestForwardToClientsThrottling:
         )
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "bar"}'
+        message_str = '{"type": "candle"}'
         await bridge._forward_to_clients(topic, topic, message_str)
         mock_ws.send_text.assert_not_awaited()
         assert bridge.topic_metrics[topic].throttled_count == 1
@@ -1274,7 +1274,7 @@ class TestForwardToClientsExceptionHandling:
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "bar"}'
+        message_str = '{"type": "candle"}'
         await bridge._forward_to_clients(topic, topic, message_str)
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
 
@@ -1296,7 +1296,7 @@ class TestForwardToWebsocketsBranchCoverage:
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "bar"}'
+        message_str = '{"type": "candle"}'
         await bridge._forward_to_websockets(topic, topic, message_str)
         assert sub.last_sent > 0
 
@@ -1316,7 +1316,7 @@ class TestForwardToWebsocketsBranchCoverage:
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "bar"}'
+        message_str = '{"type": "candle"}'
         await bridge._forward_to_websockets(topic, topic, message_str)
         bridge.disconnect_client.assert_awaited_once()
         assert bridge.topic_metrics[topic].timeout_count == 1
@@ -1337,7 +1337,7 @@ class TestZmqSubscriptionLoopBranchCoverage:
         bridge._forward_to_clients = AsyncMock()
         topic = "market.candles.BTC"
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
-        valid_message = [topic.encode(), b'{"type": "bar", "open": 100}']
+        valid_message = [topic.encode(), b'{"type": "candle", "open": 100}']
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[valid_message, asyncio.CancelledError()]
         )
@@ -1416,7 +1416,7 @@ class TestHandleZmqMessagesBranchCoverage:
             pattern=topic,
         )
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
-        raw_json = '{"type": "bar", "open": 100}'
+        raw_json = '{"type": "candle", "open": 100}'
         valid_message = [topic.encode(), raw_json.encode()]
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[valid_message, asyncio.CancelledError()]

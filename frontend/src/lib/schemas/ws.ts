@@ -2,7 +2,7 @@ import { z } from 'zod/v4'
 
 export {
   TickEnvelopeSchema as tickSchema,
-  BarEnvelopeSchema as barSchema,
+  CandleEnvelopeSchema as candleSchema,
   TradeEnvelopeSchema as tradeSchema,
   SignalEnvelopeSchema as signalSchema,
   OrderStatusEnvelopeSchema as orderStatusSchema,
@@ -25,7 +25,7 @@ export {
 } from './ws.generated.zod'
 import {
   TickEnvelopeSchema,
-  BarEnvelopeSchema,
+  CandleEnvelopeSchema,
   TradeEnvelopeSchema,
   SignalEnvelopeSchema,
   OrderStatusEnvelopeSchema,
@@ -47,7 +47,7 @@ import {
 
 export const wsMessageUnionSchema = z.discriminatedUnion('type', [
   TickEnvelopeSchema,
-  BarEnvelopeSchema,
+  CandleEnvelopeSchema,
   TradeEnvelopeSchema,
   SignalEnvelopeSchema,
   OrderStatusEnvelopeSchema,
@@ -73,7 +73,7 @@ export const wsMessageBaseSchema = z.looseObject({
 export type WsMessageBase = z.infer<typeof wsMessageBaseSchema>
 export type WsMessageUnion = z.infer<typeof wsMessageUnionSchema>
 export type Tick = z.infer<typeof TickEnvelopeSchema>
-export type Bar = z.infer<typeof BarEnvelopeSchema>
+export type Candle = z.infer<typeof CandleEnvelopeSchema>
 export type Trade = z.infer<typeof TradeEnvelopeSchema>
 export type Signal = z.infer<typeof SignalEnvelopeSchema>
 export type OrderStatus = z.infer<typeof OrderStatusEnvelopeSchema>
@@ -81,7 +81,7 @@ export type Fill = z.infer<typeof FillEnvelopeSchema>
 export type Heartbeat = z.infer<typeof HeartbeatEnvelopeSchema>
 const KNOWN_MESSAGE_TYPES = new Set([
   'tick',
-  'bar',
+  'candle',
   'trade',
   'signal',
   'order_status',

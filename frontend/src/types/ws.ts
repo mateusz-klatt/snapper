@@ -1,7 +1,7 @@
 export type {
   WsMessageSchema,
   TickEnvelope,
-  BarEnvelope,
+  CandleEnvelope,
   TradeEnvelope,
   SignalEnvelope,
   OrderStatusEnvelope,
@@ -29,7 +29,7 @@ export type {
 } from './ws.generated'
 import type {
   TickEnvelope,
-  BarEnvelope,
+  CandleEnvelope,
   TradeEnvelope,
   SignalEnvelope,
   OrderStatusEnvelope,
@@ -58,7 +58,7 @@ import type {
 
 export type WebSocketMessages =
   | TickEnvelope
-  | BarEnvelope
+  | CandleEnvelope
   | TradeEnvelope
   | SignalEnvelope
   | OrderStatusEnvelope
@@ -84,8 +84,8 @@ export type WebSocketMessages =
   | WSTopicSuggestionsResponse
   | WSPongResponse
 
-export function isCandle(msg: WebSocketMessages): msg is BarEnvelope {
-  return msg.type === 'bar'
+export function isCandle(msg: WebSocketMessages): msg is CandleEnvelope {
+  return msg.type === 'candle'
 }
 
 export function isTick(msg: WebSocketMessages): msg is TickEnvelope {

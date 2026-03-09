@@ -40,7 +40,7 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.market_data.walutomat import WalutomatSnapshotUpdaterService
 from snapper.interface.websocket.dispatcher import dispatch_messages
 from snapper.interface.websocket.helpers import build_allowed_origins
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
@@ -49,14 +49,14 @@ from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
 
 
-def make_bar_envelope(
+def make_candle_envelope(
     instrument: str = "BTC-USD",
     close: float = 100.0,
     ts: float | None = None,
     exchange: str = "kraken",
-) -> BarEnvelope:
-    """Create a BarEnvelope instance with configurable parameters."""
-    return BarEnvelope(
+) -> CandleEnvelope:
+    """Create a CandleEnvelope instance with configurable parameters."""
+    return CandleEnvelope(
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -80,8 +80,8 @@ def prefill_candle_buffer(
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
     for close in closes:
-        bar = make_bar_envelope(instrument, close, exchange=exchange)
-        strategy.candle_buffer[instrument].append(bar)
+        candle = make_candle_envelope(instrument, close, exchange=exchange)
+        strategy.candle_buffer[instrument].append(candle)
 
 
 async def feed_bar_to_strategy(
@@ -90,15 +90,15 @@ async def feed_bar_to_strategy(
     close: float,
     exchange: str = "kraken",
 ) -> Signal | None:
-    """Feed a bar to strategy and return resulting signal if any."""
-    bar = make_bar_envelope(instrument, close, exchange=exchange)
+    """Feed a candle to strategy and return resulting signal if any."""
+    candle = make_candle_envelope(instrument, close, exchange=exchange)
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
-    strategy.candle_buffer[instrument].append(bar)
+    strategy.candle_buffer[instrument].append(candle)
     max_buffer_size = strategy.params.get("buffer_size", 100)
     if len(strategy.candle_buffer[instrument]) > max_buffer_size:
         strategy.candle_buffer[instrument].pop(0)
-    return await strategy.on_bar(instrument, bar)
+    return await strategy.on_candle(instrument, candle)
 
 
 class TestDispatcherReauthFailure:

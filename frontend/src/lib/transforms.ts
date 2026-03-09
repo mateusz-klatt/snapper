@@ -9,7 +9,7 @@ import type {
   OrderStatusEnvelope,
   FillEnvelope,
   SignalEnvelope,
-  BarEnvelope,
+  CandleEnvelope,
   TickEnvelope,
   HeartbeatEnvelope,
 } from '../types/ws'
@@ -19,7 +19,6 @@ import type {
   Signal,
   Position,
   Candle,
-  Bar,
   Tick,
   Heartbeat,
   OrderType,
@@ -188,25 +187,25 @@ export function candleFromAPI(api: CandleData): Candle {
   }
 }
 
-export function barFromWS(ws: BarEnvelope): Bar {
+export function candleFromWS(ws: CandleEnvelope): Candle {
   if (ws.timeframe === null || ws.timeframe === undefined) {
-    throw new Error('BarEnvelope missing required field: timeframe')
+    throw new Error('CandleEnvelope missing required field: timeframe')
   }
 
   if (ws.open === null || ws.open === undefined) {
-    throw new Error('BarEnvelope missing required field: open')
+    throw new Error('CandleEnvelope missing required field: open')
   }
 
   if (ws.high === null || ws.high === undefined) {
-    throw new Error('BarEnvelope missing required field: high')
+    throw new Error('CandleEnvelope missing required field: high')
   }
 
   if (ws.low === null || ws.low === undefined) {
-    throw new Error('BarEnvelope missing required field: low')
+    throw new Error('CandleEnvelope missing required field: low')
   }
 
   if (ws.close === null || ws.close === undefined) {
-    throw new Error('BarEnvelope missing required field: close')
+    throw new Error('CandleEnvelope missing required field: close')
   }
 
   return {

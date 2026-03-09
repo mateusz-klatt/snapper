@@ -29,7 +29,7 @@ from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import clear_encryption
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import get_encryption_service
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import list_process_runs
 from snapper.strategies.base import BaseStrategy
@@ -38,14 +38,14 @@ from snapper.strategies.base import StrategyConfig
 from snapper.strategies.cointegration import CointegrationPairs
 
 
-def make_bar_envelope(
+def make_candle_envelope(
     instrument: str = "BTC-USD",
     close: float = 100.0,
     ts: float | None = None,
     exchange: str = "kraken",
-) -> BarEnvelope:
-    """Create a BarEnvelope with default values for testing."""
-    return BarEnvelope(
+) -> CandleEnvelope:
+    """Create a CandleEnvelope with default values for testing."""
+    return CandleEnvelope(
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -65,15 +65,15 @@ async def feed_bar_to_strategy(
     close: float,
     exchange: str = "kraken",
 ) -> Signal | None:
-    """Feed a bar envelope to a strategy and return generated signal."""
-    bar = make_bar_envelope(instrument, close, exchange=exchange)
+    """Feed a candle envelope to a strategy and return generated signal."""
+    candle = make_candle_envelope(instrument, close, exchange=exchange)
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
-    strategy.candle_buffer[instrument].append(bar)
+    strategy.candle_buffer[instrument].append(candle)
     max_buffer_size = strategy.params.get("buffer_size", 100)
     if len(strategy.candle_buffer[instrument]) > max_buffer_size:
         strategy.candle_buffer[instrument].pop(0)
-    return await strategy.on_bar(instrument, bar)
+    return await strategy.on_candle(instrument, candle)
 
 
 @pytest.fixture(autouse=True)
@@ -1120,7 +1120,7 @@ class TestCointegrationInstrument2Hedges:
         """
         await self._build_history_for_short_spread(strategy)
         strategy._position = None
-        strategy.candle_buffer["BTC-USD"][-1] = make_bar_envelope("BTC-USD", 60000.0)
+        strategy.candle_buffer["BTC-USD"][-1] = make_candle_envelope("BTC-USD", 60000.0)
         signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3017.5)
         if signal and strategy._position == "short_spread":
             assert signal.instrument == "ETH-USD"
@@ -1138,7 +1138,7 @@ class TestCointegrationInstrument2Hedges:
         """
         await self._build_history_for_long_spread(strategy)
         strategy._position = None
-        strategy.candle_buffer["BTC-USD"][-1] = make_bar_envelope("BTC-USD", 40000.0)
+        strategy.candle_buffer["BTC-USD"][-1] = make_candle_envelope("BTC-USD", 40000.0)
         signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3200.0)
         if signal and strategy._position == "long_spread":
             assert signal.instrument == "ETH-USD"

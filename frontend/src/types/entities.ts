@@ -8,7 +8,7 @@
 
 export type {
   // WS Envelope entities (backend naming)
-  Bar,
+  Candle,
   Fill,
   Heartbeat,
   OrderRequest,
@@ -21,7 +21,6 @@ export type {
   Tick,
   Trade,
   // API Snapshot entities
-  Candle,
   Position,
   // Request entities
   AdminResetPassword,

@@ -1,7 +1,7 @@
 import type {
   WebSocketMessages,
   TickEnvelope,
-  BarEnvelope,
+  CandleEnvelope,
   TradeEnvelope,
   SignalEnvelope,
   OrderStatusEnvelope,
@@ -24,7 +24,7 @@ import type { Components } from '../../types/api.generated'
 
 export interface WebSocketMessageTypeMap {
   tick: TickEnvelope
-  bar: BarEnvelope
+  bar: CandleEnvelope
   trade: TradeEnvelope
   signal: SignalEnvelope
   order_status: OrderStatusEnvelope

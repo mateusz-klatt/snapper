@@ -131,7 +131,7 @@ export function createCandle(
   const now = new Date().toISOString()
 
   return {
-    type: 'bar' as const,
+    type: 'candle' as const,
     timestamp: overrides.timestamp ?? now,
     open_at: overrides.open_at ?? now,
     meta: overrides.meta,

@@ -38,7 +38,7 @@ describe('auth', () => {
       expect(isAuthControlMessage({ type: 'reauth_required' })).toBe(true)
     })
     it('returns false for candle message', () => {
-      expect(isAuthControlMessage({ type: 'bar' })).toBe(false)
+      expect(isAuthControlMessage({ type: 'candle' })).toBe(false)
     })
     it('returns false for heartbeat message', () => {
       expect(isAuthControlMessage({ type: 'heartbeat' })).toBe(false)

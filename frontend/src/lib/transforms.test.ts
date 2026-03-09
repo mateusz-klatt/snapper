@@ -8,7 +8,7 @@ import {
   signalFromWS,
   positionFromAPI,
   candleFromAPI,
-  barFromWS,
+  candleFromWS,
   tickFromWS,
   heartbeatFromWS,
   ordersFromAPI,
@@ -34,7 +34,7 @@ import type {
   OrderStatusEnvelope,
   FillEnvelope,
   SignalEnvelope,
-  BarEnvelope,
+  CandleEnvelope,
   TickEnvelope,
   HeartbeatEnvelope,
 } from '../types/ws'
@@ -346,8 +346,8 @@ describe('Candle Transformers', () => {
     expect(result.openAt).toEqual(new Date('2026-01-15T10:00:00Z'))
   })
   it('transforms WebSocket candle to canonical entity', () => {
-    const wsCandle: BarEnvelope = {
-      type: 'bar',
+    const wsCandle: CandleEnvelope = {
+      type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       timeframe: '5m',
@@ -358,7 +358,7 @@ describe('Candle Transformers', () => {
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
     }
-    const result = barFromWS(wsCandle)
+    const result = candleFromWS(wsCandle)
 
     expect(result.instrument).toBe('ETH/USD')
     expect(result.timeframe).toBe('5m')
@@ -367,8 +367,8 @@ describe('Candle Transformers', () => {
     expect(result.timestamp).toBeUndefined()
   })
   it('includes envelope timestamp when present in WebSocket candle', () => {
-    const wsCandle: BarEnvelope = {
-      type: 'bar',
+    const wsCandle: CandleEnvelope = {
+      type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       timeframe: '5m',
@@ -380,14 +380,14 @@ describe('Candle Transformers', () => {
       open_at: '2026-01-15T10:00:00Z',
       timestamp: '2026-01-15T10:00:01Z',
     }
-    const result = barFromWS(wsCandle)
+    const result = candleFromWS(wsCandle)
 
     expect(result.openAt).toEqual(new Date('2026-01-15T10:00:00Z'))
     expect(result.timestamp).toEqual(new Date('2026-01-15T10:00:01Z'))
   })
   it('throws on missing timeframe in WebSocket candle', () => {
     const wsCandle = {
-      type: 'bar',
+      type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       timeframe: null,
@@ -397,13 +397,13 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as BarEnvelope
+    } as unknown as CandleEnvelope
 
-    expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: timeframe')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: timeframe')
   })
   it('throws on missing open in WebSocket candle', () => {
     const wsCandle = {
-      type: 'bar',
+      type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       timeframe: '5m',
@@ -413,13 +413,13 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as BarEnvelope
+    } as unknown as CandleEnvelope
 
-    expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: open')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: open')
   })
   it('throws on missing high in WebSocket candle', () => {
     const wsCandle = {
-      type: 'bar',
+      type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       timeframe: '5m',
@@ -429,13 +429,13 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as BarEnvelope
+    } as unknown as CandleEnvelope
 
-    expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: high')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: high')
   })
   it('throws on missing low in WebSocket candle', () => {
     const wsCandle = {
-      type: 'bar',
+      type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       timeframe: '5m',
@@ -445,13 +445,13 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as BarEnvelope
+    } as unknown as CandleEnvelope
 
-    expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: low')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: low')
   })
   it('throws on missing close in WebSocket candle', () => {
     const wsCandle = {
-      type: 'bar',
+      type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       timeframe: '5m',
@@ -461,9 +461,9 @@ describe('Candle Transformers', () => {
       close: null,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as BarEnvelope
+    } as unknown as CandleEnvelope
 
-    expect(() => barFromWS(wsCandle)).toThrow('BarEnvelope missing required field: close')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: close')
   })
 })
 describe('Tick Transformers', () => {

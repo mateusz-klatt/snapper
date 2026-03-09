@@ -31,7 +31,7 @@ from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.messaging.schemas.messages import HeartbeatEnvelope
 from snapper.messaging.schemas.messages import MarketDataEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
@@ -237,7 +237,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         (e.g. paper publisher reports source exchange in payloads).
 
         Returns:
-            Exchange name for BarEnvelope/TickEnvelope/TradeEnvelope.
+            Exchange name for CandleEnvelope/TickEnvelope/TradeEnvelope.
         """
         return cast(MarketDataExchange, self._get_exchange_name())
 
@@ -257,7 +257,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if not self.running:
                     break
                 native_symbol = candle.symbol
-                bar_msg = BarEnvelope(
+                candle_msg = CandleEnvelope(
                     exchange=exchange,
                     instrument=native_symbol,
                     volume=candle.volume,
@@ -271,9 +271,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     trades=candle.trades,
                 )
                 topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
-                await self._publish_message(topic, bar_msg)
+                await self._publish_message(topic, candle_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
-                await self._save_to_db(native_symbol, bar_msg)
+                await self._save_to_db(native_symbol, candle_msg)
         except Exception as e:
             logger.error(f"Candle loop error for {symbols}: {e}")
 
@@ -395,12 +395,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         except Exception as e:
             logger.error(f"Error publishing heartbeat: {e}")
 
-    async def _save_to_db(self, native_symbol: str, bar_msg: BarEnvelope) -> None:
+    async def _save_to_db(self, native_symbol: str, candle_msg: CandleEnvelope) -> None:
         """Persist candle data to the database.
 
         Args:
             native_symbol: Native exchange symbol identifier.
-            bar_msg: Bar envelope containing OHLCV data to persist.
+            candle_msg: Candle envelope containing OHLCV data to persist.
         """
         try:
             base_currency: str
@@ -425,30 +425,30 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     lot_size=0.0,
                 )
                 self._instrument_cache[native_symbol] = instrument_id
-            timeframe = bar_msg.timeframe or "1m"
-            open_price = bar_msg.open if bar_msg.open is not None else bar_msg.close
-            high_price = bar_msg.high if bar_msg.high is not None else bar_msg.close
-            low_price = bar_msg.low if bar_msg.low is not None else bar_msg.close
-            close_price = bar_msg.close if bar_msg.close is not None else 0.0
-            vwap_price = bar_msg.vwap if bar_msg.vwap is not None else bar_msg.close
-            trades = bar_msg.trades if bar_msg.trades is not None else 0
+            timeframe = candle_msg.timeframe or "1m"
+            open_price = candle_msg.open if candle_msg.open is not None else candle_msg.close
+            high_price = candle_msg.high if candle_msg.high is not None else candle_msg.close
+            low_price = candle_msg.low if candle_msg.low is not None else candle_msg.close
+            close_price = candle_msg.close if candle_msg.close is not None else 0.0
+            vwap_price = candle_msg.vwap if candle_msg.vwap is not None else candle_msg.close
+            trades = candle_msg.trades if candle_msg.trades is not None else 0
             candle_row: dict[str, Any] = {
                 "instrument_id": instrument_id,
-                "open_at": bar_msg.open_at,
-                "timestamp": bar_msg.timestamp,
+                "open_at": candle_msg.open_at,
+                "timestamp": candle_msg.timestamp,
                 "timeframe": timeframe,
                 "open": open_price,
                 "high": high_price,
                 "low": low_price,
                 "close": close_price,
-                "volume": float(bar_msg.volume),
+                "volume": float(candle_msg.volume),
                 "vwap": vwap_price,
                 "trades": trades,
             }
             assert self.repository is not None, "Repository not initialized"
             await self.repository.upsert_candles([candle_row])
         except Exception as e:
-            logger.error(f"Error saving bar to DB: {e}")
+            logger.error(f"Error saving candle to DB: {e}")
 
     async def _symbol_aliases_loop(self) -> None:
         """Listen for system messages and handle cache invalidation."""

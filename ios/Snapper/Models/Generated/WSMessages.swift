@@ -9,7 +9,7 @@ enum UserRole: String, Codable, Sendable {
     case admin
 }
 
-enum BarEnvelopeExchange: String, Codable, Sendable {
+enum CandleEnvelopeExchange: String, Codable, Sendable {
     case kraken
     case zonda
     case walutomat
@@ -165,7 +165,7 @@ struct WsMessageBase: Codable, Sendable {
     let timestamp: Date?
 }
 
-struct BarEnvelope: Codable, Sendable {
+struct CandleEnvelope: Codable, Sendable {
     let type: String
     let timestamp: Date?
     let meta: [String: AnyCodable]?

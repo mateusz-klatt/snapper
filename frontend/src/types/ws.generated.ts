@@ -9,7 +9,7 @@
  */
 export type WebSocketMessages =
   | WsMessageSchema
-  | BarEnvelope
+  | CandleEnvelope
   | FillEnvelope
   | HeartbeatEnvelope
   | OrderCancelEnvelope
@@ -43,7 +43,7 @@ export type WebSocketMessages =
   | WSSubscriptionsListResponse
   | WSTopicSuggestionsResponse
   | WSUnsubscribeRequest;
-export type Type = "bar";
+export type Type = "candle";
 export type Exchange = "kraken" | "zonda" | "walutomat" | "polygon";
 export type Vwap = number | null;
 export type Trades = number | null;
@@ -261,15 +261,15 @@ export interface WsMessageSchema {
   timestamp?: string;
 }
 /**
- * OHLCV candle bar message envelope.
+ * OHLCV candle message envelope.
  *
  * Wraps CandleData for transmission over the messaging bus.
  * Published when a candle closes or during historical replay.
  *
  * Attributes:
- *     type: Fixed as 'bar' for message routing.
+ *     type: Fixed as 'candle' for message routing.
  */
-export interface BarEnvelope {
+export interface CandleEnvelope {
   type: Type;
   timestamp?: string;
   meta?: Meta;

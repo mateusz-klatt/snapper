@@ -2,7 +2,7 @@
 
 This module defines typed message envelopes used for communication between
 Snapper processes via ZeroMQ pub/sub messaging. Each envelope wraps domain
-data (ticks, bars, signals, orders) with metadata for routing and parsing.
+data (ticks, candles, signals, orders) with metadata for routing and parsing.
 
 The messaging system uses topic-based routing where publishers send to
 topics like 'market.kraken.BTC-USD.ticks' and subscribers filter by patterns.
@@ -10,7 +10,7 @@ topics like 'market.kraken.BTC-USD.ticks' and subscribers filter by patterns.
 Classes:
     MessageEnvelopeBase: Base class with common envelope fields.
     TickEnvelope: Real-time price tick message.
-    BarEnvelope: OHLCV candle bar message.
+    CandleEnvelope: OHLCV candle message.
     TradeEnvelope: Trade execution from market.
     SignalEnvelope: Trading signal from strategy.
     OrderRequestEnvelope: Order request from strategy to executor.
@@ -100,17 +100,17 @@ class TickEnvelope(TickData, MessageEnvelopeBase):
     type: Literal["tick"] = "tick"
 
 
-class BarEnvelope(CandleData, MessageEnvelopeBase):
-    """OHLCV candle bar message envelope.
+class CandleEnvelope(CandleData, MessageEnvelopeBase):
+    """OHLCV candle message envelope.
 
     Wraps CandleData for transmission over the messaging bus.
     Published when a candle closes or during historical replay.
 
     Attributes:
-        type: Fixed as 'bar' for message routing.
+        type: Fixed as 'candle' for message routing.
     """
 
-    type: Literal["bar"] = "bar"
+    type: Literal["candle"] = "candle"
 
 
 class TradeEnvelope(TradeData, MessageEnvelopeBase):
@@ -126,7 +126,7 @@ class TradeEnvelope(TradeData, MessageEnvelopeBase):
     type: Literal["trade"] = "trade"
 
 
-MarketDataEnvelope = TickEnvelope | BarEnvelope | TradeEnvelope
+MarketDataEnvelope = TickEnvelope | CandleEnvelope | TradeEnvelope
 """Union type for all market data envelope types."""
 
 
@@ -391,7 +391,7 @@ class MessageParseError(Exception):
 
 MESSAGE_TYPE_MAP: dict[str, type[MessageEnvelopeBase]] = {
     "tick": TickEnvelope,
-    "bar": BarEnvelope,
+    "candle": CandleEnvelope,
     "trade": TradeEnvelope,
     "signal": SignalEnvelope,
     "order_req": OrderRequestEnvelope,
@@ -419,7 +419,7 @@ def parse_message(data: str) -> MessageEnvelopeBase:
         data: JSON string containing the serialized message.
 
     Returns:
-        Typed message envelope instance (TickEnvelope, BarEnvelope, etc.).
+        Typed message envelope instance (TickEnvelope, CandleEnvelope, etc.).
 
     Raises:
         MessageParseError: If JSON is invalid, type field is missing,

@@ -6,7 +6,7 @@ from datetime import datetime
 
 import pytest
 
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.messaging.schemas.messages import FillEnvelope
 from snapper.messaging.schemas.messages import HeartbeatEnvelope
 from snapper.messaging.schemas.messages import MessageParseError
@@ -39,13 +39,13 @@ class TestMessages:
         assert "timestamp" in data
 
     def test_market_data_bar_message(self) -> None:
-        """Test BarEnvelope round-trip serialization.
+        """Test CandleEnvelope round-trip serialization.
 
-        Given: A BarEnvelope with OHLCV data,
+        Given: A CandleEnvelope with OHLCV data,
         When: Serialized to JSON and parsed back,
         Then: All fields are preserved.
         """
-        msg = BarEnvelope(
+        msg = CandleEnvelope(
             instrument="ETHUSD",
             exchange="kraken",
             volume=5.0,
@@ -59,9 +59,9 @@ class TestMessages:
             open_at=datetime.now(UTC),
         )
         json_str = msg.to_json()
-        parsed = BarEnvelope.from_json(json_str)
-        assert isinstance(parsed, BarEnvelope)
-        assert parsed.type == "bar"
+        parsed = CandleEnvelope.from_json(json_str)
+        assert isinstance(parsed, CandleEnvelope)
+        assert parsed.type == "candle"
         assert parsed.instrument == "ETHUSD"
         assert parsed.timeframe == "1m"
         assert parsed.open == pytest.approx(2990.0)

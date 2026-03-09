@@ -40,7 +40,7 @@ export function getMessageTopic(message: WebSocketMessages): string | null {
   }
 
   switch (message.type) {
-    case 'bar': {
+    case 'candle': {
       const instrument = normalizeInst(message.instrument)
       const exchange = normalizeExchange(message.exchange)
       const timeframe = message.timeframe
@@ -86,7 +86,7 @@ export function getMessageTopic(message: WebSocketMessages): string | null {
   }
 }
 
-const THROTTLED_MESSAGE_TYPES = new Set(['bar', 'order_status', 'fill', 'position'])
+const THROTTLED_MESSAGE_TYPES = new Set(['candle', 'order_status', 'fill', 'position'])
 
 export function shouldThrottle(messageType: string): boolean {
   return THROTTLED_MESSAGE_TYPES.has(messageType)

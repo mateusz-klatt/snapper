@@ -124,7 +124,7 @@ Components:
 Message types:
 
 - `TickEnvelope` — Price tick
-- `BarEnvelope` — OHLCV candle
+- `CandleEnvelope` — OHLCV candle
 - `SignalEnvelope` — Trading signal
 - `TradeEnvelope` — Trade execution
 - `HeartbeatEnvelope` — Component heartbeat

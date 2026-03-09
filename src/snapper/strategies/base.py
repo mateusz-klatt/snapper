@@ -24,7 +24,7 @@ import zmq.asyncio
 from snapper.config.settings import get_bootstrap_settings
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.messaging.schemas.messages import SettingChangedEnvelope
 from snapper.messaging.schemas.messages import SignalEnvelope
 from snapper.messaging.schemas.messages import TickEnvelope
@@ -85,7 +85,7 @@ class BaseStrategy(ABC):
         self.zmq_context: zmq.asyncio.Context | None = None
         self.subscriber: ValidatedSubscriber | None = None
         self.publisher: ValidatedPublisher | None = None
-        self.candle_buffer: dict[str, list[BarEnvelope]] = {}
+        self.candle_buffer: dict[str, list[CandleEnvelope]] = {}
         self._listen_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self.last_data_timestamp: float = time.time()
@@ -105,12 +105,12 @@ class BaseStrategy(ABC):
         """
         return self._running
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
-        """Handle incoming bar/candle data.
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+        """Handle incoming candle data.
 
         Args:
             instrument: The instrument symbol.
-            bar: The bar envelope with OHLCV data.
+            candle: The candle envelope with OHLCV data.
 
         Returns:
             Optional signal if strategy logic triggers.
@@ -379,24 +379,24 @@ class BaseStrategy(ABC):
             self._running = False
 
     async def _handle_candle_data(self, instrument: str, payload: str) -> Signal | None:
-        """Handle incoming candle bar data.
+        """Handle incoming candle data.
 
         Args:
             instrument: The instrument symbol.
             payload: The JSON payload string.
 
         Returns:
-            Optional signal from the bar handler.
+            Optional signal from the candle handler.
         """
-        bar = BarEnvelope.from_json(payload)
-        self._last_data_ts = bar.open_at.timestamp()
+        candle = CandleEnvelope.from_json(payload)
+        self._last_data_ts = candle.open_at.timestamp()
         if instrument not in self.candle_buffer:
             self.candle_buffer[instrument] = []
-        self.candle_buffer[instrument].append(bar)
+        self.candle_buffer[instrument].append(candle)
         max_buffer_size = self.params.get("buffer_size", 100)
         if len(self.candle_buffer[instrument]) > max_buffer_size:
             self.candle_buffer[instrument].pop(0)
-        return await self.on_bar(instrument, bar)
+        return await self.on_candle(instrument, candle)
 
     async def _dispatch_market_data(
         self, topic: str, instrument: str, payload: str

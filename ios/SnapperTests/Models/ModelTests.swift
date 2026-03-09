@@ -88,10 +88,10 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(response.user.role, .admin)
     }
 
-    func testBarEnvelopeDecoding() throws {
+    func testCandleEnvelopeDecoding() throws {
         let json = """
         {
-            "type": "bar",
+            "type": "candle",
             "timestamp": "2025-11-22T10:00:00Z",
             "meta": null,
             "instrument": "BTCUSD",
@@ -110,17 +110,17 @@ final class ModelTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
-        let bar = try decoder.decode(BarEnvelope.self, from: json)
+        let candle = try decoder.decode(CandleEnvelope.self, from: json)
 
-        XCTAssertEqual(bar.type, "bar")
-        XCTAssertEqual(bar.instrument, "BTCUSD")
-        XCTAssertEqual(bar.timeframe, "1m")
-        XCTAssertEqual(bar.open, 50000.0)
-        XCTAssertEqual(bar.high, 50100.0)
-        XCTAssertEqual(bar.low, 49900.0)
-        XCTAssertEqual(bar.close, 50050.0)
-        XCTAssertEqual(bar.volume, 100.5)
-        XCTAssertEqual(bar.exchange, "kraken")
+        XCTAssertEqual(candle.type, "candle")
+        XCTAssertEqual(candle.instrument, "BTCUSD")
+        XCTAssertEqual(candle.timeframe, "1m")
+        XCTAssertEqual(candle.open, 50000.0)
+        XCTAssertEqual(candle.high, 50100.0)
+        XCTAssertEqual(candle.low, 49900.0)
+        XCTAssertEqual(candle.close, 50050.0)
+        XCTAssertEqual(candle.volume, 100.5)
+        XCTAssertEqual(candle.exchange, "kraken")
     }
 
     func testRefreshResponseDecoding() throws {

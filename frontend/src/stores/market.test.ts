@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useMarketStore } from './market'
-import type { BarEnvelope, TickEnvelope } from '../types/ws'
+import type { CandleEnvelope, TickEnvelope } from '../types/ws'
 
 describe('useMarketStore', () => {
   beforeEach(() => {
@@ -84,8 +84,8 @@ describe('useMarketStore', () => {
   })
   describe('clearMarketData', () => {
     it('resets all state to defaults', () => {
-      const mockCandle: BarEnvelope = {
-        type: 'bar',
+      const mockCandle: CandleEnvelope = {
+        type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'binance',
         timeframe: '1m',

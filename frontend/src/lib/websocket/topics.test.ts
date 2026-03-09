@@ -142,7 +142,7 @@ describe('topics', () => {
   })
   describe('shouldThrottle', () => {
     it('returns true for candle messages', () => {
-      expect(shouldThrottle('bar')).toBe(true)
+      expect(shouldThrottle('candle')).toBe(true)
     })
     it('returns true for order messages', () => {
       expect(shouldThrottle('order_status')).toBe(true)

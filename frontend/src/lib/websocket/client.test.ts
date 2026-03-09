@@ -19,7 +19,7 @@ import {
 
 vi.mock('./topics', () => ({
   getMessageTopic: vi.fn((msg: any) => {
-    if (msg.type === 'bar' && msg.exchange && msg.instrument && msg.timeframe) {
+    if (msg.type === 'candle' && msg.exchange && msg.instrument && msg.timeframe) {
       return `market.${msg.exchange}.${msg.instrument}.candles.${msg.timeframe}`
     }
 
@@ -30,7 +30,7 @@ vi.mock('./topics', () => ({
     return msg.topic || msg.type || null
   }),
   shouldThrottle: vi.fn((type: string) =>
-    ['bar', 'order_status', 'fill', 'position'].includes(type)
+    ['candle', 'order_status', 'fill', 'position'].includes(type)
   ),
   buildMarketTopic: vi.fn((type: string, inst: string) => `market:${type}:${inst}`),
   MARKET_TOPIC_PREFIX: 'market',
@@ -417,7 +417,7 @@ describe('WebSocketClient', () => {
     })
     it('handles repeated unsubscription safely', () => {
       const handler = vi.fn()
-      const unsubscribe = client.onMessage('bar', handler)
+      const unsubscribe = client.onMessage('candle', handler)
 
       unsubscribe()
       unsubscribe()
@@ -626,12 +626,12 @@ describe('WebSocketClient', () => {
     it('drops messages that fail schema validation', async () => {
       const handler = vi.fn()
 
-      client.onMessage('bar', handler)
+      client.onMessage('candle', handler)
       client.connect()
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
       const invalidMessage = {
-        type: 'bar',
+        type: 'candle',
         timestamp: new Date().toISOString(),
         invalid: true,
       }
@@ -661,7 +661,7 @@ describe('WebSocketClient', () => {
     it('queues throttled messages by topic', async () => {
       const handler = vi.fn()
 
-      client.onMessage('bar', handler)
+      client.onMessage('candle', handler)
       client.connect()
       await vi.advanceTimersByTimeAsync(50)
       const mockWs = (client as any).ws
@@ -1238,7 +1238,7 @@ describe('WebSocketClient secure mode', () => {
   it('ignores non-auth messages before authentication completes', async () => {
     const handler = vi.fn()
 
-    client.onMessage('bar', handler)
+    client.onMessage('candle', handler)
     client.connect()
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws
@@ -1453,7 +1453,7 @@ describe('WebSocketClient secure mode', () => {
   it('ignores messages before authentication', async () => {
     const handler = vi.fn()
 
-    client.onMessage('bar', handler)
+    client.onMessage('candle', handler)
     client.connect()
     await vi.advanceTimersByTimeAsync(50)
     const mockWs = (client as any).ws

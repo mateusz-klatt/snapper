@@ -10,7 +10,7 @@ flowchart TB
     MarketData["Market Data<br/>ZMQ"] --> Strategy
 
     subgraph Strategy["BaseStrategy"]
-        OnBar["on_bar()"]
+        OnBar["on_candle()"]
         OnTick["on_tick()"]
     end
 
@@ -26,7 +26,7 @@ flowchart TB
 ```python
 from snapper.strategies.base import BaseStrategy, Signal, StrategyConfig
 from snapper.strategies.decorators import register_strategy, create_strategy_process
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 
 
 @register_strategy("MyStrategy")
@@ -52,7 +52,7 @@ class MyStrategy(BaseStrategy):
         self.threshold = self.params.get("threshold", 0.5)
         self.period = self.params.get("period", 14)
 
-    async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
         """Process candle and generate signal."""
         # Access candle buffer
         candles = self.candle_buffer.get(instrument, [])
@@ -232,7 +232,7 @@ from snapper.strategies.cointegration import CointegrationStrategy
 ### Candle Buffer
 
 ```python
-async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
+async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
     candles = self.candle_buffer.get(instrument, [])
 
     # Last N candles
@@ -243,11 +243,11 @@ async def on_bar(self, instrument: str, bar: BarEnvelope) -> Signal | None:
     closes = pd.Series([c.close for c in candles])
 ```
 
-### BarEnvelope
+### CandleEnvelope
 
 ```python
 @dataclass
-class BarEnvelope:
+class CandleEnvelope:
     open: float
     high: float
     low: float
@@ -304,7 +304,7 @@ flowchart TB
     Start --> Loop
 
     subgraph Loop["Listen loop"]
-        Receive["Receive message"] --> Process["on_bar() / on_tick()"]
+        Receive["Receive message"] --> Process["on_candle() / on_tick()"]
         Process -->|Signal| SignalOut["Signal"]
         Process --> Receive
     end
@@ -357,7 +357,7 @@ asyncio.run(main())
 import pytest
 from snapper.strategies.rsi import RSIReversion
 from snapper.strategies.base import StrategyConfig
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 
 
 @pytest.fixture
@@ -376,7 +376,7 @@ def rsi_strategy() -> RSIReversion:
 async def test_buy_signal_on_low_rsi(rsi_strategy: RSIReversion) -> None:
     # Prepare data with low RSI
     ...
-    signal = await rsi_strategy.on_bar("BTC-USD", bar)
+    signal = await rsi_strategy.on_candle("BTC-USD", candle)
     assert signal is not None
     assert signal.side == "buy"
 ```

@@ -15,7 +15,7 @@ from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.messaging.publishers.zonda import ZondaMarketDataPublisher
-from snapper.messaging.schemas.messages import BarEnvelope
+from snapper.messaging.schemas.messages import CandleEnvelope
 from snapper.messaging.schemas.messages import MarketDataEnvelope
 
 
@@ -162,7 +162,7 @@ class TestZondaPublisherLoops:
 
         Given a running publisher with candle stream,
         When _candle_loop processes candles,
-        Then messages are published with correct topic and bar data.
+        Then messages are published with correct topic and candle data.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -188,14 +188,14 @@ class TestZondaPublisherLoops:
 
         mock_exchange_client = SimpleNamespace(subscribe_candles=mock_subscribe)
         publisher_any._exchange_client = mock_exchange_client
-        published_messages: list[tuple[str, BarEnvelope]] = []
+        published_messages: list[tuple[str, CandleEnvelope]] = []
 
-        async def publish_stub(topic: str, message: BarEnvelope) -> None:
+        async def publish_stub(topic: str, message: CandleEnvelope) -> None:
             published_messages.append((topic, message))
 
-        saved_payloads: list[tuple[str, BarEnvelope]] = []
+        saved_payloads: list[tuple[str, CandleEnvelope]] = []
 
-        async def save_stub(symbol: str, envelope: BarEnvelope) -> None:
+        async def save_stub(symbol: str, envelope: CandleEnvelope) -> None:
             saved_payloads.append((symbol, envelope))
 
         publisher_any._publish_message = publish_stub
@@ -204,7 +204,7 @@ class TestZondaPublisherLoops:
         assert len(published_messages) == 1
         topic, msg = published_messages[0]
         assert topic == "market.zonda.BTC-PLN.candles.1m"
-        assert msg.type == "bar"
+        assert msg.type == "candle"
         assert msg.instrument == "BTC-PLN"
         assert msg.close == pytest.approx(101000.0)
 
