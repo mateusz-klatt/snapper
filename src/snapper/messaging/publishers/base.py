@@ -435,7 +435,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             candle_row: dict[str, Any] = {
                 "instrument_id": instrument_id,
                 "open_at": bar_msg.open_at,
-                "timestamp": datetime.now(UTC),
+                "timestamp": bar_msg.timestamp,
                 "timeframe": timeframe,
                 "open": open_price,
                 "high": high_price,

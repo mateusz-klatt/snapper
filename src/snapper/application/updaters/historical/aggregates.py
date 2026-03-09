@@ -735,7 +735,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             {
                 "instrument_id": instrument_id,
                 "open_at": candle.timestamp,
-                "timestamp": candle.timestamp,
+                "timestamp": datetime.now(UTC),
                 "timeframe": timeframe,
                 "open": float(candle.open),
                 "high": float(candle.high),

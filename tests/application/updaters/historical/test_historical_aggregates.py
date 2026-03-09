@@ -2145,21 +2145,20 @@ def test_build_candle_rows_converts_values_decimal() -> None:
         instrument_id=7,
         timeframe="1m",
     )
-    assert rows == [
-        {
-            "instrument_id": 7,
-            "open_at": candle.timestamp,
-            "timestamp": candle.timestamp,
-            "timeframe": "1m",
-            "open": 1.0,
-            "high": 2.0,
-            "low": 3.0,
-            "close": 4.0,
-            "volume": 5.0,
-            "vwap": None,
-            "trades": 10,
-        }
-    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["instrument_id"] == 7
+    assert row["open_at"] == candle.timestamp
+    assert row["timeframe"] == "1m"
+    assert row["open"] == 1.0
+    assert row["high"] == 2.0
+    assert row["low"] == 3.0
+    assert row["close"] == 4.0
+    assert row["volume"] == 5.0
+    assert row["vwap"] is None
+    assert row["trades"] == 10
+    assert isinstance(row["timestamp"], datetime)
+    assert row["timestamp"] != row["open_at"]
 
 
 def test_timeframe_label_variants_extended() -> None:
