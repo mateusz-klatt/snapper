@@ -78,7 +78,7 @@ class SignalReadService:
                     inst_id = inst.id
                 signal_event = SignalEvent(
                     instrument_id=inst_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=signal.timestamp or datetime.now(UTC),
                     side=signal.side,
                     strength=signal.strength,
                     reason=signal.reason,

@@ -2033,7 +2033,7 @@ class TestEmitSignal:
             reason="Timestamp propagation",
         )
         await strategy.emit_signal(signal)
-        assert signal.timestamp == pytest.approx(1234.5)
+        assert signal.timestamp == datetime.fromtimestamp(1234.5, tz=UTC)
         publisher_mock.send_multipart.assert_awaited_once()
         topic_arg, payload_arg = publisher_mock.send_multipart.await_args.args
         assert topic_arg == "signals.paper.BTC-USD.test_strategy"
@@ -2070,7 +2070,7 @@ class TestEmitSignal:
             reason="Live test",
         )
         await strategy.emit_signal(signal)
-        assert signal.timestamp == pytest.approx(777.7)
+        assert signal.timestamp == datetime.fromtimestamp(777.7, tz=UTC)
         publisher_mock.send_multipart.assert_awaited_once()
         topic_arg, payload_arg = publisher_mock.send_multipart.await_args.args
         assert topic_arg == "signals.kraken.BTC-USD.live"
@@ -2102,10 +2102,10 @@ class TestEmitSignal:
             strength=0.9,
             price=50500.0,
             reason="Explicit timestamp test",
-            timestamp=123456789.0,
+            timestamp=datetime.fromtimestamp(123456789.0, tz=UTC),
         )
         await strategy.emit_signal(signal)
-        assert signal.timestamp == pytest.approx(123456789.0)
+        assert signal.timestamp == datetime.fromtimestamp(123456789.0, tz=UTC)
 
     @pytest.mark.asyncio
     async def test_emit_signal_skips_publish_when_no_publisher(self) -> None:
@@ -2135,7 +2135,7 @@ class TestEmitSignal:
             strength=0.9,
             price=50500.0,
             reason="No publisher test",
-            timestamp=123.0,
+            timestamp=datetime.fromtimestamp(123.0, tz=UTC),
         )
         await strategy.emit_signal(signal)
 
@@ -3250,7 +3250,7 @@ class TestEmitSignalTimestamp:
             timestamp=None,
         )
         await strategy.emit_signal(signal)
-        assert signal.timestamp == pytest.approx(1700000000.0)
+        assert signal.timestamp == datetime.fromtimestamp(1700000000.0, tz=UTC)
 
     @pytest.mark.asyncio
     async def test_emit_signal_uses_wall_time_when_no_replay_ts(self) -> None:
@@ -3279,9 +3279,9 @@ class TestEmitSignalTimestamp:
             reason="test",
             timestamp=None,
         )
-        before = time.time()
+        before = datetime.now(UTC)
         await strategy.emit_signal(signal)
-        after = time.time()
+        after = datetime.now(UTC)
         assert signal.timestamp is not None
         assert before <= signal.timestamp <= after
 

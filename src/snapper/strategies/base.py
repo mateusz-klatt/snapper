@@ -434,7 +434,8 @@ class BaseStrategy(ABC):
             ValueError: If signal instrument is not in configured outputs.
         """
         if signal.timestamp is None:
-            signal.timestamp = self._last_data_ts or time.time()
+            ts = self._last_data_ts or time.time()
+            signal.timestamp = datetime.fromtimestamp(ts, tz=UTC)
         if self.exchange == "paper":
             topic = f"signals.paper.{signal.instrument}.{self.name}"
         else:
@@ -455,7 +456,7 @@ class BaseStrategy(ABC):
             price=signal.price,
             exchange=self.exchange,
             strategy_name=self.name,
-            timestamp=datetime.fromtimestamp(signal.timestamp, tz=UTC),
+            timestamp=signal.timestamp,
             meta=signal.metadata,
         )
         payload_bytes = signal_envelope.to_json().encode("utf-8")

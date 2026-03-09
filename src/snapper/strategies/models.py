@@ -7,6 +7,7 @@ instance configuration.
 
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
 from typing import Any
 
 from snapper.core.types import OrderExchange
@@ -25,7 +26,7 @@ class Signal:
         strength: Signal strength from 0.0 to 1.0.
         reason: Human-readable reason for the signal.
         price: Price at which signal was generated.
-        timestamp: Signal generation timestamp (Unix epoch).
+        timestamp: When the signal was generated (UTC datetime).
         metadata: Additional signal metadata.
     """
 
@@ -34,7 +35,7 @@ class Signal:
     strength: float
     reason: str
     price: float
-    timestamp: float | None = None
+    timestamp: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
