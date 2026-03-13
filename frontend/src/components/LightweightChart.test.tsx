@@ -194,24 +194,24 @@ describe('LightweightChart', () => {
   })
   it('skips resize when chart ref is missing', async () => {
     vi.resetModules()
+    const React = await import('react')
     const containerRef = { current: document.createElement('div') }
     const chartRef = { current: null as unknown }
     const seriesRef = { current: null as unknown }
 
     vi.doMock('react', async () => {
-      const actual = await vi.importActual<typeof import('react')>('react')
       let callCount = 0
 
       return {
-        ...actual,
+        ...React,
         useRef: ((initialValue: unknown) => {
           callCount += 1
           if (callCount === 1) return containerRef
           if (callCount === 2) return chartRef
           if (callCount === 3) return seriesRef
 
-          return actual.useRef(initialValue)
-        }) as typeof actual.useRef,
+          return React.useRef(initialValue)
+        }) as typeof React.useRef,
       }
     })
     const { LightweightChart: MockedLightweightChart } = await import('./LightweightChart')
@@ -226,15 +226,17 @@ describe('LightweightChart', () => {
   })
   it('skips setup when container ref is null', async () => {
     vi.resetModules()
+    const React = await import('react')
+    const originalUseRef = React.useRef
+
     vi.doMock('react', async () => {
-      const actual = await vi.importActual<typeof import('react')>('react')
       let callCount = 0
 
       return {
-        ...actual,
+        ...React,
         useRef: ((initialValue: unknown) => {
           callCount += 1
-          const ref = actual.useRef(initialValue)
+          const ref = originalUseRef(initialValue)
 
           if (callCount === 1) {
             Object.defineProperty(ref, 'current', {
@@ -245,7 +247,7 @@ describe('LightweightChart', () => {
           }
 
           return ref
-        }) as typeof actual.useRef,
+        }) as typeof React.useRef,
       }
     })
     const { LightweightChart: MockedLightweightChart } = await import('./LightweightChart')
