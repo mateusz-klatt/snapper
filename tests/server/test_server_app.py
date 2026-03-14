@@ -304,6 +304,7 @@ class TestCreateApiRouter:
         assert data[0]["instrument"] == "BTC-USD"
         assert data[0]["open"] == pytest.approx(50000.0)
         assert data[0]["close"] == pytest.approx(50500.0)
+        assert data[0]["timestamp"] is not None
 
     @patch("snapper.server.app.get_settings")
     @patch("snapper.server.app.get_repository")
@@ -1236,6 +1237,7 @@ class MockOrder:
         self.id = 1
         self.public_id = "order-uuid-1234"
         self.instrument_id = 1
+        self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.client_order_id = "client_123"
         self.exchange_order_id = "exch_456"
         self.created_at = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
@@ -1398,6 +1400,7 @@ class TestOrdersSuccessPath:
         assert data[0]["filled_size"] == pytest.approx(1.0)
         assert data[0]["average_price"] == pytest.approx(50000.0)
         assert data[0]["status"] == "filled"
+        assert data[0]["timestamp"] == "2024-01-01T12:00:00Z"
 
     def test_get_orders_with_symbol_filter(self) -> None:
         """Verify orders endpoint filters by symbol.
@@ -1455,7 +1458,8 @@ class TestSignalsSuccessPath:
         assert data[0]["strength"] == pytest.approx(0.8)
         assert data[0]["reason"] == "RSI oversold"
         assert data[0]["strategy_name"] == "rsi_strategy"
-        assert data[0]["fired_at"] is not None
+        assert data[0]["timestamp"] == "2024-01-01T12:00:00Z"
+        assert data[0]["fired_at"] == "2024-01-01T11:59:00Z"
 
     def test_get_signals_with_filters(self) -> None:
         """Verify signals endpoint filters by instrument and strategy.
@@ -1517,6 +1521,7 @@ class TestExecutionsSuccessPath:
         assert data[0]["exchange"] == "kraken"
         assert data[0]["side"] == "buy"
         assert data[0]["status"] == "filled"
+        assert data[0]["timestamp"] == "2024-01-01T12:01:00Z"
         assert data[0]["executed_at"] is not None
 
     def test_get_executions_empty(self) -> None:

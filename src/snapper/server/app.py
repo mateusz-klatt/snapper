@@ -454,6 +454,7 @@ def _create_candles_signals_router() -> APIRouter:
                 return [
                     CandleData(
                         id=candle.public_id,
+                        timestamp=candle.timestamp,
                         instrument=instrument,
                         exchange=exchange,
                         timeframe=candle.timeframe,
@@ -502,6 +503,7 @@ def _create_candles_signals_router() -> APIRouter:
                 return [
                     SignalData(
                         id=signal.public_id,
+                        timestamp=signal.timestamp,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
                         side=signal.side,
@@ -602,6 +604,7 @@ def _create_orders_executions_router() -> APIRouter:
                 return [
                     OrderData(
                         id=order.public_id,
+                        timestamp=order.timestamp,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
                         client_order_id=order.client_order_id or "",
@@ -645,6 +648,7 @@ def _create_orders_executions_router() -> APIRouter:
                 return [
                     ExecutionData(
                         id=execution.public_id,
+                        timestamp=execution.timestamp,
                         trade_id=execution.trade_id,
                         exchange_order_id=order.exchange_order_id,
                         client_order_id=order.client_order_id or "",
