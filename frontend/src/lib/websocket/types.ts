@@ -1,12 +1,12 @@
 import type {
   WebSocketMessages,
-  TickEnvelope,
-  CandleEnvelope,
-  TradeEnvelope,
-  SignalEnvelope,
-  OrderStatusEnvelope,
-  FillEnvelope,
-  HeartbeatEnvelope,
+  TickData,
+  CandleData,
+  TradeData,
+  SignalData,
+  OrderData,
+  ExecutionData,
+  HeartbeatData,
   WSErrorResponse,
   WSAuthRequiredResponse,
   WSAuthOkResponse,
@@ -23,13 +23,13 @@ import type {
 import type { Components } from '../../types/api.generated'
 
 export interface WebSocketMessageTypeMap {
-  tick: TickEnvelope
-  candle: CandleEnvelope
-  trade: TradeEnvelope
-  signal: SignalEnvelope
-  order_status: OrderStatusEnvelope
-  fill: FillEnvelope
-  heartbeat: HeartbeatEnvelope
+  tick: TickData
+  candle: CandleData
+  trade: TradeData
+  signal: SignalData
+  order: OrderData
+  execution: ExecutionData
+  heartbeat: HeartbeatData
   error: WSErrorResponse
   auth_required: WSAuthRequiredResponse
   auth_ok: WSAuthOkResponse

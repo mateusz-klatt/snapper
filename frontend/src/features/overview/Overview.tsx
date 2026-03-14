@@ -8,7 +8,7 @@ import {
   useProcessSummary,
 } from '../../hooks/queries'
 import { useTradeStore } from '../../stores/trade'
-import type { Signal, Fill } from '../../types/entities'
+import type { Signal, Execution } from '../../types/entities'
 
 const CURRENCY_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
 
@@ -89,7 +89,7 @@ const PortfolioContent: React.FC<PortfolioContentProps> = ({
 }
 
 const signalKey = (signal: Signal, index: number): string | number =>
-  signal.id ?? signal.timestamp?.getTime() ?? `signal-${index}`
+  signal.firedAt?.getTime() ?? `signal-${index}`
 
 const SignalRow: React.FC<Readonly<{ signal: Signal; index: number }>> = ({ signal, index }) => {
   const normalizedSide = signal.side.toLowerCase()
@@ -105,12 +105,12 @@ const SignalRow: React.FC<Readonly<{ signal: Signal; index: number }>> = ({ sign
         </StatusBadge>
         <span className='text-sm font-medium'>{signal.instrument}</span>
       </div>
-      <div className='text-xs text-dark-300'>{signal.timestamp?.toLocaleTimeString() ?? 'N/A'}</div>
+      <div className='text-xs text-dark-300'>{signal.firedAt?.toLocaleTimeString() ?? 'N/A'}</div>
     </div>
   )
 }
 
-const ExecutionRow: React.FC<Readonly<{ execution: Fill }>> = ({ execution }) => (
+const ExecutionRow: React.FC<Readonly<{ execution: Execution }>> = ({ execution }) => (
   <div className='flex items-center justify-between p-2 bg-dark-700 rounded-sm'>
     <div className='flex items-center gap-3'>
       <StatusBadge status={execution.side === 'sell' ? 'error' : 'connected'}>

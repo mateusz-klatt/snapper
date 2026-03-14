@@ -7,12 +7,12 @@ import { useMarketStore } from './market'
 import { useAppStore } from './app'
 import { useProcessStore } from './process'
 import type {
-  OrderStatusEnvelope,
-  FillEnvelope,
-  SignalEnvelope,
-  CandleEnvelope,
-  TradeEnvelope,
-  HeartbeatEnvelope,
+  OrderData,
+  ExecutionData,
+  SignalData,
+  CandleData,
+  TradeData,
+  HeartbeatData,
 } from '../types/ws'
 
 vi.mock('./trade', () => ({
@@ -130,8 +130,8 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      expect(mockWsClient.onMessage).toHaveBeenCalledWith('order_status', expect.any(Function))
-      expect(mockWsClient.onMessage).toHaveBeenCalledWith('fill', expect.any(Function))
+      expect(mockWsClient.onMessage).toHaveBeenCalledWith('order', expect.any(Function))
+      expect(mockWsClient.onMessage).toHaveBeenCalledWith('execution', expect.any(Function))
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('signal', expect.any(Function))
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('candle', expect.any(Function))
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('tick', expect.any(Function))
@@ -168,9 +168,9 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = '2026-01-15T10:30:00Z'
-      const orderMessage: OrderStatusEnvelope = {
-        type: 'order_status',
-        id: '1',
+      const orderMessage: OrderData = {
+        type: 'order',
+        client_order_id: 'client-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -182,12 +182,13 @@ describe('WSDispatcher', () => {
         created_at: nowIso,
         updated_at: null,
       }
-      const orderHandler = messageHandlers.get('order_status')
+      const orderHandler = messageHandlers.get('order')
 
       expect(orderHandler).toBeDefined()
       orderHandler?.(orderMessage)
       expect(useTradeStore.getState().addOrder).toHaveBeenCalledWith({
-        id: '1',
+        clientOrderId: 'client-1',
+        exchangeOrderId: null,
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -197,12 +198,13 @@ describe('WSDispatcher', () => {
         price: 50000,
         averagePrice: null,
         status: 'new',
+        reason: null,
         createdAt: new Date(nowIso),
         updatedAt: null,
       })
     })
     it('handles order message and updates existing order', () => {
-      const existingOrder = { id: '1', status: 'new' }
+      const existingOrder = { clientOrderId: 'client-1', status: 'new' }
       const mockTradeStore = {
         orders: [existingOrder],
         addOrder: vi.fn(),
@@ -216,9 +218,9 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = '2026-01-15T10:30:00Z'
-      const orderMessage: OrderStatusEnvelope = {
-        type: 'order_status',
-        id: '1',
+      const orderMessage: OrderData = {
+        type: 'order',
+        client_order_id: 'client-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -230,12 +232,12 @@ describe('WSDispatcher', () => {
         created_at: nowIso,
         updated_at: nowIso,
       }
-      const orderHandler = messageHandlers.get('order_status')
+      const orderHandler = messageHandlers.get('order')
 
       orderHandler?.(orderMessage)
       expect(mockTradeStore.updateOrder).toHaveBeenCalledWith(
-        '1',
-        expect.objectContaining({ id: '1', status: 'filled' })
+        'client-1',
+        expect.objectContaining({ clientOrderId: 'client-1', status: 'filled' })
       )
       expect(mockTradeStore.addOrder).not.toHaveBeenCalled()
     })
@@ -244,10 +246,9 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = '2026-01-15T10:30:00Z'
-      const execMessage: FillEnvelope = {
-        type: 'fill',
-        id: '1',
-        order_id: 'ord-1',
+      const execMessage: ExecutionData = {
+        type: 'execution',
+        client_order_id: 'ord-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
         side: 'buy',
@@ -258,13 +259,14 @@ describe('WSDispatcher', () => {
         status: 'filled',
         executed_at: nowIso,
       }
-      const execHandler = messageHandlers.get('fill')
+      const execHandler = messageHandlers.get('execution')
 
       expect(execHandler).toBeDefined()
       execHandler?.(execMessage)
       expect(useTradeStore.getState().addExecution).toHaveBeenCalledWith({
-        id: '1',
-        orderId: 'ord-1',
+        clientOrderId: 'ord-1',
+        tradeId: null,
+        exchangeOrderId: null,
         exchange: 'kraken',
         instrument: 'BTC/USD',
         side: 'buy',
@@ -280,16 +282,15 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const signalMessage: SignalEnvelope = {
+      const signalMessage: SignalData = {
         type: 'signal',
-        id: '1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
         side: 'buy',
         strength: 0.8,
         reason: 'Test signal',
         strategy_name: 'test_strategy',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
       }
       const signalHandler = messageHandlers.get('signal')
 
@@ -302,7 +303,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -336,7 +337,7 @@ describe('WSDispatcher', () => {
         low: 48500,
         close: undefined,
         volume: 100,
-      } as unknown as CandleEnvelope
+      } as unknown as CandleData
       const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
@@ -364,7 +365,7 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -384,25 +385,29 @@ describe('WSDispatcher', () => {
       expect(cached).toHaveLength(1)
       expect(cached?.[0]).toMatchObject({ close: 50500, volume: 100 })
     })
-    it('order invalidation predicate correctly filters queries', () => {
-      let capturedPredicate: ((query: { queryKey: unknown[] }) => boolean) | undefined
-      const invalidateQueriesSpy = vi
-        .spyOn(queryClient, 'invalidateQueries')
-        .mockImplementation(options => {
-          if (options && typeof options === 'object' && 'predicate' in options) {
-            capturedPredicate = options.predicate as unknown as (query: {
-              queryKey: unknown[]
-            }) => boolean
-          }
+    it('order message merges new order into cache', () => {
+      const existingOrders = [
+        {
+          id: 'uuid-1',
+          client_order_id: 'existing-1',
+          instrument: 'ETH/USD',
+          exchange: 'kraken' as const,
+          side: 'sell' as const,
+          status: 'filled',
+          order_type: 'market' as const,
+          size: 2,
+          filled_size: 2,
+          created_at: new Date().toISOString(),
+        },
+      ]
 
-          return Promise.resolve()
-        })
+      queryClient.setQueryData(['orders', undefined], existingOrders)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const orderMessage: OrderStatusEnvelope = {
-        type: 'order_status',
-        id: '1',
+      const orderMessage: OrderData = {
+        type: 'order',
+        client_order_id: 'client-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -414,35 +419,83 @@ describe('WSDispatcher', () => {
         created_at: new Date().toISOString(),
         updated_at: null,
       }
-      const orderHandler = messageHandlers.get('order_status')
+      const orderHandler = messageHandlers.get('order')
 
       orderHandler?.(orderMessage)
-      expect(capturedPredicate).toBeDefined()
-      expect(capturedPredicate?.({ queryKey: ['orders'] })).toBe(true)
-      expect(capturedPredicate?.({ queryKey: ['orders', 'kraken'] })).toBe(true)
-      expect(capturedPredicate?.({ queryKey: ['executions'] })).toBe(false)
-      invalidateQueriesSpy.mockRestore()
-    })
-    it('execution invalidation predicate correctly filters queries', () => {
-      let capturedPredicate: ((query: { queryKey: unknown[] }) => boolean) | undefined
-      const invalidateQueriesSpy = vi
-        .spyOn(queryClient, 'invalidateQueries')
-        .mockImplementation(options => {
-          if (options && typeof options === 'object' && 'predicate' in options) {
-            capturedPredicate = options.predicate as unknown as (query: {
-              queryKey: unknown[]
-            }) => boolean
-          }
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>(['orders', undefined])
 
-          return Promise.resolve()
-        })
+      expect(cached).toHaveLength(2)
+      expect(cached?.[0]?.client_order_id).toBe('client-1')
+    })
+    it('order message updates existing order in cache by client_order_id', () => {
+      const existingOrders = [
+        {
+          id: 'uuid-1',
+          client_order_id: 'client-1',
+          instrument: 'BTC/USD',
+          exchange: 'kraken' as const,
+          side: 'buy' as const,
+          status: 'new',
+          order_type: 'limit' as const,
+          size: 1,
+          filled_size: 0,
+          created_at: new Date().toISOString(),
+        },
+      ]
+
+      queryClient.setQueryData(['orders', undefined], existingOrders)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const execMessage: FillEnvelope = {
-        type: 'fill',
-        id: '1',
-        order_id: 'ord-1',
+      const orderMessage: OrderData = {
+        type: 'order',
+        client_order_id: 'client-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        order_type: 'limit',
+        size: 1,
+        price: 50000,
+        status: 'filled',
+        filled_size: 1,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
+      const orderHandler = messageHandlers.get('order')
+
+      orderHandler?.(orderMessage)
+      const cached = queryClient.getQueryData<{ client_order_id: string; status: string }[]>([
+        'orders',
+        undefined,
+      ])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.status).toBe('filled')
+    })
+    it('execution message merges into cache', () => {
+      const existingExecs = [
+        {
+          id: 'uuid-1',
+          client_order_id: 'ord-old',
+          instrument: 'ETH/USD',
+          exchange: 'kraken' as const,
+          side: 'sell' as const,
+          size: 2,
+          price: 3000,
+          fee: 0.05,
+          fee_asset: 'USD',
+          status: 'filled' as const,
+          executed_at: '2026-01-01T00:00:00Z',
+        },
+      ]
+
+      queryClient.setQueryData(['executions', undefined], existingExecs)
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const execMessage: ExecutionData = {
+        type: 'execution',
+        client_order_id: 'ord-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
         side: 'buy',
@@ -453,35 +506,80 @@ describe('WSDispatcher', () => {
         status: 'filled',
         executed_at: new Date().toISOString(),
       }
-      const execHandler = messageHandlers.get('fill')
+      const execHandler = messageHandlers.get('execution')
 
       execHandler?.(execMessage)
-      expect(capturedPredicate).toBeDefined()
-      expect(capturedPredicate?.({ queryKey: ['executions'] })).toBe(true)
-      expect(capturedPredicate?.({ queryKey: ['executions', 'filter'] })).toBe(true)
-      expect(capturedPredicate?.({ queryKey: ['orders'] })).toBe(false)
-      invalidateQueriesSpy.mockRestore()
-    })
-    it('signal invalidation predicate correctly filters queries', () => {
-      let capturedPredicate: ((query: { queryKey: unknown[] }) => boolean) | undefined
-      const invalidateQueriesSpy = vi
-        .spyOn(queryClient, 'invalidateQueries')
-        .mockImplementation(options => {
-          if (options && typeof options === 'object' && 'predicate' in options) {
-            capturedPredicate = options.predicate as unknown as (query: {
-              queryKey: unknown[]
-            }) => boolean
-          }
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
+        'executions',
+        undefined,
+      ])
 
-          return Promise.resolve()
-        })
+      expect(cached).toHaveLength(2)
+      expect(cached?.[0]?.client_order_id).toBe('ord-1')
+    })
+    it('execution message deduplicates by client_order_id and executed_at', () => {
+      const executedAt = new Date().toISOString()
+      const existingExecs = [
+        {
+          id: 'uuid-1',
+          client_order_id: 'ord-1',
+          instrument: 'BTC/USD',
+          exchange: 'kraken' as const,
+          side: 'buy' as const,
+          size: 1,
+          price: 50000,
+          fee: 0.1,
+          fee_asset: 'USD',
+          status: 'filled' as const,
+          executed_at: executedAt,
+        },
+      ]
+
+      queryClient.setQueryData(['executions', undefined], existingExecs)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const signalMessage: SignalEnvelope = {
+      const execMessage: ExecutionData = {
+        type: 'execution',
+        client_order_id: 'ord-1',
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        size: 1,
+        price: 50000,
+        fee: 0.1,
+        fee_asset: 'USD',
+        status: 'filled',
+        executed_at: executedAt,
+      }
+      const execHandler = messageHandlers.get('execution')
+
+      execHandler?.(execMessage)
+      const cached = queryClient.getQueryData<unknown[]>(['executions', undefined])
+
+      expect(cached).toHaveLength(1)
+    })
+    it('signal message merges into cache', () => {
+      const existingSignals = [
+        {
+          id: 'uuid-1',
+          instrument: 'ETH/USD',
+          exchange: 'kraken' as const,
+          side: 'sell' as const,
+          strength: 0.5,
+          reason: 'Old signal',
+          strategy_name: 'old_strategy',
+          fired_at: '2026-01-01T00:00:00Z',
+        },
+      ]
+
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], existingSignals)
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const signalMessage: SignalData = {
         type: 'signal',
-        timestamp: new Date().toISOString(),
-        id: '1',
+        fired_at: new Date().toISOString(),
         exchange: 'kraken',
         instrument: 'BTC/USD',
         side: 'buy',
@@ -493,11 +591,53 @@ describe('WSDispatcher', () => {
       const signalHandler = messageHandlers.get('signal')
 
       signalHandler?.(signalMessage)
-      expect(capturedPredicate).toBeDefined()
-      expect(capturedPredicate?.({ queryKey: ['signals'] })).toBe(true)
-      expect(capturedPredicate?.({ queryKey: ['signals', 'strategy'] })).toBe(true)
-      expect(capturedPredicate?.({ queryKey: ['orders'] })).toBe(false)
-      invalidateQueriesSpy.mockRestore()
+      const cached = queryClient.getQueryData<{ strategy_name: string }[]>([
+        'signals',
+        undefined,
+        50,
+        undefined,
+        24,
+      ])
+
+      expect(cached).toHaveLength(2)
+      expect(cached?.[0]?.strategy_name).toBe('test_strategy')
+    })
+    it('signal message deduplicates by strategy_name and fired_at', () => {
+      const firedAt = new Date().toISOString()
+      const existingSignals = [
+        {
+          id: 'uuid-1',
+          instrument: 'BTC/USD',
+          exchange: 'kraken' as const,
+          side: 'buy' as const,
+          strength: 0.8,
+          reason: 'Test signal',
+          strategy_name: 'test_strategy',
+          fired_at: firedAt,
+        },
+      ]
+
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], existingSignals)
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const signalMessage: SignalData = {
+        type: 'signal',
+        fired_at: firedAt,
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        strength: 0.8,
+        reason: 'Test signal',
+        strategy_name: 'test_strategy',
+        price: 50000,
+      }
+      const signalHandler = messageHandlers.get('signal')
+
+      signalHandler?.(signalMessage)
+      const cached = queryClient.getQueryData<unknown[]>(['signals', undefined, 50, undefined, 24])
+
+      expect(cached).toHaveLength(1)
     })
     it('candle message appends new candle when open_at is newer', () => {
       const oldTime = '2026-01-15T10:00:00Z'
@@ -522,7 +662,7 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -560,7 +700,7 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient, maxCandles: 5 })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -592,7 +732,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: '',
         exchange: 'kraken',
@@ -616,7 +756,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'ETH-USD',
         exchange: 'kraken',
@@ -657,7 +797,7 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -698,7 +838,7 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -728,7 +868,7 @@ describe('WSDispatcher', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -753,7 +893,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       dispatcher.startBuffering('ETH-USD', 'kraken', '1m')
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'ETH-USD',
         exchange: 'kraken',
@@ -777,7 +917,7 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       dispatcher.startBuffering('BTC-USD', 'kraken', '1m')
       const candleHandler = messageHandlers.get('candle')
-      const candle1: CandleEnvelope = {
+      const candle1: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -789,7 +929,7 @@ describe('WSDispatcher', () => {
         volume: 100,
         open_at: '2026-01-15T10:00:00Z',
       }
-      const candle2: CandleEnvelope = {
+      const candle2: CandleData = {
         type: 'candle',
         instrument: 'BTC-USD',
         exchange: 'kraken',
@@ -932,7 +1072,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const tradeMessage: TradeEnvelope = {
+      const tradeMessage: TradeData = {
         type: 'trade',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -952,7 +1092,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatEnvelope = {
+      const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
         component: 'bridge',
         status: 'healthy',
@@ -972,7 +1112,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatEnvelope = {
+      const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
         component: 'feed',
         status: 'healthy',
@@ -996,7 +1136,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatEnvelope = {
+      const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
         component: 'feed.kraken',
         status: 'healthy',
@@ -1020,7 +1160,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatEnvelope = {
+      const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
         component: 'executor_binance',
         status: 'error',
@@ -1049,7 +1189,7 @@ describe('WSDispatcher', () => {
         status: 'healthy',
         lag_ms: 5,
         sequence: 1,
-      } as HeartbeatEnvelope
+      } as HeartbeatData
       const heartbeatHandler = messageHandlers.get('heartbeat')
 
       heartbeatHandler?.(heartbeatMessage)
@@ -1067,7 +1207,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatEnvelope = {
+      const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
         component: 'broker',
         status: 'healthy',
@@ -1165,9 +1305,9 @@ describe('WSDispatcher', () => {
       })
 
       dispatcher.attach(mockWsClient)
-      const orderMessage: OrderStatusEnvelope = {
-        type: 'order_status',
-        id: '1',
+      const orderMessage: OrderData = {
+        type: 'order',
+        client_order_id: 'client-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -1179,7 +1319,7 @@ describe('WSDispatcher', () => {
         created_at: new Date().toISOString(),
         updated_at: null,
       }
-      const orderHandler = messageHandlers.get('order_status')
+      const orderHandler = messageHandlers.get('order')
 
       orderHandler?.(orderMessage)
       expect(useTradeStore.getState().addOrder).not.toHaveBeenCalled()
@@ -1192,10 +1332,9 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const execMessage: FillEnvelope = {
-        type: 'fill',
-        id: 'exec-1',
-        order_id: 'ord-1',
+      const execMessage: ExecutionData = {
+        type: 'execution',
+        client_order_id: 'ord-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
         side: 'buy',
@@ -1206,23 +1345,23 @@ describe('WSDispatcher', () => {
         status: 'filled',
         executed_at: nowIso,
       }
-      const signalMessage: SignalEnvelope = {
+      const signalMessage: SignalData = {
         type: 'signal',
-        id: 'sig-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
         side: 'buy',
         strength: 0.8,
         reason: 'Test signal',
         strategy_name: 'test_strategy',
-        timestamp: nowIso,
+        fired_at: nowIso,
       }
-      const candleMessage: CandleEnvelope = {
+      const candleMessage: CandleData = {
         type: 'candle',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         timeframe: '1m',
         timestamp: nowIso,
+        open_at: nowIso,
         open: 49000,
         high: 51000,
         low: 48500,
@@ -1238,7 +1377,7 @@ describe('WSDispatcher', () => {
         last: 50500,
         timestamp: nowIso,
       }
-      const tradeMessage: TradeEnvelope = {
+      const tradeMessage: TradeData = {
         type: 'trade',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -1248,7 +1387,7 @@ describe('WSDispatcher', () => {
         timestamp: nowIso,
       }
 
-      messageHandlers.get('fill')?.(execMessage)
+      messageHandlers.get('execution')?.(execMessage)
       messageHandlers.get('signal')?.(signalMessage)
       messageHandlers.get('candle')?.(candleMessage)
       messageHandlers.get('tick')?.(tickMessage)
@@ -1270,7 +1409,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatEnvelope = {
+      const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
         component: 'strategy_macd',
         status: 'healthy',
@@ -1313,7 +1452,7 @@ describe('WSDispatcher', () => {
 
       dispatcher.attach(mockWsClient)
       const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatEnvelope = {
+      const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
         component: 'feed.kraken',
         status: 'healthy',
@@ -1349,7 +1488,7 @@ describe('WSDispatcher', () => {
         component: 'executor_binance',
         status: 'healthy',
         timestamp: nowIso,
-      } as unknown as HeartbeatEnvelope
+      } as unknown as HeartbeatData
       const heartbeatHandler = messageHandlers.get('heartbeat')
 
       heartbeatHandler?.(heartbeatMessage)
@@ -1407,9 +1546,9 @@ describe('WSDispatcher', () => {
         const dispatcher = new WSDispatcher({ queryClient })
 
         dispatcher.attach(mockWsClient)
-        const orderHandler = messageHandlers.get('order_status')
+        const orderHandler = messageHandlers.get('order')
 
-        orderHandler?.({ type: 'fill' })
+        orderHandler?.({ type: 'execution' })
         expect(useTradeStore.getState().addOrder).not.toHaveBeenCalled()
         expect(useTradeStore.getState().updateOrder).not.toHaveBeenCalled()
       })
@@ -1417,9 +1556,9 @@ describe('WSDispatcher', () => {
         const dispatcher = new WSDispatcher({ queryClient })
 
         dispatcher.attach(mockWsClient)
-        const execHandler = messageHandlers.get('fill')
+        const execHandler = messageHandlers.get('execution')
 
-        execHandler?.({ type: 'order_status' })
+        execHandler?.({ type: 'order' })
         expect(useTradeStore.getState().addExecution).not.toHaveBeenCalled()
       })
       it('signal handler ignores non-signal messages', () => {
@@ -1428,7 +1567,7 @@ describe('WSDispatcher', () => {
         dispatcher.attach(mockWsClient)
         const signalHandler = messageHandlers.get('signal')
 
-        signalHandler?.({ type: 'fill' })
+        signalHandler?.({ type: 'execution' })
         expect(useTradeStore.getState().addSignal).not.toHaveBeenCalled()
       })
       it('candle handler ignores non-candle messages', () => {
@@ -1437,7 +1576,7 @@ describe('WSDispatcher', () => {
         dispatcher.attach(mockWsClient)
         const candleHandler = messageHandlers.get('candle')
 
-        candleHandler?.({ type: 'fill' })
+        candleHandler?.({ type: 'execution' })
         expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()
       })
       it('tick handler ignores non-tick messages', () => {
@@ -1446,7 +1585,7 @@ describe('WSDispatcher', () => {
         dispatcher.attach(mockWsClient)
         const tickHandler = messageHandlers.get('tick')
 
-        tickHandler?.({ type: 'fill' })
+        tickHandler?.({ type: 'execution' })
         expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()
       })
       it('trade handler ignores non-trade messages', () => {
@@ -1455,7 +1594,7 @@ describe('WSDispatcher', () => {
         dispatcher.attach(mockWsClient)
         const tradeHandler = messageHandlers.get('trade')
 
-        tradeHandler?.({ type: 'fill' })
+        tradeHandler?.({ type: 'execution' })
         expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()
       })
       it('heartbeat handler ignores non-heartbeat messages', () => {
@@ -1464,9 +1603,347 @@ describe('WSDispatcher', () => {
         dispatcher.attach(mockWsClient)
         const heartbeatHandler = messageHandlers.get('heartbeat')
 
-        heartbeatHandler?.({ type: 'fill' })
+        heartbeatHandler?.({ type: 'execution' })
         expect(useAppStore.getState().setConnectionLag).not.toHaveBeenCalled()
       })
+    })
+  })
+  describe('trade buffering', () => {
+    it('buffers order messages when buffering active and no cache exists', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startTradeBuffering()
+      const orderMessage: OrderData = {
+        type: 'order',
+        client_order_id: 'client-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        order_type: 'limit',
+        size: 1,
+        price: 50000,
+        status: 'new',
+        filled_size: 0,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+      }
+      const orderHandler = messageHandlers.get('order')
+
+      orderHandler?.(orderMessage)
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('buffers execution messages when buffering active and no cache exists', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startTradeBuffering()
+      const execMessage: ExecutionData = {
+        type: 'execution',
+        client_order_id: 'ord-1',
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        size: 1,
+        price: 50000,
+        fee: 0.1,
+        fee_asset: 'USD',
+        status: 'filled',
+        executed_at: new Date().toISOString(),
+      }
+      const execHandler = messageHandlers.get('execution')
+
+      execHandler?.(execMessage)
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('buffers signal messages when buffering active and no cache exists', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startTradeBuffering()
+      const signalMessage: SignalData = {
+        type: 'signal',
+        fired_at: new Date().toISOString(),
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        strength: 0.8,
+        reason: 'Test signal',
+        strategy_name: 'test_strategy',
+        price: 50000,
+      }
+      const signalHandler = messageHandlers.get('signal')
+
+      signalHandler?.(signalMessage)
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('flushTradeBuffer replays buffered orders into cache', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startTradeBuffering()
+      const orderHandler = messageHandlers.get('order')
+
+      orderHandler?.({
+        type: 'order',
+        client_order_id: 'buffered-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        order_type: 'limit',
+        size: 1,
+        price: 50000,
+        status: 'new',
+        filled_size: 0,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+      })
+      queryClient.setQueryData(['orders', undefined], [])
+      dispatcher.flushTradeBuffer()
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>(['orders', undefined])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.client_order_id).toBe('buffered-1')
+    })
+    it('flushTradeBuffer replays buffered executions into cache', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startTradeBuffering()
+      const execHandler = messageHandlers.get('execution')
+
+      execHandler?.({
+        type: 'execution',
+        client_order_id: 'buffered-exec-1',
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        size: 1,
+        price: 50000,
+        fee: 0.1,
+        fee_asset: 'USD',
+        status: 'filled',
+        executed_at: new Date().toISOString(),
+      })
+      queryClient.setQueryData(['executions', undefined], [])
+      dispatcher.flushTradeBuffer()
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
+        'executions',
+        undefined,
+      ])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.client_order_id).toBe('buffered-exec-1')
+    })
+    it('flushTradeBuffer replays buffered signals into cache', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startTradeBuffering()
+      const signalHandler = messageHandlers.get('signal')
+
+      signalHandler?.({
+        type: 'signal',
+        fired_at: new Date().toISOString(),
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        strength: 0.8,
+        reason: 'Buffered signal',
+        strategy_name: 'test_strategy',
+        price: 50000,
+      })
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], [])
+      dispatcher.flushTradeBuffer()
+      const cached = queryClient.getQueryData<{ reason: string }[]>([
+        'signals',
+        undefined,
+        50,
+        undefined,
+        24,
+      ])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.reason).toBe('Buffered signal')
+    })
+    it('flushTradeBuffer is a no-op when no buffers exist', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.flushTradeBuffer()
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('stopTradeBuffering discards buffered messages', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      dispatcher.startTradeBuffering()
+      const orderHandler = messageHandlers.get('order')
+
+      orderHandler?.({
+        type: 'order',
+        client_order_id: 'discarded-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        order_type: 'limit',
+        size: 1,
+        price: 50000,
+        status: 'new',
+        filled_size: 0,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+      })
+      dispatcher.stopTradeBuffering()
+      queryClient.setQueryData(['orders', undefined], [])
+      dispatcher.flushTradeBuffer()
+      const cached = queryClient.getQueryData<unknown[]>(['orders', undefined])
+
+      expect(cached).toHaveLength(0)
+    })
+    it('order message without cache and without buffering does not throw', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const orderHandler = messageHandlers.get('order')
+
+      expect(() =>
+        orderHandler?.({
+          type: 'order',
+          client_order_id: 'no-cache-1',
+          instrument: 'BTC/USD',
+          exchange: 'kraken',
+          side: 'buy',
+          order_type: 'limit',
+          size: 1,
+          price: 50000,
+          status: 'new',
+          filled_size: 0,
+          created_at: new Date().toISOString(),
+          updated_at: null,
+        })
+      ).not.toThrow()
+    })
+    it('order merge skips query cache entries with undefined data', () => {
+      queryClient.setQueryData(['orders', undefined], [])
+      queryClient.getQueryCache().build(queryClient, { queryKey: ['orders', 'stale'] })
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const orderHandler = messageHandlers.get('order')
+
+      orderHandler?.({
+        type: 'order',
+        client_order_id: 'skip-undef-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        order_type: 'limit',
+        size: 1,
+        price: 50000,
+        status: 'new',
+        filled_size: 0,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+      })
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>(['orders', undefined])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.client_order_id).toBe('skip-undef-1')
+    })
+    it('execution merge skips query cache entries with undefined data', () => {
+      queryClient.setQueryData(['executions', undefined], [])
+      queryClient.getQueryCache().build(queryClient, { queryKey: ['executions', 'stale'] })
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const execHandler = messageHandlers.get('execution')
+
+      execHandler?.({
+        type: 'execution',
+        client_order_id: 'skip-undef-exec',
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        size: 1,
+        price: 50000,
+        fee: 0.1,
+        fee_asset: 'USD',
+        status: 'filled',
+        executed_at: new Date().toISOString(),
+      })
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
+        'executions',
+        undefined,
+      ])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.client_order_id).toBe('skip-undef-exec')
+    })
+    it('signal merge skips query cache entries with undefined data', () => {
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], [])
+      queryClient.getQueryCache().build(queryClient, { queryKey: ['signals', 'stale'] })
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const signalHandler = messageHandlers.get('signal')
+
+      signalHandler?.({
+        type: 'signal',
+        fired_at: new Date().toISOString(),
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        strength: 0.8,
+        reason: 'Skip undef signal',
+        strategy_name: 'test',
+        price: 50000,
+      })
+      const cached = queryClient.getQueryData<{ reason: string }[]>([
+        'signals',
+        undefined,
+        50,
+        undefined,
+        24,
+      ])
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.reason).toBe('Skip undef signal')
+    })
+    it('order message merges into multiple query caches', () => {
+      queryClient.setQueryData(['orders', undefined], [])
+      queryClient.setQueryData(['orders', { symbol: 'BTC/USD' }], [])
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const orderHandler = messageHandlers.get('order')
+
+      orderHandler?.({
+        type: 'order',
+        client_order_id: 'multi-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        order_type: 'limit',
+        size: 1,
+        price: 50000,
+        status: 'new',
+        filled_size: 0,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+      })
+      const cached1 = queryClient.getQueryData<unknown[]>(['orders', undefined])
+      const cached2 = queryClient.getQueryData<unknown[]>(['orders', { symbol: 'BTC/USD' }])
+
+      expect(cached1).toHaveLength(1)
+      expect(cached2).toHaveLength(1)
     })
   })
 })

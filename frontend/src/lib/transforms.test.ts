@@ -17,32 +17,29 @@ import {
   positionsFromAPI,
   candlesFromAPI,
   isTradeSide,
-  isOrderStatus,
+  isOrder,
   isOrderType,
   safeOrderFromAPI,
   safeExecutionFromAPI,
   safeSignalFromAPI,
+  orderDataFromEnvelope,
+  executionDataFromEnvelope,
+  signalDataFromEnvelope,
 } from './transforms'
+import type { PositionData } from '../types/api'
 import type {
-  OrderStatus as OrderStatusApi,
-  ExecutionRecord,
-  TradingSignal,
-  PositionSnapshot,
+  OrderData,
+  ExecutionData,
+  SignalData,
   CandleData,
-} from '../types/api'
-import type {
-  OrderStatusEnvelope,
-  FillEnvelope,
-  SignalEnvelope,
-  CandleEnvelope,
-  TickEnvelope,
-  HeartbeatEnvelope,
+  TickData,
+  HeartbeatData,
 } from '../types/ws'
 
 describe('Order Transformers', () => {
   it('transforms REST API order to canonical entity', () => {
-    const apiOrder: OrderStatusApi = {
-      id: 1,
+    const apiOrder: OrderData = {
+      type: 'order',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       client_order_id: 'client-123',
@@ -50,8 +47,9 @@ describe('Order Transformers', () => {
       created_at: '2026-01-15T10:30:00Z',
       updated_at: '2026-01-15T10:31:00Z',
       side: 'buy',
-      type: 'limit',
+      order_type: 'limit',
       size: 0.1,
+      filled_size: 0,
       price: 50000,
       status: 'filled',
       time_in_force: 'GTC',
@@ -59,7 +57,7 @@ describe('Order Transformers', () => {
     }
     const result = orderFromAPI(apiOrder)
 
-    expect(result.id).toBe(1)
+    expect(result.clientOrderId).toBe('client-123')
     expect(result.instrument).toBe('BTC/USD')
     expect(result.exchange).toBe('kraken')
     expect(result.side).toBe('buy')
@@ -70,10 +68,28 @@ describe('Order Transformers', () => {
     expect(result.createdAt).toEqual(new Date('2026-01-15T10:30:00Z'))
     expect(result.updatedAt).toEqual(new Date('2026-01-15T10:31:00Z'))
   })
+  it('falls back to current date when created_at is undefined in API order', () => {
+    const apiOrder = {
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      client_order_id: 'client-123',
+      side: 'buy',
+      order_type: 'limit',
+      size: 0.1,
+      filled_size: 0,
+      price: 50000,
+      status: 'open',
+    } as unknown as OrderData
+    const before = new Date()
+    const result = orderFromAPI(apiOrder)
+
+    expect(result.createdAt).toBeDefined()
+    expect((result.createdAt as Date).getTime()).toBeGreaterThanOrEqual(before.getTime())
+  })
   it('transforms WebSocket order to canonical entity', () => {
-    const wsOrder: OrderStatusEnvelope = {
-      type: 'order_status',
-      id: '2',
+    const wsOrder: OrderData = {
+      type: 'order',
+      client_order_id: 'client-2',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       side: 'sell',
@@ -87,7 +103,7 @@ describe('Order Transformers', () => {
     }
     const result = orderFromWS(wsOrder)
 
-    expect(result.id).toBe('2')
+    expect(result.clientOrderId).toBe('client-2')
     expect(result.instrument).toBe('ETH/USD')
     expect(result.exchange).toBe('kraken')
     expect(result.side).toBe('sell')
@@ -97,10 +113,29 @@ describe('Order Transformers', () => {
     expect(result.createdAt).toEqual(new Date('2026-01-15T10:30:00Z'))
     expect(result.updatedAt).toBeNull()
   })
+  it('transforms WebSocket order with updated_at to canonical entity', () => {
+    const wsOrder: OrderData = {
+      type: 'order',
+      client_order_id: 'client-3',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      side: 'buy',
+      order_type: 'limit',
+      size: 1,
+      filled_size: 0.5,
+      price: 50000,
+      status: 'partially_filled',
+      created_at: '2026-01-15T10:30:00Z',
+      updated_at: '2026-01-15T11:00:00Z',
+    }
+    const result = orderFromWS(wsOrder)
+
+    expect(result.updatedAt).toEqual(new Date('2026-01-15T11:00:00Z'))
+  })
   it('throws on missing created_at in WebSocket order', () => {
     const wsOrder = {
-      type: 'order_status',
-      id: '2',
+      type: 'order',
+      client_order_id: 'client-2',
       instrument: 'ETH/USD',
       exchange: 'kraken',
       side: 'sell',
@@ -109,29 +144,27 @@ describe('Order Transformers', () => {
       price: null,
       status: 'new',
       updated_at: null,
-    } as unknown as OrderStatusEnvelope
+    } as unknown as OrderData
 
-    expect(() => orderFromWS(wsOrder)).toThrow(
-      'OrderStatusEnvelope missing required field: created_at'
-    )
+    expect(() => orderFromWS(wsOrder)).toThrow('OrderData missing required field: created_at')
   })
   it('normalizes unknown order type to limit', () => {
     const apiOrder = {
-      id: 1,
       instrument: 'BTC/USD',
       exchange: '',
-      client_order_id: null,
+      client_order_id: 'client-1',
       exchange_order_id: null,
       created_at: '2026-01-15T10:30:00Z',
       updated_at: null,
       side: 'buy',
-      type: 'unknown_type',
+      order_type: 'unknown_type',
       price: null,
       size: 1,
+      filled_size: 0,
       status: 'new',
       time_in_force: null,
       error: null,
-    } as unknown as OrderStatusApi
+    } as unknown as OrderData
 
     expect(() => orderFromAPI(apiOrder)).toThrow(
       'Invalid order type: "unknown_type". Expected "market", "limit", "stop", or "stop_limit".'
@@ -139,21 +172,21 @@ describe('Order Transformers', () => {
   })
   it('passes through order status without validation', () => {
     const apiOrder = {
-      id: 1,
       instrument: 'BTC/USD',
       exchange: '',
-      client_order_id: null,
+      client_order_id: 'client-1',
       exchange_order_id: null,
       created_at: '2026-01-15T10:30:00Z',
       updated_at: null,
       side: 'buy',
-      type: 'market',
+      order_type: 'market',
       price: null,
       size: 1,
+      filled_size: 0,
       status: 'unknown_status',
       time_in_force: null,
       error: null,
-    } as unknown as OrderStatusApi
+    } as unknown as OrderData
     const result = orderFromAPI(apiOrder)
 
     expect(result.status).toBe('unknown_status')
@@ -161,10 +194,10 @@ describe('Order Transformers', () => {
 })
 describe('Execution Transformers', () => {
   it('transforms REST API execution to canonical entity', () => {
-    const apiExecution: ExecutionRecord = {
-      id: 10,
-      order_id: 1,
-      timestamp: '2026-01-15T10:30:00Z',
+    const apiExecution: ExecutionData = {
+      type: 'execution',
+      client_order_id: 'client-10',
+      executed_at: '2026-01-15T10:30:00Z',
       price: 50000,
       size: 0.1,
       fee: 5,
@@ -172,11 +205,11 @@ describe('Execution Transformers', () => {
       instrument: 'BTC/USD',
       side: 'buy',
       exchange: 'kraken',
+      status: 'filled',
     }
     const result = executionFromAPI(apiExecution)
 
-    expect(result.id).toBe(10)
-    expect(result.orderId).toBe(1)
+    expect(result.clientOrderId).toBe('client-10')
     expect(result.exchange).toBe('kraken')
     expect(result.instrument).toBe('BTC/USD')
     expect(result.side).toBe('buy')
@@ -185,10 +218,9 @@ describe('Execution Transformers', () => {
     expect(result.executedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
   it('transforms WebSocket execution to canonical entity', () => {
-    const wsExecution: FillEnvelope = {
-      type: 'fill',
-      id: '11',
-      order_id: '2',
+    const wsExecution: ExecutionData = {
+      type: 'execution',
+      client_order_id: 'client-11',
       exchange: 'zonda',
       instrument: 'ETH/PLN',
       side: 'sell',
@@ -201,8 +233,7 @@ describe('Execution Transformers', () => {
     }
     const result = executionFromWS(wsExecution)
 
-    expect(result.id).toBe('11')
-    expect(result.orderId).toBe('2')
+    expect(result.clientOrderId).toBe('client-11')
     expect(result.exchange).toBe('zonda')
     expect(result.instrument).toBe('ETH/PLN')
     expect(result.feeAsset).toBe('PLN')
@@ -211,9 +242,8 @@ describe('Execution Transformers', () => {
   })
   it('throws on missing executed_at in WebSocket execution', () => {
     const wsExecution = {
-      type: 'fill',
-      id: '11',
-      order_id: '2',
+      type: 'execution',
+      client_order_id: 'client-11',
       exchange: 'zonda',
       instrument: 'ETH/PLN',
       side: 'sell',
@@ -221,20 +251,38 @@ describe('Execution Transformers', () => {
       price: 15000,
       fee: 15,
       fee_asset: 'PLN',
-    } as unknown as FillEnvelope
+    } as unknown as ExecutionData
 
     expect(() => executionFromWS(wsExecution)).toThrow(
-      'FillEnvelope missing required field: executed_at'
+      'ExecutionData missing required field: executed_at'
     )
+  })
+  it('falls back to current date when executed_at is undefined in API execution', () => {
+    const apiExecution = {
+      client_order_id: 'client-12',
+      price: 50000,
+      size: 0.1,
+      fee: 5,
+      fee_asset: 'USD',
+      instrument: 'BTC/USD',
+      side: 'buy',
+      exchange: 'kraken',
+      status: 'filled',
+    } as unknown as ExecutionData
+    const before = new Date()
+    const result = executionFromAPI(apiExecution)
+
+    expect(result.executedAt).toBeDefined()
+    expect((result.executedAt as Date).getTime()).toBeGreaterThanOrEqual(before.getTime())
   })
 })
 describe('Signal Transformers', () => {
   it('transforms REST API signal to canonical entity', () => {
-    const apiSignal: TradingSignal = {
-      id: 100,
+    const apiSignal: SignalData = {
+      type: 'signal',
       instrument: 'BTC/USD',
       exchange: 'kraken',
-      timestamp: '2026-01-15T10:30:00Z',
+      fired_at: '2026-01-15T10:30:00Z',
       side: 'buy',
       strength: 0.85,
       reason: 'RSI oversold',
@@ -243,16 +291,14 @@ describe('Signal Transformers', () => {
     }
     const result = signalFromAPI(apiSignal)
 
-    expect(result.id).toBe(100)
     expect(result.exchange).toBe('kraken')
     expect(result.instrument).toBe('BTC/USD')
     expect(result.strategyName).toBe('momentum_v1')
-    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
+    expect(result.firedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
   it('transforms WebSocket signal to canonical entity', () => {
-    const wsSignal: SignalEnvelope = {
+    const wsSignal: SignalData = {
       type: 'signal',
-      id: '101',
       exchange: 'kraken',
       instrument: 'ETH/USD',
       side: 'sell',
@@ -260,32 +306,15 @@ describe('Signal Transformers', () => {
       reason: 'MACD divergence',
       strategy_name: null,
       price: null,
-      timestamp: '2026-01-15T10:30:00Z',
+      fired_at: '2026-01-15T10:30:00Z',
     }
     const result = signalFromWS(wsSignal)
 
-    expect(result.id).toBe('101')
     expect(result.exchange).toBe('kraken')
     expect(result.strategyName).toBeNull()
-    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
+    expect(result.firedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
-  it('sets missing WebSocket signal id to null', () => {
-    const wsSignal: SignalEnvelope = {
-      type: 'signal',
-      exchange: 'kraken',
-      instrument: 'ETH/USD',
-      side: 'sell',
-      strength: 0.7,
-      reason: 'MACD divergence',
-      strategy_name: null,
-      price: null,
-      timestamp: '2026-01-15T10:30:00Z',
-    }
-    const result = signalFromWS(wsSignal)
-
-    expect(result.id).toBeNull()
-  })
-  it('throws on missing timestamp in WebSocket signal', () => {
+  it('throws on missing fired_at and timestamp in WebSocket signal', () => {
     const wsSignal = {
       type: 'signal',
       exchange: 'kraken',
@@ -295,15 +324,48 @@ describe('Signal Transformers', () => {
       reason: 'MACD divergence',
       strategy_name: null,
       price: null,
-    } as unknown as SignalEnvelope
+    } as unknown as SignalData
 
-    expect(() => signalFromWS(wsSignal)).toThrow('SignalEnvelope missing required field: timestamp')
+    expect(() => signalFromWS(wsSignal)).toThrow('SignalData missing required field: timestamp')
+  })
+  it('falls back to current date when fired_at is undefined in API signal', () => {
+    const apiSignal = {
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      side: 'buy',
+      strength: 0.85,
+      reason: 'RSI oversold',
+      strategy_name: 'momentum_v1',
+      price: 49500,
+    } as unknown as SignalData
+    const before = new Date()
+    const result = signalFromAPI(apiSignal)
+
+    expect(result.firedAt).toBeDefined()
+    expect((result.firedAt as Date).getTime()).toBeGreaterThanOrEqual(before.getTime())
+  })
+  it('falls back to timestamp when fired_at is undefined in WS signal', () => {
+    const wsSignal = {
+      type: 'signal',
+      exchange: 'kraken',
+      instrument: 'ETH/USD',
+      side: 'sell',
+      strength: 0.7,
+      reason: 'MACD divergence',
+      strategy_name: null,
+      price: null,
+      timestamp: '2026-01-15T10:30:00Z',
+    } as unknown as SignalData
+    const result = signalFromWS(wsSignal)
+
+    expect(result.firedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
 })
 describe('Position Transformers', () => {
   it('transforms REST API position to canonical entity', () => {
-    const apiPosition: PositionSnapshot = {
-      id: 50,
+    const apiPosition: PositionData = {
+      type: 'position',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       quantity: 1.5,
@@ -314,19 +376,36 @@ describe('Position Transformers', () => {
     }
     const result = positionFromAPI(apiPosition)
 
-    expect(result.id).toBe(50)
+    expect(result.id).toBe('BTC/USD')
     expect(result.instrument).toBe('BTC/USD')
+
     expect(result.exchange).toBe('kraken')
     expect(result.averagePrice).toBe(48000)
     expect(result.unrealizedPnl).toBe(3000)
     expect(result.realizedPnl).toBe(500)
     expect(result.updatedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
+  it('falls back to current date when updated_at is undefined in API position', () => {
+    const apiPosition = {
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      quantity: 1.5,
+      average_price: 48000,
+      unrealized_pnl: 3000,
+      realized_pnl: 500,
+    } as unknown as PositionData
+    const before = new Date()
+    const result = positionFromAPI(apiPosition)
+
+    expect(result.updatedAt.getTime()).toBeGreaterThanOrEqual(before.getTime())
+  })
 })
 describe('Candle Transformers', () => {
   it('transforms REST API candle to canonical entity', () => {
     const apiCandle: CandleData = {
+      type: 'candle',
       instrument: 'BTC/USD',
+      exchange: 'kraken',
       timeframe: '1h',
       open_at: '2026-01-15T10:00:00Z',
       open: 49000,
@@ -346,7 +425,7 @@ describe('Candle Transformers', () => {
     expect(result.openAt).toEqual(new Date('2026-01-15T10:00:00Z'))
   })
   it('transforms WebSocket candle to canonical entity', () => {
-    const wsCandle: CandleEnvelope = {
+    const wsCandle: CandleData = {
       type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
@@ -367,7 +446,7 @@ describe('Candle Transformers', () => {
     expect(result.timestamp).toBeUndefined()
   })
   it('includes envelope timestamp when present in WebSocket candle', () => {
-    const wsCandle: CandleEnvelope = {
+    const wsCandle: CandleData = {
       type: 'candle',
       instrument: 'ETH/USD',
       exchange: 'kraken',
@@ -397,9 +476,9 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as CandleEnvelope
+    } as unknown as CandleData
 
-    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: timeframe')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleData missing required field: timeframe')
   })
   it('throws on missing open in WebSocket candle', () => {
     const wsCandle = {
@@ -413,9 +492,9 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as CandleEnvelope
+    } as unknown as CandleData
 
-    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: open')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleData missing required field: open')
   })
   it('throws on missing high in WebSocket candle', () => {
     const wsCandle = {
@@ -429,9 +508,9 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as CandleEnvelope
+    } as unknown as CandleData
 
-    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: high')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleData missing required field: high')
   })
   it('throws on missing low in WebSocket candle', () => {
     const wsCandle = {
@@ -445,9 +524,9 @@ describe('Candle Transformers', () => {
       close: 3020,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as CandleEnvelope
+    } as unknown as CandleData
 
-    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: low')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleData missing required field: low')
   })
   it('throws on missing close in WebSocket candle', () => {
     const wsCandle = {
@@ -461,14 +540,14 @@ describe('Candle Transformers', () => {
       close: null,
       volume: 500,
       open_at: '2026-01-15T10:00:00Z',
-    } as unknown as CandleEnvelope
+    } as unknown as CandleData
 
-    expect(() => candleFromWS(wsCandle)).toThrow('CandleEnvelope missing required field: close')
+    expect(() => candleFromWS(wsCandle)).toThrow('CandleData missing required field: close')
   })
 })
 describe('Tick Transformers', () => {
   it('transforms WebSocket tick to canonical entity', () => {
-    const wsTick: TickEnvelope = {
+    const wsTick: TickData = {
       type: 'tick',
       instrument: 'BTC/USD',
       exchange: 'kraken',
@@ -487,7 +566,7 @@ describe('Tick Transformers', () => {
     expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
   it('handles missing last and nullable bid/ask', () => {
-    const wsTick: TickEnvelope = {
+    const wsTick: TickData = {
       type: 'tick',
       instrument: 'BTC/USD',
       exchange: 'kraken',
@@ -511,14 +590,14 @@ describe('Tick Transformers', () => {
       bid: 49990,
       ask: 50010,
       volume: 100,
-    } as unknown as TickEnvelope
+    } as unknown as TickData
 
-    expect(() => tickFromWS(wsTick)).toThrow('TickEnvelope missing required field: timestamp')
+    expect(() => tickFromWS(wsTick)).toThrow('TickData missing required field: timestamp')
   })
 })
 describe('Heartbeat Transformers', () => {
   it('transforms WebSocket heartbeat to canonical entity', () => {
-    const wsHeartbeat: HeartbeatEnvelope = {
+    const wsHeartbeat: HeartbeatData = {
       type: 'heartbeat',
       component: 'executor_kraken',
       status: 'healthy',
@@ -536,7 +615,7 @@ describe('Heartbeat Transformers', () => {
     expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
   it('handles heartbeat with different sequence', () => {
-    const wsHeartbeat: HeartbeatEnvelope = {
+    const wsHeartbeat: HeartbeatData = {
       type: 'heartbeat',
       component: 'executor_kraken',
       status: 'healthy',
@@ -554,44 +633,46 @@ describe('Heartbeat Transformers', () => {
       component: 'executor_kraken',
       status: 'healthy',
       lag_ms: 15,
-    } as unknown as HeartbeatEnvelope
+    } as unknown as HeartbeatData
 
     expect(() => heartbeatFromWS(wsHeartbeat)).toThrow(
-      'HeartbeatEnvelope missing required field: timestamp'
+      'HeartbeatData missing required field: timestamp'
     )
   })
 })
 describe('Batch Transformers', () => {
   it('transforms array of orders', () => {
-    const apiOrders: OrderStatusApi[] = [
+    const apiOrders: OrderData[] = [
       {
-        id: 1,
+        type: 'order',
         instrument: 'BTC/USD',
         exchange: 'kraken',
-        client_order_id: null,
+        client_order_id: 'client-1',
         exchange_order_id: null,
         created_at: '2026-01-15T10:30:00Z',
         updated_at: null,
         side: 'buy',
-        type: 'market',
+        order_type: 'market',
         price: null,
         size: 1,
+        filled_size: 0,
         status: 'new',
         time_in_force: null,
         error: null,
       },
       {
-        id: 2,
+        type: 'order',
         instrument: 'ETH/USD',
         exchange: 'zonda',
-        client_order_id: null,
+        client_order_id: 'client-2',
         exchange_order_id: null,
         created_at: '2026-01-15T10:31:00Z',
         updated_at: null,
         side: 'sell',
-        type: 'limit',
+        order_type: 'limit',
         price: 3000,
         size: 2,
+        filled_size: 0,
         status: 'open',
         time_in_force: null,
         error: null,
@@ -600,15 +681,15 @@ describe('Batch Transformers', () => {
     const result = ordersFromAPI(apiOrders)
 
     expect(result).toHaveLength(2)
-    expect(result[0].id).toBe(1)
-    expect(result[1].id).toBe(2)
+    expect(result[0].clientOrderId).toBe('client-1')
+    expect(result[1].clientOrderId).toBe('client-2')
   })
   it('transforms array of executions', () => {
-    const apiExecutions: ExecutionRecord[] = [
+    const apiExecutions: ExecutionData[] = [
       {
-        id: 10,
-        order_id: 1,
-        timestamp: '2026-01-15T10:30:00Z',
+        type: 'execution',
+        client_order_id: 'client-10',
+        executed_at: '2026-01-15T10:30:00Z',
         price: 50000,
         size: 0.1,
         fee: 5,
@@ -616,20 +697,21 @@ describe('Batch Transformers', () => {
         instrument: 'BTC/USD',
         side: 'buy',
         exchange: 'kraken',
+        status: 'filled',
       },
     ]
     const result = executionsFromAPI(apiExecutions)
 
     expect(result).toHaveLength(1)
-    expect(result[0].id).toBe(10)
+    expect(result[0].clientOrderId).toBe('client-10')
   })
   it('transforms array of signals', () => {
-    const apiSignals: TradingSignal[] = [
+    const apiSignals: SignalData[] = [
       {
-        id: 100,
+        type: 'signal',
         instrument: 'BTC/USD',
         exchange: 'kraken',
-        timestamp: '2026-01-15T10:30:00Z',
+        fired_at: '2026-01-15T10:30:00Z',
         side: 'buy',
         strength: 0.85,
         reason: 'RSI oversold',
@@ -643,9 +725,9 @@ describe('Batch Transformers', () => {
     expect(result[0].strategyName).toBe('momentum_v1')
   })
   it('transforms array of positions', () => {
-    const apiPositions: PositionSnapshot[] = [
+    const apiPositions: PositionData[] = [
       {
-        id: 50,
+        type: 'position',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         quantity: 1.5,
@@ -663,7 +745,9 @@ describe('Batch Transformers', () => {
   it('transforms array of candles', () => {
     const apiCandles: CandleData[] = [
       {
+        type: 'candle',
         instrument: 'BTC/USD',
+        exchange: 'kraken',
         timeframe: '1h',
         open_at: '2026-01-15T10:00:00Z',
         open: 49000,
@@ -688,15 +772,15 @@ describe('Type Guards', () => {
     expect(isTradeSide(null)).toBe(false)
   })
   it('validates OrderStatus', () => {
-    expect(isOrderStatus('new')).toBe(true)
-    expect(isOrderStatus('submitted')).toBe(true)
-    expect(isOrderStatus('open')).toBe(true)
-    expect(isOrderStatus('filled')).toBe(true)
-    expect(isOrderStatus('partially_filled')).toBe(true)
-    expect(isOrderStatus('cancelled')).toBe(true)
-    expect(isOrderStatus('rejected')).toBe(true)
-    expect(isOrderStatus('unknown')).toBe(false)
-    expect(isOrderStatus(null)).toBe(false)
+    expect(isOrder('new')).toBe(true)
+    expect(isOrder('submitted')).toBe(true)
+    expect(isOrder('open')).toBe(true)
+    expect(isOrder('filled')).toBe(true)
+    expect(isOrder('partially_filled')).toBe(true)
+    expect(isOrder('cancelled')).toBe(true)
+    expect(isOrder('rejected')).toBe(true)
+    expect(isOrder('unknown')).toBe(false)
+    expect(isOrder(null)).toBe(false)
   })
   it('validates OrderType', () => {
     expect(isOrderType('market')).toBe(true)
@@ -709,8 +793,8 @@ describe('Type Guards', () => {
 })
 describe('Safe API Transformers', () => {
   it('safeOrderFromAPI returns order on valid input', () => {
-    const apiOrder: OrderStatusApi = {
-      id: 1,
+    const apiOrder: OrderData = {
+      type: 'order',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       client_order_id: 'client-123',
@@ -718,8 +802,9 @@ describe('Safe API Transformers', () => {
       created_at: '2026-01-15T10:30:00Z',
       updated_at: null,
       side: 'buy',
-      type: 'limit',
+      order_type: 'limit',
       size: 0.1,
+      filled_size: 0,
       price: 50000,
       status: 'filled',
       time_in_force: null,
@@ -728,32 +813,32 @@ describe('Safe API Transformers', () => {
     const result = safeOrderFromAPI(apiOrder)
 
     expect(result).not.toBeNull()
-    expect(result?.id).toBe(1)
+    expect(result?.clientOrderId).toBe('client-123')
   })
   it('safeOrderFromAPI returns null on invalid side', () => {
     const apiOrder = {
-      id: 1,
       instrument: 'BTC/USD',
       exchange: 'kraken',
-      client_order_id: null,
+      client_order_id: 'client-1',
       exchange_order_id: null,
       created_at: '2026-01-15T10:30:00Z',
       updated_at: null,
       side: 'invalid_side',
-      type: 'limit',
+      order_type: 'limit',
       size: 0.1,
+      filled_size: 0,
       status: 'filled',
       time_in_force: null,
       error: null,
-    } as unknown as OrderStatusApi
+    } as unknown as OrderData
     const result = safeOrderFromAPI(apiOrder)
 
     expect(result).toBeNull()
   })
   it('safeExecutionFromAPI returns execution on valid input', () => {
-    const apiExecution: ExecutionRecord = {
-      id: 1,
-      order_id: 1,
+    const apiExecution: ExecutionData = {
+      type: 'execution',
+      client_order_id: 'client-1',
       exchange: 'kraken',
       instrument: 'BTC/USD',
       side: 'buy',
@@ -761,32 +846,33 @@ describe('Safe API Transformers', () => {
       size: 0.1,
       fee: 5,
       fee_asset: 'USD',
-      timestamp: '2026-01-15T10:30:00Z',
+      executed_at: '2026-01-15T10:30:00Z',
+      status: 'filled',
     }
     const result = safeExecutionFromAPI(apiExecution)
 
     expect(result).not.toBeNull()
-    expect(result?.id).toBe(1)
+    expect(result?.clientOrderId).toBe('client-1')
   })
   it('safeExecutionFromAPI returns null on invalid side', () => {
     const apiExecution = {
-      id: 'exec-1',
-      order_id: 'order-1',
+      client_order_id: 'client-1',
       exchange: 'kraken',
       instrument: 'BTC/USD',
       side: 'unknown',
       size: 0.1,
       fee: 5,
       fee_asset: 'USD',
-      timestamp: '2026-01-15T10:30:00Z',
-    } as unknown as ExecutionRecord
+      executed_at: '2026-01-15T10:30:00Z',
+      status: 'filled',
+    } as unknown as ExecutionData
     const result = safeExecutionFromAPI(apiExecution)
 
     expect(result).toBeNull()
   })
   it('safeSignalFromAPI returns signal on valid input', () => {
-    const apiSignal: TradingSignal = {
-      id: 1,
+    const apiSignal: SignalData = {
+      type: 'signal',
       exchange: 'kraken',
       instrument: 'BTC/USD',
       side: 'buy',
@@ -794,16 +880,15 @@ describe('Safe API Transformers', () => {
       reason: 'Test signal',
       strategy_name: null,
       price: null,
-      timestamp: '2026-01-15T10:30:00Z',
+      fired_at: '2026-01-15T10:30:00Z',
     }
     const result = safeSignalFromAPI(apiSignal)
 
     expect(result).not.toBeNull()
-    expect(result?.id).toBe(1)
+    expect(result?.instrument).toBe('BTC/USD')
   })
   it('safeSignalFromAPI returns null on invalid side', () => {
     const apiSignal = {
-      id: 'signal-1',
       exchange: 'kraken',
       instrument: 'BTC/USD',
       side: 'hold',
@@ -811,10 +896,105 @@ describe('Safe API Transformers', () => {
       reason: 'Test signal',
       strategy_name: null,
       price: null,
-      timestamp: '2026-01-15T10:30:00Z',
-    } as unknown as TradingSignal
+      fired_at: '2026-01-15T10:30:00Z',
+    } as unknown as SignalData
     const result = safeSignalFromAPI(apiSignal)
 
     expect(result).toBeNull()
+  })
+  it('orderDataFromEnvelope converts to OrderData preserving type', () => {
+    const envelope: OrderData = {
+      type: 'order',
+      timestamp: '2026-01-15T10:00:00Z',
+      id: 'uuid-1',
+      client_order_id: 'client-1',
+      exchange_order_id: 'exch-1',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      side: 'buy',
+      status: 'new',
+      order_type: 'limit',
+      size: 1,
+      filled_size: 0,
+      price: 50000,
+      average_price: null,
+      reason: null,
+      time_in_force: 'GTC',
+      error: null,
+      created_at: '2026-01-15T10:00:00Z',
+      updated_at: null,
+    }
+    const data = orderDataFromEnvelope(envelope)
+
+    expect(data.id).toBe('uuid-1')
+    expect(data.client_order_id).toBe('client-1')
+    expect(data.exchange).toBe('kraken')
+    expect(data.order_type).toBe('limit')
+    expect(data.time_in_force).toBe('GTC')
+    expect(data.type).toBe('order')
+    expect((data as unknown as Record<string, unknown>)['timestamp']).toBeUndefined()
+  })
+  it('executionDataFromEnvelope converts to ExecutionData preserving type', () => {
+    const envelope: ExecutionData = {
+      type: 'execution',
+      timestamp: '2026-01-15T10:00:00Z',
+      id: 'uuid-2',
+      trade_id: 'trade-1',
+      exchange_order_id: 'exch-1',
+      client_order_id: 'ord-1',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      side: 'buy',
+      size: 1,
+      price: 50000,
+      fee: 0.1,
+      fee_asset: 'USD',
+      status: 'filled',
+      executed_at: '2026-01-15T10:00:01Z',
+    }
+    const data = executionDataFromEnvelope(envelope)
+
+    expect(data.id).toBe('uuid-2')
+    expect(data.trade_id).toBe('trade-1')
+    expect(data.client_order_id).toBe('ord-1')
+    expect(data.executed_at).toBe('2026-01-15T10:00:01Z')
+    expect(data.type).toBe('execution')
+    expect((data as unknown as Record<string, unknown>)['timestamp']).toBeUndefined()
+  })
+  it('signalDataFromEnvelope converts to SignalData preserving type', () => {
+    const envelope: SignalData = {
+      type: 'signal',
+      timestamp: '2026-01-15T10:00:00Z',
+      id: 'uuid-3',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      side: 'buy',
+      strength: 0.8,
+      reason: 'Test signal',
+      price: 50000,
+      strategy_name: 'macd',
+      fired_at: '2026-01-15T10:00:00Z',
+    }
+    const data = signalDataFromEnvelope(envelope)
+
+    expect(data.id).toBe('uuid-3')
+    expect(data.strategy_name).toBe('macd')
+    expect(data.fired_at).toBe('2026-01-15T10:00:00Z')
+    expect(data.type).toBe('signal')
+    expect((data as unknown as Record<string, unknown>)['timestamp']).toBeUndefined()
+  })
+  it('signalDataFromEnvelope falls back to timestamp when fired_at is absent', () => {
+    const envelope: SignalData = {
+      type: 'signal',
+      timestamp: '2026-01-15T10:00:00Z',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      side: 'buy',
+      strength: 0.5,
+      reason: 'Fallback',
+    }
+    const data = signalDataFromEnvelope(envelope)
+
+    expect(data.fired_at).toBe('2026-01-15T10:00:00Z')
   })
 })

@@ -1,21 +1,15 @@
+import type { PositionData } from '../types/api'
 import type {
-  OrderStatus as OrderStatusApi,
-  ExecutionRecord,
-  TradingSignal,
-  PositionSnapshot,
+  OrderData,
+  ExecutionData,
+  SignalData,
   CandleData,
-} from '../types/api'
-import type {
-  OrderStatusEnvelope,
-  FillEnvelope,
-  SignalEnvelope,
-  CandleEnvelope,
-  TickEnvelope,
-  HeartbeatEnvelope,
+  TickData,
+  HeartbeatData,
 } from '../types/ws'
 import type {
-  OrderStatus,
-  Fill,
+  Order,
+  Execution,
   Signal,
   Position,
   Candle,
@@ -35,30 +29,35 @@ function normalizeSide(side: string): TradeSide {
   throw new Error(`Invalid trade side: "${side}". Expected "buy" or "sell".`)
 }
 
-export function orderFromAPI(api: OrderStatusApi): OrderStatus {
+export function orderFromAPI(api: OrderData): Order {
   return {
-    id: api.id,
+    clientOrderId: api.client_order_id,
+    exchangeOrderId: api.exchange_order_id ?? null,
     instrument: api.instrument,
     exchange: api.exchange,
     side: normalizeSide(api.side),
-    orderType: normalizeOrderType(api.type),
+    orderType: normalizeOrderType(api.order_type),
     size: api.size,
-    filledSize: 0,
+    filledSize: api.filled_size,
     price: api.price ?? null,
-    averagePrice: null,
+    averagePrice: api.average_price ?? null,
     status: api.status,
-    createdAt: new Date(api.created_at),
+    reason: api.reason ?? null,
+    timeInForce: api.time_in_force ?? null,
+    error: api.error ?? null,
+    createdAt: api.created_at ? new Date(api.created_at) : new Date(),
     updatedAt: api.updated_at ? new Date(api.updated_at) : null,
   }
 }
 
-export function orderFromWS(ws: OrderStatusEnvelope): OrderStatus {
+export function orderFromWS(ws: OrderData): Order {
   if (!ws.created_at) {
-    throw new Error('OrderStatusEnvelope missing required field: created_at')
+    throw new Error('OrderData missing required field: created_at')
   }
 
   return {
-    id: ws.id,
+    clientOrderId: ws.client_order_id,
+    exchangeOrderId: ws.exchange_order_id ?? null,
     instrument: ws.instrument,
     exchange: ws.exchange,
     side: ws.side,
@@ -68,6 +67,7 @@ export function orderFromWS(ws: OrderStatusEnvelope): OrderStatus {
     price: ws.price ?? null,
     averagePrice: ws.average_price ?? null,
     status: ws.status,
+    reason: ws.reason ?? null,
     createdAt: new Date(ws.created_at),
     updatedAt: ws.updated_at ? new Date(ws.updated_at) : null,
   }
@@ -90,10 +90,11 @@ function normalizeOrderType(type: string): OrderType {
   )
 }
 
-export function executionFromAPI(api: ExecutionRecord): Fill {
+export function executionFromAPI(api: ExecutionData): Execution {
   return {
-    id: api.id,
-    orderId: api.order_id,
+    clientOrderId: api.client_order_id,
+    tradeId: api.trade_id ?? null,
+    exchangeOrderId: api.exchange_order_id ?? null,
     exchange: api.exchange,
     instrument: api.instrument,
     side: normalizeSide(api.side),
@@ -101,19 +102,20 @@ export function executionFromAPI(api: ExecutionRecord): Fill {
     price: api.price,
     fee: api.fee,
     feeAsset: api.fee_asset,
-    status: 'filled',
-    executedAt: new Date(api.timestamp),
+    status: api.status,
+    executedAt: api.executed_at ? new Date(api.executed_at) : new Date(),
   }
 }
 
-export function executionFromWS(ws: FillEnvelope): Fill {
+export function executionFromWS(ws: ExecutionData): Execution {
   if (!ws.executed_at) {
-    throw new Error('FillEnvelope missing required field: executed_at')
+    throw new Error('ExecutionData missing required field: executed_at')
   }
 
   return {
-    id: ws.id,
-    orderId: ws.order_id,
+    clientOrderId: ws.client_order_id,
+    tradeId: ws.trade_id ?? null,
+    exchangeOrderId: ws.exchange_order_id ?? null,
     exchange: ws.exchange,
     instrument: ws.instrument,
     side: ws.side,
@@ -126,9 +128,8 @@ export function executionFromWS(ws: FillEnvelope): Fill {
   }
 }
 
-export function signalFromAPI(api: TradingSignal): Signal {
+export function signalFromAPI(api: SignalData): Signal {
   return {
-    id: api.id,
     exchange: api.exchange,
     instrument: api.instrument,
     side: normalizeSide(api.side),
@@ -136,17 +137,20 @@ export function signalFromAPI(api: TradingSignal): Signal {
     reason: api.reason,
     strategyName: api.strategy_name ?? null,
     price: api.price ?? null,
-    timestamp: new Date(api.timestamp),
+    firedAt: api.fired_at ? new Date(api.fired_at) : new Date(),
   }
 }
 
-export function signalFromWS(ws: SignalEnvelope): Signal {
-  if (!ws.timestamp) {
-    throw new Error('SignalEnvelope missing required field: timestamp')
+export function signalFromWS(ws: SignalData): Signal {
+  if (!ws.fired_at && !ws.timestamp) {
+    throw new Error('SignalData missing required field: timestamp')
   }
 
+  const firedAtSource = ws.fired_at ?? ws.timestamp
+  const firedAt = new Date(firedAtSource as string)
+  const timestamp = ws.timestamp ? new Date(ws.timestamp) : undefined
+
   return {
-    id: ws.id ?? null,
     exchange: ws.exchange,
     instrument: ws.instrument,
     side: ws.side,
@@ -154,20 +158,21 @@ export function signalFromWS(ws: SignalEnvelope): Signal {
     reason: ws.reason,
     strategyName: ws.strategy_name ?? null,
     price: ws.price ?? null,
-    timestamp: new Date(ws.timestamp),
+    firedAt,
+    timestamp,
   }
 }
 
-export function positionFromAPI(api: PositionSnapshot): Position {
+export function positionFromAPI(api: PositionData): Position {
   return {
-    id: api.id,
+    id: api.instrument,
     instrument: api.instrument,
     exchange: api.exchange,
     quantity: api.quantity,
     averagePrice: api.average_price,
     unrealizedPnl: api.unrealized_pnl,
     realizedPnl: api.realized_pnl,
-    updatedAt: new Date(api.updated_at),
+    updatedAt: api.updated_at ? new Date(api.updated_at) : new Date(),
   }
 }
 
@@ -187,25 +192,25 @@ export function candleFromAPI(api: CandleData): Candle {
   }
 }
 
-export function candleFromWS(ws: CandleEnvelope): Candle {
+export function candleFromWS(ws: CandleData): Candle {
   if (ws.timeframe === null || ws.timeframe === undefined) {
-    throw new Error('CandleEnvelope missing required field: timeframe')
+    throw new Error('CandleData missing required field: timeframe')
   }
 
   if (ws.open === null || ws.open === undefined) {
-    throw new Error('CandleEnvelope missing required field: open')
+    throw new Error('CandleData missing required field: open')
   }
 
   if (ws.high === null || ws.high === undefined) {
-    throw new Error('CandleEnvelope missing required field: high')
+    throw new Error('CandleData missing required field: high')
   }
 
   if (ws.low === null || ws.low === undefined) {
-    throw new Error('CandleEnvelope missing required field: low')
+    throw new Error('CandleData missing required field: low')
   }
 
   if (ws.close === null || ws.close === undefined) {
-    throw new Error('CandleEnvelope missing required field: close')
+    throw new Error('CandleData missing required field: close')
   }
 
   return {
@@ -224,9 +229,9 @@ export function candleFromWS(ws: CandleEnvelope): Candle {
   }
 }
 
-export function tickFromWS(ws: TickEnvelope): Tick {
+export function tickFromWS(ws: TickData): Tick {
   if (!ws.timestamp) {
-    throw new Error('TickEnvelope missing required field: timestamp')
+    throw new Error('TickData missing required field: timestamp')
   }
 
   return {
@@ -240,9 +245,9 @@ export function tickFromWS(ws: TickEnvelope): Tick {
   }
 }
 
-export function heartbeatFromWS(ws: HeartbeatEnvelope): Heartbeat {
+export function heartbeatFromWS(ws: HeartbeatData): Heartbeat {
   if (!ws.timestamp) {
-    throw new Error('HeartbeatEnvelope missing required field: timestamp')
+    throw new Error('HeartbeatData missing required field: timestamp')
   }
 
   return {
@@ -254,19 +259,76 @@ export function heartbeatFromWS(ws: HeartbeatEnvelope): Heartbeat {
   }
 }
 
-export function ordersFromAPI(apis: OrderStatusApi[]): OrderStatus[] {
+export function orderDataFromEnvelope(env: OrderData): OrderData {
+  return {
+    type: env.type,
+    id: env.id,
+    exchange_order_id: env.exchange_order_id,
+    client_order_id: env.client_order_id,
+    instrument: env.instrument,
+    exchange: env.exchange,
+    side: env.side,
+    status: env.status,
+    order_type: env.order_type,
+    size: env.size,
+    filled_size: env.filled_size,
+    price: env.price,
+    average_price: env.average_price,
+    reason: env.reason,
+    time_in_force: env.time_in_force,
+    error: env.error,
+    created_at: env.created_at,
+    updated_at: env.updated_at,
+  }
+}
+
+export function executionDataFromEnvelope(env: ExecutionData): ExecutionData {
+  return {
+    type: env.type,
+    id: env.id,
+    trade_id: env.trade_id,
+    exchange_order_id: env.exchange_order_id,
+    client_order_id: env.client_order_id,
+    instrument: env.instrument,
+    exchange: env.exchange,
+    side: env.side,
+    size: env.size,
+    price: env.price,
+    fee: env.fee,
+    fee_asset: env.fee_asset,
+    status: env.status,
+    executed_at: env.executed_at,
+  }
+}
+
+export function signalDataFromEnvelope(env: SignalData): SignalData {
+  return {
+    type: env.type,
+    id: env.id,
+    instrument: env.instrument,
+    exchange: env.exchange,
+    side: env.side,
+    strength: env.strength,
+    reason: env.reason,
+    price: env.price,
+    strategy_name: env.strategy_name,
+    fired_at: env.fired_at ?? env.timestamp,
+  }
+}
+
+export function ordersFromAPI(apis: OrderData[]): Order[] {
   return apis.map(orderFromAPI)
 }
 
-export function executionsFromAPI(apis: ExecutionRecord[]): Fill[] {
+export function executionsFromAPI(apis: ExecutionData[]): Execution[] {
   return apis.map(executionFromAPI)
 }
 
-export function signalsFromAPI(apis: TradingSignal[]): Signal[] {
+export function signalsFromAPI(apis: SignalData[]): Signal[] {
   return apis.map(signalFromAPI)
 }
 
-export function positionsFromAPI(apis: PositionSnapshot[]): Position[] {
+export function positionsFromAPI(apis: PositionData[]): Position[] {
   return apis.map(positionFromAPI)
 }
 
@@ -278,7 +340,7 @@ export function isTradeSide(value: unknown): value is TradeSide {
   return value === 'buy' || value === 'sell'
 }
 
-export function isOrderStatus(value: unknown): value is OrderStatus {
+export function isOrder(value: unknown): value is Order {
   return (
     value === 'new' ||
     value === 'submitted' ||
@@ -294,7 +356,7 @@ export function isOrderType(value: unknown): value is OrderType {
   return value === 'market' || value === 'limit' || value === 'stop' || value === 'stop_limit'
 }
 
-export function safeOrderFromAPI(api: OrderStatusApi): OrderStatus | null {
+export function safeOrderFromAPI(api: OrderData): Order | null {
   try {
     return orderFromAPI(api)
   } catch (error) {
@@ -304,7 +366,7 @@ export function safeOrderFromAPI(api: OrderStatusApi): OrderStatus | null {
   }
 }
 
-export function safeExecutionFromAPI(api: ExecutionRecord): Fill | null {
+export function safeExecutionFromAPI(api: ExecutionData): Execution | null {
   try {
     return executionFromAPI(api)
   } catch (error) {
@@ -314,7 +376,7 @@ export function safeExecutionFromAPI(api: ExecutionRecord): Fill | null {
   }
 }
 
-export function safeSignalFromAPI(api: TradingSignal): Signal | null {
+export function safeSignalFromAPI(api: SignalData): Signal | null {
   try {
     return signalFromAPI(api)
   } catch (error) {

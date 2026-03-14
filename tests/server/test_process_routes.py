@@ -443,7 +443,9 @@ class TestStartProcess:
         """
         mock_factory = MagicMock()
         mock_factory.start_process_by_name = AsyncMock(
-            return_value=ProcessStartResult(status="success", message="started", run_id="run-001")
+            return_value=ProcessStartResult(
+                status="success", message="started", public_id="run-001"
+            )
         )
         request = ProcessStartRequest(
             mode="process",
@@ -460,7 +462,7 @@ class TestStartProcess:
         )
         assert result.status == "success"
         assert result.name == "zmq_broker"
-        assert result.run_id == "run-001"
+        assert result.public_id == "run-001"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker",
             mode="process",
@@ -937,7 +939,7 @@ class TestProcessRoutesEdgeCases:
         mock_factory.get_recent_runs = AsyncMock(
             return_value=[
                 {
-                    "run_id": "run-001",
+                    "public_id": "run-001",
                     "process_name": "zmq_broker",
                     "status": "succeeded",
                     "role": "core",
@@ -950,7 +952,7 @@ class TestProcessRoutesEdgeCases:
                     "completed_at": "2026-01-04T11:00:00Z",
                 },
                 {
-                    "run_id": "run-002",
+                    "public_id": "run-002",
                     "process_name": "feed_publisher",
                     "status": "running",
                     "role": "core",
@@ -986,7 +988,7 @@ class TestProcessRoutesEdgeCases:
         mock_factory.get_recent_runs = AsyncMock(
             return_value=[
                 {
-                    "run_id": "run-001",
+                    "public_id": "run-001",
                     "process_name": "zmq_broker",
                     "status": "succeeded",
                     "role": "core",

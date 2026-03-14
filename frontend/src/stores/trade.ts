@@ -1,14 +1,14 @@
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
 import type { TradeState } from '../types/ui'
-import type { OrderStatus, Fill, Signal, Position } from '../types/entities'
+import type { Order, Execution, Signal, Position } from '../types/entities'
 
 interface TradeStore extends TradeState {
-  updateOrders: (orders: OrderStatus[]) => void
-  addOrder: (order: OrderStatus) => void
-  updateOrder: (orderId: string | number, updates: Partial<OrderStatus>) => void
-  updateExecutions: (executions: Fill[]) => void
-  addExecution: (execution: Fill) => void
+  updateOrders: (orders: Order[]) => void
+  addOrder: (order: Order) => void
+  updateOrder: (orderId: string | number, updates: Partial<Order>) => void
+  updateExecutions: (executions: Execution[]) => void
+  addExecution: (execution: Execution) => void
   updatePositions: (positions: Position[]) => void
   updatePosition: (instrument: string, updates: Partial<Position>) => void
   updateSignals: (signals: Signal[]) => void
@@ -26,7 +26,7 @@ export const useTradeStore = create<TradeStore>()(
     updateOrders: orders => set({ orders }),
     addOrder: order => {
       const current = get().orders
-      const existingIndex = current.findIndex(o => o.id === order.id)
+      const existingIndex = current.findIndex(o => o.clientOrderId === order.clientOrderId)
 
       if (existingIndex >= 0) {
         const updated = [...current]
@@ -40,7 +40,7 @@ export const useTradeStore = create<TradeStore>()(
     updateOrder: (orderId, updates) => {
       const current = get().orders
       const updated = current.map(order =>
-        order.id === orderId ? { ...order, ...updates } : order
+        order.clientOrderId === orderId ? { ...order, ...updates } : order
       )
 
       set({ orders: updated })
@@ -48,7 +48,7 @@ export const useTradeStore = create<TradeStore>()(
     updateExecutions: executions => set({ executions }),
     addExecution: execution => {
       const current = get().executions
-      const existing = current.find(e => e.id === execution.id)
+      const existing = current.find(e => e.clientOrderId === execution.clientOrderId)
 
       if (!existing) {
         set({ executions: [execution, ...current] })
@@ -68,7 +68,7 @@ export const useTradeStore = create<TradeStore>()(
       const current = get().signals
       const existing = current.find(
         s =>
-          s.timestamp?.getTime() === signal.timestamp?.getTime() &&
+          s.firedAt?.getTime() === signal.firedAt?.getTime() &&
           s.strategyName === signal.strategyName
       )
 

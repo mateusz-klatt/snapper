@@ -11,14 +11,15 @@ import pytest
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
-from snapper.data.models import OrderRecord
+from snapper.data.models import Order
 from snapper.data.models import Position
-from snapper.data.models import SignalEvent
+from snapper.data.models import Signal
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
+from snapper.data.models import UUIDColumn
 
 
 class TestInstrumentModel:
@@ -185,23 +186,24 @@ class TestTradeModel:
 
 
 class TestOrderModel:
-    """Tests for OrderRecord SQLAlchemy ORM model."""
+    """Tests for Order SQLAlchemy ORM model."""
 
     def test_order_creation(self) -> None:
-        """Test OrderRecord model with all fields.
+        """Test Order model with all fields.
 
         Given: Valid order parameters,
-        When: OrderRecord is created,
+        When: Order is created,
         Then: All fields match provided values.
         """
         now = datetime.now(UTC)
-        order = OrderRecord(
+        order = Order(
             instrument_id=1,
             client_order_id="client-123",
             exchange_order_id="exchange-456",
             created_at=now,
+            timestamp=now,
             side="buy",
-            type="limit",
+            order_type="limit",
             price=50000.0,
             size=1.0,
             filled_size=0.0,
@@ -212,7 +214,7 @@ class TestOrderModel:
         assert order.client_order_id == "client-123"
         assert order.exchange_order_id == "exchange-456"
         assert order.side == "buy"
-        assert order.type == "limit"
+        assert order.order_type == "limit"
         assert order.price == pytest.approx(50000.0)
         assert order.size == pytest.approx(1.0)
         assert order.filled_size == pytest.approx(0.0)
@@ -220,36 +222,40 @@ class TestOrderModel:
         assert order.status == "pending"
 
     def test_market_order(self) -> None:
-        """Test OrderRecord with market type has no price.
+        """Test Order with market type has no price.
 
         Given: Market order parameters,
-        When: OrderRecord is created,
+        When: Order is created,
         Then: Price is None for market orders.
         """
-        order = OrderRecord(
+        now = datetime.now(UTC)
+        order = Order(
             instrument_id=1,
-            created_at=datetime.now(UTC),
+            created_at=now,
+            timestamp=now,
             side="buy",
-            type="market",
+            order_type="market",
             price=None,
             size=0.5,
             status="pending",
         )
-        assert order.type == "market"
+        assert order.order_type == "market"
         assert order.price is None
 
     def test_order_status_updates(self) -> None:
-        """Test OrderRecord status can be updated.
+        """Test Order status can be updated.
 
         Given: An order with pending status,
         When: Status is changed to filled,
         Then: New status is reflected.
         """
-        order = OrderRecord(
+        now = datetime.now(UTC)
+        order = Order(
             instrument_id=1,
-            created_at=datetime.now(UTC),
+            created_at=now,
+            timestamp=now,
             side="buy",
-            type="limit",
+            order_type="limit",
             price=50000.0,
             size=1.0,
             status="pending",
@@ -272,6 +278,8 @@ class TestExecutionModel:
         execution = Execution(
             order_id=1,
             timestamp=datetime.now(UTC),
+            side="buy",
+            status="filled",
             price=50000.0,
             size=1.0,
             fee=5.0,
@@ -294,6 +302,8 @@ class TestExecutionModel:
         execution = Execution(
             order_id=1,
             timestamp=datetime.now(UTC),
+            side="buy",
+            status="filled",
             price=50000.0,
             size=2.0,
             fee=10.0,
@@ -321,7 +331,7 @@ class TestPositionModel:
             average_price=48000.0,
             unrealized_pnl=5000.0,
             realized_pnl=1000.0,
-            updated_at=datetime.now(UTC),
+            timestamp=datetime.now(UTC),
         )
         assert position.instrument_id == 1
         assert position.quantity == pytest.approx(2.5)
@@ -342,7 +352,7 @@ class TestPositionModel:
             average_price=45000.0,
             unrealized_pnl=0.0,
             realized_pnl=0.0,
-            updated_at=datetime.now(UTC),
+            timestamp=datetime.now(UTC),
         )
         market_value = position.quantity * position.average_price
         assert market_value == pytest.approx(45000.0)
@@ -360,7 +370,7 @@ class TestPositionModel:
             average_price=50000.0,
             unrealized_pnl=2000.0,
             realized_pnl=500.0,
-            updated_at=datetime.now(UTC),
+            timestamp=datetime.now(UTC),
         )
         total_pnl = position.unrealized_pnl + position.realized_pnl
         assert total_pnl == pytest.approx(2500.0)
@@ -383,7 +393,7 @@ class TestSymbolCatalogModel:
             quote="USD",
             asset_type="crypto",
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert catalog.native_symbol == "BTC-USD"
         assert catalog.base == "BTC"
@@ -404,7 +414,7 @@ class TestSymbolCatalogModel:
             quote=None,
             asset_type="equity",
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert catalog.quote is None
         assert catalog.asset_type == "equity"
@@ -427,7 +437,7 @@ class TestSymbolAliasModel:
             channel="ws",
             exchange_symbol="BTC/USD",
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert alias.native_symbol == "BTC-USD"
         assert alias.exchange == "kraken"
@@ -448,7 +458,7 @@ class TestSymbolAliasModel:
             channel="rest",
             exchange_symbol="X:BTCUSD",
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert alias.exchange == "polygon"
         assert alias.channel == "rest"
@@ -483,7 +493,7 @@ class TestSymbolExchangeCapabilityModel:
             source="kraken_updater",
             reason="Listed on exchange ticker list",
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert cap.native_symbol == "BTC-USD"
         assert cap.exchange == "kraken"
@@ -492,7 +502,7 @@ class TestSymbolExchangeCapabilityModel:
         assert cap.source == "kraken_updater"
         assert cap.reason == "Listed on exchange ticker list"
         assert cap.created_at == now
-        assert cap.updated_at == now
+        assert cap.timestamp == now
 
     def test_capability_default_booleans(self) -> None:
         """Test SymbolExchangeCapability with False boolean flags.
@@ -510,7 +520,7 @@ class TestSymbolExchangeCapabilityModel:
             source="seed",
             reason=None,
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert cap.can_market_data is False
         assert cap.can_trade is False
@@ -531,7 +541,7 @@ class TestSymbolExchangeCapabilityModel:
             source=None,
             reason=None,
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert cap.source is None
         assert cap.reason is None
@@ -552,23 +562,23 @@ class TestSymbolExchangeCapabilityModel:
             source="kraken_updater",
             reason="WS-only, no REST ticker",
             created_at=now,
-            updated_at=now,
+            timestamp=now,
         )
         assert cap.source == "kraken_updater"
         assert cap.reason == "WS-only, no REST ticker"
 
 
 class TestSignalEventModel:
-    """Tests for SignalEvent SQLAlchemy ORM model."""
+    """Tests for Signal SQLAlchemy ORM model."""
 
     def test_signal_event_creation(self) -> None:
-        """Test SignalEvent model with all fields.
+        """Test Signal model with all fields.
 
         Given: Valid signal parameters,
-        When: SignalEvent is created,
+        When: Signal is created,
         Then: All fields match provided values.
         """
-        event = SignalEvent(
+        event = Signal(
             instrument_id=1,
             timestamp=datetime.now(UTC),
             side="buy",
@@ -585,13 +595,13 @@ class TestSignalEventModel:
         assert event.price == pytest.approx(49000.0)
 
     def test_signal_event_strength_validation(self) -> None:
-        """Test SignalEvent strength is normalized 0-1.
+        """Test Signal strength is normalized 0-1.
 
         Given: A signal with strength value,
         When: Checking strength bounds,
         Then: Strength is between 0 and 1.
         """
-        event = SignalEvent(
+        event = Signal(
             instrument_id=1,
             timestamp=datetime.now(UTC),
             side="sell",
@@ -602,13 +612,13 @@ class TestSignalEventModel:
         assert 0.0 <= event.strength <= 1.0
 
     def test_signal_event_without_price(self) -> None:
-        """Test SignalEvent with null price.
+        """Test Signal with null price.
 
         Given: Signal parameters without price,
-        When: SignalEvent is created,
+        When: Signal is created,
         Then: Price field is None.
         """
-        event = SignalEvent(
+        event = Signal(
             instrument_id=1,
             timestamp=datetime.now(UTC),
             side="buy",
@@ -670,13 +680,13 @@ class TestModelRelationships:
         assert hasattr(trade, "instrument")
 
     def test_signal_event_relationship(self) -> None:
-        """Test SignalEvent has instrument relation.
+        """Test Signal has instrument relation.
 
-        Given: A SignalEvent instance,
+        Given: A Signal instance,
         When: Checking relationship attributes,
         Then: Has instrument attribute.
         """
-        event = SignalEvent(
+        event = Signal(
             instrument_id=1,
             timestamp=datetime.now(UTC),
             side="buy",
@@ -769,3 +779,33 @@ class TestTZDateTime:
         result = tz_dt.process_result_value(aware, mock_dialect)
         assert result is not None
         assert result.tzinfo == UTC
+
+
+class TestUUIDColumn:
+    """Tests for UUIDColumn custom SQLAlchemy type."""
+
+    def test_load_dialect_impl_postgresql(self) -> None:
+        """Test UUIDColumn uses native UUID on PostgreSQL.
+
+        Given: A PostgreSQL dialect,
+        When: load_dialect_impl is called,
+        Then: Returns native UUID type descriptor.
+        """
+        col = UUIDColumn()
+        mock_dialect = MagicMock()
+        mock_dialect.name = "postgresql"
+        mock_dialect.type_descriptor = MagicMock(side_effect=lambda t: t)
+        col.load_dialect_impl(mock_dialect)
+        mock_dialect.type_descriptor.assert_called_once()
+
+    def test_process_bind_param_none(self) -> None:
+        """Test UUIDColumn returns None for None input.
+
+        Given: None value,
+        When: process_bind_param is called,
+        Then: Returns None.
+        """
+        col = UUIDColumn()
+        mock_dialect = MagicMock()
+        result = col.process_bind_param(None, mock_dialect)
+        assert result is None

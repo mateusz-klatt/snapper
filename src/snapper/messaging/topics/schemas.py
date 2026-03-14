@@ -133,7 +133,7 @@ TOPIC_REGISTRY: dict[str, TopicSchema] = {
         throttle_ms=0,
         required_fields=["type", "exchange", "instrument", "client_order_id"],
         sample_data={
-            "type": "order_req",
+            "type": "order_request",
             "exchange": "kraken",
             "instrument": "BTC-USD",
             "side": "buy",
@@ -148,15 +148,15 @@ TOPIC_REGISTRY: dict[str, TopicSchema] = {
         pattern="orders.events.",
         description=(
             "Order events from executor to trader/UI. "
-            "Suffix indicates event type: submitted, accepted, rejected, fill, etc. "
-            "Payload varies: FillEnvelope for 'fill', OrderStatusEnvelope for others. "
+            "Suffix indicates event type: submitted, accepted, rejected, executed, etc. "
+            "Payload varies: ExecutionData for 'executed', OrderData for others. "
             "Format: orders.events.{exchange}.{instrument}.{event}"
         ),
         category="trade",
         throttle_ms=0,
         required_fields=["type", "exchange", "instrument", "client_order_id"],
         sample_data={
-            "type": "fill",
+            "type": "execution",
             "trade_id": "trade_67890",
             "exchange_order_id": "KRAKEN-ABC123",
             "client_order_id": "client_12345",

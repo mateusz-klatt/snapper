@@ -29,7 +29,7 @@ from snapper.infrastructure.security.encryption import decrypt_if_encrypted
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import force_encrypt_if_cleartext
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
+from snapper.messaging.schemas.data import SettingChangedData
 
 
 @dataclass
@@ -257,7 +257,7 @@ class SettingsService:
                     category=category,
                     description=description,
                     is_encrypted=is_encrypted,
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                     updated_by=updated_by,
                 )
             )
@@ -269,7 +269,7 @@ class SettingsService:
                     category=category,
                     description=description,
                     is_encrypted=is_encrypted,
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                     updated_by=updated_by,
                 )
                 session.add(new_setting)
@@ -295,7 +295,7 @@ class SettingsService:
         if not self._publisher:
             logger.warning("ZMQ publisher not available, skipping broadcast")
             return
-        envelope = SettingChangedEnvelope(
+        envelope = SettingChangedData(
             key=key,
             value=value,
             category=category,

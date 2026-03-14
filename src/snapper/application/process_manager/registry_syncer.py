@@ -107,7 +107,7 @@ class ProcessRegistrySyncer:
                 key=f"process_{name}",
                 value=json.dumps(config_dict),
                 category="process",
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
             session.add(setting)
             await session.commit()
@@ -260,7 +260,7 @@ class ProcessRegistrySyncer:
             existing_record = result.scalar_one_or_none()
             if existing_record:
                 existing_record.value = json.dumps(config_dict, indent=4)
-                existing_record.updated_at = datetime.now(UTC)
+                existing_record.timestamp = datetime.now(UTC)
                 existing_record.updated_by = "sync_registry"
                 await update_session.commit()
                 logger.info(
@@ -349,7 +349,7 @@ class ProcessRegistrySyncer:
                 key=config_key,
                 value=json.dumps(config_dict, indent=4),
                 category="process",
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
             session.add(setting)
             await session.commit()

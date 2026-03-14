@@ -71,7 +71,7 @@ async def test_update_database_creates_and_updates_mappings(
                 quote="PLN",
                 asset_type="forex",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -81,7 +81,7 @@ async def test_update_database_creates_and_updates_mappings(
                 channel="ws",
                 exchange_symbol="EUR_PLN_OLD",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -91,7 +91,7 @@ async def test_update_database_creates_and_updates_mappings(
                 channel="rest",
                 exchange_symbol="EURNOT",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()
@@ -150,8 +150,8 @@ async def test_update_database_creates_and_updates_mappings(
         ).scalar_one()
     assert eur_ws_alias.exchange_symbol == "EUR_PLN"
     assert eur_rest_alias.exchange_symbol == "EURPLN"
-    assert eur_ws_alias.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
-    assert eur_rest_alias.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert eur_ws_alias.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert eur_rest_alias.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
     assert eur_catalog.base == "EUR"
     assert eur_catalog.quote == "PLN"
     assert usd_ws_alias.exchange_symbol == "USD_PLN"
@@ -159,7 +159,7 @@ async def test_update_database_creates_and_updates_mappings(
     assert usd_catalog.base == "USD"
     assert usd_catalog.quote == "PLN"
     assert usd_catalog.asset_type == "forex"
-    assert usd_catalog.created_at == usd_catalog.updated_at
+    assert usd_catalog.created_at == usd_catalog.timestamp
 
 
 @pytest.mark.asyncio()
@@ -183,7 +183,7 @@ async def test_update_database_skips_when_mapping_unchanged(
                 quote="PLN",
                 asset_type="forex",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -193,7 +193,7 @@ async def test_update_database_skips_when_mapping_unchanged(
                 channel="ws",
                 exchange_symbol="EUR_PLN",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -203,7 +203,7 @@ async def test_update_database_skips_when_mapping_unchanged(
                 channel="rest",
                 exchange_symbol="EURPLN",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()
@@ -235,8 +235,8 @@ async def test_update_database_skips_when_mapping_unchanged(
         ).scalar_one()
     assert ws_alias.exchange_symbol == "EUR_PLN"
     assert rest_alias.exchange_symbol == "EURPLN"
-    assert ws_alias.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
-    assert rest_alias.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
+    assert ws_alias.timestamp.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
+    assert rest_alias.timestamp.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
 
 
 def test_get_default_kwargs_uses_weekly_threshold() -> None:

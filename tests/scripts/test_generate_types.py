@@ -415,13 +415,13 @@ class TestStripPrimitiveTitles:
     def test_preserves_title_on_object_type(self) -> None:
         """Does not strip title from object type definitions."""
         schema: dict[str, Any] = {
-            "title": "CandleEnvelope",
+            "title": "CandleData",
             "type": "object",
             "properties": {"open": {"title": "Open", "type": "number"}},
         }
         result = strip_primitive_titles(schema)
         assert isinstance(result, dict)
-        assert result["title"] == "CandleEnvelope"
+        assert result["title"] == "CandleData"
         props = result["properties"]
         assert isinstance(props, dict)
         assert "title" not in props["open"]
@@ -1507,28 +1507,26 @@ class TestGenerateEntityInterface:
         assert "Test doc" in result
 
     def test_excludes_entity_fields(self) -> None:
-        """Excludes type and meta fields."""
+        """Excludes type field."""
         schema = {
             "properties": {
                 "type": {"const": "event"},
-                "meta": {"type": "object"},
                 "data": {"type": "string"},
             },
-            "required": ["type", "meta", "data"],
+            "required": ["type", "data"],
         }
         lines = generate_entity_interface("Event", schema)
         result = "\n".join(lines)
         assert "type:" not in result
-        assert "meta:" not in result
         assert "data:" in result
 
 
 class TestDeriveEntityName:
     """Tests for derive_entity_name function."""
 
-    def test_removes_envelope_suffix(self) -> None:
-        """Removes Envelope suffix."""
-        assert derive_entity_name("OrderEnvelope", "Envelope") == "Order"
+    def test_removes_data_suffix(self) -> None:
+        """Removes Data suffix."""
+        assert derive_entity_name("OrderData", "Data") == "Order"
 
     def test_removes_snapshot_suffix(self) -> None:
         """Removes Snapshot suffix."""
@@ -1546,7 +1544,7 @@ class TestGenerateEntities:
             json.dumps(
                 {
                     "definitions": {
-                        "OrderEnvelope": {
+                        "OrderData": {
                             "type": "object",
                             "properties": {"order_id": {"type": "string"}},
                             "required": ["order_id"],
@@ -1617,7 +1615,7 @@ class TestGenerateEntities:
             json.dumps(
                 {
                     "definitions": {
-                        "OrderEnvelope": {
+                        "OrderData": {
                             "type": "object",
                             "properties": {"order_id": {"type": "string"}},
                         },
@@ -1657,7 +1655,7 @@ class TestDiscoverWsSchemas:
         schemas = discover_ws_schemas()
         names = [name for name, _ in schemas]
         assert "WsMessageBase" in names
-        assert any("Envelope" in name for name in names)
+        assert any("Data" in name for name in names)
 
 
 class TestExportWsSchemas:
@@ -2090,7 +2088,6 @@ class TestConstants:
     def test_entity_exclude_fields(self) -> None:
         """ENTITY_EXCLUDE_FIELDS contains expected fields."""
         assert "type" in ENTITY_EXCLUDE_FIELDS
-        assert "meta" in ENTITY_EXCLUDE_FIELDS
 
     def test_entity_union_id_fields(self) -> None:
         """ENTITY_UNION_ID_FIELDS contains expected fields."""
@@ -2131,9 +2128,9 @@ class TestExtractRepeatedUnions:
             "}",
         ]
         result = extract_repeated_unions(lines)
-        assert "type Side = 'buy' | 'sell'" in result
+        assert "type TradeSide = 'buy' | 'sell'" in result
         assert all(
-            "  side: Side" in line for line in result if "side:" in line and "type" not in line
+            "  side: TradeSide" in line for line in result if "side:" in line and "type" not in line
         )
 
     def test_alias_placed_before_first_interface(self) -> None:
@@ -2155,7 +2152,7 @@ class TestExtractRepeatedUnions:
             "}",
         ]
         result = extract_repeated_unions(lines)
-        alias_idx = next(i for i, line in enumerate(result) if line.startswith("type Side"))
+        alias_idx = next(i for i, line in enumerate(result) if line.startswith("type TradeSide"))
         first_iface = next(
             i for i, line in enumerate(result) if line.startswith("export interface")
         )
@@ -2179,7 +2176,7 @@ class TestExtractRepeatedUnions:
         ]
         result = extract_repeated_unions(lines)
         joined = "\n".join(result)
-        assert "type Side = 'buy' | 'sell'" in joined
+        assert "type TradeSide = 'buy' | 'sell'" in joined
         assert "type Exchange = 'paper' | 'kraken' | 'zonda'" in joined
 
     def test_does_not_extract_below_threshold(self) -> None:
@@ -2209,7 +2206,7 @@ class TestExtractRepeatedUnions:
             "}",
         ]
         result = extract_repeated_unions(lines)
-        assert "type Side = 'buy' | 'sell'" in result
+        assert "type TradeSide = 'buy' | 'sell'" in result
 
     def test_snake_case_field_produces_pascal_alias(self) -> None:
         """Snake_case field names produce PascalCase aliases."""
@@ -2241,7 +2238,7 @@ class TestExtractRepeatedUnions:
             "}",
         ]
         result = extract_repeated_unions(lines)
-        assert result[0] == "type Side = 'buy' | 'sell'"
+        assert result[0] == "type TradeSide = 'buy' | 'sell'"
 
     def test_alias_collision_appends_suffix(self) -> None:
         """Verify numeric suffix is appended when two unions share the same field name.

@@ -14,10 +14,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.services.signals.service import SignalReadService
 from snapper.data.models import Instrument
-from snapper.data.models import SignalEvent
+from snapper.data.models import Signal
 from snapper.data.models import SymbolCatalog
 from snapper.data.repository import SQLAlchemyRepository
-from snapper.strategies.base import Signal
+from snapper.strategies.base import StrategySignal
 
 
 class TestSignalService:
@@ -39,7 +39,7 @@ class TestSignalService:
                         quote=quote,
                         asset_type="crypto",
                         created_at=datetime.now(UTC),
-                        updated_at=datetime.now(UTC),
+                        timestamp=datetime.now(UTC),
                     )
                 )
             await s.commit()
@@ -53,9 +53,9 @@ class TestSignalService:
         return service
 
     @pytest.fixture
-    def sample_signal(self) -> Signal:
-        """Create sample Signal object for test assertions."""
-        return Signal(
+    def sample_signal(self) -> StrategySignal:
+        """Create sample StrategySignal object for test assertions."""
+        return StrategySignal(
             instrument="BTCUSD",
             side="buy",
             strength=0.8,
@@ -66,14 +66,14 @@ class TestSignalService:
     async def test_store_signal(
         self,
         signal_service: SignalReadService,
-        sample_signal: Signal,
+        sample_signal: StrategySignal,
         test_repository: SQLAlchemyRepository,
     ) -> None:
         """Verify store_signal persists signal with all metadata.
 
         Given: Repository with BTCUSD instrument,
         When: store_signal called with signal,
-        Then: Signal stored with correct attributes.
+        Then: StrategySignal stored with correct attributes.
         """
         await test_repository.upsert_instrument(
             symbol="BTCUSD",
@@ -90,9 +90,11 @@ class TestSignalService:
             price=50000.0,
         )
         assert signal_id is not None
-        assert isinstance(signal_id, int)
+        assert isinstance(signal_id, str)
+        assert len(signal_id) == 36
         async with test_repository.session() as session:
-            stored_signal = await session.get(SignalEvent, signal_id)
+            result = await session.execute(select(Signal).where(Signal.public_id == signal_id))
+            stored_signal = result.scalars().first()
             assert stored_signal is not None
             assert stored_signal.side == "buy"
             assert stored_signal.strength == pytest.approx(0.8)
@@ -103,14 +105,14 @@ class TestSignalService:
     async def test_store_signal_without_price(
         self,
         signal_service: SignalReadService,
-        sample_signal: Signal,
+        sample_signal: StrategySignal,
         test_repository: SQLAlchemyRepository,
     ) -> None:
         """Verify store_signal handles None price.
 
         Given: Repository with BTCUSD instrument,
         When: store_signal called with price=None,
-        Then: Signal stored with price=None.
+        Then: StrategySignal stored with price=None.
         """
         await test_repository.upsert_instrument(
             symbol="BTCUSD",
@@ -125,14 +127,15 @@ class TestSignalService:
         )
         assert signal_id is not None
         async with test_repository.session() as session:
-            stored_signal = await session.get(SignalEvent, signal_id)
+            result = await session.execute(select(Signal).where(Signal.public_id == signal_id))
+            stored_signal = result.scalars().first()
             assert stored_signal is not None
             assert stored_signal.price is None
 
     async def test_get_recent_signals(
         self,
         signal_service: SignalReadService,
-        sample_signal: Signal,
+        sample_signal: StrategySignal,
         test_repository: SQLAlchemyRepository,
     ) -> None:
         """Verify get_recent_signals returns ordered signals with limit.
@@ -160,13 +163,13 @@ class TestSignalService:
             signal_ids.append(signal_id)
         recent_signals = await signal_service.get_recent_signals(limit=2)
         assert len(recent_signals) == 2
-        assert recent_signals[0]["id"] == signal_ids[-1]
-        assert recent_signals[1]["id"] == signal_ids[-2]
+        assert isinstance(recent_signals[0]["id"], int)
+        assert recent_signals[0]["id"] > recent_signals[1]["id"]
 
     async def test_get_recent_signals_by_strategy(
         self,
         signal_service: SignalReadService,
-        sample_signal: Signal,
+        sample_signal: StrategySignal,
         test_repository: SQLAlchemyRepository,
     ) -> None:
         """Verify get_recent_signals filters by strategy name.
@@ -184,15 +187,13 @@ class TestSignalService:
             lot_size=0.001,
         )
         await signal_service.store_signal(sample_signal, "testexchange", "strategy_a", 50000.0)
-        target_id = await signal_service.store_signal(
-            sample_signal, "testexchange", "strategy_b", 51000.0
-        )
+        await signal_service.store_signal(sample_signal, "testexchange", "strategy_b", 51000.0)
         await signal_service.store_signal(sample_signal, "testexchange", "strategy_a", 52000.0)
         strategy_b_signals = await signal_service.get_recent_signals(
             strategy="strategy_b", limit=10
         )
         assert len(strategy_b_signals) == 1
-        assert strategy_b_signals[0]["id"] == target_id
+        assert isinstance(strategy_b_signals[0]["id"], int)
         assert strategy_b_signals[0]["strategy_name"] == "strategy_b"
 
     async def test_get_recent_signals_by_instrument(
@@ -220,27 +221,25 @@ class TestSignalService:
             tick_size=0.01,
             lot_size=0.001,
         )
-        btc_signal = Signal(
+        btc_signal = StrategySignal(
             instrument="BTCUSD",
             side="buy",
             strength=0.8,
             reason="BTC signal",
             price=50000.0,
         )
-        eth_signal = Signal(
+        eth_signal = StrategySignal(
             instrument="ETHUSD",
             side="sell",
             strength=0.6,
             reason="ETH signal",
             price=3000.0,
         )
-        btc_id = await signal_service.store_signal(
-            btc_signal, "testexchange", "strategy_a", 50000.0
-        )
+        await signal_service.store_signal(btc_signal, "testexchange", "strategy_a", 50000.0)
         await signal_service.store_signal(eth_signal, "testexchange", "strategy_a", 3000.0)
         btc_signals = await signal_service.get_recent_signals(instrument="BTCUSD", limit=10)
         assert len(btc_signals) == 1
-        assert btc_signals[0]["id"] == btc_id
+        assert isinstance(btc_signals[0]["id"], int)
         assert btc_signals[0]["instrument"] == "BTCUSD"
 
     async def test_get_recent_signals_by_exchange(
@@ -268,7 +267,7 @@ class TestSignalService:
             tick_size=0.01,
             lot_size=0.001,
         )
-        btc_signal = Signal(
+        btc_signal = StrategySignal(
             instrument="BTCUSD",
             side="buy",
             strength=0.8,
@@ -276,14 +275,12 @@ class TestSignalService:
             price=50000.0,
         )
         await signal_service.store_signal(btc_signal, "exchange_a", "strategy_a", 50000.0)
-        target_id = await signal_service.store_signal(
-            btc_signal, "exchange_b", "strategy_a", 51000.0
-        )
+        await signal_service.store_signal(btc_signal, "exchange_b", "strategy_a", 51000.0)
         exchange_b_signals = await signal_service.get_recent_signals(
             exchange="exchange_b", limit=10
         )
         assert len(exchange_b_signals) == 1
-        assert exchange_b_signals[0]["id"] == target_id
+        assert isinstance(exchange_b_signals[0]["id"], int)
         assert exchange_b_signals[0]["exchange"] == "exchange_b"
 
     async def test_get_recent_signals_empty(self, signal_service: SignalReadService) -> None:
@@ -326,7 +323,7 @@ class TestSignalServiceCoverage:
                     quote="USD",
                     asset_type="crypto",
                     created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                 )
             )
             await s.commit()
@@ -340,9 +337,9 @@ class TestSignalServiceCoverage:
         return service
 
     @pytest.fixture
-    def sample_signal(self) -> Signal:
-        """Create sample Signal object for testing."""
-        return Signal(
+    def sample_signal(self) -> StrategySignal:
+        """Create sample StrategySignal object for testing."""
+        return StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
@@ -351,7 +348,7 @@ class TestSignalServiceCoverage:
         )
 
     async def test_store_signal_creates_new_instrument(
-        self, signal_service: SignalReadService, sample_signal: Signal
+        self, signal_service: SignalReadService, sample_signal: StrategySignal
     ) -> None:
         """Verify store_signal creates instrument if not exists.
 
@@ -365,7 +362,7 @@ class TestSignalServiceCoverage:
             strategy_name="test_strategy",
             price=50000.0,
         )
-        assert signal_id > 0
+        assert len(signal_id) == 36
         async with signal_service.repo.session() as session:
             inst_query = await session.execute(
                 select(Instrument).where(Instrument.symbol == "BTC-USD")
@@ -377,7 +374,7 @@ class TestSignalServiceCoverage:
             assert inst.quote == "USD"
 
     async def test_store_signal_error_handling(
-        self, signal_service: SignalReadService, sample_signal: Signal
+        self, signal_service: SignalReadService, sample_signal: StrategySignal
     ) -> None:
         """Verify store_signal returns -1 and logs error on exception.
 
@@ -397,12 +394,12 @@ class TestSignalServiceCoverage:
                 strategy_name="test_strategy",
                 price=50000.0,
             )
-            assert signal_id == -1
+            assert signal_id == ""
             mock_logger.error.assert_called_once()
             assert "Error storing signal" in str(mock_logger.error.call_args)
 
     async def test_store_signal_upsert_instrument_error(
-        self, signal_service: SignalReadService, sample_signal: Signal
+        self, signal_service: SignalReadService, sample_signal: StrategySignal
     ) -> None:
         """Verify store_signal returns -1 and logs error on upsert failure.
 
@@ -424,7 +421,7 @@ class TestSignalServiceCoverage:
                 strategy_name="test_strategy",
                 price=50000.0,
             )
-            assert signal_id == -1
+            assert signal_id == ""
             mock_logger.error.assert_called_once()
             assert "Error storing signal" in str(mock_logger.error.call_args)
 
@@ -474,7 +471,7 @@ class TestSignalServiceCoverage:
     async def test_store_signal_session_add_error(
         self,
         signal_service: SignalReadService,
-        sample_signal: Signal,
+        sample_signal: StrategySignal,
         test_repository: SQLAlchemyRepository,
     ) -> None:
         """Verify store_signal returns -1 and logs error when session.add fails.
@@ -511,7 +508,7 @@ class TestSignalServiceCoverage:
                 strategy_name="test_strategy",
                 price=50000.0,
             )
-            assert signal_id == -1
+            assert signal_id == ""
             mock_logger.error.assert_called_once()
             assert "Error storing signal" in str(mock_logger.error.call_args)
 
@@ -532,11 +529,11 @@ class TestSignalServiceCoverage:
                     quote="USD",
                     asset_type="crypto",
                     created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                 )
             )
             await s.commit()
-        single_asset_signal = Signal(
+        single_asset_signal = StrategySignal(
             instrument="GOLD",
             side="buy",
             strength=0.5,
@@ -549,7 +546,7 @@ class TestSignalServiceCoverage:
             strategy_name="test_strategy",
             price=2000.0,
         )
-        assert signal_id > 0
+        assert len(signal_id) == 36
         async with signal_service.repo.session() as session:
             inst_query = await session.execute(
                 select(Instrument).where(Instrument.symbol == "GOLD")

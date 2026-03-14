@@ -6,6 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -15,8 +16,8 @@ from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.messaging.publishers.zonda import ZondaMarketDataPublisher
-from snapper.messaging.schemas.messages import CandleEnvelope
-from snapper.messaging.schemas.messages import MarketDataEnvelope
+from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.messages import MarketDataMessage
 
 
 class PublisherSocketStub:
@@ -188,18 +189,19 @@ class TestZondaPublisherLoops:
 
         mock_exchange_client = SimpleNamespace(subscribe_candles=mock_subscribe)
         publisher_any._exchange_client = mock_exchange_client
-        published_messages: list[tuple[str, CandleEnvelope]] = []
+        published_messages: list[tuple[str, CandleData]] = []
 
-        async def publish_stub(topic: str, message: CandleEnvelope) -> None:
+        async def publish_stub(topic: str, message: CandleData) -> None:
             published_messages.append((topic, message))
 
-        saved_payloads: list[tuple[str, CandleEnvelope]] = []
+        saved_payloads: list[tuple[str, CandleData]] = []
 
-        async def save_stub(symbol: str, envelope: CandleEnvelope) -> None:
+        async def save_stub(symbol: str, envelope: CandleData) -> None:
             saved_payloads.append((symbol, envelope))
 
         publisher_any._publish_message = publish_stub
         publisher_any._save_to_db = save_stub
+        publisher_any._ensure_instrument = AsyncMock(return_value=1)
         await publisher_any._candle_loop(["BTC-PLN"], "1m")
         assert len(published_messages) == 1
         topic, msg = published_messages[0]
@@ -247,9 +249,9 @@ class TestZondaPublisherLoops:
 
         mock_exchange_client = SimpleNamespace(subscribe_ticks=mock_subscribe)
         publisher_any._exchange_client = mock_exchange_client
-        published_messages: list[tuple[str, MarketDataEnvelope]] = []
+        published_messages: list[tuple[str, MarketDataMessage]] = []
 
-        async def publish_stub(topic: str, message: MarketDataEnvelope) -> None:
+        async def publish_stub(topic: str, message: MarketDataMessage) -> None:
             published_messages.append((topic, message))
 
         publisher_any._publish_message = publish_stub
@@ -293,9 +295,9 @@ class TestZondaPublisherLoops:
 
         mock_exchange_client = SimpleNamespace(subscribe_trades=mock_subscribe)
         publisher_any._exchange_client = mock_exchange_client
-        published_messages: list[tuple[str, MarketDataEnvelope]] = []
+        published_messages: list[tuple[str, MarketDataMessage]] = []
 
-        async def publish_stub(topic: str, message: MarketDataEnvelope) -> None:
+        async def publish_stub(topic: str, message: MarketDataMessage) -> None:
             published_messages.append((topic, message))
 
         publisher_any._publish_message = publish_stub

@@ -8,10 +8,10 @@ import pandas as pd
 from loguru import logger
 
 from snapper.indicators.ta_lib_adapter import macd
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
-from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
+from snapper.strategies.base import StrategySignal
 from snapper.strategies.decorators import create_strategy_process
 from snapper.strategies.decorators import register_strategy
 
@@ -55,12 +55,12 @@ class MACDCrossover(BaseStrategy):
         self.signal_period = self.params.get("signal_period", 9)
         self._last_hist: dict[str, float] = {}
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle and generate signal on histogram crossover.
 
         Args:
             instrument: The instrument symbol.
-            candle: The candle envelope with OHLCV data.
+            candle: The candle data with OHLCV data.
 
         Returns:
             Buy signal on bullish crossover, sell signal on bearish,
@@ -77,32 +77,20 @@ class MACDCrossover(BaseStrategy):
         if last_hist is None:
             return None
         if last_hist <= 0 and hist > 0:
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="buy",
                 strength=min(abs(hist) * 10, 1.0),
                 price=current_price,
-                reason=f"MACD bull cross (hist: {hist:.4f})",
-                metadata={
-                    "fast": self.fast,
-                    "slow": self.slow,
-                    "signal": self.signal_period,
-                    "histogram": hist,
-                },
+                reason=f"MACD bull cross (hist={hist:.4f}, fast={self.fast}, slow={self.slow}, signal={self.signal_period})",
             )
         if last_hist >= 0 and hist < 0:
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="sell",
                 strength=min(abs(hist) * 10, 1.0),
                 price=current_price,
-                reason=f"MACD bear cross (hist: {hist:.4f})",
-                metadata={
-                    "fast": self.fast,
-                    "slow": self.slow,
-                    "signal": self.signal_period,
-                    "histogram": hist,
-                },
+                reason=f"MACD bear cross (hist={hist:.4f}, fast={self.fast}, slow={self.slow}, signal={self.signal_period})",
             )
         return None
 

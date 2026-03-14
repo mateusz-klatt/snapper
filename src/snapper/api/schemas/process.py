@@ -335,7 +335,7 @@ class ConfiguredProcess(StrictApiSchema):
         tags: Categorization tags.
         parameters_schema: JSON Schema for parameters.
         is_one_shot: Whether process is one-shot task.
-        active_run_id: Active run ID if running.
+        active_public_id: Active public ID if running.
     """
 
     name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
@@ -352,7 +352,7 @@ class ConfiguredProcess(StrictApiSchema):
     tags: list[str] = Field(default_factory=list, description="Categorization tags")
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
     is_one_shot: bool = Field(description="Whether process is one-shot task")
-    active_run_id: str | None = Field(None, description="Active run ID if running")
+    active_public_id: str | None = Field(None, description="Active public ID if running")
 
 
 class ConfiguredProcessesResponse(StrictApiSchema):
@@ -481,7 +481,7 @@ class ProcessRun(StrictApiSchema):
     Represents a single execution run of a process.
 
     Attributes:
-        run_id: Unique run identifier.
+        public_id: Unique run identifier.
         process_name: Process name.
         status: Run status.
         role: Process role.
@@ -494,7 +494,7 @@ class ProcessRun(StrictApiSchema):
         completed_at: Completion time if finished.
     """
 
-    run_id: str = Field(description="Unique run identifier")
+    public_id: str = Field(description="Unique run identifier")
     process_name: str = Field(description=_PROCESS_NAME_DESC)
     status: ProcessRunStatusType = Field(description="Run status")
     role: ProcessRoleType = Field(description="Process role")
@@ -529,7 +529,7 @@ class ProcessRuntimeStatus(StrictApiSchema):
         running: Whether process is currently running.
         role: Process role category.
         lifecycle: Process lifecycle type.
-        active_run_id: Active run ID if running.
+        active_public_id: Active public ID if running.
         details: Additional process details.
     """
 
@@ -537,7 +537,7 @@ class ProcessRuntimeStatus(StrictApiSchema):
     running: bool = Field(description=_RUNNING_DESC)
     role: ProcessRoleType = Field(description=_ROLE_DESC)
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
-    active_run_id: str | None = Field(None, description="Active run ID if running")
+    active_public_id: str | None = Field(None, description="Active public ID if running")
     details: dict[str, Any] | None = Field(None, description="Additional process details")
 
 
@@ -547,7 +547,7 @@ class ProcessStartResponse(StrictApiSchema):
     Attributes:
         status: Operation status (success, already_running, error).
         name: Process name.
-        run_id: Run ID if started.
+        public_id: Public ID if started.
         message: Additional message.
     """
 
@@ -555,7 +555,7 @@ class ProcessStartResponse(StrictApiSchema):
         description="Operation status (success, already_running, error)"
     )
     name: str = Field(description=_PROCESS_NAME_DESC)
-    run_id: str | None = Field(None, description="Run ID if started")
+    public_id: str | None = Field(None, description="Public ID if started")
     message: str | None = Field(None, description="Additional message")
 
 

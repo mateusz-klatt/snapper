@@ -8,10 +8,10 @@ import pandas as pd
 from loguru import logger
 
 from snapper.indicators.ta_lib_adapter import rsi
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
-from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
+from snapper.strategies.base import StrategySignal
 from snapper.strategies.decorators import create_strategy_process
 from snapper.strategies.decorators import register_strategy
 
@@ -58,12 +58,12 @@ class RSIReversion(BaseStrategy):
         self.cooldown = self.params.get("cooldown", 0)
         self._cool: dict[str, int] = {}
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle and generate signal if conditions met.
 
         Args:
             instrument: The instrument symbol.
-            candle: The candle envelope with OHLCV data.
+            candle: The candle data with OHLCV data.
 
         Returns:
             Buy signal if RSI <= lower, sell signal if RSI >= upper,
@@ -85,35 +85,21 @@ class RSIReversion(BaseStrategy):
             return None
         if r <= self.lower or (r_prev <= self.lower and c_last > c_prev):
             self._cool[instrument] = self.cooldown
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="buy",
                 strength=1.0,
                 price=current_price,
-                reason=f"RSI {r:.2f} <= {self.lower}",
-                metadata={
-                    "period": self.period,
-                    "rsi_value": r,
-                    "rsi_prev": r_prev,
-                    "upper": self.upper,
-                    "lower": self.lower,
-                },
+                reason=f"RSI {r:.2f} <= {self.lower} (period={self.period}, prev={r_prev:.2f})",
             )
         if r >= self.upper or (r_prev >= self.upper and c_last < c_prev):
             self._cool[instrument] = self.cooldown
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="sell",
                 strength=1.0,
                 price=current_price,
-                reason=f"RSI {r:.2f} >= {self.upper}",
-                metadata={
-                    "period": self.period,
-                    "rsi_value": r,
-                    "rsi_prev": r_prev,
-                    "upper": self.upper,
-                    "lower": self.lower,
-                },
+                reason=f"RSI {r:.2f} >= {self.upper} (period={self.period}, prev={r_prev:.2f})",
             )
         return None
 

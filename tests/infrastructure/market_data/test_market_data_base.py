@@ -378,8 +378,8 @@ class TestMarketSnapshotServiceCoverage:
         after = datetime.now(UTC)
         saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
         snapshot = saved_snapshots[0]
-        assert before <= snapshot.updated_at <= after
-        assert snapshot.updated_at.tzinfo == UTC
+        assert before <= snapshot.timestamp <= after
+        assert snapshot.timestamp.tzinfo == UTC
 
 
 class StubMarketUpdater(MarketSnapshotUpdaterService):

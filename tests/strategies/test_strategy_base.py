@@ -28,11 +28,11 @@ from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.messages import CandleEnvelope
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
-from snapper.messaging.schemas.messages import TickEnvelope
-from snapper.messaging.schemas.messages import TradeEnvelope
+from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.schemas.data import SettingChangedData
+from snapper.messaging.schemas.data import TickData
+from snapper.messaging.schemas.data import TradeData
 from snapper.messaging.topics.validation import _validate_admin_topic
 from snapper.messaging.topics.validation import _validate_orders_commands_topic
 from snapper.messaging.topics.validation import _validate_signal_topic
@@ -40,8 +40,8 @@ from snapper.messaging.topics.validation import _validate_system_topic
 from snapper.messaging.topics.validation import validate_topic
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import CompositeStrategy
-from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
+from snapper.strategies.base import StrategySignal
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
@@ -54,9 +54,9 @@ def make_candle_envelope(
     close: float = 50000.0,
     ts: float | None = None,
     exchange: str = "kraken",
-) -> CandleEnvelope:
-    """Create a CandleEnvelope with default test values."""
-    return CandleEnvelope(
+) -> CandleData:
+    """Create a CandleData with default test values."""
+    return CandleData(
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -75,7 +75,7 @@ async def feed_bar_to_strategy(
     instrument: str,
     close: float,
     exchange: str = "kraken",
-) -> Signal | None:
+) -> StrategySignal | None:
     """Feed a single candle to strategy and return resulting signal."""
     candle = make_candle_envelope(instrument, close, exchange=exchange)
     if instrument not in strategy.candle_buffer:
@@ -92,9 +92,9 @@ async def feed_closes_to_strategy(
     instrument: str,
     closes: list[float],
     exchange: str = "kraken",
-) -> Signal | None:
+) -> StrategySignal | None:
     """Feed multiple close prices to strategy sequentially."""
-    signal: Signal | None = None
+    signal: StrategySignal | None = None
     for close in closes:
         signal = await feed_bar_to_strategy(strategy, instrument, close, exchange)
     return signal
@@ -240,45 +240,27 @@ class TestStrategyConfig:
 
 
 class TestSignal:
-    """Test suite for Signal dataclass."""
+    """Test suite for StrategySignal dataclass."""
 
     def test_signal_creation(self) -> None:
-        """Verify Signal creates with all fields properly set.
+        """Verify StrategySignal creates with all fields properly set.
 
-        Given: Signal parameters including metadata,
-        When: Signal is instantiated,
+        Given: StrategySignal parameters including metadata,
+        When: StrategySignal is instantiated,
         Then: All attributes are correctly assigned.
         """
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
             price=50000.0,
             reason="MACD crossover",
-            metadata={"indicator": "macd", "value": 0.05},
         )
         assert signal.instrument == "BTC-USD"
         assert signal.side == "buy"
         assert signal.strength == pytest.approx(0.8)
         assert signal.price == pytest.approx(50000.0)
         assert signal.reason == "MACD crossover"
-        assert signal.metadata["indicator"] == "macd"
-
-    def test_signal_without_metadata(self) -> None:
-        """Verify Signal defaults metadata to empty dict.
-
-        Given: Signal without metadata parameter,
-        When: Signal is instantiated,
-        Then: Metadata defaults to empty dict.
-        """
-        signal = Signal(
-            instrument="ETH-USD",
-            side="sell",
-            strength=1.0,
-            price=3000.0,
-            reason="RSI overbought",
-        )
-        assert signal.metadata == {}
 
 
 class MockStrategy(BaseStrategy):
@@ -287,15 +269,15 @@ class MockStrategy(BaseStrategy):
     def __init__(self, config: StrategyConfig) -> None:
         """Initialize the instance."""
         super().__init__(config)
-        self.candles_received: list[tuple[str, CandleEnvelope]] = []
-        self.signals_emitted: list[Signal] = []
+        self.candles_received: list[tuple[str, CandleData]] = []
+        self.signals_emitted: list[StrategySignal] = []
         self._trigger_signal: bool = False
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle data and return optional signal."""
         self.candles_received.append((instrument, candle))
         if self._trigger_signal:
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="buy",
                 strength=0.8,
@@ -318,7 +300,7 @@ class MockStrategy(BaseStrategy):
         """No-op subscription management for test strategy."""
         pass
 
-    async def emit_signal(self, signal: Signal) -> None:
+    async def emit_signal(self, signal: StrategySignal) -> None:
         """Emit a trading signal."""
         self.signals_emitted.append(signal)
 
@@ -376,7 +358,7 @@ class TestBaseStrategy:
 
         Given: MockStrategy with _trigger_signal flag,
         When: on_candle called with and without trigger,
-        Then: Signal returned only when triggered.
+        Then: StrategySignal returned only when triggered.
         """
         config = StrategyConfig(
             name="test",
@@ -555,12 +537,12 @@ class FakeStrategy(BaseStrategy):
         if publisher is not None:
             self.publisher = cast(ValidatedPublisher, publisher)
         self.reset_called = False
-        self.received: list[tuple[str, CandleEnvelope]] = []
+        self.received: list[tuple[str, CandleData]] = []
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle data and return optional signal."""
         self.received.append((instrument, candle))
-        return Signal(
+        return StrategySignal(
             instrument=instrument,
             side="buy",
             strength=0.5,
@@ -603,7 +585,7 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
             invalidate_calls.append(str(fail_fast))
 
     monkeypatch.setattr("snapper.strategies.system_events._get_db_mapper", lambda: _Mapper())
-    heartbeat = HeartbeatEnvelope(
+    heartbeat = HeartbeatData(
         component="feed.kraken",
         sequence=1,
         status="healthy",
@@ -617,8 +599,8 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
             "system.heartbeats.feed.kraken",
             heartbeat.to_json().encode(),
         ),
-        ("system.replay.start", json.dumps({"ts": 111.0}).encode()),
-        ("system.replay.end", b"{}"),
+        ("system.replay.start", json.dumps({"type": "replay_start"}).encode()),
+        ("system.replay.end", json.dumps({"type": "replay_end"}).encode()),
         (
             "market.kraken.BTC-USD.candles.1h",
             candle.to_json().encode(),
@@ -675,7 +657,7 @@ async def test_default_handlers_return_none() -> None:
     strategy = MinimalStrategy(_strategy_config())
     candle = make_candle_envelope("BTC-USD", 50000.0)
     assert await strategy.on_candle("BTC-USD", candle) is None
-    tick = TickEnvelope(
+    tick = TickData(
         instrument="BTC-USD",
         volume=100.0,
         bid=50000.0,
@@ -683,7 +665,7 @@ async def test_default_handlers_return_none() -> None:
         exchange="kraken",
     )
     assert await strategy.on_tick("BTC-USD", tick) is None
-    trade = TradeEnvelope(
+    trade = TradeData(
         instrument="BTC-USD",
         price=50000.0,
         volume=1.0,
@@ -698,14 +680,14 @@ async def test_emit_signal_validates_outputs(monkeypatch: pytest.MonkeyPatch) ->
 
     Given: Strategy with BTC-USD output,
     When: emit_signal called with valid instrument,
-    Then: Signal is published without error.
+    Then: StrategySignal is published without error.
     """
     strategy = FakeStrategy(_strategy_config(exchange="paper"))
     publisher = DummyPublisher()
     strategy.publisher = cast(ValidatedPublisher, publisher)
     strategy._last_data_ts = 321.0
     await strategy.emit_signal(
-        Signal(
+        StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.4,
@@ -748,21 +730,21 @@ async def test_listen_loop_handles_tick_data() -> None:
     When: Tick message received,
     Then: on_tick handler invoked with correct data.
     """
-    received_ticks: list[tuple[str, TickEnvelope]] = []
+    received_ticks: list[tuple[str, TickData]] = []
 
     class TickStrategy(BaseStrategy):
         async def reset(self) -> None:
             """No-op reset for test strategy."""
             pass
 
-        async def on_tick(self, instrument: str, tick: TickEnvelope) -> None:
+        async def on_tick(self, instrument: str, tick: TickData) -> None:
             received_ticks.append((instrument, tick))
 
     strategy = TickStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.ticks"]))
     strategy._running = True
     publisher = DummyPublisher()
     strategy.publisher = cast(ValidatedPublisher, publisher)
-    tick = TickEnvelope(
+    tick = TickData(
         instrument="BTC-USD",
         volume=100.0,
         bid=50000.0,
@@ -786,21 +768,21 @@ async def test_listen_loop_handles_trade_data() -> None:
     When: Trade message received,
     Then: on_trade handler invoked with correct data.
     """
-    received_trades: list[tuple[str, TradeEnvelope]] = []
+    received_trades: list[tuple[str, TradeData]] = []
 
     class TradeStrategy(BaseStrategy):
         async def reset(self) -> None:
             """No-op reset for test strategy."""
             pass
 
-        async def on_trade(self, instrument: str, trade: TradeEnvelope) -> None:
+        async def on_trade(self, instrument: str, trade: TradeData) -> None:
             received_trades.append((instrument, trade))
 
     strategy = TradeStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.trades"]))
     strategy._running = True
     publisher = DummyPublisher()
     strategy.publisher = cast(ValidatedPublisher, publisher)
-    trade = TradeEnvelope(
+    trade = TradeData(
         instrument="BTC-USD",
         price=50000.0,
         volume=1.0,
@@ -849,7 +831,7 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
     monkeypatch.setattr(BaseStrategy, "_setup_publisher", fake_setup)
     monkeypatch.setattr(time, "time", lambda: captured_time)
     await strategy.emit_signal(
-        Signal(
+        StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.9,
@@ -864,7 +846,7 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
     assert payload_data["instrument"] == "BTC-USD"
     with pytest.raises(ValueError, match="not allowed"):
         await strategy.emit_signal(
-            Signal(
+            StrategySignal(
                 instrument="ETH-USD",
                 side="sell",
                 strength=0.2,
@@ -1015,15 +997,15 @@ class SimpleTestStrategy(BaseStrategy):
     def __init__(self, config: StrategyConfig) -> None:
         """Initialize the instance."""
         super().__init__(config)
-        self.signals_generated: list[Signal] = []
-        self.candles_processed: list[tuple[str, CandleEnvelope]] = []
+        self.signals_generated: list[StrategySignal] = []
+        self.candles_processed: list[tuple[str, CandleData]] = []
         self._generate_signal: bool = False
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle data and return optional signal."""
         self.candles_processed.append((instrument, candle))
         if self._generate_signal:
-            signal = Signal(
+            signal = StrategySignal(
                 instrument=instrument,
                 side="buy",
                 strength=0.7,
@@ -1525,7 +1507,7 @@ class TestListenLoop:
 
         Given: Strategy receiving signal topic message,
         When: _listen_loop runs,
-        Then: Signal not processed as candle.
+        Then: StrategySignal not processed as candle.
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
@@ -1671,7 +1653,9 @@ class TestListenLoop:
         strategy_config.inputs = ["market.paper.kraken.BTC-USD.candles"]
         strategy = ReplayAwareStrategy(strategy_config)
         strategy._running = True
-        replay_payload = json.dumps({"started_at": "2024-01-01T00:02:03.450000+00:00"}).encode()
+        replay_payload = json.dumps(
+            {"type": "replay_start", "started_at": "2024-01-01T00:02:03.450000+00:00"}
+        ).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[("system.replay.start", replay_payload), asyncio.CancelledError()]
@@ -1694,7 +1678,7 @@ class TestListenLoop:
         strategy = ReplayAwareStrategy(strategy_config)
         strategy._running = True
         strategy._last_data_ts = 55.5
-        replay_end_payload = json.dumps({"ts": 55.5}).encode()
+        replay_end_payload = json.dumps({"type": "replay_end"}).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[("system.replay.end", replay_end_payload), asyncio.CancelledError()]
@@ -1818,7 +1802,7 @@ class TestListenLoop:
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
-        heartbeat = HeartbeatEnvelope(
+        heartbeat = HeartbeatData(
             component="feed.kraken",
             sequence=1,
             status="healthy",
@@ -1859,7 +1843,7 @@ class TestEmitSignal:
         mock_socket.send_multipart = AsyncMock(return_value=None)
         mock_context = MagicMock()
         mock_context.socket.return_value = mock_socket
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
@@ -1886,7 +1870,7 @@ class TestEmitSignal:
         mock_socket.send_multipart = AsyncMock(return_value=None)
         mock_context = MagicMock()
         mock_context.socket.return_value = mock_socket
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
@@ -1932,7 +1916,7 @@ class TestEmitSignal:
             with patch.object(strategy, "_listen_loop", side_effect=mock_listen_loop):
                 try:
                     strategy.zmq_context = mock_context
-                    signal = Signal(
+                    signal = StrategySignal(
                         instrument="BTC-USD",
                         side="buy",
                         strength=0.8,
@@ -1954,20 +1938,19 @@ class TestEmitSignal:
 
         Given: Strategy with publisher,
         When: emit_signal called with signal,
-        Then: Signal published to output topic with metadata.
+        Then: StrategySignal published to output topic.
         """
         strategy = SimpleTestStrategy(strategy_config)
         mock_send_multipart = AsyncMock(return_value=None)
         mock_socket = MagicMock()
         mock_socket.send_multipart = mock_send_multipart
         strategy.publisher = mock_socket
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
             price=50000.0,
             reason="Test signal",
-            metadata={"test": "value"},
         )
         await strategy.emit_signal(signal)
         mock_socket.send_multipart.assert_called_once()
@@ -1981,7 +1964,6 @@ class TestEmitSignal:
         assert payload_data["strength"] == pytest.approx(0.8)
         assert payload_data["price"] == pytest.approx(50000.0)
         assert payload_data["reason"] == "Test signal"
-        assert payload_data["meta"]["test"] == "value"
         assert "timestamp" in payload_data
         assert payload_data["strategy_name"] == "test_strategy"
 
@@ -2000,7 +1982,7 @@ class TestEmitSignal:
         mock_socket = MagicMock()
         mock_socket.send_multipart = mock_send_multipart
         strategy.publisher = mock_socket
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="sell",
             strength=0.5,
@@ -2018,14 +2000,14 @@ class TestEmitSignal:
 
         Given: Strategy with _last_data_ts set,
         When: emit_signal called,
-        Then: Signal timestamp matches _last_data_ts.
+        Then: StrategySignal timestamp matches _last_data_ts.
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._last_data_ts = 1234.5
         publisher_mock = MagicMock(spec=ValidatedPublisher)
         publisher_mock.send_multipart = AsyncMock(return_value=None)
         strategy.publisher = cast(ValidatedPublisher, publisher_mock)
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.9,
@@ -2048,7 +2030,7 @@ class TestEmitSignal:
 
         Given: Strategy with kraken exchange,
         When: emit_signal called,
-        Then: Signal published to signals.kraken.BTC-USD.live topic.
+        Then: StrategySignal published to signals.kraken.BTC-USD.live topic.
         """
         config = StrategyConfig(
             name="live_strategy",
@@ -2062,7 +2044,7 @@ class TestEmitSignal:
         publisher_mock = MagicMock(spec=ValidatedPublisher)
         publisher_mock.send_multipart = AsyncMock(return_value=None)
         strategy.publisher = cast(ValidatedPublisher, publisher_mock)
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.9,
@@ -2081,7 +2063,7 @@ class TestEmitSignal:
     async def test_emit_signal_preserves_existing_timestamp(self) -> None:
         """Verify emit_signal preserves pre-set signal timestamp.
 
-        Given: Signal with explicit timestamp,
+        Given: StrategySignal with explicit timestamp,
         When: emit_signal called,
         Then: Original timestamp preserved.
         """
@@ -2096,7 +2078,7 @@ class TestEmitSignal:
         publisher_mock = MagicMock(spec=ValidatedPublisher)
         publisher_mock.send_multipart = AsyncMock(return_value=None)
         strategy.publisher = cast(ValidatedPublisher, publisher_mock)
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.9,
@@ -2129,7 +2111,7 @@ class TestEmitSignal:
             pass
 
         strategy._setup_publisher = noop_setup
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.9,
@@ -2149,7 +2131,7 @@ class TestEmitSignal:
         """
         strategy_config.outputs = ["ETH-USD"]
         strategy = SimpleTestStrategy(strategy_config)
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.5,
@@ -2267,7 +2249,7 @@ class TestCompositeStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
         config = StrategyConfig(
@@ -2292,7 +2274,7 @@ class TestCompositeStrategy:
         """Verify adding sub-strategy to composite."""
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
         config = StrategyConfig(
@@ -2323,7 +2305,7 @@ class TestCompositeStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
         config = StrategyConfig(
@@ -2353,7 +2335,7 @@ class TestCompositeStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
         config = StrategyConfig(
@@ -2385,7 +2367,9 @@ class TestReplayHandling:
         )
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
-        replay_payload = json.dumps({"started_at": "2024-01-01T00:02:03.456000+00:00"}).encode()
+        replay_payload = json.dumps(
+            {"type": "replay_start", "started_at": "2024-01-01T00:02:03.456000+00:00"}
+        ).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[
@@ -2415,8 +2399,10 @@ class TestReplayHandling:
         )
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
-        replay_start = json.dumps({"started_at": "2024-01-01T00:00:50.000000+00:00"}).encode()
-        replay_end = json.dumps({}).encode()
+        replay_start = json.dumps(
+            {"type": "replay_start", "started_at": "2024-01-01T00:00:50.000000+00:00"}
+        ).encode()
+        replay_end = json.dumps({"type": "replay_end"}).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[
@@ -2448,7 +2434,7 @@ class TestReplayHandling:
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
         strategy._last_data_ts = 777.0
-        replay_end = json.dumps({"ts": 42}).encode()
+        replay_end = json.dumps({"type": "replay_end"}).encode()
 
         class StubSubscriber:
             def __init__(self) -> None:
@@ -2487,7 +2473,7 @@ class TestReplayHandling:
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
         strategy._last_data_ts = 99.0
-        replay_end_payload = json.dumps({"ts": 12.34}).encode()
+        replay_end_payload = json.dumps({"type": "replay_end"}).encode()
 
         class SingleMessageSubscriber:
             def __init__(self) -> None:
@@ -3024,7 +3010,7 @@ class TestListenLoopSystemMessages:
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
-        envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
+        envelope = SettingChangedData(key="test_key", value="test_value", category="test")
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
             mock_instance._parse_value.return_value = "test_value"
@@ -3048,7 +3034,7 @@ class TestListenLoopSystemMessages:
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
-        envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
+        envelope = SettingChangedData(key="test_key", value="test_value", category="test")
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_service.return_value = None
             strategy._handle_settings_update(envelope)
@@ -3067,7 +3053,7 @@ class TestListenLoopSystemMessages:
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
-        envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
+        envelope = SettingChangedData(key="test_key", value="test_value", category="test")
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
             mock_instance._parse_value.side_effect = RuntimeError("parse failed")
@@ -3093,7 +3079,7 @@ class TestListenLoopSystemMessages:
         strategy = SimpleTestStrategy(config)
         strategy._running = True
         strategy._feed_heartbeats = {}
-        heartbeat = HeartbeatEnvelope(
+        heartbeat = HeartbeatData(
             component="feed_kraken",
             sequence=1,
             status="healthy",
@@ -3127,7 +3113,7 @@ class TestListenLoopSignalTimestamp:
         """Verify signal topics do not update _last_data_ts.
 
         Given: Strategy with signal topic input,
-        When: Signal message received,
+        When: StrategySignal message received,
         Then: _last_data_ts unchanged.
         """
         config = StrategyConfig(
@@ -3159,7 +3145,7 @@ class TestListenLoopSignalTimestamp:
         """Verify signal messages don't update timestamp.
 
         Given: Strategy with existing _last_data_ts,
-        When: Signal message received,
+        When: StrategySignal message received,
         Then: _last_data_ts unchanged.
         """
         config = StrategyConfig(
@@ -3228,7 +3214,7 @@ class TestEmitSignalTimestamp:
 
         Given: Strategy with _last_data_ts set,
         When: emit_signal called without timestamp,
-        Then: Signal timestamp uses _last_data_ts.
+        Then: StrategySignal timestamp uses _last_data_ts.
         """
         config = StrategyConfig(
             name="test",
@@ -3241,7 +3227,7 @@ class TestEmitSignalTimestamp:
         mock_publisher = MagicMock()
         mock_publisher.send_multipart = AsyncMock()
         strategy.publisher = mock_publisher
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.9,
@@ -3258,7 +3244,7 @@ class TestEmitSignalTimestamp:
 
         Given: Strategy with _last_data_ts=None,
         When: emit_signal called,
-        Then: Signal timestamp uses current time.
+        Then: StrategySignal timestamp uses current time.
         """
         config = StrategyConfig(
             name="test",
@@ -3271,7 +3257,7 @@ class TestEmitSignalTimestamp:
         mock_publisher = MagicMock()
         mock_publisher.send_multipart = AsyncMock()
         strategy.publisher = mock_publisher
-        signal = Signal(
+        signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
             strength=0.9,
@@ -3294,7 +3280,7 @@ class TestCompositeReset:
         """Verify reset propagates to sub-strategies."""
 
         class TestComposite(CompositeStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
         config = StrategyConfig(
@@ -3472,7 +3458,7 @@ class TestExecutorBasePhase4:
             mock_publisher = MagicMock()
             mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Connection failed"))
             executor.publisher = mock_publisher
-            heartbeat = HeartbeatEnvelope(
+            heartbeat = HeartbeatData(
                 timestamp=datetime.now(UTC),
                 component="test_executor",
                 sequence=1,
@@ -3716,7 +3702,7 @@ class TestBaseStrategyFeedHeartbeat:
         """
 
         class TestStrategy(BaseStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
             async def reset(self) -> None:
@@ -3759,7 +3745,7 @@ class TestBaseStrategyEmitSignal:
         """
 
         class TestStrategy(BaseStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
             async def reset(self) -> None:
@@ -3773,13 +3759,12 @@ class TestBaseStrategyEmitSignal:
         strategy.output_topics = ["signals.paper.BTC-USD.test"]
         strategy.publisher = None
         strategy._last_data_ts = None
-        signal = Signal(
+        signal = StrategySignal(
             instrument="ETH-USD",
             side="buy",
             strength=0.8,
             price=1800.0,
             reason="test",
-            metadata={},
         )
         with pytest.raises(ValueError, match="not allowed"):
             await strategy.emit_signal(signal)
@@ -3798,11 +3783,11 @@ class TestCompositeStrategyAddSubStrategy:
         """
 
         class TestCompositeStrategy(CompositeStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
         class TestSubStrategy(BaseStrategy):
-            async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+            async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
                 return None
 
             async def reset(self) -> None:
@@ -3925,7 +3910,7 @@ class TestCointegrationDataProcessing:
 
         Given: Strategy configured for BTC-USD and ETH-USD,
         When: on_candle called with UNKNOWN-USD,
-        Then: Signal is None.
+        Then: StrategySignal is None.
         """
         signal = await feed_bar_to_strategy(strategy, "UNKNOWN-USD", 50000.0)
         assert signal is None
@@ -3936,7 +3921,7 @@ class TestCointegrationDataProcessing:
 
         Given: Strategy with no candle history,
         When: on_candle called,
-        Then: Signal is None.
+        Then: StrategySignal is None.
         """
         signal = await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0)
         assert signal is None
@@ -3949,7 +3934,7 @@ class TestCointegrationDataProcessing:
 
         Given: Strategy with empty list in candle_buffer,
         When: on_candle called,
-        Then: Signal is None and list still empty.
+        Then: StrategySignal is None and list still empty.
         """
         strategy.candle_buffer["BTC-USD"] = []
         candle = make_candle_envelope("BTC-USD", 50000.0)
@@ -3978,7 +3963,7 @@ class TestCointegrationDataProcessing:
 
         Given: Strategy with only BTC-USD data,
         When: on_candle called,
-        Then: Signal is None (needs both instruments).
+        Then: StrategySignal is None (needs both instruments).
         """
         closes = [50000.0 + i for i in range(35)]
         signal = await feed_closes_to_strategy(strategy, "BTC-USD", closes)
@@ -3992,7 +3977,7 @@ class TestCointegrationDataProcessing:
 
         Given: Strategy with less than min_data_points,
         When: on_candle called,
-        Then: Signal is None.
+        Then: StrategySignal is None.
         """
         for i in range(20):
             await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i)
@@ -4028,7 +4013,7 @@ class TestCointegrationSignalGeneration:
 
         Given: Sufficient price history,
         When: BTC rises above mean,
-        Then: Signal to sell BTC (short spread).
+        Then: StrategySignal to sell BTC (short spread).
         """
         for i in range(35):
             btc_price = 50000.0 + i * 100
@@ -4050,7 +4035,7 @@ class TestCointegrationSignalGeneration:
 
         Given: Sufficient price history,
         When: BTC drops below mean,
-        Then: Signal to buy BTC (long spread).
+        Then: StrategySignal to buy BTC (long spread).
         """
         for i in range(35):
             btc_price = 50000.0 - i * 100
@@ -4250,7 +4235,7 @@ class TestCointegrationEdgeCases:
         """Verify signal strength capped at 1.0.
 
         Given: Extreme z-score conditions,
-        When: Signal generated,
+        When: StrategySignal generated,
         Then: Strength does not exceed 1.0.
         """
         for i in range(35):
@@ -4285,7 +4270,7 @@ class TestCointegrationEdgeCases:
 
         Given: Position open and reverting,
         When: Exit condition met,
-        Then: Signal strength is 0.0.
+        Then: StrategySignal strength is 0.0.
         """
         for i in range(35):
             await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i * 100)
@@ -4345,7 +4330,6 @@ async def test_macd_bullish_crossover_signal(monkeypatch: pytest.MonkeyPatch) ->
     assert signal.side == "buy"
     assert 0.0 < signal.strength <= 1.0
     assert "MACD bull cross" in signal.reason
-    assert "histogram" in signal.metadata
 
 
 @pytest.mark.asyncio
@@ -4388,7 +4372,6 @@ async def test_macd_bearish_crossover(monkeypatch: pytest.MonkeyPatch) -> None:
     assert signal.side == "sell"
     assert 0.0 < signal.strength <= 1.0
     assert "MACD bear cross" in signal.reason
-    assert "histogram" in signal.metadata
 
 
 @pytest.mark.asyncio
@@ -4397,7 +4380,7 @@ async def test_macd_wrong_instrument_ignored() -> None:
 
     Given: MACD strategy for BTC-USD,
     When: ETH-USD bars fed,
-    Then: Signal is None.
+    Then: StrategySignal is None.
     """
     config = StrategyConfig(
         name="test_macd_filter",
@@ -4413,12 +4396,12 @@ async def test_macd_wrong_instrument_ignored() -> None:
 
 
 @pytest.mark.asyncio
-async def test_macd_metadata_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify signal metadata contains MACD params.
+async def test_macd_reason_contains_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify signal reason contains MACD params.
 
     Given: MACD strategy with custom params,
-    When: Signal generated,
-    Then: Metadata has fast, slow, signal, histogram.
+    When: StrategySignal generated,
+    Then: Reason string includes fast, slow, signal values.
     """
     config = StrategyConfig(
         name="test_metadata",
@@ -4448,13 +4431,9 @@ async def test_macd_metadata_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     assert initial is None
     signal = await feed_bar_to_strategy(strategy, INSTRUMENT_BTC, 141.0)
     assert signal is not None
-    assert "fast" in signal.metadata
-    assert "slow" in signal.metadata
-    assert "signal" in signal.metadata
-    assert "histogram" in signal.metadata
-    assert signal.metadata["fast"] == 8
-    assert signal.metadata["slow"] == 21
-    assert signal.metadata["signal"] == 5
+    assert "fast=8" in signal.reason
+    assert "slow=21" in signal.reason
+    assert "signal=5" in signal.reason
 
 
 @pytest.mark.asyncio
@@ -4605,7 +4584,7 @@ async def test_macd_insufficient_data(macd_strategy: MACDCrossover) -> None:
 
     Given: Only two bars,
     When: on_candle called,
-    Then: Signal is None.
+    Then: StrategySignal is None.
     """
     closes = [100.0, 101.0]
     signal = await feed_closes_to_strategy(macd_strategy, INSTRUMENT_BTC, closes)
@@ -4661,7 +4640,7 @@ async def test_macd_neutral_market(macd_strategy: MACDCrossover) -> None:
 
     Given: Choppy sideways price data,
     When: Bars processed,
-    Then: Signal None or valid side.
+    Then: StrategySignal None or valid side.
     """
     closes = [100.0 + (i % 10 - 5) * 0.1 for i in range(50)]
     signal = await feed_closes_to_strategy(macd_strategy, INSTRUMENT_BTC, closes)
@@ -4676,7 +4655,7 @@ async def test_macd_signal_emission(
 
     Given: Trending price data,
     When: Crossover occurs,
-    Then: Signal has correct instrument.
+    Then: StrategySignal has correct instrument.
     """
     closes = [100.0 + i * 2.0 for i in range(50)]
     monkeypatch.setattr("snapper.strategies.macd.macd", _stub_macd_sequence([-0.5, 0.5]))
@@ -4718,7 +4697,7 @@ async def test_macd_missing_closes(macd_strategy: MACDCrossover) -> None:
 
     Given: Empty candle buffer,
     When: Single candle,
-    Then: Signal is None.
+    Then: StrategySignal is None.
     """
     candle = make_candle_envelope(INSTRUMENT_BTC, 100.0)
     signal = await macd_strategy.on_candle(INSTRUMENT_BTC, candle)
@@ -4731,7 +4710,7 @@ async def test_macd_empty_closes(macd_strategy: MACDCrossover) -> None:
 
     Given: No prior data,
     When: Single candle,
-    Then: Signal is None.
+    Then: StrategySignal is None.
     """
     candle = make_candle_envelope(INSTRUMENT_BTC, 100.0)
     signal = await macd_strategy.on_candle(INSTRUMENT_BTC, candle)
@@ -4744,7 +4723,7 @@ async def test_macd_single_close(macd_strategy: MACDCrossover) -> None:
 
     Given: Only one candle,
     When: on_candle called,
-    Then: Signal is None.
+    Then: StrategySignal is None.
     """
     signal = await feed_bar_to_strategy(macd_strategy, INSTRUMENT_BTC, 100.0)
     assert signal is None
@@ -4756,7 +4735,7 @@ async def test_macd_volatile_data(macd_strategy: MACDCrossover) -> None:
 
     Given: Highly volatile price series,
     When: Bars processed,
-    Then: Signal None or valid strength.
+    Then: StrategySignal None or valid strength.
     """
     closes: list[float] = []
     price = 100.0
@@ -4773,7 +4752,7 @@ async def test_macd_wrong_instrument(macd_strategy: MACDCrossover) -> None:
 
     Given: MACD for BTC,
     When: ETH candles fed,
-    Then: Signal is None.
+    Then: StrategySignal is None.
     """
     closes = [100.0 + i for i in range(50)]
     signal = await feed_closes_to_strategy(macd_strategy, INSTRUMENT_ETH, closes)
@@ -4820,9 +4799,8 @@ async def test_macd_actual_bullish_crossover(
     assert signal is not None
     assert signal.side == "buy"
     assert "MACD bull cross" in signal.reason
-    assert "histogram" in signal.metadata
-    assert signal.metadata["fast"] == macd_strategy.fast
-    assert signal.metadata["slow"] == macd_strategy.slow
+    assert f"fast={macd_strategy.fast}" in signal.reason
+    assert f"slow={macd_strategy.slow}" in signal.reason
 
 
 @pytest.mark.asyncio
@@ -4843,7 +4821,6 @@ async def test_macd_actual_bearish_crossover(
     assert signal is not None
     assert signal.side == "sell"
     assert "MACD bear cross" in signal.reason
-    assert "histogram" in signal.metadata
 
 
 def test_paper_exchange_accepts_known_symbols() -> None:
@@ -5062,9 +5039,7 @@ class TestRSIReversion:
         assert signal.side == "buy"
         assert signal.strength == pytest.approx(1.0)
         assert "RSI" in signal.reason
-        assert signal.metadata["period"] == 14
-        assert signal.metadata["lower"] == pytest.approx(30.0)
-        assert "rsi_value" in signal.metadata
+        assert "period=14" in signal.reason
 
     @pytest.mark.asyncio
     async def test_sell_signal_overbought(self, strategy: RSIReversion) -> None:
@@ -5081,9 +5056,7 @@ class TestRSIReversion:
         assert signal.side == "sell"
         assert signal.strength == pytest.approx(1.0)
         assert "RSI" in signal.reason
-        assert signal.metadata["period"] == 14
-        assert signal.metadata["upper"] == pytest.approx(70.0)
-        assert "rsi_value" in signal.metadata
+        assert "period=14" in signal.reason
 
     @pytest.mark.asyncio
     async def test_no_signal_neutral(self, strategy: RSIReversion) -> None:
@@ -5091,7 +5064,7 @@ class TestRSIReversion:
 
         Given: Sideways prices,
         When: RSI between thresholds,
-        Then: Signal is None.
+        Then: StrategySignal is None.
         """
         closes = [
             100.0,
@@ -5122,7 +5095,7 @@ class TestRSIReversion:
     async def test_cooldown(self, strategy: RSIReversion) -> None:
         """Verify cooldown prevents rapid signals.
 
-        Given: Signal generated with cooldown=2,
+        Given: StrategySignal generated with cooldown=2,
         When: Conditions persist,
         Then: Next signal after cooldown bars.
         """
@@ -5144,7 +5117,7 @@ class TestRSIReversion:
 
         Given: Only three bars,
         When: on_candle called,
-        Then: Signal is None.
+        Then: StrategySignal is None.
         """
         closes = [100.0, 101.0, 102.0]
         signal = await feed_closes_to_strategy(strategy, TEST_INSTRUMENT, closes)
@@ -5156,7 +5129,7 @@ class TestRSIReversion:
 
         Given: RSI configured for ETH-USD,
         When: BTC-USD bars fed,
-        Then: Signal still generated (RSI is multi-instrument).
+        Then: StrategySignal still generated (RSI is multi-instrument).
         """
         closes = [100.0] * 10 + [95.0, 90.0, 85.0, 80.0, 75.0]
         signal = await feed_closes_to_strategy(strategy, "BTC-USD", closes)
@@ -5298,7 +5271,7 @@ def test_strategy_config_requires_non_empty_fields() -> None:
 class _TestStrategy(BaseStrategy):
     """Test strategy implementation for exchange validation tests."""
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle data and return optional signal."""
         return None
 
@@ -5327,7 +5300,7 @@ def test_invalid_exchange_raises_error() -> None:
 class MockMACDCrossover(BaseStrategy):
     """Mock MACD crossover strategy for factory testing."""
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle data and return optional signal."""
         return None
 
@@ -5339,7 +5312,7 @@ class MockMACDCrossover(BaseStrategy):
 class MockRSIReversion(BaseStrategy):
     """Mock RSI reversion strategy for factory testing."""
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle data and return optional signal."""
         return None
 

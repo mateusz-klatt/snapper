@@ -15,7 +15,7 @@ import zmq.asyncio
 from snapper.config.settings import get_settings
 from snapper.messaging.infrastructure.broker import ZmqBrokerProcess
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
-from snapper.messaging.schemas.messages import TickEnvelope
+from snapper.messaging.schemas.data import TickData
 
 
 @pytest.mark.asyncio
@@ -344,9 +344,7 @@ class TestZMQPubSub:
             sub_socket.connect(pub_endpoint)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "BTCUSD")
             await asyncio.sleep(0.1)
-            test_msg = TickEnvelope(
-                instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0
-            )
+            test_msg = TickData(instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0)
             await pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")])
             try:
                 topic_bytes, payload_bytes = await asyncio.wait_for(
@@ -355,8 +353,8 @@ class TestZMQPubSub:
                 topic = topic_bytes.decode("utf-8")
                 payload = payload_bytes.decode("utf-8")
                 assert topic == "BTCUSD"
-                received_msg = TickEnvelope.from_json(payload)
-                assert isinstance(received_msg, TickEnvelope)
+                received_msg = TickData.from_json(payload)
+                assert isinstance(received_msg, TickData)
                 assert received_msg.instrument == "BTCUSD"
                 assert received_msg.last == pytest.approx(50000.0)
                 assert received_msg.volume == pytest.approx(0.1)
@@ -387,9 +385,9 @@ class TestZMQPubSub:
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "BTCUSD")
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "ETHUSD")
             await asyncio.sleep(0.1)
-            btc_msg = TickEnvelope(instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0)
-            eth_msg = TickEnvelope(instrument="ETHUSD", exchange="kraken", volume=1.0, last=3000.0)
-            other_msg = TickEnvelope(instrument="ADAUSD", exchange="kraken", volume=100.0, last=0.5)
+            btc_msg = TickData(instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0)
+            eth_msg = TickData(instrument="ETHUSD", exchange="kraken", volume=1.0, last=3000.0)
+            other_msg = TickData(instrument="ADAUSD", exchange="kraken", volume=100.0, last=0.5)
             await pub_socket.send_multipart([b"BTCUSD", btc_msg.to_json().encode("utf-8")])
             await pub_socket.send_multipart([b"ETHUSD", eth_msg.to_json().encode("utf-8")])
             await pub_socket.send_multipart([b"ADAUSD", other_msg.to_json().encode("utf-8")])
@@ -429,9 +427,7 @@ class TestZMQPubSub:
             sub_socket.setsockopt(zmq.LINGER, 0)
             sub_socket.connect(pub_endpoint)
             await asyncio.sleep(0.1)
-            test_msg = TickEnvelope(
-                instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0
-            )
+            test_msg = TickData(instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0)
             await pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")])
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(sub_socket.recv_multipart(), timeout=0.5)
@@ -455,25 +451,21 @@ class TestZMQPubSub:
             pub_port = pub_socket.bind_to_random_port("tcp://127.0.0.1")
             pub_endpoint = f"tcp://127.0.0.1:{pub_port}"
             await asyncio.sleep(0.1)
-            early_msg = TickEnvelope(
-                instrument="BTCUSD", exchange="kraken", volume=0.1, last=49000.0
-            )
+            early_msg = TickData(instrument="BTCUSD", exchange="kraken", volume=0.1, last=49000.0)
             await pub_socket.send_multipart([b"BTCUSD", early_msg.to_json().encode("utf-8")])
             sub_socket = context.socket(zmq.SUB)
             sub_socket.setsockopt(zmq.LINGER, 0)
             sub_socket.connect(pub_endpoint)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "BTCUSD")
             await asyncio.sleep(0.1)
-            late_msg = TickEnvelope(
-                instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0
-            )
+            late_msg = TickData(instrument="BTCUSD", exchange="kraken", volume=0.1, last=50000.0)
             await pub_socket.send_multipart([b"BTCUSD", late_msg.to_json().encode("utf-8")])
             try:
                 _topic_bytes, payload_bytes = await asyncio.wait_for(
                     sub_socket.recv_multipart(), timeout=1.0
                 )
-                received_msg = TickEnvelope.from_json(payload_bytes.decode("utf-8"))
-                assert isinstance(received_msg, TickEnvelope)
+                received_msg = TickData.from_json(payload_bytes.decode("utf-8"))
+                assert isinstance(received_msg, TickData)
                 assert received_msg.last == pytest.approx(50000.0)
                 with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(sub_socket.recv_multipart(), timeout=0.5)

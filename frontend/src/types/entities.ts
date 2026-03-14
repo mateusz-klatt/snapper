@@ -7,12 +7,12 @@
  */
 
 export type {
-  // WS Envelope entities (backend naming)
+  // WS Data entities (backend naming)
   Candle,
-  Fill,
+  Execution,
   Heartbeat,
   OrderRequest,
-  OrderStatus,
+  Order,
   ReplayEnd,
   ReplayStart,
   SettingChanged,
@@ -20,8 +20,6 @@ export type {
   SymbolAliasUpdate,
   Tick,
   Trade,
-  // API Snapshot entities
-  Position,
   // Request entities
   AdminResetPassword,
   ChangePassword,
@@ -35,3 +33,18 @@ export type {
   OrderType,
   HeartbeatStatus,
 } from './entities.generated'
+
+/**
+ * Canonical Position entity.
+ * Derived from REST PositionData (no WS envelope exists for positions).
+ */
+export interface Position {
+  id: string | number
+  instrument: string
+  exchange: string
+  quantity: number
+  averagePrice: number
+  unrealizedPnl: number
+  realizedPnl: number
+  updatedAt: Date
+}

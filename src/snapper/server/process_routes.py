@@ -130,7 +130,7 @@ async def list_configured_processes(
             parameters_schema=config.parameters_schema,
             running=config.name in factory.started_processes,
             is_one_shot=config.lifecycle is ProcessLifecycleEnum.ONE_SHOT,
-            active_run_id=factory.active_runs.get(config.name),
+            active_public_id=factory.active_runs.get(config.name),
         )
         for config in configs
     ]
@@ -322,7 +322,7 @@ async def start_process(
     return ProcessStartResponse(
         status=result.status,
         name=name,
-        run_id=result.run_id,
+        public_id=result.public_id,
         message=result.message,
     )
 

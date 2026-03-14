@@ -1159,7 +1159,7 @@ class TestProcessRunRecords:
         Then: Status and result updated, committed.
         """
         mock_run = MagicMock()
-        mock_run.run_id = "test-run-id"
+        mock_run.public_id = "test-run-id"
         with patch(
             "snapper.application.process_manager.run_recorder.get_repository"
         ) as mock_get_repo:
@@ -1322,7 +1322,7 @@ class TestGetProcessStatus:
         status = await launcher.get_process_status("running")
         assert status.name == "running"
         assert status.running is True
-        assert status.active_run_id == "test-run-id"
+        assert status.active_public_id == "test-run-id"
 
     @pytest.mark.asyncio
     async def test_get_process_status_not_running(self, launcher: ProcessLauncherService) -> None:
@@ -1394,7 +1394,7 @@ class TestGetRecentRuns:
         Then: Returns list of formatted run dictionaries.
         """
         mock_run = MagicMock()
-        mock_run.run_id = "run-123"
+        mock_run.public_id = "run-123"
         mock_run.process_name = "test_process"
         mock_run.status = "succeeded"
         mock_run.role = "core"
@@ -1418,7 +1418,7 @@ class TestGetRecentRuns:
             mock_get_repo.return_value = mock_repo
             runs = await launcher.get_recent_runs(limit=10)
             assert len(runs) == 1
-            assert runs[0]["run_id"] == "run-123"
+            assert runs[0]["public_id"] == "run-123"
             assert runs[0]["process_name"] == "test_process"
             assert runs[0]["tags"] == ["tag1"]
 

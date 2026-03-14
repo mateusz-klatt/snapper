@@ -32,7 +32,7 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.schemas.messages import SymbolAliasUpdateEnvelope
+from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.utils.logging import set_log_context
 
 
@@ -106,7 +106,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not self.publisher:
             self._setup_zmq()
         if self.publisher:
-            envelope = SymbolAliasUpdateEnvelope()
+            envelope = SymbolAliasUpdateData()
             topic = "system.symbol_aliases"
             await self.publisher.send_multipart(topic, envelope.to_json().encode())
             logger.info(f"Broadcasted cache invalidation: {topic}")
@@ -146,7 +146,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     quote=quote,
                     asset_type=asset_type,
                     created_at=now,
-                    updated_at=now,
+                    timestamp=now,
                 )
             )
             return True
@@ -161,7 +161,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             existing.asset_type = asset_type
             changed = True
         if changed:
-            existing.updated_at = now
+            existing.timestamp = now
         return False
 
     @staticmethod
@@ -201,13 +201,13 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     channel=channel,
                     exchange_symbol=exchange_symbol,
                     created_at=now,
-                    updated_at=now,
+                    timestamp=now,
                 )
             )
             return "created"
         if existing.exchange_symbol != exchange_symbol:
             existing.exchange_symbol = exchange_symbol
-            existing.updated_at = now
+            existing.timestamp = now
             return "updated"
         return "unchanged"
 
@@ -253,7 +253,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     source=source,
                     reason=reason,
                     created_at=now,
-                    updated_at=now,
+                    timestamp=now,
                 )
             )
             return "created"
@@ -271,7 +271,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             existing.reason = reason
             changed = True
         if changed:
-            existing.updated_at = now
+            existing.timestamp = now
             return "updated"
         return "unchanged"
 
@@ -314,7 +314,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 cap.can_market_data = False
                 cap.source = source
                 cap.reason = "Delisted: not seen in updater run"
-                cap.updated_at = now
+                cap.timestamp = now
                 deactivated += 1
         return deactivated
 
@@ -406,12 +406,12 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         value=iso_timestamp,
                         category="system",
                         description=f"Timestamp of last {self._get_setting_key()} update",
-                        updated_at=timestamp,
+                        timestamp=timestamp,
                     )
                     session.add(setting)
                 else:
                     setting.value = iso_timestamp
-                    setting.updated_at = timestamp
+                    setting.timestamp = timestamp
                 session.commit()
                 logger.info(f"Updated timestamp: {self._get_setting_key()} = {iso_timestamp}")
         except Exception as e:

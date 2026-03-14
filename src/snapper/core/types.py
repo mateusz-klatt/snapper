@@ -57,22 +57,22 @@ ReplaceEventType = Literal["replaced", "rejected"]
 """Event types for replace command responses."""
 
 OrderEventType = Literal["submitted", "accepted", "rejected", "cancelled", "expired", "replaced"]
-"""Order event type for ZMQ topic suffix (non-fill events).
+"""Order event type for ZMQ topic suffix (non-execution events).
 
 This type MUST match the suffix of the orders.events.{exchange}.{instrument}.{event}
-topic for non-fill events. Used by:
-- OrderStatusEnvelope.status: Full order lifecycle events (submit flow).
-- OrderEventEnvelope.event: Lightweight cancel/replace confirmations.
+topic for non-execution events. Used by:
+- OrderData.status: Full order lifecycle events (submit flow).
+- OrderEventData.event: Lightweight cancel/replace confirmations.
 
-Note: 'fill' is NOT in this type. Fill events use FillEnvelope (with FillStatus),
-not OrderStatusEnvelope. This separation ensures clear payload types:
-- orders.events.*.*.fill -> FillEnvelope
-- orders.events.*.*.{submitted|accepted|rejected|expired} -> OrderStatusEnvelope
-- orders.events.*.*.{cancelled|replaced|rejected} -> OrderEventEnvelope
+Note: 'executed' is NOT in this type. Execution events use ExecutionData (with FillStatus),
+not OrderData. This separation ensures clear payload types:
+- orders.events.*.*.executed -> ExecutionData
+- orders.events.*.*.{submitted|accepted|rejected|expired} -> OrderData
+- orders.events.*.*.{cancelled|replaced|rejected} -> OrderEventData
 
-The 'rejected' event may come from either envelope type:
-- OrderStatusEnvelope: Submit rejected by executor validation or exchange.
-- OrderEventEnvelope: Cancel/replace rejected.
+The 'rejected' event may come from either data type:
+- OrderData: Submit rejected by executor validation or exchange.
+- OrderEventData: Cancel/replace rejected.
 
 Events:
     submitted: Executor accepted command, order sent to exchange (local event).
@@ -150,7 +150,7 @@ OrderCommand = Literal["submit", "cancel", "replace"]
 """Order command types for orders.commands.* ZMQ topics."""
 
 OrderEvent = Literal[
-    "submitted", "accepted", "rejected", "fill", "cancelled", "expired", "replaced"
+    "submitted", "accepted", "rejected", "executed", "cancelled", "expired", "replaced"
 ]
 """Order event types for orders.events.* ZMQ topics."""
 

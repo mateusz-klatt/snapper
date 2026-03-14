@@ -51,10 +51,10 @@ vi.mock('../../lib/apiClient', () => ({
   apiClient: {
     getSignals: vi.fn(async () => [
       {
-        id: 1,
+        type: 'signal',
         instrument: 'BTC-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.85,
         reason: 'Strong momentum breakout',
@@ -62,10 +62,10 @@ vi.mock('../../lib/apiClient', () => ({
         price: 42000,
       },
       {
-        id: 2,
+        type: 'signal',
         instrument: 'ETH-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'sell',
         strength: 0.65,
         reason: 'Overbought RSI',
@@ -201,10 +201,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 10,
+        type: 'signal',
         instrument: 'BTC-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.9,
         reason: 'Bullish momentum',
@@ -212,10 +212,10 @@ describe('Signals', () => {
         price: 42000,
       },
       {
-        id: 11,
+        type: 'signal',
         instrument: 'ETH-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.7,
         reason: 'Uptrend',
@@ -238,10 +238,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 12,
+        type: 'signal',
         instrument: 'BTC-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'sell',
         strength: 0.9,
         reason: 'Bearish momentum',
@@ -249,10 +249,10 @@ describe('Signals', () => {
         price: 42000,
       },
       {
-        id: 13,
+        type: 'signal',
         instrument: 'ETH-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'sell',
         strength: 0.7,
         reason: 'Downtrend',
@@ -287,10 +287,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 3,
+        type: 'signal',
         instrument: 'SOL-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.45,
         reason: 'Weak signal',
@@ -313,10 +313,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 4,
+        type: 'signal',
         instrument: 'XRP-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'sell',
         strength: 0.25,
         reason: 'Very weak signal',
@@ -339,10 +339,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 5,
+        type: 'signal',
         instrument: 'ADA-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.75,
         reason: 'Recent signal',
@@ -366,10 +366,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 6,
+        type: 'signal',
         instrument: 'DOT-USD',
         exchange: 'kraken',
-        timestamp: fifteenMinutesAgo,
+        fired_at: fifteenMinutesAgo,
         side: 'sell',
         strength: 0.8,
         reason: 'Minutes ago signal',
@@ -393,10 +393,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 7,
+        type: 'signal',
         instrument: 'LINK-USD',
         exchange: 'kraken',
-        timestamp: threeHoursAgo,
+        fired_at: threeHoursAgo,
         side: 'buy',
         strength: 0.9,
         reason: 'Hours ago signal',
@@ -420,10 +420,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 8,
+        type: 'signal',
         instrument: 'AVAX-USD',
         exchange: 'kraken',
-        timestamp: twoDaysAgo,
+        fired_at: twoDaysAgo,
         side: 'sell',
         strength: 0.7,
         reason: 'Old signal',
@@ -463,10 +463,10 @@ describe('Signals', () => {
     vi.mocked(apiClient.getSignals)
       .mockResolvedValueOnce([
         {
-          id: 1,
+          type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
-          timestamp: new Date().toISOString(),
+          fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.85,
           reason: 'MACD signal',
@@ -474,10 +474,10 @@ describe('Signals', () => {
           price: 42000,
         },
         {
-          id: 2,
+          type: 'signal',
           instrument: 'ETH-USD',
           exchange: 'kraken',
-          timestamp: new Date().toISOString(),
+          fired_at: new Date().toISOString(),
           side: 'sell',
           strength: 0.65,
           reason: 'RSI signal',
@@ -507,10 +507,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 1,
+        type: 'signal',
         instrument: 'BTC-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.85,
         reason: 'MACD signal',
@@ -518,10 +518,10 @@ describe('Signals', () => {
         price: 42000,
       },
       {
-        id: 2,
+        type: 'signal',
         instrument: 'ETH-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'sell',
         strength: 0.65,
         reason: 'RSI signal',
@@ -547,10 +547,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 1,
+        type: 'signal',
         instrument: 'BTC-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.85,
         reason: 'Strong momentum',
@@ -588,10 +588,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 14,
+        type: 'signal',
         instrument: 'BTC-USD',
         exchange: 'kraken',
-        timestamp: new Date().toISOString(),
+        fired_at: new Date().toISOString(),
         side: 'buy',
         strength: 0.85,
         reason: 'No strategy label',
@@ -627,8 +627,8 @@ describe('Signals', () => {
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
       'signals.csv',
-      ['ID', 'Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Timestamp'],
-      expect.arrayContaining([expect.arrayContaining(['1', 'BTC-USD', 'buy'])])
+      ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At'],
+      expect.arrayContaining([expect.arrayContaining(['BTC-USD', 'buy'])])
     )
   })
   it('disables export button when no signals', async () => {
@@ -647,6 +647,68 @@ describe('Signals', () => {
 
     expect(exportButton).toBeDisabled()
   })
+  it('renders signal with undefined fired_at', async () => {
+    const { apiClient } = await import('../../lib/apiClient')
+
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
+      {
+        type: 'signal',
+        instrument: 'SOL-USD',
+        exchange: 'kraken',
+        fired_at: undefined as unknown as string,
+        side: 'buy',
+        strength: 0.5,
+        reason: 'test reason',
+        strategy_name: 'test',
+        price: 100,
+      },
+    ])
+    const queryClient = createTestQueryClient()
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Signals />
+      </QueryClientProvider>
+    )
+    await screen.findByText('SOL-USD')
+    expect(screen.getByText('N/A')).toBeInTheDocument()
+  })
+  it('exports signals with undefined fired_at', async () => {
+    const { apiClient } = await import('../../lib/apiClient')
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const userEventModule = await import('@testing-library/user-event')
+    const user = userEventModule.default.setup()
+
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
+      {
+        type: 'signal',
+        instrument: 'SOL-USD',
+        exchange: 'kraken',
+        fired_at: undefined as unknown as string,
+        side: 'sell',
+        strength: 0.6,
+        reason: 'test',
+        strategy_name: null as unknown as string,
+        price: null as unknown as number,
+      },
+    ])
+    const queryClient = createTestQueryClient()
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Signals />
+      </QueryClientProvider>
+    )
+    await screen.findByText('SOL-USD')
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'signals.csv',
+      ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At'],
+      [['SOL-USD', 'sell', '60%', '', '', 'test', '']]
+    )
+  })
   it('exports signals with null price and null strategy_name', async () => {
     const { apiClient } = await import('../../lib/apiClient')
     const { exportToCSV } = await import('../../lib/csvExport')
@@ -655,10 +717,10 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
       {
-        id: 20,
+        type: 'signal',
         instrument: 'BTC-USD',
         exchange: 'kraken',
-        timestamp: '2024-01-01T00:00:00Z',
+        fired_at: '2024-01-01T00:00:00Z',
         side: 'buy',
         strength: 0.85,
         reason: null as unknown as string,
@@ -679,8 +741,8 @@ describe('Signals', () => {
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
       'signals.csv',
-      ['ID', 'Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Timestamp'],
-      [['20', 'BTC-USD', 'buy', '85%', '', '', '', '2024-01-01T00:00:00Z']]
+      ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At'],
+      [['BTC-USD', 'buy', '85%', '', '', '', '2024-01-01T00:00:00Z']]
     )
   })
 })

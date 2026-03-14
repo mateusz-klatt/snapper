@@ -87,7 +87,7 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
             change_24h=ticker_data.change,
             spread=spread,
             spread_pct=spread_pct,
-            updated_at=datetime.now(UTC),
+            timestamp=datetime.now(UTC),
         )
 
     _COLLECTION_TIMEOUT_SECONDS = 120.0

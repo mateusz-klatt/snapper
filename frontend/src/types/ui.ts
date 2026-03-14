@@ -1,4 +1,4 @@
-import type { OrderStatus, Fill, Signal, Position } from './entities'
+import type { Order, Execution, Signal, Position } from './entities'
 
 export interface AppState {
   isDarkMode: boolean
@@ -15,8 +15,8 @@ export interface MarketDataState {
   lastUpdate: number
 }
 export interface TradeState {
-  orders: OrderStatus[]
-  executions: Fill[]
+  orders: Order[]
+  executions: Execution[]
   positions: Position[]
   signals: Signal[]
   lastUpdate: number

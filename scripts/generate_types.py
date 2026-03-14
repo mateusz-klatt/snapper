@@ -23,13 +23,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.api.schemas.base import WsMessageSchema
 from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS as BACKEND_RESOURCE_PERMISSIONS
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS as BACKEND_ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.interface.websocket import schemas as ws_schemas
-from snapper.messaging.schemas import messages as msg_schemas
+from snapper.messaging.schemas import data as data_schemas
 from snapper.server.app import create_app
 
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
@@ -51,10 +52,10 @@ _SWIFT_HEADER_LINES = [
 _TS_CONST_OBJECT_CLOSE = "} as const"
 
 ENTITY_RENAMES: dict[str, str] = {}
-ENVELOPE_SUFFIX = "Envelope"
+DATA_SUFFIX = "Data"
 SNAPSHOT_SUFFIX = "Snapshot"
 REQUEST_SUFFIX = "Request"
-ENTITY_EXCLUDE_FIELDS = {"type", "meta"}
+ENTITY_EXCLUDE_FIELDS = {"type"}
 ENTITY_UNION_ID_FIELDS = {"id", "order_id"}
 
 SWIFT_KEYWORD_RENAMES: dict[str, str] = {
@@ -261,12 +262,12 @@ def discover_ws_schemas() -> list[tuple[str, type[BaseModel]]]:
     discovered: list[tuple[str, type[BaseModel]]] = []
     discovered.append(("WsMessageBase", WsMessageSchema))
 
-    for name, obj in inspect.getmembers(msg_schemas):
+    for name, obj in inspect.getmembers(data_schemas):
         if (
             inspect.isclass(obj)
-            and issubclass(obj, BaseModel)
-            and obj is not BaseModel
-            and name.endswith("Envelope")
+            and issubclass(obj, StrictDataSchema)
+            and obj is not StrictDataSchema
+            and name.endswith("Data")
         ):
             discovered.append((name, obj))
 
@@ -1308,6 +1309,14 @@ def json_type_to_ts_entity(
 _ENTITY_UNION_THRESHOLD = 3
 _UNION_LINE_RE = re.compile(r"^(\s+\w+\??:\s+)((?:'[\w]+' \| )*'[\w]+')\s*$")
 
+_KNOWN_UNION_ALIASES: dict[str, str] = {
+    "'kraken' | 'zonda' | 'walutomat' | 'polygon'": "MarketDataExchange",
+    "'paper' | 'kraken' | 'zonda' | 'walutomat'": "OrderExchange",
+    "'buy' | 'sell'": "TradeSide",
+    "'market' | 'limit' | 'stop' | 'stop_limit'": "OrderType",
+    "'filled' | 'partial'": "FillStatus",
+}
+
 
 def extract_repeated_unions(lines: list[str]) -> list[str]:
     """Extract repeated inline string-literal unions as type aliases.
@@ -1364,6 +1373,10 @@ def _build_entity_union_alias_map(
 ) -> dict[str, str]:
     """Build union-string to alias name mapping.
 
+    Uses _KNOWN_UNION_ALIASES for semantic names that match the Python
+    source type (e.g., MarketDataExchange, OrderExchange). Falls back
+    to PascalCase field name with numeric collision suffix.
+
     Args:
         repeated: Mapping of repeated union-string occurrences.
 
@@ -1373,13 +1386,17 @@ def _build_entity_union_alias_map(
     alias_map: dict[str, str] = {}
     used_names: set[str] = set()
     for union_str, occurrences in repeated.items():
-        camel = snake_to_camel(occurrences[0][1])
-        base_name = camel[0].upper() + camel[1:]
-        name = base_name
-        counter = 2
-        while name in used_names:
-            name = f"{base_name}{counter}"
-            counter += 1
+        known = _KNOWN_UNION_ALIASES.get(union_str)
+        if known:
+            name = known
+        else:
+            camel = snake_to_camel(occurrences[0][1])
+            base_name = camel[0].upper() + camel[1:]
+            name = base_name
+            counter = 2
+            while name in used_names:
+                name = f"{base_name}{counter}"
+                counter += 1
         alias_map[union_str] = name
         used_names.add(name)
     return alias_map
@@ -1567,17 +1584,17 @@ def generate_entities(project_root: Path) -> None:
 
     generated_entities: set[str] = set()
 
-    envelope_count = 0
+    data_count = 0
     for schema_name, schema in ws_schemas.items():
-        if not schema_name.endswith(ENVELOPE_SUFFIX):
+        if not schema_name.endswith(DATA_SUFFIX):
             continue
-        entity_name = derive_entity_name(schema_name, ENVELOPE_SUFFIX)
+        entity_name = derive_entity_name(schema_name, DATA_SUFFIX)
         generated_entities.add(entity_name)
         doc = f"Canonical {entity_name} entity.\nFrom WebSocket {schema_name}."
         interface_lines = generate_entity_interface(entity_name, schema, doc, all_schemas)
         lines.extend(interface_lines)
         lines.append("")
-        envelope_count += 1
+        data_count += 1
 
     snapshot_count = 0
     for schema_name, schema in api_schemas.items():
@@ -1611,7 +1628,7 @@ def generate_entities(project_root: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines))
     print(f"Generated {output_path}")
-    print(f"  - {envelope_count} WS envelope entities")
+    print(f"  - {data_count} WS data entities")
     print(f"  - {snapshot_count} API snapshot entities")
     print(f"  - {request_count} request entities")
 

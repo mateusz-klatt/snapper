@@ -18,7 +18,7 @@ from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
-from snapper.messaging.schemas.messages import SignalEnvelope
+from snapper.messaging.schemas.data import SignalData
 
 
 class FakeSocket:
@@ -405,7 +405,7 @@ class TestTraderSignalHandling:
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
-        signal = SignalEnvelope(
+        signal = SignalData(
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
@@ -467,7 +467,7 @@ class TestTraderSignalHandling:
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
-        signal = SignalEnvelope(
+        signal = SignalData(
             instrument="BTC-USD",
             side="sell",
             strength=1.0,
@@ -522,7 +522,7 @@ class TestTraderSignalHandling:
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
-        invalid_signal = SignalEnvelope(
+        invalid_signal = SignalData(
             instrument="BTC-USD",
             side="buy",
             strength=0.5,
@@ -582,7 +582,7 @@ class TestTraderSignalHandling:
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
-        signal = SignalEnvelope(
+        signal = SignalData(
             instrument="ETH-USD",
             side="buy",
             strength=0.5,

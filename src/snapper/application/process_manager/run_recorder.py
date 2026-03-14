@@ -7,7 +7,7 @@ process run records that track execution history.
 from datetime import UTC
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
+from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import desc
@@ -51,13 +51,13 @@ class ProcessRunRecorder:
             parameters: Runtime parameters for this run.
 
         Returns:
-            Generated run_id (UUID string).
+            Generated public_id (UUID string).
         """
         repository = get_repository(self.settings.db_url)
-        run_id = str(uuid4())
+        public_id = str(uuid7())
         async with repository.session() as session:
             run = ProcessRun(
-                run_id=run_id,
+                public_id=public_id,
                 process_name=config.name,
                 role=config.role.value,
                 lifecycle=config.lifecycle.value,
@@ -65,14 +65,15 @@ class ProcessRunRecorder:
                 parameters=parameters,
                 tags=list(config.tags),
                 started_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
             session.add(run)
             await session.commit()
-        return run_id
+        return public_id
 
     async def update_run_record(
         self,
-        run_id: str,
+        public_id: str,
         status: ProcessRunStatusEnum,
         *,
         result: dict[str, Any] | None = None,
@@ -81,7 +82,7 @@ class ProcessRunRecorder:
         """Update an existing process run record.
 
         Args:
-            run_id: Run ID to update.
+            public_id: Public ID to update.
             status: New status to set.
             result: Optional result data dict.
             error: Optional error message (truncated to 1024 chars).
@@ -89,11 +90,11 @@ class ProcessRunRecorder:
         repository = get_repository(self.settings.db_url)
         async with repository.session() as session:
             result_row = await session.execute(
-                select(ProcessRun).where(ProcessRun.run_id == run_id)
+                select(ProcessRun).where(ProcessRun.public_id == public_id)
             )
             process_run = result_row.scalar_one_or_none()
             if process_run is None:
-                logger.warning("Process run '{}' not found for status update", run_id)
+                logger.warning("Process run '{}' not found for status update", public_id)
                 return
             process_run.status = status.value
             process_run.completed_at = datetime.now(UTC)
@@ -127,7 +128,7 @@ class ProcessRunRecorder:
             runs = result.scalars().all()
         return [
             {
-                "run_id": run.run_id,
+                "public_id": run.public_id,
                 "process_name": run.process_name,
                 "status": run.status,
                 "role": run.role,

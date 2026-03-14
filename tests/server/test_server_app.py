@@ -267,6 +267,8 @@ class TestCreateApiRouter:
         mock_inst_result = MagicMock()
         mock_inst_result.scalars.return_value.first.return_value = mock_instrument
         mock_candle = MagicMock(spec=Candle)
+        mock_candle.id = 1
+        mock_candle.public_id = "candle-uuid-1234"
         mock_candle.timeframe = "1h"
         mock_candle.open_at = datetime(2023, 1, 1, 12, 0)
         mock_candle.timestamp = datetime(2023, 1, 1, 12, 0)
@@ -1226,19 +1228,20 @@ class MockInstrument:
         self.exchange = exchange
 
 
-class MockOrderRecord:
+class MockOrder:
     """Mock order record for testing orders endpoint."""
 
     def __init__(self) -> None:
         """Initialize the instance."""
         self.id = 1
+        self.public_id = "order-uuid-1234"
         self.instrument_id = 1
         self.client_order_id = "client_123"
         self.exchange_order_id = "exch_456"
         self.created_at = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.updated_at = dt.datetime(2024, 1, 1, 12, 5, tzinfo=dt.UTC)
         self.side = "buy"
-        self.type = "limit"
+        self.order_type = "limit"
         self.price = 50000.0
         self.size = 1.0
         self.status = "filled"
@@ -1248,12 +1251,13 @@ class MockOrderRecord:
         self.error = None
 
 
-class MockSignalEvent:
+class MockSignal:
     """Mock signal event for testing signals endpoint."""
 
     def __init__(self) -> None:
         """Initialize the instance."""
         self.id = 1
+        self.public_id = "signal-uuid-1234"
         self.instrument_id = 1
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.side = "buy"
@@ -1269,10 +1273,13 @@ class MockExecution:
     def __init__(self) -> None:
         """Initialize the instance."""
         self.id = 1
+        self.public_id = "execution-uuid-1234"
         self.order_id = 1
         self.exec_id = "exec-001"
         self.trade_id = "trade-001"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 1, tzinfo=dt.UTC)
+        self.side = "buy"
+        self.status = "filled"
         self.executed_at = dt.datetime(2024, 1, 1, 12, 1, tzinfo=dt.UTC)
         self.price = 50000.0
         self.size = 1.0
@@ -1286,12 +1293,13 @@ class MockPosition:
     def __init__(self) -> None:
         """Initialize the instance."""
         self.id = 1
+        self.public_id = "position-uuid-1234"
         self.instrument_id = 1
         self.quantity = 1.5
         self.average_price = 48000.0
         self.unrealized_pnl = 3000.0
         self.realized_pnl = 500.0
-        self.updated_at = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
+        self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
 
 
 class MockRepositoryV2:
@@ -1374,7 +1382,7 @@ class TestOrdersSuccessPath:
         When: GET /orders is called,
         Then: Response contains order data with instrument symbol.
         """
-        order = MockOrderRecord()
+        order = MockOrder()
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(order, instrument)])
         client = create_app_with_overrides(repo)
@@ -1382,10 +1390,10 @@ class TestOrdersSuccessPath:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["id"] == 1
         assert data[0]["instrument"] == "BTC-USD"
         assert data[0]["exchange"] == "kraken"
         assert data[0]["side"] == "buy"
+        assert data[0]["order_type"] == "limit"
         assert data[0]["filled_size"] == pytest.approx(1.0)
         assert data[0]["average_price"] == pytest.approx(50000.0)
         assert data[0]["status"] == "filled"
@@ -1397,7 +1405,7 @@ class TestOrdersSuccessPath:
         When: GET /orders is called with symbol filter,
         Then: Response contains only matching orders.
         """
-        order = MockOrderRecord()
+        order = MockOrder()
         instrument = MockInstrument(symbol="ETH-USD")
         repo = MockRepository(session_result=[(order, instrument)])
         client = create_app_with_overrides(repo)
@@ -1432,7 +1440,7 @@ class TestSignalsSuccessPath:
         When: GET /signals is called,
         Then: Response contains signal data with strategy name.
         """
-        signal = MockSignalEvent()
+        signal = MockSignal()
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(signal, instrument)])
         client = create_app_with_overrides(repo)
@@ -1440,12 +1448,13 @@ class TestSignalsSuccessPath:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["id"] == 1
         assert data[0]["instrument"] == "BTC-USD"
+        assert data[0]["exchange"] == "kraken"
         assert data[0]["side"] == "buy"
         assert data[0]["strength"] == pytest.approx(0.8)
         assert data[0]["reason"] == "RSI oversold"
         assert data[0]["strategy_name"] == "rsi_strategy"
+        assert data[0]["fired_at"] is not None
 
     def test_get_signals_with_filters(self) -> None:
         """Verify signals endpoint filters by instrument and strategy.
@@ -1454,7 +1463,7 @@ class TestSignalsSuccessPath:
         When: GET /signals is called with filters,
         Then: Response contains only matching signals.
         """
-        signal = MockSignalEvent()
+        signal = MockSignal()
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(signal, instrument)])
         client = create_app_with_overrides(repo)
@@ -1489,7 +1498,7 @@ class TestExecutionsSuccessPath:
         Then: Response contains execution data with fee info.
         """
         execution = MockExecution()
-        order = MockOrderRecord()
+        order = MockOrder()
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(execution, order, instrument)])
         client = create_app_with_overrides(repo)
@@ -1497,14 +1506,16 @@ class TestExecutionsSuccessPath:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["id"] == 1
-        assert data[0]["order_id"] == 1
         assert data[0]["price"] == pytest.approx(50000.0)
         assert data[0]["size"] == pytest.approx(1.0)
         assert data[0]["fee"] == pytest.approx(10.0)
         assert data[0]["fee_asset"] == "USD"
-        assert data[0]["exec_id"] == "exec-001"
         assert data[0]["trade_id"] == "trade-001"
+        assert data[0]["client_order_id"] == "client_123"
+        assert data[0]["instrument"] == "BTC-USD"
+        assert data[0]["exchange"] == "kraken"
+        assert data[0]["side"] == "buy"
+        assert data[0]["status"] == "filled"
         assert data[0]["executed_at"] is not None
 
     def test_get_executions_empty(self) -> None:
@@ -1540,8 +1551,8 @@ class TestPositionsSuccessPath:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["id"] == 1
         assert data[0]["instrument"] == "BTC-USD"
+        assert data[0]["exchange"] == "kraken"
         assert data[0]["quantity"] == pytest.approx(1.5)
         assert data[0]["average_price"] == pytest.approx(48000.0)
         assert data[0]["unrealized_pnl"] == pytest.approx(3000.0)
@@ -1686,7 +1697,7 @@ class TestSignalsExchangeFilter:
         When: GET /signals is called with exchange filter,
         Then: Response contains only matching signals.
         """
-        signal = MockSignalEvent()
+        signal = MockSignal()
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(signal, instrument)])
         client = create_app_with_overrides(repo)
@@ -1707,7 +1718,7 @@ class TestOrdersExchangeFilter:
         When: GET /orders is called with exchange filter,
         Then: Response contains only matching orders.
         """
-        order = MockOrderRecord()
+        order = MockOrder()
         instrument = MockInstrument()
         repo = MockRepository(session_result=[(order, instrument)])
         client = create_app_with_overrides(repo)

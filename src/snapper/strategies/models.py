@@ -1,7 +1,7 @@
 """Strategy data models and configuration structures.
 
 Provides the core data classes used across the strategy framework:
-Signal for trade signal emission and StrategyConfig for strategy
+StrategySignal for trade signal emission and StrategyConfig for strategy
 instance configuration.
 """
 
@@ -17,7 +17,7 @@ from snapper.infrastructure.symbols.functions import is_tradeable
 
 
 @dataclass
-class Signal:
+class StrategySignal:
     """Trading signal emitted by a strategy.
 
     Attributes:
@@ -27,7 +27,6 @@ class Signal:
         reason: Human-readable reason for the signal.
         price: Price at which signal was generated.
         timestamp: When the signal was generated (UTC datetime).
-        metadata: Additional signal metadata.
     """
 
     instrument: str
@@ -36,7 +35,6 @@ class Signal:
     reason: str
     price: float
     timestamp: datetime | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Strategies } from './Strategies'
 import type { StrategyProcess } from '../../types/api'
-import type { HeartbeatEnvelope } from '../../types/ws'
+import type { HeartbeatData } from '../../types/ws'
 
 function createHeartbeat(
   component: string,
@@ -12,7 +12,7 @@ function createHeartbeat(
   lagMs: number = 0,
   sequence: number = 1,
   meta?: Record<string, unknown>
-): HeartbeatEnvelope {
+): HeartbeatData {
   return {
     type: 'heartbeat',
     component,

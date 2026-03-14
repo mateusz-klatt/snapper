@@ -234,7 +234,7 @@ async def test_update_database_handles_inserts_and_updates(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -244,7 +244,7 @@ async def test_update_database_handles_inserts_and_updates(
                 channel="ws",
                 exchange_symbol="BTC-USD-OLD",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()
@@ -283,11 +283,11 @@ async def test_update_database_handles_inserts_and_updates(
             )
         ).scalar_one()
     assert btc_ws.exchange_symbol == "BTC-USD"
-    assert btc_ws.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert btc_ws.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
     assert eth_ws.exchange_symbol == "ETH-USD"
     assert eth_catalog.base == "ETH"
     assert eth_catalog.quote == "USD"
-    assert eth_ws.created_at == eth_ws.updated_at
+    assert eth_ws.created_at == eth_ws.timestamp
 
 
 @pytest.mark.asyncio()
@@ -311,7 +311,7 @@ async def test_update_database_skips_unchanged_mapping(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -321,7 +321,7 @@ async def test_update_database_skips_unchanged_mapping(
                 channel="ws",
                 exchange_symbol="BTC-USD",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -331,7 +331,7 @@ async def test_update_database_skips_unchanged_mapping(
                 channel="ccxt",
                 exchange_symbol="BTC/USD",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()
@@ -361,7 +361,7 @@ async def test_update_database_skips_unchanged_mapping(
                 SymbolAlias.channel == "ccxt",
             )
         ).scalar_one()
-    assert btc_ws.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
+    assert btc_ws.timestamp.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
     assert btc_ws.exchange_symbol == "BTC-USD"
     assert btc_ccxt.exchange_symbol == "BTC/USD"
 
@@ -501,7 +501,7 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 quote="USD",
                 asset_type="crypto",
                 created_at=seed_time,
-                updated_at=seed_time,
+                timestamp=seed_time,
             )
         )
         session.add(
@@ -511,7 +511,7 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 channel="ws",
                 exchange_symbol="OLD",
                 created_at=seed_time,
-                updated_at=seed_time,
+                timestamp=seed_time,
             )
         )
         session.add(
@@ -521,7 +521,7 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 channel="ccxt",
                 exchange_symbol="OLD/USDT",
                 created_at=seed_time,
-                updated_at=seed_time,
+                timestamp=seed_time,
             )
         )
         session.commit()

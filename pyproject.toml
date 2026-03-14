@@ -37,7 +37,7 @@ alembic = "^1.18.4"
 fastapi = "^0.135.1"
 uvicorn = {extras = ["standard"], version = "^0.41.0"}
 pyzmq = "^27.1.0"
-pyjwt = "^2.12.0"
+pyjwt = "^2.12.1"
 TA-Lib = "^0.6.8"
 ccxt = "^4.5.43"
 python-kraken-sdk = "^3.2.7"

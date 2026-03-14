@@ -59,7 +59,7 @@ class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
 
     Topics Published:
         - orders.events.paper.{instrument}.accepted
-        - orders.events.paper.{instrument}.fill
+        - orders.events.paper.{instrument}.executed
         - orders.events.paper.{instrument}.rejected
         - system.heartbeats.executor.paper
 

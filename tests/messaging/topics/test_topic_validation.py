@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from snapper.messaging.schemas.messages import FillEnvelope
+from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.topics import validation
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
@@ -136,9 +136,9 @@ class TestTopicContractValidation:
         Then: All are valid.
         """
         valid_topics = [
-            "orders.events.kraken.BTC-USD.fill",
-            "orders.events.zonda.BTC-PLN.fill",
-            "orders.events.walutomat.EUR-PLN.fill",
+            "orders.events.kraken.BTC-USD.executed",
+            "orders.events.zonda.BTC-PLN.executed",
+            "orders.events.walutomat.EUR-PLN.executed",
         ]
         for topic in valid_topics:
             is_valid, error_msg = validate_topic(topic)
@@ -190,9 +190,9 @@ class TestValidatedPublisherContract:
         Then: All are accepted.
         """
         valid_executor_topics = [
-            "orders.events.kraken.BTC-USD.fill",
+            "orders.events.kraken.BTC-USD.executed",
             "orders.events.kraken.BTC-USD.accepted",
-            "orders.events.zonda.BTC-PLN.fill",
+            "orders.events.zonda.BTC-PLN.executed",
             "orders.events.zonda.BTC-PLN.accepted",
         ]
         for topic in valid_executor_topics:
@@ -221,13 +221,13 @@ class TestPayloadContract:
     """Tests for payload contract ensuring correct field structures."""
 
     def test_fill_envelope_has_all_required_frontend_fields(self) -> None:
-        """Test FillEnvelope has all frontend fields.
+        """Test ExecutionData has all frontend fields.
 
-        Given: A FillEnvelope with execution data,
+        Given: A ExecutionData with execution data,
         When: Serialized to JSON,
         Then: All required frontend fields are present.
         """
-        fill = FillEnvelope(
+        fill = ExecutionData(
             trade_id="trade-456",
             exchange_order_id="exch-456",
             client_order_id="test-order-123",
@@ -266,13 +266,13 @@ class TestPayloadContract:
         assert "executed_at" in json_data
 
     def test_fill_envelope_side_is_valid_literal(self) -> None:
-        """Test FillEnvelope side accepts valid literals.
+        """Test ExecutionData side accepts valid literals.
 
-        Given: FillEnvelope with buy or sell side,
+        Given: ExecutionData with buy or sell side,
         When: Created,
         Then: Side value is preserved.
         """
-        buy_fill = FillEnvelope(
+        buy_fill = ExecutionData(
             trade_id="trade-1",
             exchange_order_id="exch-1",
             client_order_id="test-1",
@@ -287,7 +287,7 @@ class TestPayloadContract:
             executed_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         assert buy_fill.side == "buy"
-        sell_fill = FillEnvelope(
+        sell_fill = ExecutionData(
             trade_id="trade-2",
             exchange_order_id="exch-2",
             client_order_id="test-2",
@@ -304,18 +304,18 @@ class TestPayloadContract:
         assert sell_fill.side == "sell"
 
     def test_fill_envelope_status_matches_frontend_expectations(self) -> None:
-        """Test FillEnvelope status matches frontend.
+        """Test ExecutionData status matches frontend.
 
         Given: Valid fill status values (filled, partial),
-        When: FillEnvelope created with each status,
+        When: ExecutionData created with each status,
         Then: Status is preserved correctly.
 
         Note: cancelled/rejected are handled by separate event types,
-        not FillEnvelope. See CancelEventType and ReplaceEventType.
+        not ExecutionData. See CancelEventType and ReplaceEventType.
         """
         valid_statuses = ["filled", "partial"]
         for status in valid_statuses:
-            fill = FillEnvelope(
+            fill = ExecutionData(
                 trade_id="trade",
                 exchange_order_id="exch",
                 client_order_id="test",
@@ -343,7 +343,7 @@ class TestBridgeNormalizerContract:
         Then: Uses unified field naming convention.
         """
         fill_data: dict[str, Any] = {
-            "type": "fill",
+            "type": "execution",
             "id": "exch-456",
             "order_id": "order-123",
             "instrument": "BTC-USD",
@@ -644,7 +644,7 @@ def test_validate_topic_orders_events_invalid_instrument() -> None:
     When: Validated,
     Then: Validation fails with instrument error.
     """
-    ok, msg = validate_topic("orders.events.kraken.ABC-USD.fill")
+    ok, msg = validate_topic("orders.events.kraken.ABC-USD.executed")
     assert ok is False
     assert "Unknown instrument" in msg
 
@@ -1206,7 +1206,7 @@ class TestOrdersEventsTopicValidation:
         When: Validated,
         Then: Validation succeeds.
         """
-        valid, _err = validate_topic("orders.events.kraken.BTC-USD.fill")
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.executed")
         assert valid, f"Expected valid orders events topic, got error: {_err}"
 
     def test_invalid_orders_events_topic_segments(self) -> None:
@@ -1352,7 +1352,7 @@ class TestOrdersCommandsAndEventsTopics:
         When: Validated,
         Then: Validation succeeds or fails with expected message.
         """
-        valid, _err = validate_topic("orders.events.kraken.BTC-USD.fill")
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.executed")
         if valid:
             assert _err == ""
         else:
@@ -1651,7 +1651,7 @@ class TestOrdersEventsTopicValidationV2:
         When: Validated with orders.events validator,
         Then: Validation fails with orders.events category error.
         """
-        valid, _err = _validate_orders_events_topic("notorders.events.kraken.BTC-USD.fill")
+        valid, _err = _validate_orders_events_topic("notorders.events.kraken.BTC-USD.executed")
         assert not valid
         assert "orders.events" in _err.lower()
 
@@ -2201,7 +2201,7 @@ class TestOrdersEventsTopicExchangeValidation:
         When: Validated,
         Then: Validation fails with exchange error.
         """
-        valid, _err = validate_topic("orders.events.invalid_exch.BTC-USD.fill")
+        valid, _err = validate_topic("orders.events.invalid_exch.BTC-USD.executed")
         assert not valid
         assert "exchange" in _err.lower()
 
@@ -2212,7 +2212,7 @@ class TestOrdersEventsTopicExchangeValidation:
         When: Validated,
         Then: Validation fails with instrument error.
         """
-        valid, _err = validate_topic("orders.events.kraken.INVALID-INST.fill")
+        valid, _err = validate_topic("orders.events.kraken.INVALID-INST.executed")
         assert not valid
         assert "instrument" in _err.lower()
 

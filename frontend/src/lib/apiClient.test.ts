@@ -622,6 +622,7 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => [
         {
+          type: 'candle',
           instrument: 'BTC/USD',
           exchange: 'kraken',
           timeframe: '1h',
@@ -671,7 +672,7 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => [
         {
-          id: 1,
+          type: 'order',
           instrument: 'BTC/USD',
           exchange: 'kraken',
           client_order_id: 'client-1',
@@ -679,7 +680,7 @@ describe('domain API methods', () => {
           created_at: '2024-01-01T00:00:00Z',
           updated_at: '2024-01-01T00:00:00Z',
           side: 'buy',
-          type: 'limit',
+          order_type: 'limit',
           price: 50000,
           size: 1,
           filled_size: 1,
@@ -713,9 +714,9 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => [
         {
-          id: 1,
-          order_id: 1,
-          timestamp: '2024-01-01T00:00:00Z',
+          type: 'execution',
+          client_order_id: 'client-1',
+          executed_at: '2024-01-01T00:00:00Z',
           price: 100,
           size: 1,
           fee: 0.1,
@@ -723,6 +724,7 @@ describe('domain API methods', () => {
           instrument: 'BTC/USD',
           side: 'buy',
           exchange: 'kraken',
+          status: 'filled',
         },
       ],
     })
@@ -737,9 +739,9 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => [
         {
-          id: 1,
-          order_id: 1,
-          timestamp: '2024-01-01T00:00:00Z',
+          type: 'execution',
+          client_order_id: 'client-1',
+          executed_at: '2024-01-01T00:00:00Z',
           price: 100,
           size: 1,
           fee: 0.1,
@@ -747,6 +749,7 @@ describe('domain API methods', () => {
           instrument: 'BTC/USD',
           side: 'buy',
           exchange: 'kraken',
+          status: 'filled',
         },
       ],
     })
@@ -761,14 +764,14 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => [
         {
-          id: 1,
+          type: 'position',
           instrument: 'BTC/USD',
           exchange: 'kraken',
           quantity: 1,
           average_price: 50000,
           unrealized_pnl: 100,
           realized_pnl: 50,
-          updated_at: '2024-01-01T00:00:00Z',
+          timestamp: '2024-01-01T00:00:00Z',
         },
       ],
     })
@@ -782,10 +785,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => [
         {
-          id: 1,
+          type: 'signal',
           instrument: 'BTC/USD',
           exchange: 'kraken',
-          timestamp: '2024-01-01T00:00:00Z',
+          fired_at: '2024-01-01T00:00:00Z',
           side: 'buy',
           strength: 0.8,
           reason: 'momentum signal',

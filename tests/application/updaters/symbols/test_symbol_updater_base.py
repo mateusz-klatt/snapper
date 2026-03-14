@@ -213,7 +213,7 @@ def test_set_last_update_timestamp_creates_setting(
             select(Setting).where(Setting.key == "test_symbols_last_update")
         ).scalar_one()
     assert setting.value == timestamp.isoformat()
-    assert setting.updated_at == timestamp
+    assert setting.timestamp == timestamp
 
 
 def test_get_last_update_timestamp_handles_invalid_value(
@@ -235,7 +235,7 @@ def test_get_last_update_timestamp_handles_invalid_value(
                 value="not-a-timestamp",
                 category="system",
                 description="Invalid value for testing",
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
         )
         session.commit()
@@ -758,7 +758,7 @@ def test_get_last_update_timestamp_returns_none_for_null_value(
                 value="null",
                 category="system",
                 description="Null value for testing",
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
         )
         session.commit()
@@ -784,7 +784,7 @@ def test_get_last_update_timestamp_returns_none_for_empty_value(
                 value="",
                 category="system",
                 description="Empty value for testing",
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
         )
         session.commit()
@@ -841,7 +841,7 @@ def test_upsert_catalog_updates_base_currency(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -859,7 +859,7 @@ def test_upsert_catalog_updates_base_currency(
             select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
         ).scalar_one()
     assert catalog.base == "XBT"
-    assert catalog.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert catalog.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_catalog_updates_quote_currency(
@@ -883,7 +883,7 @@ def test_upsert_catalog_updates_quote_currency(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -901,7 +901,7 @@ def test_upsert_catalog_updates_quote_currency(
             select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
         ).scalar_one()
     assert catalog.quote == "USDT"
-    assert catalog.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert catalog.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_catalog_updates_asset_type(
@@ -925,7 +925,7 @@ def test_upsert_catalog_updates_asset_type(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -943,7 +943,7 @@ def test_upsert_catalog_updates_asset_type(
             select(SymbolCatalog).where(SymbolCatalog.native_symbol == "EUR-USD")
         ).scalar_one()
     assert catalog.asset_type == "forex"
-    assert catalog.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert catalog.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_catalog_preserves_timestamp_when_unchanged(
@@ -967,7 +967,7 @@ def test_upsert_catalog_preserves_timestamp_when_unchanged(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -984,7 +984,7 @@ def test_upsert_catalog_preserves_timestamp_when_unchanged(
         catalog = session.execute(
             select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
         ).scalar_one()
-    assert catalog.updated_at.replace(tzinfo=None) == original_time.replace(tzinfo=None)
+    assert catalog.timestamp.replace(tzinfo=None) == original_time.replace(tzinfo=None)
 
 
 def _seed_catalog(updater: DummySymbolUpdater, native_symbol: str, now: datetime) -> None:
@@ -999,7 +999,7 @@ def _seed_catalog(updater: DummySymbolUpdater, native_symbol: str, now: datetime
                 quote=native_symbol.split("-")[1],
                 asset_type="crypto",
                 created_at=now,
-                updated_at=now,
+                timestamp=now,
             )
         )
         session.commit()
@@ -1063,7 +1063,7 @@ def test_upsert_capability_updates_can_trade(
                 source="seed",
                 reason=None,
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -1084,7 +1084,7 @@ def test_upsert_capability_updates_can_trade(
             )
         ).scalar_one()
     assert cap.can_trade is True
-    assert cap.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert cap.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_capability_updates_can_market_data(
@@ -1111,7 +1111,7 @@ def test_upsert_capability_updates_can_market_data(
                 source="seed",
                 reason=None,
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -1132,7 +1132,7 @@ def test_upsert_capability_updates_can_market_data(
             )
         ).scalar_one()
     assert cap.can_market_data is True
-    assert cap.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert cap.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_capability_updates_source(
@@ -1159,7 +1159,7 @@ def test_upsert_capability_updates_source(
                 source="seed",
                 reason=None,
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -1180,7 +1180,7 @@ def test_upsert_capability_updates_source(
             )
         ).scalar_one()
     assert cap.source == "kraken_updater"
-    assert cap.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert cap.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_capability_updates_reason(
@@ -1207,7 +1207,7 @@ def test_upsert_capability_updates_reason(
                 source="kraken_updater",
                 reason=None,
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -1228,7 +1228,7 @@ def test_upsert_capability_updates_reason(
             )
         ).scalar_one()
     assert cap.reason == "WS-only"
-    assert cap.updated_at.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert cap.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_capability_unchanged(
@@ -1255,7 +1255,7 @@ def test_upsert_capability_unchanged(
                 source="kraken_updater",
                 reason="Ticker list",
                 created_at=original_time,
-                updated_at=original_time,
+                timestamp=original_time,
             )
         )
         session.commit()
@@ -1275,7 +1275,7 @@ def test_upsert_capability_unchanged(
                 SymbolExchangeCapability.exchange == "kraken",
             )
         ).scalar_one()
-    assert cap.updated_at.replace(tzinfo=None) == original_time.replace(tzinfo=None)
+    assert cap.timestamp.replace(tzinfo=None) == original_time.replace(tzinfo=None)
 
 
 def _seed_capability(
@@ -1300,7 +1300,7 @@ def _seed_capability(
                 source=source,
                 reason=None,
                 created_at=now,
-                updated_at=now,
+                timestamp=now,
             )
         )
         session.commit()

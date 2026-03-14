@@ -2,10 +2,10 @@ export type { Components, Operations, Paths } from './api.generated'
 import type { Components } from './api.generated'
 
 export type CandleData = Components['schemas']['CandleData']
-export type OrderStatus = Components['schemas']['OrderStatus']
-export type ExecutionRecord = Components['schemas']['ExecutionRecord']
-export type PositionSnapshot = Components['schemas']['PositionSnapshot']
-export type TradingSignal = Components['schemas']['TradingSignal']
+export type OrderData = Components['schemas']['OrderData']
+export type ExecutionData = Components['schemas']['ExecutionData']
+export type SignalData = Components['schemas']['SignalData']
+export type PositionData = Components['schemas']['PositionData']
 export type SettingRead = Components['schemas']['SettingRead']
 export type SettingUpdate = Components['schemas']['SettingUpdate']
 export type UserProfile = Components['schemas']['UserProfile']

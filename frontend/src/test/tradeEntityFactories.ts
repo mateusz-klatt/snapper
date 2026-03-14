@@ -1,21 +1,24 @@
-import type { OrderStatus, Fill, Signal, Position } from '../types/entities'
+import type { Order, Execution, Signal, Position } from '../types/entities'
 
-const DEFAULT_ORDER_OVERRIDES: Partial<OrderStatus> & { id: string | number; instrument: string } =
-  {
-    id: 'order-1',
-    instrument: 'BTC-USD',
-  }
+const DEFAULT_ORDER_OVERRIDES: Partial<Order> & {
+  clientOrderId: string
+  instrument: string
+} = {
+  clientOrderId: 'order-1',
+  instrument: 'BTC-USD',
+}
 
 export function createTestOrder(
-  overrides: Partial<OrderStatus> & {
-    id: string | number
+  overrides: Partial<Order> & {
+    clientOrderId: string
     instrument: string
   } = DEFAULT_ORDER_OVERRIDES
-): OrderStatus {
+): Order {
   const now = new Date()
 
   return {
-    id: overrides.id,
+    clientOrderId: overrides.clientOrderId,
+    exchangeOrderId: overrides.exchangeOrderId ?? null,
     instrument: overrides.instrument,
     exchange: overrides.exchange ?? 'kraken',
     side: overrides.side ?? 'buy',
@@ -30,25 +33,23 @@ export function createTestOrder(
   }
 }
 
-const DEFAULT_EXECUTION_OVERRIDES: Partial<Fill> & {
-  id: string | number
-  orderId: string | number
+const DEFAULT_EXECUTION_OVERRIDES: Partial<Execution> & {
+  clientOrderId: string
 } = {
-  id: 'exec-1',
-  orderId: 'order-1',
+  clientOrderId: 'order-1',
 }
 
 export function createTestExecution(
-  overrides: Partial<Fill> & {
-    id: string | number
-    orderId: string | number
+  overrides: Partial<Execution> & {
+    clientOrderId: string
   } = DEFAULT_EXECUTION_OVERRIDES
-): Fill {
+): Execution {
   const now = new Date()
 
   return {
-    id: overrides.id,
-    orderId: overrides.orderId,
+    clientOrderId: overrides.clientOrderId,
+    tradeId: overrides.tradeId ?? null,
+    exchangeOrderId: overrides.exchangeOrderId ?? null,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     side: overrides.side ?? 'buy',
@@ -71,7 +72,6 @@ export function createTestSignal(
   const now = new Date()
 
   return {
-    id: overrides.id ?? 1,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument,
     side: overrides.side ?? 'buy',
@@ -79,7 +79,7 @@ export function createTestSignal(
     reason: overrides.reason ?? 'Test signal',
     strategyName: overrides.strategyName ?? 'test-strategy',
     price: overrides.price ?? 50000,
-    timestamp: overrides.timestamp ?? now,
+    firedAt: overrides.firedAt ?? now,
   }
 }
 

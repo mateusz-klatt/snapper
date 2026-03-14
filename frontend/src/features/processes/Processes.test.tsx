@@ -4,14 +4,14 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Processes } from './Processes'
 import type { ConfiguredProcess, AvailableProcess, ProcessRun } from '../../types/api'
-import type { HeartbeatEnvelope } from '../../types/ws'
+import type { HeartbeatData } from '../../types/ws'
 
 function createHeartbeat(
   component: string,
   status: 'healthy' | 'warning' | 'error',
   lagMs: number = 0,
   sequence: number = 1
-): HeartbeatEnvelope {
+): HeartbeatData {
   return {
     type: 'heartbeat',
     component,

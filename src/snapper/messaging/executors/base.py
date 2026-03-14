@@ -37,16 +37,16 @@ from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.schemas import FillStatus
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.messages import FillEnvelope
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
+from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.schemas.data import OrderCancelData
+from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import OrderEventData
+from snapper.messaging.schemas.data import OrderReplaceData
+from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.schemas.data import SettingChangedData
+from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.messaging.schemas.messages import MessageParseError
-from snapper.messaging.schemas.messages import OrderCancelEnvelope
-from snapper.messaging.schemas.messages import OrderEventEnvelope
-from snapper.messaging.schemas.messages import OrderReplaceEnvelope
-from snapper.messaging.schemas.messages import OrderRequestEnvelope
-from snapper.messaging.schemas.messages import OrderStatusEnvelope
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
-from snapper.messaging.schemas.messages import SymbolAliasUpdateEnvelope
 from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.utils.logging import set_log_context
@@ -79,7 +79,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.heartbeat_seq = 0
         self.exchange_client: T | None = None
         self.repository: Repository | None = None
-        self.pending_orders: dict[str, OrderRequestEnvelope] = {}
+        self.pending_orders: dict[str, OrderRequestData] = {}
         self.client_by_exchange: dict[str, str] = {}
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
         self.orphan_ttl_seconds: float = 5.0
@@ -237,9 +237,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Process incoming order commands from ZMQ subscription.
 
         Dispatches to appropriate handler based on command suffix:
-        - .submit -> _process_order (OrderRequestEnvelope)
-        - .cancel -> _process_cancel (OrderCancelEnvelope)
-        - .replace -> _process_replace (OrderReplaceEnvelope)
+        - .submit -> _process_order (OrderRequestData)
+        - .cancel -> _process_cancel (OrderCancelData)
+        - .replace -> _process_replace (OrderReplaceData)
 
         Topic invariant enforced: topic parts must match payload fields.
         """
@@ -298,7 +298,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except MessageParseError as e:
             logger.warning(f"[{exchange_name}] Invalid submit command payload: {e}")
             return
-        if not isinstance(order_msg, OrderRequestEnvelope):
+        if not isinstance(order_msg, OrderRequestData):
             logger.warning(f"Received non-order message on submit topic: {order_msg.type}")
             return
         if self._validate_command_invariants(order_msg, exchange_name, topic_instrument):
@@ -319,7 +319,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except MessageParseError as e:
             logger.warning(f"[{exchange_name}] Invalid cancel command payload: {e}")
             return
-        if not isinstance(cancel_msg, OrderCancelEnvelope):
+        if not isinstance(cancel_msg, OrderCancelData):
             logger.warning(f"Received non-cancel message on cancel topic: {cancel_msg.type}")
             return
         if self._validate_command_invariants(cancel_msg, exchange_name, topic_instrument):
@@ -340,13 +340,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except MessageParseError as e:
             logger.warning(f"[{exchange_name}] Invalid replace command payload: {e}")
             return
-        if not isinstance(replace_msg, OrderReplaceEnvelope):
+        if not isinstance(replace_msg, OrderReplaceData):
             logger.warning(f"Received non-replace message on replace topic: {replace_msg.type}")
             return
         if self._validate_command_invariants(replace_msg, exchange_name, topic_instrument):
             await self._process_replace(replace_msg)
 
-    async def _process_order(self, order: OrderRequestEnvelope) -> None:
+    async def _process_order(self, order: OrderRequestData) -> None:
         """Submit an order to the exchange and handle the response.
 
         Order correlation uses two-level mapping:
@@ -357,14 +357,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         - submitted: Executor accepted command, sending to exchange
         - accepted: Exchange ACK returned order_id (sync REST response)
         - rejected: Exchange rejected order or validation failed
-        - fill: Order execution (see _execution_handler for WebSocket fills)
+        - executed: Order executed (see _execution_handler for WebSocket fills)
 
         Note: 'accepted' is published when the exchange REST API returns an order_id,
         confirming the order was received and queued. This is a synchronous response.
         Actual fills come asynchronously via WebSocket execution updates.
 
         Args:
-            order: Order request envelope containing order details.
+            order: Order request data containing order details.
         """
         exchange_name = self._get_exchange_name()
         if not is_tradeable(order.instrument, exchange_name):
@@ -398,13 +398,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self.pending_orders.pop(order.client_order_id, None)
             await self._publish_order_status(order, "rejected")
 
-    async def _process_cancel(self, cancel: OrderCancelEnvelope) -> None:
+    async def _process_cancel(self, cancel: OrderCancelData) -> None:
         """Cancel an existing order on the exchange.
 
         Cleans up pending_orders and client_by_exchange on success.
 
         Args:
-            cancel: Cancel request envelope containing order ID to cancel.
+            cancel: Cancel request data containing order ID to cancel.
         """
         exchange_name = self._get_exchange_name()
         try:
@@ -431,14 +431,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             await self._publish_cancel_event(cancel, "rejected")
 
-    async def _process_replace(self, replace: OrderReplaceEnvelope) -> None:
+    async def _process_replace(self, replace: OrderReplaceData) -> None:
         """Replace/modify an existing order on the exchange.
 
         Note: Many exchanges don't support atomic replace, so this may
         cancel and re-submit the order.
 
         Args:
-            replace: Replace request envelope containing new order parameters.
+            replace: Replace request data containing new order parameters.
         """
         exchange_name = self._get_exchange_name()
         logger.warning(
@@ -447,12 +447,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         await self._publish_replace_event(replace, "rejected")
 
-    async def _publish_cancel_event(
-        self, cancel: OrderCancelEnvelope, event: CancelEventType
-    ) -> None:
+    async def _publish_cancel_event(self, cancel: OrderCancelData, event: CancelEventType) -> None:
         """Publish cancel event to orders.events.*.*.cancelled or rejected.
 
-        Uses lightweight OrderEventEnvelope since cancel commands don't carry
+        Uses lightweight OrderEventData since cancel commands do not carry
         full order details (side/order_type are not needed).
 
         Args:
@@ -464,7 +462,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         try:
             topic = f"orders.events.{exchange_name}.{cancel.instrument}.{event}"
-            order_event = OrderEventEnvelope(
+            order_event = OrderEventData(
                 exchange_order_id=cancel.exchange_order_id,
                 client_order_id=cancel.client_order_id,
                 exchange=exchange_name,
@@ -479,11 +477,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"[{exchange_name}] Error publishing cancel event: {e}")
 
     async def _publish_replace_event(
-        self, replace: OrderReplaceEnvelope, event: ReplaceEventType
+        self, replace: OrderReplaceData, event: ReplaceEventType
     ) -> None:
         """Publish replace event to orders.events.*.*.replaced or rejected.
 
-        Uses lightweight OrderEventEnvelope since replace commands don't carry
+        Uses lightweight OrderEventData since replace commands do not carry
         full order details (only identifiers and new values).
 
         Args:
@@ -495,7 +493,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         try:
             topic = f"orders.events.{exchange_name}.{replace.instrument}.{event}"
-            order_event = OrderEventEnvelope(
+            order_event = OrderEventData(
                 exchange_order_id=replace.exchange_order_id,
                 client_order_id=replace.client_order_id,
                 exchange=exchange_name,
@@ -509,11 +507,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing replace event: {e}")
 
-    async def _execute_live_order(self, order: OrderRequestEnvelope) -> str | None:
+    async def _execute_live_order(self, order: OrderRequestData) -> str | None:
         """Execute an order on the exchange and return the exchange order ID.
 
         Args:
-            order: Order request envelope containing order details.
+            order: Order request data containing order details.
 
         Returns:
             Exchange order ID if successful, None otherwise.
@@ -543,17 +541,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"[{exchange_name}] Live execution error: {e}")
             return None
 
-    async def _publish_fill(self, fill: FillEnvelope) -> None:
+    async def _publish_execution(self, fill: ExecutionData) -> None:
         """Publish a fill notification to the ZMQ topic.
 
         Args:
-            fill: Fill envelope containing execution details.
+            fill: ExecutionData containing execution details.
         """
         if not self.publisher or not self.running:
             return
         exchange_name = self._get_exchange_name()
         try:
-            topic = f"orders.events.{exchange_name}.{fill.instrument}.fill"
+            topic = f"orders.events.{exchange_name}.{fill.instrument}.executed"
             await self.publisher.send_multipart(topic, fill.to_json().encode("utf-8"))
             logger.info(
                 f"[{exchange_name}] Published fill: {fill.client_order_id} - "
@@ -642,7 +640,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     def _resolve_execution_order(
         self, execution: ExecutionUpdate, exchange_name: str
-    ) -> tuple[str, str, OrderRequestEnvelope] | None:
+    ) -> tuple[str, str, OrderRequestData] | None:
         """Resolve execution to its order using two-level correlation.
 
         Args:
@@ -702,31 +700,31 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.client_by_exchange.pop(exchange_order_id, None)
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
-            f"cleaned up maps (no FillEnvelope)"
+            f"cleaned up maps (no execution published)"
         )
         return True
 
-    def _build_fill_envelope(
+    def _build_execution_data(
         self,
         execution: ExecutionUpdate,
         exchange_order_id: str,
-        original_order: OrderRequestEnvelope,
+        original_order: OrderRequestData,
         exchange_name: OrderExchange,
-    ) -> FillEnvelope:
-        """Build a FillEnvelope from execution and order data.
+    ) -> ExecutionData:
+        """Build an ExecutionData from execution and order data.
 
         Args:
             execution: Execution update from exchange.
             exchange_order_id: Exchange-assigned order ID.
-            original_order: Original order request.
+            original_order: Original order request data.
             exchange_name: Exchange name.
 
         Returns:
-            FillEnvelope ready for publishing.
+            ExecutionData ready for publishing.
         """
         status = self._determine_fill_status(execution)
         total_fee = execution.fee_usd_equiv or 0.0
-        return FillEnvelope(
+        return ExecutionData(
             trade_id=execution.exec_id,
             exchange_order_id=exchange_order_id,
             client_order_id=original_order.client_order_id,
@@ -747,7 +745,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         1. Resolve exchange_order_id -> client_order_id via client_by_exchange
         2. Lookup order by client_order_id in pending_orders
 
-        Cancelled/expired executions clean up maps but do not publish FillEnvelope.
+        Cancelled/expired executions clean up maps but do not publish execution data.
         Unknown executions are buffered for TTL in case ACK arrives later (race).
 
         Args:
@@ -764,10 +762,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 execution, exchange_order_id, client_order_id, exchange_name
             ):
                 return
-            fill = self._build_fill_envelope(
+            fill = self._build_execution_data(
                 execution, exchange_order_id, original_order, exchange_name
             )
-            await self._publish_fill(fill)
+            await self._publish_execution(fill)
             if fill.status == "filled":
                 self.pending_orders.pop(client_order_id, None)
                 self.client_by_exchange.pop(exchange_order_id, None)
@@ -779,7 +777,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     async def _publish_order_status(
         self,
-        order: OrderRequestEnvelope,
+        order: OrderRequestData,
         status: OrderEventType,
         exchange_order_id: str | None = None,
     ) -> None:
@@ -789,7 +787,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         status field, ensuring consistency between routing and content.
 
         Args:
-            order: Order request envelope containing order details.
+            order: Order request data containing order details.
             status: Event type for topic suffix and payload status field.
             exchange_order_id: Exchange-assigned order ID (if known).
         """
@@ -799,7 +797,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             instrument = order.instrument
             topic = f"orders.events.{exchange_name}.{instrument}.{status}"
-            order_status = OrderStatusEnvelope(
+            order_status = OrderData(
                 exchange_order_id=exchange_order_id,
                 client_order_id=order.client_order_id,
                 instrument=order.instrument,
@@ -829,7 +827,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self._cleanup_expired_orphans()
                 self.heartbeat_seq += 1
                 lag_ms = 0
-                hb_msg = HeartbeatEnvelope(
+                hb_msg = HeartbeatData(
                     component=f"executor_{exchange_name}",
                     sequence=self.heartbeat_seq,
                     status="healthy",
@@ -846,12 +844,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             except Exception as e:
                 logger.error(f"[{exchange_name}] Execution service heartbeat error: {e}")
 
-    async def _publish_heartbeat(self, topic: str, message: HeartbeatEnvelope) -> None:
+    async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
         """Publish heartbeat message to ZMQ.
 
         Args:
             topic: ZMQ topic string for the heartbeat.
-            message: Heartbeat envelope to publish.
+            message: HeartbeatData to publish.
         """
         if not self.publisher or not self.running:
             return
@@ -868,7 +866,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         try:
-            SymbolAliasUpdateEnvelope.from_json(payload)
+            SymbolAliasUpdateData.from_json(payload)
             logger.info(f"[{exchange_name}] Received symbol alias cache invalidation")
             SymbolMapperService.get_instance().trigger_cache_invalidation(fail_fast=False)
             logger.debug(f"[{exchange_name}] Symbol alias cache invalidated successfully")
@@ -883,7 +881,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         try:
-            envelope = SettingChangedEnvelope.from_json(payload)
+            envelope = SettingChangedData.from_json(payload)
             settings_service = SettingsService.get_instance()
             if settings_service:
                 parsed_value = settings_service._parse_value(envelope.value)

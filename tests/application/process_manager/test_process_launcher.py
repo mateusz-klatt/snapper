@@ -2812,7 +2812,7 @@ async def test_get_process_status_handles_get_status_error() -> None:
     factory.active_runs["bad"] = "run-id"
     status = await factory.get_process_status("bad")
     assert status.running is True
-    assert status.active_run_id == "run-id"
+    assert status.active_public_id == "run-id"
 
 
 @pytest.mark.asyncio()
@@ -2826,7 +2826,7 @@ async def test_get_recent_runs_with_filter(monkeypatch: pytest.MonkeyPatch) -> N
     now = datetime.now(UTC)
     runs = [
         SimpleNamespace(
-            run_id="1",
+            public_id="1",
             process_name="demo",
             status="ok",
             role="core",
@@ -3606,7 +3606,7 @@ class TestProcessFactoryDatabasePersistence:
         mock_session.add.assert_called_once()
         added_run = mock_session.add.call_args[0][0]
         assert isinstance(added_run, ProcessRun)
-        assert added_run.run_id == run_id
+        assert added_run.public_id == run_id
         assert added_run.process_name == "test_process"
         assert added_run.role == ProcessRoleEnum.CORE.value
         assert added_run.lifecycle == ProcessLifecycleEnum.LONG_RUNNING.value
@@ -3918,7 +3918,7 @@ async def test_sync_registry_to_database_adds_missing_tags(
     }
     existing_setting = MagicMock()
     existing_setting.value = json.dumps(existing_value)
-    existing_setting.updated_at = None
+    existing_setting.timestamp = None
     existing_setting.updated_by = None
     first_result = MagicMock()
     first_result.scalar_one_or_none.return_value = existing_setting

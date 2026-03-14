@@ -8,11 +8,11 @@ import pandas as pd
 from loguru import logger
 
 from snapper.core.types import TradeSide
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.topics.builders import parse_market_topic
 from snapper.strategies.base import BaseStrategy
-from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
+from snapper.strategies.base import StrategySignal
 from snapper.strategies.decorators import create_strategy_process
 from snapper.strategies.decorators import register_strategy
 
@@ -95,15 +95,15 @@ class CointegrationPairs(BaseStrategy):
             return parsed.instrument
         return topic
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle and generate spread trading signal.
 
         Args:
             instrument: The instrument symbol.
-            candle: The candle envelope with OHLCV data.
+            candle: The candle data with OHLCV data.
 
         Returns:
-            Signal based on spread z-score, or None.
+            StrategySignal based on spread z-score, or None.
         """
         if instrument not in [self.instrument1, self.instrument2]:
             return None
@@ -141,7 +141,7 @@ class CointegrationPairs(BaseStrategy):
         hedge_side: TradeSide,
         action: str,
         strength: float,
-    ) -> Signal:
+    ) -> StrategySignal:
         """Build a signal for either the primary or hedge instrument.
 
         Args:
@@ -151,16 +151,16 @@ class CointegrationPairs(BaseStrategy):
             primary_side: Side for instrument1 ('buy' or 'sell').
             hedge_side: Side for instrument2 ('buy' or 'sell').
             action: Description for the reason (e.g., 'Enter short spread').
-            strength: Signal strength for instrument1.
+            strength: StrategySignal strength for instrument1.
 
         Returns:
-            Signal for the given instrument.
+            StrategySignal for the given instrument.
         """
         is_primary = instrument == self.instrument1
         side = primary_side if is_primary else hedge_side
         hedge_suffix = "" if is_primary else " hedge"
         actual_strength = strength if is_primary else strength * self.beta
-        return Signal(
+        return StrategySignal(
             instrument=instrument,
             side=side,
             strength=actual_strength,
@@ -170,7 +170,7 @@ class CointegrationPairs(BaseStrategy):
 
     def _generate_signal_from_zscore(
         self, z_score: float, instrument: str, price: float
-    ) -> Signal | None:
+    ) -> StrategySignal | None:
         """Generate signal based on spread z-score.
 
         Args:

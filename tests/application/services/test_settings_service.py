@@ -29,12 +29,12 @@ from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import clear_encryption
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import get_encryption_service
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import list_process_runs
 from snapper.strategies.base import BaseStrategy
-from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
+from snapper.strategies.base import StrategySignal
 from snapper.strategies.cointegration import CointegrationPairs
 
 
@@ -43,9 +43,9 @@ def make_candle_envelope(
     close: float = 100.0,
     ts: float | None = None,
     exchange: str = "kraken",
-) -> CandleEnvelope:
-    """Create a CandleEnvelope with default values for testing."""
-    return CandleEnvelope(
+) -> CandleData:
+    """Create a CandleData with default values for testing."""
+    return CandleData(
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -64,7 +64,7 @@ async def feed_bar_to_strategy(
     instrument: str,
     close: float,
     exchange: str = "kraken",
-) -> Signal | None:
+) -> StrategySignal | None:
     """Feed a candle envelope to a strategy and return generated signal."""
     candle = make_candle_envelope(instrument, close, exchange=exchange)
     if instrument not in strategy.candle_buffer:
@@ -267,7 +267,7 @@ class TestSettingsService:
                     value="test_value",
                     category="test",
                     is_encrypted=False,
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                 )
             )
             await session.commit()
@@ -409,7 +409,7 @@ class TestSettingsService:
                     value="existing_value",
                     category="test",
                     is_encrypted=False,
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                 )
             )
             await session.commit()
@@ -495,7 +495,7 @@ class TestSettingsService:
                     value="secret123",
                     category="auth",
                     is_encrypted=False,
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                 )
             )
             await session.commit()
@@ -1308,7 +1308,7 @@ class TestProcessRoutesListRuns:
         mock_factory.get_recent_runs = AsyncMock(
             return_value=[
                 {
-                    "run_id": "run-001",
+                    "public_id": "run-001",
                     "process_name": "test_process",
                     "started_at": "2024-01-01T00:00:00",
                     "completed_at": "2024-01-01T01:00:00",
@@ -1321,7 +1321,7 @@ class TestProcessRoutesListRuns:
                     "tags": [],
                 },
                 {
-                    "run_id": "run-002",
+                    "public_id": "run-002",
                     "process_name": "test_process_2",
                     "started_at": "2024-01-02T00:00:00",
                     "completed_at": None,
@@ -1357,7 +1357,7 @@ class TestProcessRoutesListRuns:
         mock_factory.get_recent_runs = AsyncMock(
             return_value=[
                 {
-                    "run_id": "run-001",
+                    "public_id": "run-001",
                     "process_name": "filtered_process",
                     "started_at": "2024-01-01T00:00:00",
                     "completed_at": "2024-01-01T01:00:00",

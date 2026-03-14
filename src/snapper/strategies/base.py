@@ -3,7 +3,7 @@
 This module provides the abstract base classes for implementing
 trading strategies with ZMQ-based messaging.
 
-Data models (Signal, StrategyConfig) are defined in
+Data models (StrategySignal, StrategyConfig) are defined in
 snapper.strategies.models and re-exported here for backwards
 compatibility.
 """
@@ -24,18 +24,18 @@ import zmq.asyncio
 from snapper.config.settings import get_bootstrap_settings
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.messages import CandleEnvelope
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
-from snapper.messaging.schemas.messages import SignalEnvelope
-from snapper.messaging.schemas.messages import TickEnvelope
-from snapper.messaging.schemas.messages import TradeEnvelope
+from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import SettingChangedData
+from snapper.messaging.schemas.data import SignalData
+from snapper.messaging.schemas.data import TickData
+from snapper.messaging.schemas.data import TradeData
 from snapper.messaging.topics.builders import parse_market_topic
 from snapper.strategies.health import StrategyHealthMonitor
-from snapper.strategies.models import Signal
 from snapper.strategies.models import StrategyConfig
+from snapper.strategies.models import StrategySignal
 from snapper.strategies.system_events import SystemMessageRouter
 
-__all__ = ["BaseStrategy", "CompositeStrategy", "Signal", "StrategyConfig"]
+__all__ = ["BaseStrategy", "CompositeStrategy", "StrategySignal", "StrategyConfig"]
 
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ class BaseStrategy(ABC):
         self.zmq_context: zmq.asyncio.Context | None = None
         self.subscriber: ValidatedSubscriber | None = None
         self.publisher: ValidatedPublisher | None = None
-        self.candle_buffer: dict[str, list[CandleEnvelope]] = {}
+        self.candle_buffer: dict[str, list[CandleData]] = {}
         self._listen_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self.last_data_timestamp: float = time.time()
@@ -105,12 +105,12 @@ class BaseStrategy(ABC):
         """
         return self._running
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Handle incoming candle data.
 
         Args:
             instrument: The instrument symbol.
-            candle: The candle envelope with OHLCV data.
+            candle: The candle data with OHLCV data.
 
         Returns:
             Optional signal if strategy logic triggers.
@@ -118,12 +118,12 @@ class BaseStrategy(ABC):
         await asyncio.sleep(0)
         return None
 
-    async def on_tick(self, instrument: str, tick: TickEnvelope) -> Signal | None:
+    async def on_tick(self, instrument: str, tick: TickData) -> StrategySignal | None:
         """Handle incoming tick data.
 
         Args:
             instrument: The instrument symbol.
-            tick: The tick envelope with bid/ask data.
+            tick: The tick data with bid/ask data.
 
         Returns:
             Optional signal if strategy logic triggers.
@@ -131,12 +131,12 @@ class BaseStrategy(ABC):
         await asyncio.sleep(0)
         return None
 
-    async def on_trade(self, instrument: str, trade: TradeEnvelope) -> Signal | None:
+    async def on_trade(self, instrument: str, trade: TradeData) -> StrategySignal | None:
         """Handle incoming trade data.
 
         Args:
             instrument: The instrument symbol.
-            trade: The trade envelope with trade data.
+            trade: The trade data with trade details.
 
         Returns:
             Optional signal if strategy logic triggers.
@@ -171,11 +171,11 @@ class BaseStrategy(ABC):
         await self._setup_publisher()
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
-    def _handle_settings_update(self, envelope: SettingChangedEnvelope) -> None:
+    def _handle_settings_update(self, envelope: SettingChangedData) -> None:
         """Handle dynamic settings update from ZMQ.
 
         Args:
-            envelope: Settings change envelope with key and value.
+            envelope: Settings change data with key and value.
         """
         self._system_router.handle_settings_update(envelope)
 
@@ -339,7 +339,7 @@ class BaseStrategy(ABC):
         if topic_str == "system.symbol_aliases":
             self._handle_symbol_aliases_update()
         elif topic_str == "system.settings":
-            envelope = SettingChangedEnvelope.from_json(payload_str)
+            envelope = SettingChangedData.from_json(payload_str)
             self._handle_settings_update(envelope)
         elif topic_str.startswith("system.heartbeats.feed."):
             self._handle_system_heartbeat(topic_str, payload_str)
@@ -378,7 +378,7 @@ class BaseStrategy(ABC):
             logger.error(f"Strategy {self.name}: Error in listen loop: {e}", exc_info=True)
             self._running = False
 
-    async def _handle_candle_data(self, instrument: str, payload: str) -> Signal | None:
+    async def _handle_candle_data(self, instrument: str, payload: str) -> StrategySignal | None:
         """Handle incoming candle data.
 
         Args:
@@ -388,7 +388,7 @@ class BaseStrategy(ABC):
         Returns:
             Optional signal from the candle handler.
         """
-        candle = CandleEnvelope.from_json(payload)
+        candle = CandleData.from_json(payload)
         self._last_data_ts = candle.open_at.timestamp()
         if instrument not in self.candle_buffer:
             self.candle_buffer[instrument] = []
@@ -400,7 +400,7 @@ class BaseStrategy(ABC):
 
     async def _dispatch_market_data(
         self, topic: str, instrument: str, payload: str
-    ) -> Signal | None:
+    ) -> StrategySignal | None:
         """Dispatch market data to appropriate handler.
 
         Args:
@@ -414,17 +414,17 @@ class BaseStrategy(ABC):
         if ".candles." in topic:
             return await self._handle_candle_data(instrument, payload)
         if ".ticks" in topic:
-            tick = TickEnvelope.from_json(payload)
+            tick = TickData.from_json(payload)
             self._last_data_ts = tick.timestamp.timestamp()
             return await self.on_tick(instrument, tick)
         if ".trades" in topic:
-            trade = TradeEnvelope.from_json(payload)
+            trade = TradeData.from_json(payload)
             self._last_data_ts = (trade.executed_at or trade.timestamp).timestamp()
             return await self.on_trade(instrument, trade)
         logger.warning(f"Strategy {self.name}: Unknown market data topic type: {topic}")
         return None
 
-    async def emit_signal(self, signal: Signal) -> None:
+    async def emit_signal(self, signal: StrategySignal) -> None:
         """Emit a trading signal to the output topic.
 
         Args:
@@ -448,7 +448,7 @@ class BaseStrategy(ABC):
             )
         if not self.publisher:
             await self._setup_publisher()
-        signal_envelope = SignalEnvelope(
+        signal_envelope = SignalData(
             instrument=signal.instrument,
             side=signal.side,
             strength=signal.strength,
@@ -457,7 +457,6 @@ class BaseStrategy(ABC):
             exchange=self.exchange,
             strategy_name=self.name,
             timestamp=signal.timestamp,
-            meta=signal.metadata,
         )
         payload_bytes = signal_envelope.to_json().encode("utf-8")
         if self.publisher is not None:

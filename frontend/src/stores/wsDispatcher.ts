@@ -5,7 +5,11 @@ import { useMarketStore } from './market'
 import { useAppStore } from './app'
 import { useProcessStore } from './process'
 import {
-  WebSocketMessages,
+  type WebSocketMessages,
+  type CandleData,
+  type OrderData,
+  type ExecutionData,
+  type SignalData,
   isOrder,
   isExecution,
   isSignal,
@@ -14,10 +18,15 @@ import {
   isTrade,
   isHeartbeat,
 } from '../types/ws'
-import type { CandleEnvelope } from '../types/ws'
-import type { CandleData } from '../types/api'
 import { ProcessStatus } from '../types/ui'
-import { orderFromWS, executionFromWS, signalFromWS } from '../lib/transforms'
+import {
+  orderFromWS,
+  executionFromWS,
+  signalFromWS,
+  orderDataFromEnvelope,
+  executionDataFromEnvelope,
+  signalDataFromEnvelope,
+} from '../lib/transforms'
 
 type UnsubscribeFn = () => void
 interface DispatcherConfig {
@@ -36,7 +45,10 @@ export class WSDispatcher {
   private readonly topics: string[]
   private readonly maxCandles: number
   private readonly directStoreUpdates: boolean
-  private readonly candleBuffers: Map<string, CandleEnvelope[]> = new Map()
+  private readonly candleBuffers: Map<string, CandleData[]> = new Map()
+  private orderBuffer: OrderData[] | null = null
+  private executionBuffer: ExecutionData[] | null = null
+  private signalBuffer: SignalData[] | null = null
   constructor(config: DispatcherConfig) {
     this.queryClient = config.queryClient
     this.maxCandles = config.maxCandles ?? DEFAULT_MAX_CANDLES
@@ -47,8 +59,8 @@ export class WSDispatcher {
     this.detach()
     this.wsClient = client
     this.unsubscribers.push(
-      client.onMessage('order_status', this.handleOrderMessage.bind(this)),
-      client.onMessage('fill', this.handleExecutionMessage.bind(this)),
+      client.onMessage('order', this.handleOrderMessage.bind(this)),
+      client.onMessage('execution', this.handleExecutionMessage.bind(this)),
       client.onMessage('signal', this.handleSignalMessage.bind(this)),
       client.onMessage('candle', this.handleCandleMessage.bind(this)),
       client.onMessage('tick', this.handleTickMessage.bind(this)),
@@ -93,18 +105,16 @@ export class WSDispatcher {
     if (this.directStoreUpdates) {
       const store = useTradeStore.getState()
       const order = orderFromWS(message)
-      const existingOrder = store.orders.find(o => o.id === order.id)
+      const existingOrder = store.orders.find(o => o.clientOrderId === order.clientOrderId)
 
       if (existingOrder) {
-        store.updateOrder(order.id, order)
+        store.updateOrder(order.clientOrderId, order)
       } else {
         store.addOrder(order)
       }
     }
 
-    this.queryClient.invalidateQueries({
-      predicate: query => query.queryKey[0] === 'orders',
-    })
+    this.mergeOrderIntoCache(message)
   }
   private handleExecutionMessage(message: WebSocketMessages): void {
     if (!isExecution(message)) return
@@ -115,9 +125,7 @@ export class WSDispatcher {
       store.addExecution(executionFromWS(message))
     }
 
-    this.queryClient.invalidateQueries({
-      predicate: query => query.queryKey[0] === 'executions',
-    })
+    this.mergeExecutionIntoCache(message)
   }
   private handleSignalMessage(message: WebSocketMessages): void {
     if (!isSignal(message)) return
@@ -128,9 +136,7 @@ export class WSDispatcher {
       store.addSignal(signalFromWS(message))
     }
 
-    this.queryClient.invalidateQueries({
-      predicate: query => query.queryKey[0] === 'signals',
-    })
+    this.mergeSignalIntoCache(message)
   }
   private handleCandleMessage(message: WebSocketMessages): void {
     if (!isCandle(message)) return
@@ -171,7 +177,44 @@ export class WSDispatcher {
 
     this.candleBuffers.delete(bufferKey)
   }
-  private mergeCandleIntoCache(envelope: CandleEnvelope): void {
+  startTradeBuffering(): void {
+    this.orderBuffer = []
+    this.executionBuffer = []
+    this.signalBuffer = []
+  }
+  flushTradeBuffer(): void {
+    const orders = this.orderBuffer
+    const executions = this.executionBuffer
+    const signals = this.signalBuffer
+
+    this.orderBuffer = null
+    this.executionBuffer = null
+    this.signalBuffer = null
+
+    if (orders) {
+      for (const o of orders) {
+        this.mergeOrderIntoCache(o)
+      }
+    }
+
+    if (executions) {
+      for (const e of executions) {
+        this.mergeExecutionIntoCache(e)
+      }
+    }
+
+    if (signals) {
+      for (const s of signals) {
+        this.mergeSignalIntoCache(s)
+      }
+    }
+  }
+  stopTradeBuffering(): void {
+    this.orderBuffer = null
+    this.executionBuffer = null
+    this.signalBuffer = null
+  }
+  private mergeCandleIntoCache(envelope: CandleData): void {
     const queryKey = ['candles', envelope.instrument, envelope.exchange, envelope.timeframe]
     const existing = this.queryClient.getQueryData<CandleData[]>(queryKey)
 
@@ -186,35 +229,101 @@ export class WSDispatcher {
       return
     }
 
-    const candle: CandleData = {
-      instrument: envelope.instrument,
-      exchange: envelope.exchange,
-      timeframe: envelope.timeframe,
-      open_at: envelope.open_at,
-      open: envelope.open,
-      high: envelope.high,
-      low: envelope.low,
-      close: envelope.close,
-      volume: envelope.volume,
-      vwap: envelope.vwap ?? null,
-      trades: envelope.trades ?? null,
-    }
-
-    const incomingTime = new Date(candle.open_at).getTime()
+    const incomingTime = new Date(envelope.open_at).getTime()
     const lastCandle = existing[existing.length - 1]
     const lastTime = lastCandle ? new Date(lastCandle.open_at).getTime() : 0
 
     if (incomingTime === lastTime) {
       const updated = [...existing]
 
-      updated[updated.length - 1] = candle
+      updated[updated.length - 1] = envelope
       this.queryClient.setQueryData<CandleData[]>(queryKey, updated)
     } else if (incomingTime > lastTime) {
-      const appended = [...existing, candle]
+      const appended = [...existing, envelope]
       const trimmed =
         appended.length > this.maxCandles ? appended.slice(-this.maxCandles) : appended
 
       this.queryClient.setQueryData<CandleData[]>(queryKey, trimmed)
+    }
+  }
+  private mergeOrderIntoCache(envelope: OrderData): void {
+    const queries = this.queryClient.getQueriesData<OrderData[]>({ queryKey: ['orders'] })
+
+    if (queries.every(([, data]) => !data)) {
+      if (this.orderBuffer) {
+        this.orderBuffer.push(envelope)
+      }
+
+      return
+    }
+
+    const data = orderDataFromEnvelope(envelope)
+
+    for (const [queryKey, existing] of queries) {
+      if (!existing) continue
+
+      const idx = existing.findIndex(o => o.client_order_id === data.client_order_id)
+
+      if (idx >= 0) {
+        const updated = [...existing]
+
+        updated[idx] = data
+        this.queryClient.setQueryData<OrderData[]>(queryKey, updated)
+      } else {
+        this.queryClient.setQueryData<OrderData[]>(queryKey, [data, ...existing])
+      }
+    }
+  }
+  private mergeExecutionIntoCache(envelope: ExecutionData): void {
+    const queries = this.queryClient.getQueriesData<ExecutionData[]>({
+      queryKey: ['executions'],
+    })
+
+    if (queries.every(([, data]) => !data)) {
+      if (this.executionBuffer) {
+        this.executionBuffer.push(envelope)
+      }
+
+      return
+    }
+
+    const data = executionDataFromEnvelope(envelope)
+
+    for (const [queryKey, existing] of queries) {
+      if (!existing) continue
+
+      const isDuplicate = existing.some(
+        e => e.client_order_id === data.client_order_id && e.executed_at === data.executed_at
+      )
+
+      if (!isDuplicate) {
+        this.queryClient.setQueryData<ExecutionData[]>(queryKey, [data, ...existing])
+      }
+    }
+  }
+  private mergeSignalIntoCache(envelope: SignalData): void {
+    const queries = this.queryClient.getQueriesData<SignalData[]>({ queryKey: ['signals'] })
+
+    if (queries.every(([, data]) => !data)) {
+      if (this.signalBuffer) {
+        this.signalBuffer.push(envelope)
+      }
+
+      return
+    }
+
+    const data = signalDataFromEnvelope(envelope)
+
+    for (const [queryKey, existing] of queries) {
+      if (!existing) continue
+
+      const isDuplicate = existing.some(
+        s => s.strategy_name === data.strategy_name && s.fired_at === data.fired_at
+      )
+
+      if (!isDuplicate) {
+        this.queryClient.setQueryData<SignalData[]>(queryKey, [data, ...existing])
+      }
     }
   }
   private handleTickMessage(message: WebSocketMessages): void {

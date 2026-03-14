@@ -5,7 +5,7 @@ import contextlib
 from snapper.auth.schemas.security import CsrfToken
 from snapper.auth.schemas.tokens import TokenPair
 from snapper.config.settings import get_settings
-from snapper.data.models import OrderRecord
+from snapper.data.models import Order
 from snapper.data.models import Trade
 from snapper.data.models import User
 from snapper.data.repository import get_repository
@@ -52,13 +52,13 @@ class TestUtilitiesCoverage:
     def test_data_models_import(self) -> None:
         """Verify data models can be imported.
 
-        Given User, Trade, OrderRecord model classes,
+        Given User, Trade, Order model classes,
         When checking their existence,
         Then all are defined (not None).
         """
         assert User is not None
         assert Trade is not None
-        assert OrderRecord is not None
+        assert Order is not None
 
     def test_error_scenarios(self) -> None:
         """Verify invalid log level is handled gracefully.

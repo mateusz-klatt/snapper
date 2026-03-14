@@ -32,7 +32,7 @@ export const ALL_TABS: readonly TabConfig[] = [
   { id: 'market', label: 'Market Data', icon: ChartCandlestick },
   { id: 'processes', label: 'Processes', icon: Workflow },
   { id: 'strategies', label: 'Strategies', icon: Gauge },
-  { id: 'orders', label: 'Orders & Fills', icon: ClipboardList },
+  { id: 'orders', label: 'Orders & Executions', icon: ClipboardList },
   { id: 'signals', label: 'Signals', icon: Bell },
   { id: 'health', label: 'Health', icon: HeartPulse },
   { id: 'admin', label: 'Administration', icon: Shield },

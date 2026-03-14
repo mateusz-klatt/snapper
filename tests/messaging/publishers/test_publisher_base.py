@@ -20,10 +20,10 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-from snapper.messaging.schemas.messages import CandleEnvelope
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
-from snapper.messaging.schemas.messages import TickEnvelope
+from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.schemas.data import SettingChangedData
+from snapper.messaging.schemas.data import TickData
 
 
 def zmq_socket_stub(**kwargs: Any) -> SimpleNamespace:
@@ -117,6 +117,8 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     """
     pub: Any = DummyPublisher(symbols=["A", "B", "C"])
     pub._get_max_symbols_per_connection = Mock(return_value=1)
+    mock_repo = SimpleNamespace(get_latest_candle_ids=AsyncMock(return_value={}))
+    monkeypatch.setattr("snapper.messaging.publishers.base.get_repository", lambda _url: mock_repo)
     monkeypatch.setattr(
         "snapper.messaging.publishers.base.get_settings_service",
         AsyncMock(return_value=SimpleNamespace()),
@@ -184,7 +186,7 @@ async def test_tick_loop_handles_unknown_symbol(monkeypatch: pytest.MonkeyPatch)
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
-        yield TickEnvelope(instrument="UNKNOWN", volume=1.0, last=1.0, exchange="kraken")
+        yield TickData(instrument="UNKNOWN", volume=1.0, last=1.0, exchange="kraken")
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -263,6 +265,7 @@ async def test_candle_loop_handles_errors(monkeypatch: pytest.MonkeyPatch) -> No
         raise RuntimeError("boom")
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -279,7 +282,7 @@ async def test_publish_message_skips_when_not_running() -> None:
     pub.running = False
     await pub._publish_message(
         "topic",
-        CandleEnvelope(
+        CandleData(
             instrument="i",
             volume=1.0,
             timeframe="1m",
@@ -309,7 +312,7 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
     pub.running = True
     await pub._publish_message(
         "topic",
-        CandleEnvelope(
+        CandleData(
             instrument="i",
             volume=1.0,
             timeframe="1m",
@@ -335,7 +338,7 @@ async def test_publish_heartbeat_when_running() -> None:
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.publisher = StubValidatedPublisher()
     pub.running = True
-    msg = HeartbeatEnvelope(component="c", sequence=1, status="healthy", lag_ms=0)
+    msg = HeartbeatData(component="c", sequence=1, status="healthy", lag_ms=0)
     await pub._publish_heartbeat("hb", msg)
     pub.publisher.send_multipart.assert_awaited()
 
@@ -381,11 +384,11 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
     Then: Only candle messages are persisted.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    msg = TickEnvelope(instrument="i", volume=0.0, last=1.0, exchange="kraken")
+    msg = TickData(instrument="i", volume=0.0, last=1.0, exchange="kraken")
     await pub._save_to_db("i", msg)
     repo = SimpleNamespace(upsert_instrument=AsyncMock(return_value=1), upsert_candles=AsyncMock())
     pub.repository = repo
-    candle = CandleEnvelope(
+    candle = CandleData(
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -438,6 +441,8 @@ async def test_start_handles_cancelled_tasks(monkeypatch: pytest.MonkeyPatch) ->
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub._get_max_symbols_per_connection = Mock(return_value=0)
+    mock_repo = SimpleNamespace(get_latest_candle_ids=AsyncMock(return_value={}))
+    monkeypatch.setattr("snapper.messaging.publishers.base.get_repository", lambda _url: mock_repo)
     monkeypatch.setattr(
         "snapper.messaging.publishers.base.get_settings_service",
         AsyncMock(return_value=SimpleNamespace()),
@@ -624,7 +629,7 @@ async def test_heartbeat_loop_runs_once(monkeypatch: pytest.MonkeyPatch) -> None
     pub._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000
     publish = AsyncMock()
 
-    async def publish_and_stop(topic: str, message: HeartbeatEnvelope) -> None:
+    async def publish_and_stop(topic: str, message: HeartbeatData) -> None:
         pub.running = False
         await publish(topic, message)
 
@@ -647,7 +652,7 @@ async def test_publish_heartbeat_skips_when_not_running() -> None:
     pub.running = False
     await pub._publish_heartbeat(
         "hb",
-        HeartbeatEnvelope(component="c", sequence=1, status="healthy", lag_ms=0),
+        HeartbeatData(component="c", sequence=1, status="healthy", lag_ms=0),
     )
     pub.publisher.send_multipart.assert_not_awaited()
 
@@ -667,7 +672,7 @@ async def test_publish_heartbeat_logs_errors() -> None:
     pub.running = True
     await pub._publish_heartbeat(
         "hb",
-        HeartbeatEnvelope(component="c", sequence=1, status="healthy", lag_ms=0),
+        HeartbeatData(component="c", sequence=1, status="healthy", lag_ms=0),
     )
     failing.send_multipart.assert_awaited_once()
 
@@ -685,7 +690,7 @@ async def test_save_to_db_logs_errors() -> None:
         upsert_instrument=AsyncMock(side_effect=RuntimeError("db fail")),
         upsert_candles=AsyncMock(),
     )
-    candle = CandleEnvelope(
+    candle = CandleData(
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -817,9 +822,10 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.publisher.send_multipart.assert_awaited_once()
-    pub.repository.upsert_instrument.assert_awaited_once()
+    pub._ensure_instrument.assert_awaited()
     pub.repository.upsert_candles.assert_awaited_once()
     assert pub._last_data_timestamps["BTC-USD"] > 0
 
@@ -877,7 +883,7 @@ async def test_save_to_db_invalid_symbol_logs_warning() -> None:
     Then: Warning is logged.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    candle = CandleEnvelope(
+    candle = CandleData(
         instrument="BAD",
         volume=1.0,
         timeframe="1m",
@@ -903,7 +909,7 @@ async def test_save_to_db_uses_cached_instrument() -> None:
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub._instrument_cache["BTC-USD"] = 7
     pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
-    candle = CandleEnvelope(
+    candle = CandleData(
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -997,10 +1003,12 @@ async def test_candle_loop_breaks_when_stopped() -> None:
             vwap=1.0,
             volume=1.0,
             trades=1,
+            interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
         )
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -1031,9 +1039,11 @@ async def test_candle_loop_stops_when_running_false() -> None:
             vwap=1.0,
             volume=1.0,
             trades=1,
+            interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
         )
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.publisher.send_multipart.assert_not_awaited()
 
@@ -1128,7 +1138,7 @@ async def test_handle_settings_update_success(monkeypatch: pytest.MonkeyPatch) -
     Then the settings cache is updated with the new value.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
+    envelope = SettingChangedData(key="test_key", value="test_value", category="test")
     payload = envelope.to_json().encode()
     mock_instance = SimpleNamespace(_cache={}, _parse_value=lambda v: v)
     monkeypatch.setattr(
@@ -1160,7 +1170,7 @@ async def test_handle_settings_update_no_instance(monkeypatch: pytest.MonkeyPatc
     Then no exception is raised.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    envelope = SettingChangedEnvelope(key="test_key", value="test_value", category="test")
+    envelope = SettingChangedData(key="test_key", value="test_value", category="test")
     payload = envelope.to_json().encode()
     monkeypatch.setattr(
         "snapper.messaging.publishers.base.SettingsService.get_instance",
@@ -1246,6 +1256,7 @@ class TestFeedPublisherCoverage:
         mock_exchange_client = AsyncMock()
         mock_exchange_client_class.return_value = mock_exchange_client
         mock_repo = MagicMock()
+        mock_repo.get_latest_candle_ids = AsyncMock(return_value={})
         mock_get_repository.return_value = mock_repo
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         with (
@@ -1375,7 +1386,7 @@ class TestFeedPublisherCoverage:
         publisher_any = cast(Any, publisher)
         publisher_any.running = True
         publisher_any.publisher = AsyncMock()
-        message = TickEnvelope(instrument="BTC-USD", exchange="kraken", volume=1.0, last=100.0)
+        message = TickData(instrument="BTC-USD", exchange="kraken", volume=1.0, last=100.0)
         await publisher_any._publish_message("market.kraken.BTC-USD.ticks", message)
         publisher_any.publisher.send_multipart.assert_awaited_once()
 
@@ -1395,7 +1406,7 @@ class TestFeedPublisherCoverage:
         publisher_any = cast(Any, publisher)
         publisher_any.running = False
         publisher_any.publisher = AsyncMock()
-        message = TickEnvelope(instrument="BTC-USD", exchange="kraken", volume=1.0, last=100.0)
+        message = TickData(instrument="BTC-USD", exchange="kraken", volume=1.0, last=100.0)
         await publisher_any._publish_message("market.kraken.BTC-USD.ticks", message)
         publisher_any.publisher.send_multipart.assert_not_called()
 
@@ -1424,7 +1435,7 @@ class TestFeedPublisherCoverage:
         publisher_any._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000 - 25
         publish_heartbeat_mock = AsyncMock()
 
-        async def publish_side_effect(topic: str, message: HeartbeatEnvelope) -> None:
+        async def publish_side_effect(topic: str, message: HeartbeatData) -> None:
             assert topic.startswith("system.heartbeats.feed.")
             assert "symbols" in message.meta
             assert "BTC-USD" in message.meta["symbols"]
@@ -1458,7 +1469,7 @@ class TestFeedPublisherCoverage:
         publisher_any = cast(Any, publisher)
         publisher_any.running = True
         publisher_any.publisher = AsyncMock()
-        heartbeat = HeartbeatEnvelope(
+        heartbeat = HeartbeatData(
             component="feed.kraken.BTC-USD", sequence=1, status="healthy", lag_ms=0
         )
         await publisher_any._publish_heartbeat("system.heartbeats", heartbeat)
@@ -1516,6 +1527,8 @@ class TestFeedPublisherCoverage:
             async for item in generator():
                 yield item
 
+        ensure_instrument_mock = AsyncMock(return_value=1)
+        publisher_any._ensure_instrument = ensure_instrument_mock
         publisher_any._exchange_client = cast(
             Any,
             SimpleNamespace(subscribe_candles=candle_stream),
@@ -1642,7 +1655,7 @@ class TestFeedPublisherCoverage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.repository = mock_repository
         publisher_any = cast(Any, publisher)
-        bar_message = CandleEnvelope(
+        bar_message = CandleData(
             instrument="BTC-USD",
             exchange="kraken",
             volume=5.0,
@@ -1716,8 +1729,8 @@ class DummyRepository:
         return len(rows)
 
 
-def _build_bar_message(instrument: str) -> CandleEnvelope:
-    return CandleEnvelope(
+def _build_bar_message(instrument: str) -> CandleData:
+    return CandleData(
         instrument=instrument,
         exchange="kraken",
         volume=12.5,
@@ -1868,18 +1881,19 @@ class TestFeedPublisherCandleLoop:
 
         mock_exchange_client.subscribe_candles = mock_subscribe
         publisher_any._exchange_client = mock_exchange_client
-        published_messages: list[tuple[str, CandleEnvelope]] = []
+        published_messages: list[tuple[str, CandleData]] = []
 
-        async def publish_stub(topic: str, message: CandleEnvelope) -> None:
+        async def publish_stub(topic: str, message: CandleData) -> None:
             published_messages.append((topic, message))
 
-        saved_payloads: list[tuple[str, CandleEnvelope]] = []
+        saved_payloads: list[tuple[str, CandleData]] = []
 
-        async def save_stub(symbol: str, envelope: CandleEnvelope) -> None:
+        async def save_stub(symbol: str, envelope: CandleData) -> None:
             saved_payloads.append((symbol, envelope))
 
         publisher_any._publish_message = publish_stub
         publisher_any._save_to_db = save_stub
+        publisher_any._ensure_instrument = AsyncMock(return_value=1)
         await publisher_any._candle_loop(
             ["BTC-USD", "ETH-USD"],
             "1m",
@@ -1887,7 +1901,7 @@ class TestFeedPublisherCandleLoop:
         assert len(published_messages) == 2
         first_topic, btc_msg = published_messages[0]
         assert first_topic == "market.kraken.BTC-USD.candles.1m"
-        assert isinstance(btc_msg, CandleEnvelope)
+        assert isinstance(btc_msg, CandleData)
         assert btc_msg.type == "candle"
         assert btc_msg.instrument == "BTC-USD"
         assert btc_msg.close == pytest.approx(50000.0)
@@ -1899,7 +1913,7 @@ class TestFeedPublisherCandleLoop:
         assert btc_msg.trades == 42
         second_topic, eth_msg = published_messages[1]
         assert second_topic == "market.kraken.ETH-USD.candles.1m"
-        assert isinstance(eth_msg, CandleEnvelope)
+        assert isinstance(eth_msg, CandleData)
         assert eth_msg.type == "candle"
         assert eth_msg.instrument == "ETH-USD"
         assert eth_msg.close == pytest.approx(3000.0)
@@ -1948,10 +1962,11 @@ class TestFeedPublisherCandleLoop:
         publisher_any._exchange_client = mock_exchange_client
         published_topics: list[str] = []
 
-        async def publish_stub(topic: str, message: CandleEnvelope) -> None:
+        async def publish_stub(topic: str, message: CandleData) -> None:
             published_topics.append(topic)
 
         publisher_any._publish_message = publish_stub
+        publisher_any._ensure_instrument = AsyncMock(return_value=1)
         task = asyncio.create_task(publisher_any._candle_loop(["BTC-USD"], "1m"))
         await asyncio.sleep(0.05)
         publisher.running = False
@@ -1988,6 +2003,7 @@ class TestFeedPublisherCandleLoop:
         publisher.running = True
         publisher_any = cast(Any, publisher)
         publisher_any._exchange_client = mock_exchange_client
+        publisher_any._ensure_instrument = AsyncMock(return_value=1)
         await publisher_any._candle_loop(["BTC-USD"], "1m")
 
 
@@ -2011,7 +2027,7 @@ class TestFeedPublisherPublishMessage:
         publisher_any = cast(Any, publisher)
         pub_socket = PublisherSocketStub()
         publisher_any.publisher = pub_socket
-        message = CandleEnvelope(
+        message = CandleData(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2048,7 +2064,7 @@ class TestFeedPublisherPublishMessage:
         publisher_any = cast(Any, publisher)
         pub_socket = PublisherSocketStub()
         publisher_any.publisher = pub_socket
-        message = CandleEnvelope(
+        message = CandleData(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2080,7 +2096,7 @@ class TestFeedPublisherPublishMessage:
         publisher.running = True
         publisher.publisher = None
         publisher_any = cast(Any, publisher)
-        message = CandleEnvelope(
+        message = CandleData(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2112,7 +2128,7 @@ class TestFeedPublisherPublishMessage:
         publisher_any = cast(Any, publisher)
         pub_socket = PublisherSocketStub(error=RuntimeError("Send failed"))
         publisher_any.publisher = pub_socket
-        message = CandleEnvelope(
+        message = CandleData(
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2128,3 +2144,102 @@ class TestFeedPublisherPublishMessage:
             message,
         )
         assert pub_socket.calls == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_candle_public_id_cache_hit() -> None:
+    """Verify _resolve_candle_public_id returns cached UUID on open_at match.
+
+    Given: A publisher with a pre-populated _candle_id_cache entry,
+    When: _resolve_candle_public_id is called with the same open_at,
+    Then: The cached UUID is returned unchanged.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    pub._candle_id_cache[(1, "1m")] = (ts, "existing-uuid")
+    result = pub._resolve_candle_public_id(1, "1m", ts)
+    assert result == "existing-uuid"
+
+
+@pytest.mark.asyncio
+async def test_resolve_candle_public_id_different_open_at_generates_new() -> None:
+    """Verify _resolve_candle_public_id generates new UUID when open_at differs.
+
+    Given: A publisher with a cached candle ID entry,
+    When: _resolve_candle_public_id is called with a different open_at,
+    Then: A new UUID is generated (not the cached one).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    ts_old = datetime(2026, 1, 1, tzinfo=UTC)
+    ts_new = datetime(2026, 1, 1, 0, 1, tzinfo=UTC)
+    pub._candle_id_cache[(1, "1m")] = (ts_old, "existing-uuid")
+    result = pub._resolve_candle_public_id(1, "1m", ts_new)
+    assert result != "existing-uuid"
+    assert pub._candle_id_cache[(1, "1m")][0] == ts_new
+
+
+@pytest.mark.asyncio
+async def test_candle_loop_skips_publish_when_ensure_instrument_returns_none() -> None:
+    """Verify _candle_loop skips publishing when instrument resolution fails.
+
+    Given: A publisher whose _ensure_instrument returns None,
+    When: _candle_loop processes a candle,
+    Then: _publish_message is never called.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.publisher = StubValidatedPublisher()
+    pub.repository = SimpleNamespace()
+    pub._exchange_client = SimpleNamespace()
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            open=1.0,
+            high=2.0,
+            low=0.5,
+            close=1.5,
+            vwap=1.2,
+            volume=10.0,
+            trades=5,
+            interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        pub.running = False
+
+    pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    pub._ensure_instrument = AsyncMock(return_value=None)
+    pub._publish_message = AsyncMock()
+    await pub._candle_loop(["BTC-USD"], "1m")
+    pub._publish_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_instrument_returns_none_for_unsplittable_symbol() -> None:
+    """Verify _ensure_instrument returns None when symbol has no dash.
+
+    Given: A publisher with a symbol that cannot be split on '-',
+    When: _ensure_instrument is called,
+    Then: None is returned.
+    """
+    pub: Any = DummyPublisher(symbols=["INVALID"])
+    pub.repository = SimpleNamespace(upsert_instrument=AsyncMock(return_value=1))
+    result = await pub._ensure_instrument("INVALID")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_instrument_resolves_and_caches() -> None:
+    """Verify _ensure_instrument resolves instrument and caches result.
+
+    Given: A publisher with a valid symbol and mock repository,
+    When: _ensure_instrument is called twice with the same symbol,
+    Then: The repository is called only once and result is cached.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    mock_upsert = AsyncMock(return_value=42)
+    pub.repository = SimpleNamespace(upsert_instrument=mock_upsert)
+    first = await pub._ensure_instrument("BTC-USD")
+    second = await pub._ensure_instrument("BTC-USD")
+    assert first == 42
+    assert second == 42
+    mock_upsert.assert_awaited_once()

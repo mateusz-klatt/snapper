@@ -40,10 +40,10 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.market_data.walutomat import WalutomatSnapshotUpdaterService
 from snapper.interface.websocket.dispatcher import dispatch_messages
 from snapper.interface.websocket.helpers import build_allowed_origins
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
-from snapper.strategies.base import Signal
 from snapper.strategies.base import StrategyConfig
+from snapper.strategies.base import StrategySignal
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
@@ -54,9 +54,9 @@ def make_candle_envelope(
     close: float = 100.0,
     ts: float | None = None,
     exchange: str = "kraken",
-) -> CandleEnvelope:
-    """Create a CandleEnvelope instance with configurable parameters."""
-    return CandleEnvelope(
+) -> CandleData:
+    """Create a CandleData instance with configurable parameters."""
+    return CandleData(
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -89,7 +89,7 @@ async def feed_bar_to_strategy(
     instrument: str,
     close: float,
     exchange: str = "kraken",
-) -> Signal | None:
+) -> StrategySignal | None:
     """Feed a candle to strategy and return resulting signal if any."""
     candle = make_candle_envelope(instrument, close, exchange=exchange)
     if instrument not in strategy.candle_buffer:

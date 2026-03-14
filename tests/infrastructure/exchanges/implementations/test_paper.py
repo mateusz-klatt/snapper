@@ -253,7 +253,7 @@ async def test_cancel_order_logs_db_update() -> None:
         timestamp=0.0,
         fee=None,
     )
-    order.db_order_id = 123
+    order.db_order_id = 42
     client._orders[order.id] = order
     log_update = AsyncMock()
     client._log_order_update_to_db = log_update

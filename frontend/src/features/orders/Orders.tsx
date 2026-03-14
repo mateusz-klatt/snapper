@@ -1,14 +1,14 @@
 import React, { useState } from 'react'
 import { Download } from 'lucide-react'
 import { useOrders, useExecutions } from '../../hooks/queries'
-import type { OrderStatus, Fill } from '../../types/entities'
+import type { Order, Execution } from '../../types/entities'
 import { OrderCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
 import { exportToCSV } from '../../lib/csvExport'
 import { EmptyState } from '../../components/ui'
 import clsx from 'clsx'
 
-const OrderCard: React.FC<{ order: OrderStatus }> = ({ order }) => {
+const OrderCard: React.FC<{ order: Order }> = ({ order }) => {
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
       case 'filled':
@@ -72,14 +72,14 @@ const OrderCard: React.FC<{ order: OrderStatus }> = ({ order }) => {
         </div>
         <div>
           <div className='text-muted-500'>Order ID</div>
-          <div className='text-xs font-mono text-alpine-900'>{order.id}</div>
+          <div className='text-xs font-mono text-alpine-900'>{order.clientOrderId}</div>
         </div>
       </div>
     </div>
   )
 }
 
-const ExecutionCard: React.FC<{ execution: Fill }> = ({ execution }) => {
+const ExecutionCard: React.FC<{ execution: Execution }> = ({ execution }) => {
   const totalCost = execution.price * execution.size
   const fees = execution.fee || 0
 
@@ -87,10 +87,10 @@ const ExecutionCard: React.FC<{ execution: Fill }> = ({ execution }) => {
     <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-5 transition-colors hover:border-muted-400'>
       <div className='flex items-center justify-between mb-3'>
         <div className='flex items-center space-x-3'>
-          <span className='font-semibold text-alpine-900'>Order #{execution.orderId}</span>
+          <span className='font-semibold text-alpine-900'>Order #{execution.clientOrderId}</span>
           <span className='rounded-full bg-gain-50 px-2 py-1 text-xs text-gain-600'>FILLED</span>
         </div>
-        <div className='text-sm text-muted-500'>Exec ID {execution.id}</div>
+        <div className='text-sm text-muted-500'>Order {execution.clientOrderId}</div>
       </div>
       <div className='grid grid-cols-3 gap-4 text-sm'>
         <div>
@@ -130,12 +130,12 @@ export const Orders: React.FC = () => {
   const { data: orders = [], isLoading: ordersLoading } = useOrders({ limit: 50 })
   const { data: executions = [], isLoading: executionsLoading } = useExecutions({ limit: 50 })
   const filteredOrders = orders.filter(
-    (order: OrderStatus) => statusFilter === 'all' || order.status.toLowerCase() === statusFilter
+    (order: Order) => statusFilter === 'all' || order.status.toLowerCase() === statusFilter
   )
 
   const handleExportOrders = () => {
     const headers = ['Instrument', 'Side', 'Type', 'Status', 'Quantity', 'Price', 'Created']
-    const rows = filteredOrders.map((o: OrderStatus) => [
+    const rows = filteredOrders.map((o: Order) => [
       o.instrument,
       o.side ?? '',
       o.orderType,
@@ -160,7 +160,7 @@ export const Orders: React.FC = () => {
       'Fee Asset',
       'Executed',
     ]
-    const rows = executions.map((e: Fill) => [
+    const rows = executions.map((e: Execution) => [
       e.clientOrderId,
       e.instrument,
       e.side,
@@ -269,8 +269,8 @@ export const Orders: React.FC = () => {
             )}
             {!ordersLoading && filteredOrders.length > 0 && (
               <div className='grid gap-4'>
-                {filteredOrders.map((order: OrderStatus) => (
-                  <OrderCard key={order.id} order={order} />
+                {filteredOrders.map((order: Order) => (
+                  <OrderCard key={order.clientOrderId} order={order} />
                 ))}
               </div>
             )}
@@ -304,8 +304,8 @@ export const Orders: React.FC = () => {
             )}
             {!executionsLoading && executions.length > 0 && (
               <div className='grid gap-4'>
-                {executions.map((execution: Fill) => (
-                  <ExecutionCard key={execution.id} execution={execution} />
+                {executions.map((execution: Execution) => (
+                  <ExecutionCard key={execution.clientOrderId} execution={execution} />
                 ))}
               </div>
             )}

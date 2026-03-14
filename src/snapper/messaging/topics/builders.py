@@ -127,16 +127,16 @@ def order_event_topic(
     Args:
         exchange: Exchange name (OrderExchange literal).
         instrument: Trading instrument symbol (e.g., 'BTC-USD').
-        event: Event type ('submitted', 'accepted', 'rejected', 'fill', etc.).
+        event: Event type ('submitted', 'accepted', 'rejected', 'executed', etc.).
 
     Returns:
-        Formatted topic string like 'orders.events.kraken.BTC-USD.fill'.
+        Formatted topic string like 'orders.events.kraken.BTC-USD.executed'.
 
     Examples:
         >>> order_event_topic("kraken", "BTC-USD", "submitted")
         'orders.events.kraken.BTC-USD.submitted'
-        >>> order_event_topic("kraken", "BTC-USD", "fill")
-        'orders.events.kraken.BTC-USD.fill'
+        >>> order_event_topic("kraken", "BTC-USD", "executed")
+        'orders.events.kraken.BTC-USD.executed'
     """
     exchange_str = exchange
     return f"orders.events.{exchange_str}.{instrument}.{event}"
@@ -267,7 +267,7 @@ class ParsedOrderTopic:
     Attributes:
         exchange: Exchange name from topic segment.
         instrument: Instrument symbol from topic segment.
-        suffix: Command (submit/cancel/replace) or event (fill/accepted/etc.).
+        suffix: Command (submit/cancel/replace) or event (execution/accepted/etc.).
     """
 
     exchange: str
@@ -409,8 +409,8 @@ def parse_order_event_topic(topic: str) -> ParsedOrderTopic | None:
         or None if topic is malformed.
 
     Examples:
-        >>> parse_order_event_topic("orders.events.kraken.BTC-USD.fill")
-        ParsedOrderTopic(exchange='kraken', instrument='BTC-USD', suffix='fill')
+        >>> parse_order_event_topic("orders.events.kraken.BTC-USD.executed")
+        ParsedOrderTopic(exchange='kraken', instrument='BTC-USD', suffix='executed')
         >>> parse_order_event_topic("orders.commands.kraken.BTC-USD.submit")
         None
     """
@@ -455,7 +455,7 @@ def is_order_topic(topic: str) -> bool:
         True if topic starts with orders.commands or orders.events.
 
     Examples:
-        >>> is_order_topic("orders.events.kraken.BTC-USD.fill")
+        >>> is_order_topic("orders.events.kraken.BTC-USD.executed")
         True
         >>> is_order_topic("market.kraken.BTC-USD.ticks")
         False

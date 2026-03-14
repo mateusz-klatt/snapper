@@ -26,6 +26,9 @@ export const AvailableProcessSchema = z
 
 export const CandleDataSchema = z
   .object({
+    id: z.string().optional(),
+    type: z.literal('candle'),
+    timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     timeframe: z.string(),
@@ -63,7 +66,7 @@ export const ConfiguredProcessSchema = z
     tags: z.array(z.string()).optional(),
     parameters_schema: z.record(z.string(), z.unknown()).nullable().optional(),
     is_one_shot: z.boolean(),
-    active_run_id: z.string().nullable().optional(),
+    active_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -77,21 +80,23 @@ export const ConnectionStatsSchemaSchema = z
   })
   .strict()
 
-export const ExecutionRecordSchema = z
+export const ExecutionDataSchema = z
   .object({
-    id: z.number().int(),
-    order_id: z.number().int(),
-    exec_id: z.string().nullable().optional(),
+    id: z.string().optional(),
+    type: z.literal('execution'),
+    timestamp: z.iso.datetime().optional(),
     trade_id: z.string().nullable().optional(),
-    timestamp: z.iso.datetime(),
-    executed_at: z.iso.datetime().nullable().optional(),
-    price: z.number(),
+    exchange_order_id: z.string().nullable().optional(),
+    client_order_id: z.string(),
+    instrument: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
+    side: z.enum(['buy', 'sell']),
     size: z.number(),
+    price: z.number(),
     fee: z.number(),
     fee_asset: z.string(),
-    instrument: z.string(),
-    side: z.enum(['buy', 'sell']),
-    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
+    status: z.enum(['filled', 'partial']),
+    executed_at: z.iso.datetime().optional(),
   })
   .strict()
 
@@ -116,45 +121,41 @@ export const MessageResponseSchema = z
   })
   .strict()
 
-export const OrderStatusSchema = z
+export const OrderDataSchema = z
   .object({
-    id: z.number().int(),
+    id: z.string().optional(),
+    type: z.literal('order'),
+    timestamp: z.iso.datetime().optional(),
+    exchange_order_id: z.string().nullable().optional(),
+    client_order_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
-    client_order_id: z.string().nullable().optional(),
-    exchange_order_id: z.string().nullable().optional(),
-    created_at: z.iso.datetime(),
-    updated_at: z.iso.datetime().nullable().optional(),
     side: z.enum(['buy', 'sell']),
-    type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
-    price: z.number().nullable().optional(),
+    status: z.string(),
+    order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
     size: z.number(),
     filled_size: z.number(),
+    price: z.number().nullable().optional(),
     average_price: z.number().nullable().optional(),
-    status: z.enum([
-      'new',
-      'submitted',
-      'open',
-      'filled',
-      'partially_filled',
-      'cancelled',
-      'rejected',
-    ]),
+    reason: z.string().nullable().optional(),
     time_in_force: z.string().nullable().optional(),
     error: z.string().nullable().optional(),
+    created_at: z.iso.datetime().optional(),
+    updated_at: z.iso.datetime().nullable().optional(),
   })
   .strict()
 
-export const PositionSnapshotSchema = z
+export const PositionDataSchema = z
   .object({
-    id: z.number().int(),
+    id: z.string().optional(),
+    type: z.literal('position'),
+    timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     quantity: z.number(),
     average_price: z.number(),
     unrealized_pnl: z.number(),
     realized_pnl: z.number(),
-    updated_at: z.iso.datetime(),
   })
   .strict()
 
@@ -186,7 +187,7 @@ export const ProcessCreatedInfoSchema = z
 
 export const ProcessRunSchema = z
   .object({
-    run_id: z.string(),
+    public_id: z.string(),
     process_name: z.string(),
     status: z.enum(['running', 'succeeded', 'failed', 'cancelled']),
     role: z.enum(['core', 'task', 'strategy', 'backtest']),
@@ -227,7 +228,7 @@ export const ProcessStartResponseSchema = z
   .object({
     status: z.enum(['success', 'already_running', 'error']),
     name: z.string(),
-    run_id: z.string().nullable().optional(),
+    public_id: z.string().nullable().optional(),
     message: z.string().nullable().optional(),
   })
   .strict()
@@ -276,6 +277,22 @@ export const SettingUpdateSchema = z
   })
   .strict()
 
+export const SignalDataSchema = z
+  .object({
+    id: z.string().optional(),
+    type: z.literal('signal'),
+    timestamp: z.iso.datetime().optional(),
+    instrument: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
+    side: z.enum(['buy', 'sell']),
+    strength: z.number(),
+    reason: z.string(),
+    price: z.number().nullable().optional(),
+    strategy_name: z.string().nullable().optional(),
+    fired_at: z.iso.datetime().optional(),
+  })
+  .strict()
+
 export const StrategyProcessSchema = z
   .object({
     name: z.string(),
@@ -319,20 +336,6 @@ export const TopicMetricSnapshotSchemaSchema = z
     last_message_ts: z.number(),
     throttle_ms: z.number().int().nullable().optional(),
     pattern: z.string().nullable().optional(),
-  })
-  .strict()
-
-export const TradingSignalSchema = z
-  .object({
-    id: z.number().int(),
-    instrument: z.string(),
-    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
-    timestamp: z.iso.datetime(),
-    side: z.enum(['buy', 'sell']),
-    strength: z.number(),
-    reason: z.string(),
-    strategy_name: z.string().nullable().optional(),
-    price: z.number().nullable().optional(),
   })
   .strict()
 
@@ -537,12 +540,12 @@ export type CandleData = z.infer<typeof CandleDataSchema>
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
 export type ConnectionStatsSchema = z.infer<typeof ConnectionStatsSchemaSchema>
-export type ExecutionRecord = z.infer<typeof ExecutionRecordSchema>
+export type ExecutionData = z.infer<typeof ExecutionDataSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
-export type OrderStatus = z.infer<typeof OrderStatusSchema>
-export type PositionSnapshot = z.infer<typeof PositionSnapshotSchema>
+export type OrderData = z.infer<typeof OrderDataSchema>
+export type PositionData = z.infer<typeof PositionDataSchema>
 export type ProcessCategoryCount = z.infer<typeof ProcessCategoryCountSchema>
 export type ProcessCreateRequest = z.infer<typeof ProcessCreateRequestSchema>
 export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
@@ -555,11 +558,11 @@ export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
+export type SignalData = z.infer<typeof SignalDataSchema>
 export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
 export type StrategyStatusPayload = z.infer<typeof StrategyStatusPayloadSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TopicMetricSnapshotSchema = z.infer<typeof TopicMetricSnapshotSchemaSchema>
-export type TradingSignal = z.infer<typeof TradingSignalSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>
 export type ValidationError = z.infer<typeof ValidationErrorSchema>
 export type WebSocketStats = z.infer<typeof WebSocketStatsSchema>

@@ -170,7 +170,7 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
                     change_24h=change_24h,
                     spread=spread,
                     spread_pct=spread_pct,
-                    updated_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
                 )
                 snapshots[native_symbol] = snapshot
                 if len(snapshots) % 10 == 0:

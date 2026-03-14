@@ -206,7 +206,7 @@ def determine_topic_category(topic: str) -> str | None:
         "tick": "market",
         "signal": "strategy",
         "order": "trade",
-        "fill": "trade",
+        "execution": "trade",
         "heartbeat": "system",
     }
     return category_map.get(topic)

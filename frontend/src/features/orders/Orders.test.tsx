@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Orders } from './Orders'
-import type { OrderStatus, Fill } from '../../types/entities'
+import type { Order, Execution } from '../../types/entities'
 
 vi.mock('../../lib/csvExport', () => ({
   exportToCSV: vi.fn(),
@@ -115,9 +115,9 @@ describe('Orders', () => {
     })
   })
   it('displays orders when data is loaded', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -156,10 +156,9 @@ describe('Orders', () => {
     })
   })
   it('displays executions when data is loaded', async () => {
-    const mockExecutions: Fill[] = [
+    const mockExecutions: Execution[] = [
       {
-        id: 1,
-        orderId: 1,
+        clientOrderId: '1',
         size: 1,
         price: 50000,
         fee: 25,
@@ -190,9 +189,9 @@ describe('Orders', () => {
     })
   })
   it('shows order count in tab', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -218,10 +217,9 @@ describe('Orders', () => {
     })
   })
   it('shows execution count in tab', async () => {
-    const mockExecutions: Fill[] = [
+    const mockExecutions: Execution[] = [
       {
-        id: 1,
-        orderId: 1,
+        clientOrderId: '1',
         size: 1,
         price: 50000,
         fee: 25,
@@ -310,9 +308,9 @@ describe('Orders', () => {
     })
   })
   it('displays order card with buy side', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -340,9 +338,9 @@ describe('Orders', () => {
     })
   })
   it('displays order card with sell side', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 2,
+        clientOrderId: '2',
         instrument: 'ETH/USD',
         exchange: 'kraken',
         side: 'sell',
@@ -370,9 +368,9 @@ describe('Orders', () => {
     })
   })
   it('displays order with different statuses', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 3,
+        clientOrderId: '3',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -398,9 +396,9 @@ describe('Orders', () => {
     })
   })
   it('displays order with new status', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 6,
+        clientOrderId: '6',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -426,9 +424,9 @@ describe('Orders', () => {
     })
   })
   it('displays rejected order status', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 4,
+        clientOrderId: '4',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -455,9 +453,9 @@ describe('Orders', () => {
     })
   })
   it('displays partially_filled order status', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 5,
+        clientOrderId: '5',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -484,10 +482,9 @@ describe('Orders', () => {
   })
   it('switches to executions tab and displays execution card', async () => {
     const user = userEvent.setup()
-    const mockExecutions: Fill[] = [
+    const mockExecutions: Execution[] = [
       {
-        id: 1,
-        orderId: 10,
+        clientOrderId: '10',
         size: 1.5,
         price: 50000,
         fee: 25,
@@ -533,10 +530,9 @@ describe('Orders', () => {
   })
   it('displays execution card without fees', async () => {
     const user = userEvent.setup()
-    const mockExecutions: Fill[] = [
+    const mockExecutions: Execution[] = [
       {
-        id: 2,
-        orderId: 20,
+        clientOrderId: '20',
         size: 2,
         price: 30000,
         fee: 0,
@@ -566,9 +562,9 @@ describe('Orders', () => {
   })
   it('filters orders by status', async () => {
     const user = userEvent.setup()
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -581,7 +577,7 @@ describe('Orders', () => {
         updatedAt: null,
       },
       {
-        id: 2,
+        clientOrderId: '2',
         instrument: 'ETH/USD',
         exchange: 'kraken',
         side: 'sell',
@@ -637,9 +633,9 @@ describe('Orders', () => {
     })
   })
   it('displays order with rejected status', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -666,9 +662,9 @@ describe('Orders', () => {
     })
   })
   it('displays order with error status', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'ETH/USD',
         exchange: 'kraken',
         side: 'sell',
@@ -695,9 +691,9 @@ describe('Orders', () => {
     })
   })
   it('displays order with partially_filled status', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'SOL/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -726,7 +722,7 @@ describe('Orders', () => {
   it('shows N/A when order created_at is missing', async () => {
     const mockOrders = [
       {
-        id: 7,
+        clientOrderId: '7',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy' as const,
@@ -752,9 +748,9 @@ describe('Orders', () => {
     })
   })
   it('displays order with unknown status using default styling', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'DOGE/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -781,12 +777,12 @@ describe('Orders', () => {
     })
   })
   it('shows N/A when order side is null', async () => {
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 8,
+        clientOrderId: '8',
         instrument: 'LTC/USD',
         exchange: 'kraken',
-        side: null as unknown as OrderStatus['side'],
+        side: null as unknown as Order['side'],
         orderType: 'market',
         size: 5,
         filledSize: 0,
@@ -811,10 +807,9 @@ describe('Orders', () => {
   })
   it('shows N/A when execution executedAt is undefined', async () => {
     const user = userEvent.setup()
-    const mockExecutions: Fill[] = [
+    const mockExecutions: Execution[] = [
       {
-        id: 100,
-        orderId: 200,
+        clientOrderId: '200',
         size: 1,
         price: 40000,
         fee: 10,
@@ -845,9 +840,9 @@ describe('Orders', () => {
   it('exports orders to CSV when export button clicked', async () => {
     const { exportToCSV } = await import('../../lib/csvExport')
     const user = userEvent.setup()
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 1,
+        clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
@@ -883,10 +878,8 @@ describe('Orders', () => {
   it('exports executions to CSV when export button clicked on executions tab', async () => {
     const { exportToCSV } = await import('../../lib/csvExport')
     const user = userEvent.setup()
-    const mockExecutions: Fill[] = [
+    const mockExecutions: Execution[] = [
       {
-        id: 1,
-        orderId: 10,
         clientOrderId: 'client-10',
         size: 1.5,
         price: 50000,
@@ -911,7 +904,7 @@ describe('Orders', () => {
 
     await user.click(executionsTab)
     await waitFor(() => {
-      expect(screen.getByText('Order #10')).toBeInTheDocument()
+      expect(screen.getByText('Order #client-10')).toBeInTheDocument()
     })
     const exportButton = screen.getByRole('button', { name: /Export CSV/i })
 
@@ -925,12 +918,12 @@ describe('Orders', () => {
   it('exports orders with null fields using fallback values', async () => {
     const { exportToCSV } = await import('../../lib/csvExport')
     const user = userEvent.setup()
-    const mockOrders: OrderStatus[] = [
+    const mockOrders: Order[] = [
       {
-        id: 9,
+        clientOrderId: '9',
         instrument: 'ETH/USD',
         exchange: 'kraken',
-        side: null as unknown as OrderStatus['side'],
+        side: null as unknown as Order['side'],
         orderType: 'market',
         size: 2,
         filledSize: 0,
@@ -963,10 +956,8 @@ describe('Orders', () => {
   it('exports executions with null fee and missing executedAt', async () => {
     const { exportToCSV } = await import('../../lib/csvExport')
     const user = userEvent.setup()
-    const mockExecutions: Fill[] = [
+    const mockExecutions: Execution[] = [
       {
-        id: 2,
-        orderId: 20,
         clientOrderId: 'client-20',
         size: 1,
         price: 30000,
@@ -991,7 +982,7 @@ describe('Orders', () => {
 
     await user.click(executionsTab)
     await waitFor(() => {
-      expect(screen.getByText('Order #20')).toBeInTheDocument()
+      expect(screen.getByText('Order #client-20')).toBeInTheDocument()
     })
     const exportButton = screen.getByRole('button', { name: /Export CSV/i })
 

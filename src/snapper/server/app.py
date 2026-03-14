@@ -65,7 +65,6 @@ from sqlalchemy import distinct
 from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
-from snapper.api.schemas.executions import ExecutionRecord
 from snapper.api.schemas.health import ConnectionStatsSchema
 from snapper.api.schemas.health import HealthCheckResponse
 from snapper.api.schemas.health import HealthTopics
@@ -78,12 +77,9 @@ from snapper.api.schemas.health import ZmqBridgeStats
 from snapper.api.schemas.health import ZmqComponents
 from snapper.api.schemas.health import ZmqConfig
 from snapper.api.schemas.health import ZmqHealthResponse
-from snapper.api.schemas.orders import OrderStatus
-from snapper.api.schemas.portfolio import PositionSnapshot
 from snapper.api.schemas.process import ProcessStatus
 from snapper.api.schemas.process import StrategyStatusPayload
 from snapper.api.schemas.process import SystemStatus
-from snapper.api.schemas.signals import TradingSignal
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.settings import SettingsService
@@ -105,9 +101,9 @@ from snapper.core.types import OrderExchange
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
-from snapper.data.models import OrderRecord
+from snapper.data.models import Order
 from snapper.data.models import Position
-from snapper.data.models import SignalEvent
+from snapper.data.models import Signal
 from snapper.data.models import SymbolAlias
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
@@ -115,6 +111,10 @@ from snapper.data.repository import get_repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import PositionData
+from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.topics.schemas import get_all_topic_names
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.process_routes import router as process_router
@@ -453,6 +453,7 @@ def _create_candles_signals_router() -> APIRouter:
                 candles = candles_query.scalars().all()
                 return [
                     CandleData(
+                        id=candle.public_id,
                         instrument=instrument,
                         exchange=exchange,
                         timeframe=candle.timeframe,
@@ -483,32 +484,32 @@ def _create_candles_signals_router() -> APIRouter:
         exchange: Annotated[OrderExchange | None, Query(description="Filter by exchange")] = None,
         hours: Annotated[int, Query(le=168, description="Hours of history to return")] = 24,
         limit: Annotated[int, Query(le=1000, description="Number of signals to return")] = 100,
-    ) -> list[TradingSignal]:
+    ) -> list[SignalData]:
         try:
             async with repo.session() as session:
                 since = dt.datetime.now(dt.UTC) - timedelta(hours=hours)
-                query = select(SignalEvent, Instrument).join(Instrument)
-                query = query.where(SignalEvent.timestamp >= since)
+                query = select(Signal, Instrument).join(Instrument)
+                query = query.where(Signal.timestamp >= since)
                 if instrument:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:
-                    query = query.where(SignalEvent.strategy_name == strategy)
+                    query = query.where(Signal.strategy_name == strategy)
                 if exchange:
                     query = query.where(Instrument.exchange == exchange)
-                query = query.order_by(desc(SignalEvent.timestamp)).limit(limit)
+                query = query.order_by(desc(Signal.timestamp)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
                 return [
-                    TradingSignal(
-                        id=signal.id,
+                    SignalData(
+                        id=signal.public_id,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
-                        timestamp=signal.timestamp,
                         side=signal.side,
                         strength=signal.strength,
                         reason=signal.reason,
                         strategy_name=signal.strategy_name,
                         price=signal.price,
+                        fired_at=signal.timestamp,
                     )
                     for signal, inst in signals_with_instruments
                 ]
@@ -587,28 +588,28 @@ def _create_orders_executions_router() -> APIRouter:
         exchange: Annotated[OrderExchange | None, Query(description="Filter by exchange")] = None,
         limit: Annotated[int, Query(ge=1, le=1000, description="Number of orders to return")] = 100,
         offset: Annotated[int, Query(ge=0, description="Number of orders to skip")] = 0,
-    ) -> list[OrderStatus]:
+    ) -> list[OrderData]:
         try:
             async with repo.session() as session:
-                query = select(OrderRecord, Instrument).join(Instrument)
+                query = select(Order, Instrument).join(Instrument)
                 if symbol:
                     query = query.where(Instrument.symbol == symbol)
                 if exchange:
                     query = query.where(Instrument.exchange == exchange)
-                query = query.order_by(desc(OrderRecord.created_at)).offset(offset).limit(limit)
+                query = query.order_by(desc(Order.created_at)).offset(offset).limit(limit)
                 result = await session.execute(query)
                 orders_with_instruments = result.all()
                 return [
-                    OrderStatus(
-                        id=order.id,
+                    OrderData(
+                        id=order.public_id,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
-                        client_order_id=order.client_order_id,
+                        client_order_id=order.client_order_id or "",
                         exchange_order_id=order.exchange_order_id,
                         created_at=order.created_at,
                         updated_at=order.updated_at,
                         side=order.side,
-                        type=order.type,
+                        order_type=order.order_type,
                         price=order.price,
                         size=order.size,
                         filled_size=order.filled_size,
@@ -629,33 +630,33 @@ def _create_orders_executions_router() -> APIRouter:
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         limit: Annotated[int, Query(le=1000, description="Number of executions to return")] = 100,
-    ) -> list[ExecutionRecord]:
+    ) -> list[ExecutionData]:
         try:
             async with repo.session() as session:
                 query = (
-                    select(Execution, OrderRecord, Instrument)
-                    .join(OrderRecord, Execution.order_id == OrderRecord.id)
-                    .join(Instrument, OrderRecord.instrument_id == Instrument.id)
+                    select(Execution, Order, Instrument)
+                    .join(Order, Execution.order_id == Order.id)
+                    .join(Instrument, Order.instrument_id == Instrument.id)
                     .order_by(desc(Execution.timestamp))
                     .limit(limit)
                 )
                 result = await session.execute(query)
                 rows = result.all()
                 return [
-                    ExecutionRecord(
-                        id=execution.id,
-                        order_id=execution.order_id,
-                        exec_id=execution.exec_id,
+                    ExecutionData(
+                        id=execution.public_id,
                         trade_id=execution.trade_id,
-                        timestamp=execution.timestamp,
-                        executed_at=execution.executed_at,
-                        price=execution.price,
+                        exchange_order_id=order.exchange_order_id,
+                        client_order_id=order.client_order_id or "",
+                        instrument=instrument.symbol,
+                        exchange=instrument.exchange,
+                        side=execution.side,
                         size=execution.size,
+                        price=execution.price,
                         fee=execution.fee,
                         fee_asset=execution.fee_asset,
-                        instrument=instrument.symbol,
-                        side=order.side,
-                        exchange=instrument.exchange,
+                        status=execution.status,
+                        executed_at=execution.executed_at or execution.timestamp,
                     )
                     for execution, order, instrument in rows
                 ]
@@ -668,22 +669,22 @@ def _create_orders_executions_router() -> APIRouter:
         _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_POSITIONS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
-    ) -> list[PositionSnapshot]:
+    ) -> list[PositionData]:
         try:
             async with repo.session() as session:
                 query = select(Position, Instrument).join(Instrument)
                 result = await session.execute(query)
                 positions_with_instruments = result.all()
                 return [
-                    PositionSnapshot(
-                        id=position.id,
+                    PositionData(
+                        id=position.public_id,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
                         quantity=position.quantity,
                         average_price=position.average_price,
                         unrealized_pnl=position.unrealized_pnl,
                         realized_pnl=position.realized_pnl,
-                        updated_at=position.updated_at,
+                        timestamp=position.timestamp,
                     )
                     for position, inst in positions_with_instruments
                 ]

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useTradeStore } from './trade'
-import type { OrderStatus, Fill, Signal, Position } from '../types/entities'
+import type { Order, Execution, Signal, Position } from '../types/entities'
 import {
   createTestOrder,
   createTestExecution,
@@ -30,20 +30,20 @@ describe('useTradeStore', () => {
   })
   describe('updateOrders', () => {
     it('sets orders array', () => {
-      const orders: OrderStatus[] = [
-        createTestOrder({ id: '1', instrument: 'BTC-USD', size: 1, price: 50000 }),
+      const orders: Order[] = [
+        createTestOrder({ clientOrderId: '1', instrument: 'BTC-USD', size: 1, price: 50000 }),
       ]
 
       useTradeStore.getState().updateOrders(orders)
       expect(useTradeStore.getState().orders).toEqual(orders)
     })
     it('replaces existing orders', () => {
-      const initialOrders: OrderStatus[] = [
-        createTestOrder({ id: '1', instrument: 'BTC-USD', size: 1, price: 50000 }),
+      const initialOrders: Order[] = [
+        createTestOrder({ clientOrderId: '1', instrument: 'BTC-USD', size: 1, price: 50000 }),
       ]
-      const newOrders: OrderStatus[] = [
+      const newOrders: Order[] = [
         createTestOrder({
-          id: '2',
+          clientOrderId: '2',
           instrument: 'ETH-USD',
           side: 'sell',
           orderType: 'market',
@@ -59,8 +59,8 @@ describe('useTradeStore', () => {
   })
   describe('addOrder', () => {
     it('adds new order to the beginning', () => {
-      const order: OrderStatus = createTestOrder({
-        id: '1',
+      const order: Order = createTestOrder({
+        clientOrderId: '1',
         instrument: 'BTC-USD',
         size: 1,
         price: 50000,
@@ -70,16 +70,16 @@ describe('useTradeStore', () => {
       expect(useTradeStore.getState().orders[0]).toEqual(order)
     })
     it('updates existing order by id', () => {
-      const order: OrderStatus = createTestOrder({
-        id: '1',
+      const order: Order = createTestOrder({
+        clientOrderId: '1',
         instrument: 'BTC-USD',
         size: 1,
         price: 50000,
       })
 
       useTradeStore.getState().addOrder(order)
-      const updatedOrder: OrderStatus = createTestOrder({
-        id: '1',
+      const updatedOrder: Order = createTestOrder({
+        clientOrderId: '1',
         instrument: 'BTC-USD',
         size: 2,
         price: 51000,
@@ -93,8 +93,8 @@ describe('useTradeStore', () => {
   })
   describe('updateOrder', () => {
     it('updates order by id with partial data', () => {
-      const order: OrderStatus = createTestOrder({
-        id: '1',
+      const order: Order = createTestOrder({
+        clientOrderId: '1',
         instrument: 'BTC-USD',
         size: 1,
         price: 50000,
@@ -107,13 +107,13 @@ describe('useTradeStore', () => {
       expect(useTradeStore.getState().orders[0].size).toBe(1)
     })
     it('does not modify other orders', () => {
-      const order1: OrderStatus = createTestOrder({
-        id: '1',
+      const order1: Order = createTestOrder({
+        clientOrderId: '1',
         instrument: 'BTC-USD',
         size: 1,
       })
-      const order2: OrderStatus = createTestOrder({
-        id: '2',
+      const order2: Order = createTestOrder({
+        clientOrderId: '2',
         instrument: 'ETH-USD',
         side: 'sell',
         orderType: 'market',
@@ -125,17 +125,16 @@ describe('useTradeStore', () => {
       useTradeStore.getState().addOrder(order2)
       useTradeStore.getState().updateOrder('1', { status: 'filled' })
       const orders = useTradeStore.getState().orders
-      const ethOrder = orders.find(o => o.id === '2')
+      const ethOrder = orders.find(o => o.clientOrderId === '2')
 
       expect(ethOrder?.status).toBe('open')
     })
   })
   describe('updateExecutions', () => {
     it('sets executions array', () => {
-      const executions: Fill[] = [
+      const executions: Execution[] = [
         createTestExecution({
-          id: '1',
-          orderId: 'o1',
+          clientOrderId: 'o1',
           instrument: 'BTC-USD',
           price: 50000,
           size: 1,
@@ -148,9 +147,8 @@ describe('useTradeStore', () => {
   })
   describe('addExecution', () => {
     it('adds new execution to the beginning', () => {
-      const execution: Fill = createTestExecution({
-        id: '1',
-        orderId: 'o1',
+      const execution: Execution = createTestExecution({
+        clientOrderId: 'o1',
         instrument: 'BTC-USD',
         price: 50000,
         size: 1,
@@ -160,9 +158,8 @@ describe('useTradeStore', () => {
       expect(useTradeStore.getState().executions[0]).toEqual(execution)
     })
     it('does not add duplicate execution', () => {
-      const execution: Fill = createTestExecution({
-        id: '1',
-        orderId: 'o1',
+      const execution: Execution = createTestExecution({
+        clientOrderId: 'o1',
         instrument: 'BTC-USD',
         price: 50000,
         size: 1,
@@ -249,28 +246,26 @@ describe('useTradeStore', () => {
       useTradeStore.getState().addSignal(signal)
       expect(useTradeStore.getState().signals[0]).toEqual(signal)
     })
-    it('does not add duplicate signal with same timestamp and strategy', () => {
-      const timestamp = new Date()
+    it('does not add duplicate signal with same firedAt and strategy', () => {
+      const firedAt = new Date()
       const signal: Signal = createTestSignal({
-        id: 1,
         instrument: 'BTC-USD',
         strategyName: 'macd',
-        timestamp,
+        firedAt,
       })
 
       useTradeStore.getState().addSignal(signal)
-      useTradeStore.getState().addSignal({ ...signal, id: 2 })
+      useTradeStore.getState().addSignal({ ...signal, reason: 'duplicate' })
       expect(useTradeStore.getState().signals).toHaveLength(1)
     })
     it('limits signals to 100', () => {
-      const timestamp = new Date()
+      const firedAt = new Date()
 
       for (let i = 0; i < 105; i++) {
         const signal: Signal = createTestSignal({
-          id: i,
           instrument: 'BTC-USD',
           strategyName: `strategy_${i}`,
-          timestamp: new Date(timestamp.getTime() + i),
+          firedAt: new Date(firedAt.getTime() + i),
         })
 
         useTradeStore.getState().addSignal(signal)
@@ -282,11 +277,10 @@ describe('useTradeStore', () => {
   describe('clearTradeData', () => {
     it('resets all trade data to defaults', () => {
       useTradeStore.setState({
-        orders: [createTestOrder({ id: '1', instrument: 'BTC-USD', size: 1 })],
+        orders: [createTestOrder({ clientOrderId: '1', instrument: 'BTC-USD', size: 1 })],
         executions: [
           createTestExecution({
-            id: '1',
-            orderId: 'o1',
+            clientOrderId: 'o1',
             instrument: 'BTC-USD',
             price: 50000,
             size: 1,

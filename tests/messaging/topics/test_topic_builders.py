@@ -210,8 +210,8 @@ class TestOrderEventTopic:
         When: Building fill event topic,
         Then: Returns correctly formatted topic.
         """
-        result = order_event_topic("kraken", "BTC-USD", "fill")
-        assert result == "orders.events.kraken.BTC-USD.fill"
+        result = order_event_topic("kraken", "BTC-USD", "executed")
+        assert result == "orders.events.kraken.BTC-USD.executed"
 
     def test_cancelled_event(self) -> None:
         """Verify cancelled event topic builds correctly.
@@ -250,8 +250,8 @@ class TestOrderEventTopic:
         When: Building event topic,
         Then: Returns correctly formatted topic.
         """
-        result = order_event_topic("zonda", "BTC-PLN", "fill")
-        assert result == "orders.events.zonda.BTC-PLN.fill"
+        result = order_event_topic("zonda", "BTC-PLN", "executed")
+        assert result == "orders.events.zonda.BTC-PLN.executed"
 
 
 class TestSignalTopic:
@@ -484,7 +484,7 @@ class TestParseOrderCommandTopic:
         When: Parsing as command topic,
         Then: Returns None.
         """
-        result = parse_order_command_topic("orders.events.kraken.BTC-USD.fill")
+        result = parse_order_command_topic("orders.events.kraken.BTC-USD.executed")
         assert result is None
 
     def test_parse_market_topic_returns_none(self) -> None:
@@ -555,11 +555,11 @@ class TestParseOrderEventTopic:
         When: Parsing the topic,
         Then: Returns ParsedOrderTopic with correct components.
         """
-        result = parse_order_event_topic("orders.events.kraken.BTC-USD.fill")
+        result = parse_order_event_topic("orders.events.kraken.BTC-USD.executed")
         assert result is not None
         assert result.exchange == "kraken"
         assert result.instrument == "BTC-USD"
-        assert result.suffix == "fill"
+        assert result.suffix == "executed"
 
     def test_parse_valid_accepted_topic(self) -> None:
         """Verify valid accepted event topic is parsed correctly.
@@ -618,7 +618,7 @@ class TestIsOrderTopic:
         When: Checking if order topic,
         Then: Returns True.
         """
-        assert is_order_topic("orders.events.kraken.BTC-USD.fill") is True
+        assert is_order_topic("orders.events.kraken.BTC-USD.executed") is True
         assert is_order_topic("orders.events.paper.ETH-USD.accepted") is True
 
     def test_order_command_topic_returns_true(self) -> None:
@@ -681,7 +681,7 @@ class TestParsedOrderTopicDataclass:
         When: Attempting to modify it,
         Then: Raises FrozenInstanceError.
         """
-        parsed = ParsedOrderTopic(exchange="kraken", instrument="BTC-USD", suffix="fill")
+        parsed = ParsedOrderTopic(exchange="kraken", instrument="BTC-USD", suffix="executed")
         with pytest.raises(AttributeError):
             parsed.exchange = "paper"
 
@@ -692,7 +692,7 @@ class TestParsedOrderTopicDataclass:
         When: Checking __slots__,
         Then: Has expected attributes.
         """
-        parsed = ParsedOrderTopic(exchange="kraken", instrument="BTC-USD", suffix="fill")
+        parsed = ParsedOrderTopic(exchange="kraken", instrument="BTC-USD", suffix="executed")
         assert hasattr(parsed, "__slots__")
 
 

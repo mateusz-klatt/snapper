@@ -19,7 +19,7 @@ from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.schemas.messages import OrderRequestEnvelope
+from snapper.messaging.schemas.data import OrderRequestData
 
 
 class TradingEngineService:
@@ -166,7 +166,7 @@ class TradingEngineService:
     ) -> None:
         """Publish order request to ZMQ execution topic.
 
-        Creates and sends an OrderRequestEnvelope to the execution system
+        Creates and sends an order request to the execution system
         via ZMQ pub/sub. Orders are published non-blocking.
 
         Args:
@@ -179,7 +179,7 @@ class TradingEngineService:
         signaled_at_dt = None
         if signaled_at is not None:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id=reason,
             instrument=self.instrument,
             mode=self.mode,

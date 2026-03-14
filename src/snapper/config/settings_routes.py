@@ -76,7 +76,7 @@ async def get_all_settings(
                 value=setting.value,
                 category=setting.category,
                 description=setting.description,
-                updated_at=setting.updated_at,
+                updated_at=setting.timestamp,
                 updated_by=setting.updated_by,
             )
             for setting in db_settings
@@ -146,7 +146,7 @@ async def update_setting(
             value=setting.value,
             category=setting.category,
             description=setting.description,
-            updated_at=setting.updated_at,
+            updated_at=setting.timestamp,
             updated_by=setting.updated_by,
         )
 

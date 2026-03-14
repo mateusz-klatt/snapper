@@ -255,6 +255,67 @@ async def test_upsert_candles_other_dialect_inserts_new_rows(
 
 
 @pytest.mark.asyncio
+async def test_upsert_candles_other_dialect_preserves_existing_public_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify upsert_candles preserves a caller-supplied public_id.
+
+    Given: A row that already contains a 'public_id' key,
+    When: upsert_candles is called via the fallback dialect path,
+    Then: The existing public_id is passed through, not overwritten.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    captured_values: list[dict[str, Any]] = []
+
+    async def _execute(stmt: Any) -> Any:
+        if hasattr(stmt, "values_kwargs") and stmt.values_kwargs is not None:
+            captured_values.append(stmt.values_kwargs)
+        if not captured_values:
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+        return SimpleNamespace(rowcount=1)
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    rows = [
+        {
+            "instrument_id": 1,
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+            "public_id": "my-custom-uuid",
+        },
+    ]
+    await repo.upsert_candles(rows)
+    assert rows[0]["public_id"] == "my-custom-uuid"
+
+
+@pytest.mark.asyncio
+async def test_upsert_trades_other_dialect_preserves_existing_public_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _upsert_batch preserves a caller-supplied public_id for trades.
+
+    Given: A trade row that already contains a 'public_id' key,
+    When: upsert_trades is called via the fallback dialect path,
+    Then: The existing public_id is preserved, not overwritten.
+    """
+    session = _DummyAsyncSession()
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
+    rows = [{"trade_id": "t1", "public_id": "my-trade-uuid"}]
+    await repo.upsert_trades(rows)
+    assert rows[0]["public_id"] == "my-trade-uuid"
+
+
+@pytest.mark.asyncio
 async def test_upsert_trades_savepoint_preserves_earlier_inserts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -379,7 +440,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
                 quote="USD",
                 asset_type="crypto",
                 created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
         )
         await s.commit()
@@ -488,12 +549,15 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     execution_id = await repo.insert_execution(
         order_id=order_id,
         timestamp=base_ts + timedelta(minutes=2, seconds=30),
+        side="buy",
+        status="filled",
         price=10.6,
         size=0.5,
         fee=0.01,
         fee_asset="USD",
     )
     assert isinstance(execution_id, int)
+    assert execution_id > 0
     async with repo.session() as session:
         stored_snapshot = MarketSnapshot(
             exchange="kraken",
@@ -510,7 +574,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             change_24h=1.5,
             spread=0.2,
             spread_pct=0.018,
-            updated_at=base_ts,
+            timestamp=base_ts,
         )
         session.add(stored_snapshot)
         await session.commit()
@@ -705,6 +769,10 @@ class DummyRepository(Repository):
     async def upsert_instrument(self, **kwargs: Any) -> int:
         """Upsert instrument - no-op returning 0."""
         return 0
+
+    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
+        """Load latest candle IDs - returns empty dict for dummy."""
+        return {}
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Upsert candles - no-op returning 0."""
@@ -1378,6 +1446,230 @@ async def test_mssql_upsert_candles_inserts_new_rows(
     result = await repo.upsert_candles(rows)
     assert result == 2
     assert created_sessions[0].execute_calls == 4
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_candles_preserves_existing_public_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify MSSQL upsert_candles preserves caller-supplied public_id.
+
+    Given: A row that already contains a 'public_id' key,
+    When: upsert_candles is called,
+    Then: The existing public_id is passed through, not overwritten.
+    """
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class InsertSession:
+        """Session where SELECT returns None so INSERT path runs."""
+
+        def __init__(self) -> None:
+            self.execute_calls = 0
+
+        def __enter__(self) -> InsertSession:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.execute_calls += 1
+            if self.execute_calls % 2 == 1:
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
+            return SimpleNamespace(rowcount=1)
+
+        def commit(self) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], InsertSession]:
+        def factory() -> InsertSession:
+            return InsertSession()
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_id": 1,
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 1.5,
+            "low": 0.5,
+            "close": 1.2,
+            "volume": 10.0,
+            "vwap": None,
+            "trades": 5,
+            "public_id": "my-custom-uuid",
+        },
+    ]
+    result = await repo.upsert_candles(rows)
+    assert result == 1
+    assert rows[0]["public_id"] == "my-custom-uuid"
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_trades_preserves_existing_public_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify MSSQL _sync_upsert_batch preserves caller-supplied public_id.
+
+    Given: A trade row that already contains a 'public_id' key,
+    When: upsert_trades is called,
+    Then: The existing public_id is preserved, not overwritten.
+    """
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class SimpleSession:
+        """Session that accepts any execute/commit."""
+
+        def __init__(self) -> None:
+            self.inserted_count = 0
+
+        def __enter__(self) -> SimpleSession:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def begin_nested(self) -> SimpleSession:
+            return self
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.inserted_count += 1
+            return SimpleNamespace(rowcount=1)
+
+        def commit(self) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], SimpleSession]:
+        def factory() -> SimpleSession:
+            return SimpleSession()
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    rows: list[dict[str, Any]] = [
+        {"trade_id": "t1", "public_id": "my-trade-uuid"},
+    ]
+    result = await repo.upsert_trades(rows)
+    assert result == 1
+    assert rows[0]["public_id"] == "my-trade-uuid"
+
+
+@pytest.mark.asyncio
+async def test_mssql_get_latest_candle_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL get_latest_candle_ids returns cached candle ID mapping.
+
+    Given: A session that returns candle rows with instrument_id/timeframe/open_at/public_id,
+    When: get_latest_candle_ids is called,
+    Then: A dict mapping (instrument_id, timeframe) to (open_at, public_id) is returned.
+    """
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 1, 0, 5, tzinfo=UTC)
+
+    class CandleIdSession:
+        """Session returning pre-defined candle ID rows."""
+
+        def __enter__(self) -> CandleIdSession:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                all=lambda: [
+                    SimpleNamespace(
+                        instrument_id=1, timeframe="1m", open_at=ts1, public_id="uuid-1"
+                    ),
+                    SimpleNamespace(
+                        instrument_id=2, timeframe="5m", open_at=ts2, public_id="uuid-2"
+                    ),
+                ]
+            )
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], CandleIdSession]:
+        def factory() -> CandleIdSession:
+            return CandleIdSession()
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    result = await repo.get_latest_candle_ids()
+    assert result == {
+        (1, "1m"): (ts1, "uuid-1"),
+        (2, "5m"): (ts2, "uuid-2"),
+    }
 
 
 @pytest.mark.asyncio
@@ -2497,7 +2789,7 @@ async def test_mssql_insert_order_uses_sync_session(
     class _DummyOrder:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
-            self.id = 0
+            self.id = ""
 
     class _Session:
         def __init__(self) -> None:
@@ -2517,12 +2809,12 @@ async def test_mssql_insert_order_uses_sync_session(
         def commit(self) -> None:
             self.commit_called = True
             if self.added is not None:
-                self.added.id = 7
+                self.added.id = "order-uuid-7777"
 
         def refresh(self, obj: _DummyOrder) -> None:
             self.refreshed = obj
 
-    monkeypatch.setattr("snapper.data.repository.OrderRecord", _DummyOrder)
+    monkeypatch.setattr("snapper.data.repository.Order", _DummyOrder)
     repo.session_factory = cast(Any, lambda: _Session())
     result = await repo.insert_order(
         instrument_id=1,
@@ -2535,7 +2827,7 @@ async def test_mssql_insert_order_uses_sync_session(
         size=1.0,
         status="open",
     )
-    assert result == 7
+    assert result == "order-uuid-7777"
 
 
 class _MinimalRepository(Repository):
@@ -2549,6 +2841,9 @@ class _MinimalRepository(Repository):
     @property
     def dialect_name(self) -> str:
         return "sqlite"
+
+    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
+        return {}
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         return 0

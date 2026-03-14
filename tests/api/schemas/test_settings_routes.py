@@ -152,14 +152,14 @@ class TestSettingsRoutes:
         mock_setting1.value = "value1"
         mock_setting1.category = "category1"
         mock_setting1.description = "desc1"
-        mock_setting1.updated_at = datetime.now(UTC)
+        mock_setting1.timestamp = datetime.now(UTC)
         mock_setting1.updated_by = "user1"
         mock_setting2 = MagicMock()
         mock_setting2.key = "key2"
         mock_setting2.value = "value2"
         mock_setting2.category = "category2"
         mock_setting2.description = "desc2"
-        mock_setting2.updated_at = datetime.now(UTC)
+        mock_setting2.timestamp = datetime.now(UTC)
         mock_setting2.updated_by = "user2"
         mock_session.execute.return_value = MockResult([mock_setting1, mock_setting2])
         mock_repository.session.return_value = mock_session
@@ -192,7 +192,7 @@ class TestSettingsRoutes:
         mock_setting.value = "value1"
         mock_setting.category = "auth"
         mock_setting.description = "desc1"
-        mock_setting.updated_at = datetime.now(UTC)
+        mock_setting.timestamp = datetime.now(UTC)
         mock_setting.updated_by = "user1"
         mock_session.execute.return_value = MockResult([mock_setting])
         mock_repository.session.return_value = mock_session
@@ -250,7 +250,7 @@ class TestSettingsRoutes:
         mock_setting.value = "updated_value"
         mock_setting.category = "updated_category"
         mock_setting.description = "Updated description"
-        mock_setting.updated_at = datetime.now(UTC)
+        mock_setting.timestamp = datetime.now(UTC)
         mock_setting.updated_by = "test_user"
         mock_session.execute.return_value = MockResult([mock_setting])
         mock_repository.session.return_value = mock_session

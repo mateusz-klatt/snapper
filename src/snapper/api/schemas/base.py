@@ -12,6 +12,8 @@ Configuration variants:
 
 from datetime import UTC
 from datetime import datetime
+from typing import Self
+from uuid import uuid7
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -81,14 +83,46 @@ STRICT_DATA_CONFIG = ConfigDict(
 
 
 class StrictDataSchema(BaseModel):
-    """Base schema for ZMQ data payloads (CandleData, TradeData, etc.).
+    """Base schema for all ZMQ data payloads and message entities.
 
-    Forbids extra fields to catch protocol errors. Uses relaxed type coercion
-    (strict=False) since data arrives from JSON deserialization over ZMQ where
-    numeric types may not be strictly distinguished.
+    Every entity on the messaging bus inherits from this base, gaining a unique
+    UUID7 identifier, a type discriminator for routing/parsing, and a bus timestamp
+    recording when the entity was created. Subclasses MUST override type with a
+    Literal default (e.g. type: Literal["candle"] = "candle").
+
+    Also provides to_json/from_json for ZMQ serialization.
+
+    Attributes:
+        id: Unique identifier (UUID7), generated at creation time.
+        type: Message type discriminator for routing and deserialization.
+        timestamp: Bus arrival timestamp (UTC), generated once at creation.
     """
 
     model_config = STRICT_DATA_CONFIG
+
+    id: str = Field(default_factory=lambda: str(uuid7()))
+    type: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    def to_json(self) -> str:
+        """Serialize to JSON string for ZMQ transport.
+
+        Returns:
+            JSON string representation.
+        """
+        return self.model_dump_json(by_alias=True)
+
+    @classmethod
+    def from_json(cls, data: str) -> Self:
+        """Deserialize from JSON string.
+
+        Args:
+            data: JSON string to parse.
+
+        Returns:
+            Typed instance.
+        """
+        return cls.model_validate_json(data)
 
 
 class MessageResponse(StrictApiSchema):

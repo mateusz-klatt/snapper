@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from snapper.interface.websocket.schemas import HealthStatus
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
+from snapper.messaging.schemas.data import HeartbeatData
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +69,16 @@ class StrategyHealthMonitor:
             }
         return feed_health
 
-    def build_heartbeat_envelope(self, lag_ms: int) -> HeartbeatEnvelope:
+    def build_heartbeat_envelope(self, lag_ms: int) -> HeartbeatData:
         """Build a heartbeat envelope with current strategy state.
 
         Args:
             lag_ms: Milliseconds since last data received.
 
         Returns:
-            HeartbeatEnvelope ready for publishing.
+            Heartbeat data ready for publishing.
         """
-        return HeartbeatEnvelope(
+        return HeartbeatData(
             component=f"strategy_{self.strategy.name}",
             sequence=self.strategy.heartbeat_seq,
             status=self.classify_health_status(lag_ms),

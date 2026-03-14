@@ -341,9 +341,10 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -360,8 +361,8 @@ class TestSeedUsers:
             assert count == 1
             row = conn.execute(text("SELECT * FROM users WHERE username = 'testadmin'")).fetchone()
             assert row is not None
-            assert row[1] == "testadmin"
-            assert row[3].startswith("$2b$")
+            assert row[2] == "testadmin"
+            assert row[4].startswith("$2b$")
         engine.dispose()
 
     def test_seed_users_skips_when_any_exist(self, tmp_path: Path) -> None:
@@ -377,9 +378,10 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -420,9 +422,10 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -452,9 +455,10 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -483,9 +487,10 @@ class TestSeedUsers:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -523,8 +528,9 @@ class TestSeedSettings:
             conn.execute(
                 text(
                     "CREATE TABLE settings ("
-                    "key TEXT PRIMARY KEY, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, updated_at TIMESTAMP)"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "key TEXT UNIQUE, value TEXT, category TEXT,"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -541,8 +547,8 @@ class TestSeedSettings:
             assert count == 1
             row = conn.execute(text("SELECT * FROM settings WHERE key = 'ui_origin'")).fetchone()
             assert row is not None
-            assert row[1] == "http://localhost:3000"
-            assert row[4] == 0
+            assert row[3] == "http://localhost:3000"
+            assert row[6] == 0
         engine.dispose()
 
     def test_seed_settings_encrypts_sensitive_keys(self, tmp_path: Path) -> None:
@@ -558,8 +564,9 @@ class TestSeedSettings:
             conn.execute(
                 text(
                     "CREATE TABLE settings ("
-                    "key TEXT PRIMARY KEY, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, updated_at TIMESTAMP)"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "key TEXT UNIQUE, value TEXT, category TEXT,"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -596,8 +603,9 @@ class TestSeedSettings:
             conn.execute(
                 text(
                     "CREATE TABLE settings ("
-                    "key TEXT PRIMARY KEY, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, updated_at TIMESTAMP)"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "key TEXT UNIQUE, value TEXT, category TEXT,"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -624,7 +632,7 @@ class TestSeedSettings:
             assert count == 0
             rows = conn.execute(text("SELECT * FROM settings")).fetchall()
             assert len(rows) == 1
-            assert rows[0][1] == "http://old:3000"
+            assert rows[0][3] == "http://old:3000"
         engine.dispose()
 
     def test_seed_settings_empty_list(self, tmp_path: Path) -> None:
@@ -640,8 +648,9 @@ class TestSeedSettings:
             conn.execute(
                 text(
                     "CREATE TABLE settings ("
-                    "key TEXT PRIMARY KEY, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, updated_at TIMESTAMP)"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "key TEXT UNIQUE, value TEXT, category TEXT,"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -667,16 +676,18 @@ class TestRunSeed:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
                 )
             )
             conn.execute(
                 text(
                     "CREATE TABLE settings ("
-                    "key TEXT PRIMARY KEY, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, updated_at TIMESTAMP)"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "key TEXT UNIQUE, value TEXT, category TEXT,"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()
@@ -712,16 +723,18 @@ class TestRunSeed:
             conn.execute(
                 text(
                     "CREATE TABLE users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, email TEXT,"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
                 )
             )
             conn.execute(
                 text(
                     "CREATE TABLE settings ("
-                    "key TEXT PRIMARY KEY, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, updated_at TIMESTAMP)"
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "key TEXT UNIQUE, value TEXT, category TEXT,"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
                 )
             )
             conn.commit()

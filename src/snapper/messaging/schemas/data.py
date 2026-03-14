@@ -1,19 +1,42 @@
-"""Market data and trading event schemas for ZMQ messaging.
+"""Market data, trading event, and system message schemas for ZMQ messaging.
 
-This module defines Pydantic models representing market data structures
-(ticks, candles, trades) and trading events (signals, fills, order status).
-These schemas are embedded in message envelopes for inter-process communication.
+This module defines Pydantic models representing all entities that flow through
+the ZMQ messaging bus. Each entity inherits StrictDataSchema which provides id
+(UUID7), type (Literal discriminator), and timestamp (bus creation time).
 
-Classes:
+These schemas serve as the single source of truth for both ZMQ transport and
+REST API responses. Domain-specific timestamps (open_at, fired_at, executed_at,
+created_at) are separate from the bus timestamp.
+
+Market data classes:
     TickData: Real-time bid/ask/last price snapshot.
     CandleData: OHLCV candle data for a specific timeframe.
     TradeData: Individual trade execution data.
+
+Trading event classes:
     SignalData: Trading signal with direction and strength.
-    FillData: Order fill/execution details.
-    OrderStatusData: Current order state and fill progress.
+    ExecutionData: Order fill/execution details.
+    OrderData: Current order state and fill progress.
+    PositionData: Portfolio position snapshot.
+
+Order command classes:
+    OrderRequestData: Order submission request.
+    OrderCancelData: Order cancellation request.
+    OrderReplaceData: Order modification request.
+    OrderEventData: Lightweight order lifecycle event.
+
+System message classes:
+    HeartbeatData: Component health heartbeat.
+    SettingChangedData: Configuration change notification.
+    SymbolAliasUpdateData: Symbol alias cache invalidation.
+    ReplayStartData: Historical data replay start marker.
+    ReplayEndData: Historical data replay end marker.
 """
 
+from datetime import UTC
 from datetime import datetime
+from typing import Any
+from typing import Literal
 
 from pydantic import Field
 
@@ -21,7 +44,9 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
+from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import FillStatus
+from snapper.interface.websocket.schemas import HealthStatus
 from snapper.interface.websocket.schemas import OrderType
 from snapper.interface.websocket.schemas import TradeSide
 
@@ -41,6 +66,7 @@ class TickData(StrictDataSchema):
         last: Last traded price.
     """
 
+    type: Literal["tick"] = "tick"
     instrument: str
     exchange: MarketDataExchange
     volume: float
@@ -69,6 +95,7 @@ class CandleData(StrictDataSchema):
         trades: Number of trades in the candle (optional).
     """
 
+    type: Literal["candle"] = "candle"
     instrument: str
     exchange: MarketDataExchange
     timeframe: str
@@ -97,6 +124,7 @@ class TradeData(StrictDataSchema):
         side: Trade direction ('buy'/'sell') if available.
     """
 
+    type: Literal["trade"] = "trade"
     instrument: str
     exchange: MarketDataExchange
     executed_at: datetime | None = None
@@ -119,8 +147,10 @@ class SignalData(StrictDataSchema):
         reason: Human-readable explanation for the signal.
         price: Suggested entry/exit price (optional).
         strategy_name: Name of the generating strategy (optional).
+        fired_at: Domain timestamp when the signal was generated.
     """
 
+    type: Literal["signal"] = "signal"
     instrument: str
     exchange: OrderExchange
     side: TradeSide
@@ -128,9 +158,10 @@ class SignalData(StrictDataSchema):
     reason: str
     price: float | None = None
     strategy_name: str | None = None
+    fired_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class FillData(StrictDataSchema):
+class ExecutionData(StrictDataSchema):
     """Order fill/execution details from an exchange.
 
     Represents a completed or partial fill of an order.
@@ -153,6 +184,7 @@ class FillData(StrictDataSchema):
         executed_at: Timestamp of the fill.
     """
 
+    type: Literal["execution"] = "execution"
     trade_id: str | None = None
     exchange_order_id: str | None = None
     client_order_id: str
@@ -164,23 +196,16 @@ class FillData(StrictDataSchema):
     fee: float
     fee_asset: str
     status: FillStatus
-    executed_at: datetime
+    executed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class OrderStatusData(StrictDataSchema):
-    """Current state of an order for ZMQ event publishing (non-fill events).
+class OrderData(StrictDataSchema):
+    """Current state of an order.
 
+    Used for both ZMQ event publishing and REST API responses.
     Published on orders.events.{exchange}.{instrument}.{status} topics.
-    Note: Fill events use FillEnvelope, NOT this class.
 
     INVARIANT: The 'status' field MUST match the topic suffix.
-    For example, if published to orders.events.kraken.BTC-USD.submitted,
-    then status MUST be 'submitted'. This ensures consistency between
-    topic-based routing and payload-based processing.
-
-    Payload separation:
-        - orders.events.*.*.fill -> FillEnvelope (FillStatus)
-        - orders.events.*.*.{other} -> OrderStatusEnvelope (OrderEventType)
 
     Attributes:
         exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
@@ -189,28 +214,246 @@ class OrderStatusData(StrictDataSchema):
         instrument: Trading pair symbol.
         exchange: Exchange where the order is placed.
         side: Order direction ('buy' or 'sell').
-        status: Event type matching topic suffix (OrderEventType, excludes 'fill').
+        status: Event type matching topic suffix (OrderEventType, excludes 'execution').
         order_type: Type of order ('market', 'limit', etc.).
         size: Total order size.
         filled_size: Amount filled so far.
         price: Limit price (for limit orders).
         average_price: Average fill price (for partial fills).
         reason: Optional rejection/failure reason (for 'rejected' status).
+        time_in_force: Order time-in-force setting.
+        error: Error message if order failed.
         created_at: Order creation timestamp.
         updated_at: Last status update timestamp.
     """
 
+    type: Literal["order"] = "order"
     exchange_order_id: str | None = None
     client_order_id: str
     instrument: str
     exchange: OrderExchange
     side: TradeSide
-    status: OrderEventType
+    status: str
     order_type: OrderType
     size: float
     filled_size: float
     price: float | None = None
     average_price: float | None = None
     reason: str | None = None
-    created_at: datetime
+    time_in_force: str | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
+
+
+class PositionData(StrictDataSchema):
+    """Portfolio position snapshot.
+
+    Represents a single position in the portfolio.
+    Used for both ZMQ event publishing and REST API responses.
+    The inherited ``timestamp`` field carries the last-update time.
+
+    Attributes:
+        instrument: Trading pair symbol.
+        exchange: Exchange where the position is held.
+        quantity: Position size (positive for long, negative for short).
+        average_price: Average entry price.
+        unrealized_pnl: Unrealized profit/loss.
+        realized_pnl: Realized profit/loss.
+    """
+
+    type: Literal["position"] = "position"
+    instrument: str
+    exchange: OrderExchange
+    quantity: float
+    average_price: float
+    unrealized_pnl: float
+    realized_pnl: float
+
+
+class OrderRequestData(StrictDataSchema):
+    """Order request from strategy to executor.
+
+    Sent by strategies to request order placement on an exchange.
+    Contains all information needed for order creation.
+    Published on: orders.commands.{exchange}.{instrument}.submit
+
+    Attributes:
+        strategy_id: Identifier of the requesting strategy.
+        exchange: Target exchange for the order.
+        instrument: Trading pair symbol.
+        mode: Execution mode ('live' or 'paper').
+        side: Order direction ('buy' or 'sell').
+        order_type: Type of order ('market', 'limit', etc.).
+        quantity: Order size (must be positive).
+        price: Limit price (required for limit orders).
+        client_order_id: Client-side order identifier.
+        signaled_at: Original signal timestamp (optional).
+    """
+
+    type: Literal["order_request"] = "order_request"
+    strategy_id: str
+    exchange: OrderExchange
+    instrument: str
+    mode: ExecutionMode
+    side: TradeSide
+    order_type: OrderType
+    quantity: float = Field(gt=0)
+    price: float | None = None
+    client_order_id: str
+    signaled_at: datetime | None = None
+
+
+class OrderCancelData(StrictDataSchema):
+    """Order cancel request from strategy to executor.
+
+    Sent to request cancellation of an existing order.
+    Published on: orders.commands.{exchange}.{instrument}.cancel
+
+    Attributes:
+        exchange: Target exchange for the cancel.
+        instrument: Trading pair symbol.
+        exchange_order_id: Exchange-assigned order ID.
+        client_order_id: Our generated order ID.
+    """
+
+    type: Literal["order_cancel"] = "order_cancel"
+    exchange: OrderExchange
+    instrument: str
+    exchange_order_id: str
+    client_order_id: str
+
+
+class OrderReplaceData(StrictDataSchema):
+    """Order replace/modify request from strategy to executor.
+
+    Sent to request modification of an existing order (price/quantity).
+    Published on: orders.commands.{exchange}.{instrument}.replace
+
+    Attributes:
+        exchange: Target exchange for the replace.
+        instrument: Trading pair symbol.
+        exchange_order_id: Exchange-assigned order ID.
+        client_order_id: Our generated order ID.
+        new_quantity: New order quantity (optional).
+        new_price: New limit price (optional).
+    """
+
+    type: Literal["order_replace"] = "order_replace"
+    exchange: OrderExchange
+    instrument: str
+    exchange_order_id: str
+    client_order_id: str
+    new_quantity: float | None = None
+    new_price: float | None = None
+
+
+class OrderEventData(StrictDataSchema):
+    """Lightweight order event for cancel/replace confirmations.
+
+    Used for publishing order lifecycle events that don't require full order
+    details. Preferred for cancel/replace results because those commands
+    don't carry side/order_type information.
+
+    Published on: orders.events.{exchange}.{instrument}.{event}
+
+    INVARIANT: The 'event' field MUST match the topic suffix.
+
+    Attributes:
+        exchange_order_id: Exchange-assigned order ID.
+        client_order_id: Our generated order ID.
+        exchange: Exchange where the order exists.
+        instrument: Trading pair symbol.
+        event: Event type matching topic suffix (OrderEventType).
+        reason: Optional rejection/cancellation reason.
+    """
+
+    type: Literal["order_event"] = "order_event"
+    exchange_order_id: str
+    client_order_id: str
+    exchange: OrderExchange
+    instrument: str
+    event: OrderEventType
+    reason: str | None = None
+
+
+class HeartbeatData(StrictDataSchema):
+    """Component health heartbeat message.
+
+    Published periodically by components to indicate they are alive.
+    Used for health monitoring and dead component detection.
+
+    Attributes:
+        component: Name of the sending component.
+        sequence: Monotonically increasing sequence number.
+        status: Current health status.
+        lag_ms: Processing lag in milliseconds.
+        meta: Optional metadata dictionary for extensions.
+    """
+
+    type: Literal["heartbeat"] = "heartbeat"
+    component: str
+    sequence: int
+    status: HealthStatus
+    lag_ms: int
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class SettingChangedData(StrictDataSchema):
+    """Configuration setting change notification.
+
+    Published when a setting is modified in the database.
+    Subscribers use this to invalidate caches or reload config.
+
+    Attributes:
+        key: Setting key that changed.
+        value: New setting value.
+        category: Setting category for grouping.
+        updated_by: User who made the change (optional).
+    """
+
+    type: Literal["setting_changed"] = "setting_changed"
+    key: str
+    value: str
+    category: str
+    updated_by: str | None = None
+
+
+class SymbolAliasUpdateData(StrictDataSchema):
+    """Symbol alias cache invalidation message.
+
+    Published when symbol aliases are updated in the database.
+    Subscribers should clear their symbol mapper caches.
+
+    Attributes:
+        event: Event type (always 'symbol_aliases_updated').
+        action: Required action (always 'clear_cache').
+    """
+
+    type: Literal["symbol_alias_update"] = "symbol_alias_update"
+    event: Literal["symbol_aliases_updated"] = "symbol_aliases_updated"
+    action: Literal["clear_cache"] = "clear_cache"
+
+
+class ReplayStartData(StrictDataSchema):
+    """Historical data replay start marker.
+
+    Sent at the beginning of a historical data replay session.
+    Strategies use this to reset state before receiving replayed data.
+
+    Attributes:
+        started_at: Replay start timestamp (optional).
+    """
+
+    type: Literal["replay_start"] = "replay_start"
+    started_at: datetime | None = None
+
+
+class ReplayEndData(StrictDataSchema):
+    """Historical data replay end marker.
+
+    Sent at the end of a historical data replay session.
+    Strategies use this to finalize analysis and generate reports.
+    """
+
+    type: Literal["replay_end"] = "replay_end"

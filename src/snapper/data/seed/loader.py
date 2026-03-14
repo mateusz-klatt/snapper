@@ -21,6 +21,7 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid7
 
 import bcrypt
 from loguru import logger
@@ -193,15 +194,18 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
         password_hash = _hash_password(user.password)
         conn.execute(
             text(
-                "INSERT INTO users (username, email, password_hash, role, is_active, created_at)"
-                " VALUES (:username, :email, :password_hash, :role, 1, :created_at)"
+                "INSERT INTO users"
+                " (public_id, username, email, password_hash, role, is_active, created_at, timestamp)"
+                " VALUES (:public_id, :username, :email, :password_hash, :role, 1, :created_at, :timestamp)"
             ),
             {
+                "public_id": str(uuid7()),
                 "username": user.username,
                 "email": user.email,
                 "password_hash": password_hash,
                 "role": user.role,
                 "created_at": now,
+                "timestamp": now,
             },
         )
     logger.info(f"Seeded {len(users)} users")
@@ -234,17 +238,19 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
             is_encrypted = 1
         result = conn.execute(
             text(
-                "INSERT INTO settings (key, value, category, description, is_encrypted, updated_at)"
-                " VALUES (:key, :value, :category, :description, :is_encrypted, :updated_at)"
+                "INSERT INTO settings"
+                " (public_id, key, value, category, description, is_encrypted, timestamp)"
+                " VALUES (:public_id, :key, :value, :category, :description, :is_encrypted, :timestamp)"
                 " ON CONFLICT(key) DO NOTHING"
             ),
             {
+                "public_id": str(uuid7()),
                 "key": setting.key,
                 "value": stored_value,
                 "category": setting.category,
                 "description": setting.description,
                 "is_encrypted": is_encrypted,
-                "updated_at": now,
+                "timestamp": now,
             },
         )
         inserted += result.rowcount

@@ -28,8 +28,8 @@ from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
-from snapper.messaging.schemas.messages import FillEnvelope
-from snapper.messaging.schemas.messages import OrderStatusEnvelope
+from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import OrderData
 
 
 @pytest.fixture
@@ -2932,10 +2932,10 @@ class TestZmqWsBridgeE2ESmoke:
     async def test_raw_json_passthrough_for_fills(
         self, bridge_with_context: ZmqWebSocketBridgeService
     ) -> None:
-        """Verify fill envelope JSON is passed through unchanged.
+        """Verify execution data JSON is passed through unchanged.
 
         Given: A subscription for executions topic,
-        When: Forwarding a FillEnvelope as JSON,
+        When: Forwarding an ExecutionData as JSON,
         Then: Raw JSON is sent to WebSocket without modification.
         """
         mock_ws = AsyncMock()
@@ -2950,7 +2950,7 @@ class TestZmqWsBridgeE2ESmoke:
         ]
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
-        fill = FillEnvelope(
+        fill = ExecutionData(
             trade_id="trade-1",
             exchange_order_id="exec-1",
             client_order_id="order-123",
@@ -2966,7 +2966,7 @@ class TestZmqWsBridgeE2ESmoke:
         )
         raw_json = fill.model_dump_json()
         await bridge_with_context._forward_to_clients(
-            topic, "orders.events.kraken.BTC-USD.fill", raw_json
+            topic, "orders.events.kraken.BTC-USD.executed", raw_json
         )
         mock_ws.send_text.assert_called_once_with(raw_json)
 
@@ -2974,10 +2974,10 @@ class TestZmqWsBridgeE2ESmoke:
     async def test_raw_json_passthrough_for_orders(
         self, bridge_with_context: ZmqWebSocketBridgeService
     ) -> None:
-        """Verify order status envelope JSON is passed through unchanged.
+        """Verify order data JSON is passed through unchanged.
 
         Given: A subscription for orders topic,
-        When: Forwarding an OrderStatusEnvelope as JSON,
+        When: Forwarding an OrderData as JSON,
         Then: Raw JSON is sent to WebSocket without modification.
         """
         mock_ws = AsyncMock()
@@ -2992,7 +2992,7 @@ class TestZmqWsBridgeE2ESmoke:
         ]
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
-        order = OrderStatusEnvelope(
+        order = OrderData(
             exchange_order_id=None,
             client_order_id="order-789",
             instrument="BTC-USD",
@@ -3032,7 +3032,7 @@ class TestPatternMatching:
         When: Finding matching pattern for fill topic,
         Then: Returns config with orders.events pattern.
         """
-        config = bridge._find_matching_pattern("orders.events.kraken.BTC-USD.fill")
+        config = bridge._find_matching_pattern("orders.events.kraken.BTC-USD.executed")
         assert config is not None
         assert config.pattern == "orders.events."
 
@@ -3121,17 +3121,17 @@ class TestBackpressure:
         assert bridge.topic_metrics[topic].dropped_count == 1
 
 
-class TestEnvelopeSerialization:
-    """Tests for envelope model JSON serialization."""
+class TestDataSerialization:
+    """Tests for data model JSON serialization."""
 
     def test_fill_envelope_serialization_matches_expected_format(self) -> None:
-        """Verify FillEnvelope serializes to expected JSON format.
+        """Verify ExecutionData serializes to expected JSON format.
 
-        Given: A FillEnvelope with all required fields,
+        Given: An ExecutionData with all required fields,
         When: Serializing to JSON,
         Then: JSON contains all fields with correct values.
         """
-        fill = FillEnvelope(
+        fill = ExecutionData(
             trade_id="trade-123",
             exchange_order_id="exchange-fill-123",
             client_order_id="order-123",
@@ -3147,7 +3147,7 @@ class TestEnvelopeSerialization:
         )
         json_data = fill.model_dump_json()
         parsed = json.loads(json_data)
-        assert parsed["type"] == "fill"
+        assert parsed["type"] == "execution"
         assert parsed["exchange_order_id"] == "exchange-fill-123"
         assert parsed["client_order_id"] == "order-123"
         assert parsed["exchange"] == "kraken"
@@ -3155,13 +3155,13 @@ class TestEnvelopeSerialization:
         assert parsed["size"] == pytest.approx(0.5)
 
     def test_order_status_envelope_serialization_matches_expected_format(self) -> None:
-        """Verify OrderStatusEnvelope serializes to expected JSON format.
+        """Verify OrderData serializes to expected JSON format.
 
-        Given: An OrderStatusEnvelope with all required fields,
+        Given: An OrderData with all required fields,
         When: Serializing to JSON,
         Then: JSON contains all fields with correct values.
         """
-        order = OrderStatusEnvelope(
+        order = OrderData(
             exchange_order_id="exchange-789",
             client_order_id="order-789",
             instrument="BTC-USD",
@@ -3176,7 +3176,7 @@ class TestEnvelopeSerialization:
         )
         json_data = order.model_dump_json()
         parsed = json.loads(json_data)
-        assert parsed["type"] == "order_status"
+        assert parsed["type"] == "order"
         assert parsed["client_order_id"] == "order-789"
         assert parsed["exchange"] == "kraken"
         assert parsed["status"] == "submitted"

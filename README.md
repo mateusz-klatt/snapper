@@ -171,7 +171,7 @@ snapper polygon-backfill-aggregates  # Backfill historical data
 Creating your own strategy:
 
 ```python
-from snapper.strategies.base import BaseStrategy, Signal, StrategyConfig
+from snapper.strategies.base import BaseStrategy, StrategySignal, StrategyConfig
 from snapper.strategies.decorators import register_strategy, create_strategy_process
 from snapper.messaging.schemas.messages import CandleEnvelope
 
@@ -191,10 +191,10 @@ class MyStrategy(BaseStrategy):
         super().__init__(config)
         self.threshold = self.params.get("threshold", 0.5)
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> StrategySignal | None:
         # Strategy logic
         if some_condition:
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="buy",
                 strength=1.0,

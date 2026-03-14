@@ -422,6 +422,8 @@ class ExchangeClientBase(ABC):
             await self.repository.insert_execution(
                 order_id=db_order_id,
                 timestamp=execution.timestamp,
+                side=execution.side.value,
+                status=execution.order_status.value,
                 price=execution.last_price or execution.average_price or 0.0,
                 size=execution.last_qty or execution.cum_qty or 0.0,
                 fee=execution.fee_usd_equiv or 0.0,

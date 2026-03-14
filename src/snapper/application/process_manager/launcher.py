@@ -72,7 +72,7 @@ class ProcessLauncherService:
         process_tasks: Dict of asyncio tasks for async processes.
         process_lifecycles: Dict tracking lifecycle type per process.
         process_roles: Dict tracking role per process.
-        active_runs: Dict mapping process name to run_id.
+        active_runs: Dict mapping process name to public_id.
         spawner: ProcessSpawnerService for subprocess management.
         expected_terminations: Set of processes expected to stop.
     """
@@ -104,14 +104,14 @@ class ProcessLauncherService:
 
     async def _update_process_run_record(
         self,
-        run_id: str,
+        public_id: str,
         status: ProcessRunStatusEnum,
         *,
         result: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
         """Delegate to run_recorder.update_run_record."""
-        await self._run_recorder.update_run_record(run_id, status, result=result, error=error)
+        await self._run_recorder.update_run_record(public_id, status, result=result, error=error)
 
     async def _finalize_process_run(
         self,
@@ -132,10 +132,10 @@ class ProcessLauncherService:
             result: Optional result data.
             error: Optional error message.
         """
-        run_id = self.active_runs.pop(name, None)
-        if run_id is None:
+        public_id = self.active_runs.pop(name, None)
+        if public_id is None:
             return
-        await self._run_recorder.update_run_record(run_id, status, result=result, error=error)
+        await self._run_recorder.update_run_record(public_id, status, result=result, error=error)
 
     @staticmethod
     def _resolve_lifecycle(
@@ -284,7 +284,7 @@ class ProcessLauncherService:
             config: Process configuration.
 
         Returns:
-            The run ID string, or None if persistence failed.
+            The public_id string, or None if persistence failed.
         """
         run_parameters: dict[str, Any] = {
             "mode": config.mode,
@@ -292,9 +292,9 @@ class ProcessLauncherService:
             "kwargs": config.kwargs,
         }
         try:
-            run_id = await self._create_process_run_record(config, run_parameters)
-            self.active_runs[config.name] = run_id
-            return run_id
+            public_id = await self._create_process_run_record(config, run_parameters)
+            self.active_runs[config.name] = public_id
+            return public_id
         except Exception as run_error:
             logger.warning(
                 "Unable to persist run record for process '{}': {}",
@@ -304,19 +304,19 @@ class ProcessLauncherService:
             return None
 
     async def _handle_start_failure(
-        self, config_name: str, run_id: str | None, exc: Exception
+        self, config_name: str, public_id: str | None, exc: Exception
     ) -> None:
         """Handle process startup failure by cleaning up and recording.
 
         Args:
             config_name: Name of the failed process.
-            run_id: Database run record ID, or None if not persisted.
+            public_id: Database run record public ID, or None if not persisted.
             exc: The exception that caused the failure.
         """
         self._cleanup_failed_start(config_name)
-        if run_id is not None:
+        if public_id is not None:
             await self._update_process_run_record(
-                run_id,
+                public_id,
                 ProcessRunStatusEnum.FAILED,
                 error=str(exc),
             )
@@ -352,7 +352,7 @@ class ProcessLauncherService:
         """
         self.process_lifecycles[config.name] = config.lifecycle
         self.process_roles[config.name] = config.role
-        run_id = await self._try_create_run_record(config)
+        public_id = await self._try_create_run_record(config)
         try:
             logger.info(
                 f"Starting process '{config.name}' in {config.mode} mode "
@@ -370,7 +370,7 @@ class ProcessLauncherService:
             if config.note:
                 logger.info(f"Note for '{config.name}': {config.note}")
         except Exception as exc:
-            await self._handle_start_failure(config.name, run_id, exc)
+            await self._handle_start_failure(config.name, public_id, exc)
             raise
         await self._finalize_one_shot(config)
 
@@ -818,7 +818,7 @@ class ProcessLauncherService:
             if config.parameters_schema is not None:
                 persisted_config["parameters_schema"] = config.parameters_schema
             setting.value = json.dumps(persisted_config)
-            setting.updated_at = datetime.now(UTC)
+            setting.timestamp = datetime.now(UTC)
             await session.commit()
 
     async def start_process_by_name(
@@ -839,7 +839,7 @@ class ProcessLauncherService:
             autostart: Whether to enable autostart on boot.
 
         Returns:
-            Typed result with operation status, message, and optional run_id.
+            Typed result with operation status, message, and optional public_id.
         """
         if name in self.started_processes:
             logger.warning(f"Process '{name}' is already running")
@@ -873,18 +873,18 @@ class ProcessLauncherService:
             )
         self._start_native_process_monitoring()
         await self._persist_config_after_start(repository, config_key, config_dict, config)
-        run_id = self.active_runs.get(name)
+        public_id = self.active_runs.get(name)
         if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
             return ProcessStartResult(
                 status="success",
                 message=f"Process '{name}' executed successfully",
-                run_id=run_id,
+                public_id=public_id,
             )
         logger.info(f"Process '{name}' started successfully")
         return ProcessStartResult(
             status="success",
             message=f"Process '{name}' started successfully",
-            run_id=run_id,
+            public_id=public_id,
         )
 
     async def _cancel_process_task(self, name: str) -> None:
@@ -918,7 +918,7 @@ class ProcessLauncherService:
                 config_dict = json.loads(setting.value)
                 config_dict["enabled"] = False
                 setting.value = json.dumps(config_dict)
-                setting.updated_at = datetime.now(UTC)
+                setting.timestamp = datetime.now(UTC)
                 await session.commit()
 
     async def stop_process_by_name(self, name: str) -> ProcessStopResult:
@@ -982,7 +982,7 @@ class ProcessLauncherService:
             running=is_running,
             role=(self.process_roles.get(name) or ProcessRoleEnum.CORE).value,
             lifecycle=self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING).value,
-            active_run_id=self.active_runs.get(name),
+            active_public_id=self.active_runs.get(name),
             details=details,
         )
 

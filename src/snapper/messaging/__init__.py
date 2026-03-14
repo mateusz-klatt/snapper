@@ -32,7 +32,7 @@ publishers
 executors
     Order execution services connecting to exchange APIs.
 schemas
-    Message envelope definitions and serialization.
+    Data class definitions and message serialization.
 
 Topic Hierarchy
 ---------------
@@ -40,37 +40,37 @@ Topic Hierarchy
 
     market.{exchange}.{instrument}.{type}              # Market data
     orders.commands.{exchange}.{instrument}.{cmd}      # Order commands
-    orders.events.{exchange}.{instrument}.{event}      # Order events/fills
+    orders.events.{exchange}.{instrument}.{event}      # Order events/executions
     signals.{exchange}.{instrument}.{type}             # Trading signals
     system.{type}[.{component}[.{name}]]               # System messages
     admin.{resource}                                    # Administration
 
 Message Types
 -------------
-MarketDataEnvelope
-    Base for tick, trade, candle data.
-OrderRequestEnvelope
+MarketDataMessage
+    Union of TickData, TradeData, CandleData.
+OrderRequestData
     Order submission requests.
-OrderStatusEnvelope
+OrderData
     Order status updates.
-FillEnvelope
+ExecutionData
     Trade execution results.
-HeartbeatEnvelope
+HeartbeatData
     Component health monitoring.
-SettingChangedEnvelope
+SettingChangedData
     Configuration change notifications.
 
 Example:
 -------
 Basic publisher/subscriber setup::
 
-    # Start broker
+    from snapper.messaging.schemas.data import TickData
+
     broker = ZmqBrokerProcess()
     await broker.start()
 
-    # Publisher
     publisher = ValidatedPublisher(pub_socket)
-    msg = TickEnvelope(exchange="kraken", instrument="BTC-USD", ...)
+    msg = TickData(exchange="kraken", instrument="BTC-USD", ...)
     await publisher.send_multipart(
         "market.kraken.BTC-USD.ticks",
         msg.to_json().encode()

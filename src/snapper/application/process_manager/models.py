@@ -184,12 +184,12 @@ class ProcessStartResult:
     Attributes:
         status: Operation outcome (success, already_running, error).
         message: Human-readable description of the result.
-        run_id: Database run record ID if the process was started.
+        public_id: Database run record public ID if the process was started.
     """
 
     status: StartProcessStatus
     message: str
-    run_id: str | None = None
+    public_id: str | None = None
 
 
 @dataclass
@@ -214,7 +214,7 @@ class ProcessStatusResult:
         running: Whether the process is currently running.
         role: Process role category (enum string value).
         lifecycle: Process lifecycle type (enum string value).
-        active_run_id: Active run record ID if currently running.
+        active_public_id: Active run record public ID if currently running.
         details: Additional process-specific status information.
     """
 
@@ -222,7 +222,7 @@ class ProcessStatusResult:
     running: bool
     role: ProcessRoleType
     lifecycle: ProcessLifecycleType
-    active_run_id: str | None = None
+    active_public_id: str | None = None
     details: dict[str, Any] | None = None
 
 

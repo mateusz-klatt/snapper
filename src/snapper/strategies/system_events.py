@@ -10,10 +10,10 @@ from typing import Any
 
 from snapper.application.services.settings import SettingsService
 from snapper.infrastructure.symbols.functions import _get_db_mapper
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
-from snapper.messaging.schemas.messages import ReplayEndEnvelope
-from snapper.messaging.schemas.messages import ReplayStartEnvelope
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.schemas.data import ReplayEndData
+from snapper.messaging.schemas.data import ReplayStartData
+from snapper.messaging.schemas.data import SettingChangedData
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,11 @@ class SystemMessageRouter:
         """
         self.strategy = strategy
 
-    def handle_settings_update(self, envelope: SettingChangedEnvelope) -> None:
+    def handle_settings_update(self, envelope: SettingChangedData) -> None:
         """Handle dynamic settings update from ZMQ.
 
         Args:
-            envelope: Settings change envelope with key and value.
+            envelope: Settings change data with key and value.
         """
         try:
             settings_service = SettingsService.get_instance()
@@ -61,7 +61,7 @@ class SystemMessageRouter:
             payload_str: The JSON payload string.
         """
         exchange = topic_str.replace("system.heartbeats.feed.", "")
-        heartbeat = HeartbeatEnvelope.from_json(payload_str)
+        heartbeat = HeartbeatData.from_json(payload_str)
         self.strategy._feed_heartbeats[exchange] = {
             "timestamp": time.time(),
             "status": heartbeat.status,
@@ -88,7 +88,7 @@ class SystemMessageRouter:
         Args:
             payload_str: The JSON payload string.
         """
-        replay_envelope = ReplayStartEnvelope.from_json(payload_str)
+        replay_envelope = ReplayStartData.from_json(payload_str)
         logger.info(f"Strategy {self.strategy.name}: Replay started, resetting state")
         await self.strategy.reset()
         self.strategy._last_data_ts = (
@@ -101,6 +101,6 @@ class SystemMessageRouter:
         Args:
             payload_str: The JSON payload string.
         """
-        ReplayEndEnvelope.from_json(payload_str)
+        ReplayEndData.from_json(payload_str)
         logger.info(f"Strategy {self.strategy.name}: Replay ended")
         self.strategy._last_data_ts = None

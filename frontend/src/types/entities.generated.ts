@@ -14,18 +14,19 @@ export type {
   Status2 as HeartbeatStatus,
 } from './ws.generated'
 
-type Exchange = 'kraken' | 'zonda' | 'walutomat' | 'polygon'
-type Exchange2 = 'paper' | 'kraken' | 'zonda' | 'walutomat'
-type Side = 'buy' | 'sell'
+type MarketDataExchange = 'kraken' | 'zonda' | 'walutomat' | 'polygon'
+type OrderExchange = 'paper' | 'kraken' | 'zonda' | 'walutomat'
+type TradeSide = 'buy' | 'sell'
 
 /**
  * Canonical Candle entity.
- * From WebSocket CandleEnvelope.
+ * From WebSocket CandleData.
  */
 export interface Candle {
+  id?: string | number
   timestamp?: Date
   instrument: string
-  exchange: Exchange
+  exchange: MarketDataExchange
   timeframe: string
   openAt: Date
   open: number
@@ -38,17 +39,18 @@ export interface Candle {
 }
 
 /**
- * Canonical Fill entity.
- * From WebSocket FillEnvelope.
+ * Canonical Execution entity.
+ * From WebSocket ExecutionData.
  */
-export interface Fill {
+export interface Execution {
+  id?: string | number
   timestamp?: Date
   tradeId?: string | null
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
-  exchange: Exchange2
-  side: Side
+  exchange: OrderExchange
+  side: TradeSide
   size: number
   price: number
   fee: number
@@ -59,37 +61,66 @@ export interface Fill {
 
 /**
  * Canonical Heartbeat entity.
- * From WebSocket HeartbeatEnvelope.
+ * From WebSocket HeartbeatData.
  */
 export interface Heartbeat {
+  id?: string | number
   timestamp?: Date
   component: string
   sequence: number
   status: 'healthy' | 'warning' | 'error'
   lagMs: number
+  meta?: Record<string, unknown>
 }
 
 /**
  * Canonical OrderCancel entity.
- * From WebSocket OrderCancelEnvelope.
+ * From WebSocket OrderCancelData.
  */
 export interface OrderCancel {
+  id?: string | number
   timestamp?: Date
-  exchange: Exchange2
+  exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
 }
 
 /**
+ * Canonical Order entity.
+ * From WebSocket OrderData.
+ */
+export interface Order {
+  id?: string | number
+  timestamp?: Date
+  exchangeOrderId?: string | null
+  clientOrderId: string
+  instrument: string
+  exchange: OrderExchange
+  side: TradeSide
+  status: string
+  orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
+  size: number
+  filledSize: number
+  price?: number | null
+  averagePrice?: number | null
+  reason?: string | null
+  timeInForce?: string | null
+  error?: string | null
+  createdAt?: Date
+  updatedAt?: Date | null
+}
+
+/**
  * Canonical OrderEvent entity.
- * From WebSocket OrderEventEnvelope.
+ * From WebSocket OrderEventData.
  */
 export interface OrderEvent {
+  id?: string | number
   timestamp?: Date
   exchangeOrderId: string
   clientOrderId: string
-  exchange: Exchange2
+  exchange: OrderExchange
   instrument: string
   event: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   reason?: string | null
@@ -97,11 +128,12 @@ export interface OrderEvent {
 
 /**
  * Canonical OrderReplace entity.
- * From WebSocket OrderReplaceEnvelope.
+ * From WebSocket OrderReplaceData.
  */
 export interface OrderReplace {
+  id?: string | number
   timestamp?: Date
-  exchange: Exchange2
+  exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
@@ -111,15 +143,16 @@ export interface OrderReplace {
 
 /**
  * Canonical OrderRequest entity.
- * From WebSocket OrderRequestEnvelope.
+ * From WebSocket OrderRequestData.
  */
 export interface OrderRequest {
+  id?: string | number
   timestamp?: Date
   strategyId: string
-  exchange: Exchange2
+  exchange: OrderExchange
   instrument: string
   mode: 'live' | 'paper'
-  side: Side
+  side: TradeSide
   orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
   quantity: number
   price?: number | null
@@ -128,49 +161,45 @@ export interface OrderRequest {
 }
 
 /**
- * Canonical OrderStatus entity.
- * From WebSocket OrderStatusEnvelope.
+ * Canonical Position entity.
+ * From WebSocket PositionData.
  */
-export interface OrderStatus {
+export interface Position {
+  id?: string | number
   timestamp?: Date
-  exchangeOrderId?: string | null
-  clientOrderId: string
   instrument: string
-  exchange: Exchange2
-  side: Side
-  status: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
-  orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
-  size: number
-  filledSize: number
-  price?: number | null
-  averagePrice?: number | null
-  reason?: string | null
-  createdAt?: Date
-  updatedAt?: Date | null
+  exchange: OrderExchange
+  quantity: number
+  averagePrice: number
+  unrealizedPnl: number
+  realizedPnl: number
 }
 
 /**
  * Canonical ReplayEnd entity.
- * From WebSocket ReplayEndEnvelope.
+ * From WebSocket ReplayEndData.
  */
 export interface ReplayEnd {
+  id?: string | number
   timestamp?: Date
 }
 
 /**
  * Canonical ReplayStart entity.
- * From WebSocket ReplayStartEnvelope.
+ * From WebSocket ReplayStartData.
  */
 export interface ReplayStart {
+  id?: string | number
   timestamp?: Date
   startedAt?: Date | null
 }
 
 /**
  * Canonical SettingChanged entity.
- * From WebSocket SettingChangedEnvelope.
+ * From WebSocket SettingChangedData.
  */
 export interface SettingChanged {
+  id?: string | number
   timestamp?: Date
   key: string
   value: string
@@ -180,25 +209,27 @@ export interface SettingChanged {
 
 /**
  * Canonical Signal entity.
- * From WebSocket SignalEnvelope.
+ * From WebSocket SignalData.
  */
 export interface Signal {
+  id?: string | number
   timestamp?: Date
   instrument: string
-  exchange: Exchange2
-  side: Side
+  exchange: OrderExchange
+  side: TradeSide
   strength: number
   reason: string
   price?: number | null
   strategyName?: string | null
-  id?: string | number | null
+  firedAt?: Date
 }
 
 /**
  * Canonical SymbolAliasUpdate entity.
- * From WebSocket SymbolAliasUpdateEnvelope.
+ * From WebSocket SymbolAliasUpdateData.
  */
 export interface SymbolAliasUpdate {
+  id?: string | number
   timestamp?: Date
   event: string
   action: string
@@ -206,12 +237,13 @@ export interface SymbolAliasUpdate {
 
 /**
  * Canonical Tick entity.
- * From WebSocket TickEnvelope.
+ * From WebSocket TickData.
  */
 export interface Tick {
+  id?: string | number
   timestamp?: Date
   instrument: string
-  exchange: Exchange
+  exchange: MarketDataExchange
   volume: number
   bid?: number | null
   ask?: number | null
@@ -220,31 +252,17 @@ export interface Tick {
 
 /**
  * Canonical Trade entity.
- * From WebSocket TradeEnvelope.
+ * From WebSocket TradeData.
  */
 export interface Trade {
+  id?: string | number
   timestamp?: Date
   instrument: string
-  exchange: Exchange
+  exchange: MarketDataExchange
   executedAt?: Date | null
   price: number
   volume: number
   side?: string | null
-}
-
-/**
- * Canonical Position entity.
- * From REST API PositionSnapshot.
- */
-export interface Position {
-  id: string | number
-  instrument: string
-  exchange: Exchange2
-  quantity: number
-  averagePrice: number
-  unrealizedPnl: number
-  realizedPnl: number
-  updatedAt: Date
 }
 
 

@@ -25,7 +25,7 @@ The messaging system uses dot-separated topic strings:
     orders.events.kraken.BTC-USD.submitted  # Order submitted to exchange (local)
     orders.events.kraken.BTC-USD.accepted   # Order accepted by exchange (ACK)
     orders.events.kraken.BTC-USD.rejected   # Order rejected
-    orders.events.kraken.BTC-USD.fill       # Order fill (partial/full)
+    orders.events.kraken.BTC-USD.executed     # Order executed (partial/full)
     orders.events.kraken.BTC-USD.cancelled  # Order cancelled
     orders.events.kraken.BTC-USD.expired    # Order expired
 

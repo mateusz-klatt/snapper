@@ -7,7 +7,7 @@ import { SignalCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
 import { exportToCSV } from '../../lib/csvExport'
 import { EmptyState } from '../../components/ui'
-import type { TradingSignal } from '../../types/api'
+import type { SignalData } from '../../types/api'
 import clsx from 'clsx'
 import {
   SIGNAL_STRENGTH_STRONG,
@@ -15,7 +15,7 @@ import {
   SIGNAL_STRENGTH_WEAK,
 } from '../../lib/constants'
 
-const SignalCard: React.FC<{ signal: TradingSignal }> = ({ signal }) => {
+const SignalCard: React.FC<{ signal: SignalData }> = ({ signal }) => {
   const getSideColor = (side: string) => {
     return side === 'buy' ? 'text-gain-400 bg-gain-900/20' : 'text-loss-400 bg-loss-900/20'
   }
@@ -68,7 +68,9 @@ const SignalCard: React.FC<{ signal: TradingSignal }> = ({ signal }) => {
             </span>
           )}
         </div>
-        <div className='text-xs text-muted-500'>{formatTime(signal.timestamp)}</div>
+        <div className='text-xs text-muted-500'>
+          {signal.fired_at ? formatTime(signal.fired_at) : 'N/A'}
+        </div>
       </div>
       <div className='grid grid-cols-3 gap-4 text-sm mb-3'>
         <div>
@@ -84,8 +86,8 @@ const SignalCard: React.FC<{ signal: TradingSignal }> = ({ signal }) => {
           </div>
         </div>
         <div>
-          <div className='text-muted-500'>Signal ID</div>
-          <div className='text-xs font-mono text-alpine-900'>#{signal.id}</div>
+          <div className='text-muted-500'>Exchange</div>
+          <div className='text-xs font-mono text-alpine-900'>{signal.exchange}</div>
         </div>
       </div>
       {signal.reason && (
@@ -110,40 +112,29 @@ export const Signals: React.FC = () => {
     enabled: isAuthenticated,
   })
   const availableStrategies = Array.from(
-    new Set(signals.map((signal: TradingSignal) => signal.strategy_name).filter(Boolean))
+    new Set(signals.map((signal: SignalData) => signal.strategy_name).filter(Boolean))
   )
   const filteredSignals = signals.filter(
-    (signal: TradingSignal) => strategyFilter === 'all' || signal.strategy_name === strategyFilter
+    (signal: SignalData) => strategyFilter === 'all' || signal.strategy_name === strategyFilter
   )
   const totalSignals = filteredSignals.length
-  const buySignals = filteredSignals.filter((s: TradingSignal) => s.side === 'buy').length
-  const sellSignals = filteredSignals.filter((s: TradingSignal) => s.side === 'sell').length
+  const buySignals = filteredSignals.filter((s: SignalData) => s.side === 'buy').length
+  const sellSignals = filteredSignals.filter((s: SignalData) => s.side === 'sell').length
   const avgStrength =
     totalSignals > 0
-      ? filteredSignals.reduce((sum: number, s: TradingSignal) => sum + s.strength, 0) /
-        totalSignals
+      ? filteredSignals.reduce((sum: number, s: SignalData) => sum + s.strength, 0) / totalSignals
       : 0
 
   const handleExportSignals = () => {
-    const headers = [
-      'ID',
-      'Instrument',
-      'Side',
-      'Strength',
-      'Price',
-      'Strategy',
-      'Reason',
-      'Timestamp',
-    ]
-    const rows = filteredSignals.map((s: TradingSignal) => [
-      String(s.id),
+    const headers = ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At']
+    const rows = filteredSignals.map((s: SignalData) => [
       s.instrument,
       s.side,
       (s.strength * 100).toFixed(0) + '%',
       s.price ? s.price.toFixed(2) : '',
       s.strategy_name ?? '',
       s.reason ?? '',
-      s.timestamp,
+      s.fired_at ?? '',
     ])
 
     exportToCSV('signals.csv', headers, rows)
@@ -253,8 +244,11 @@ export const Signals: React.FC = () => {
               <span>Showing {filteredSignals.length} signals</span>
               <span>Latest signals first</span>
             </div>
-            {filteredSignals.map((signal: TradingSignal) => (
-              <SignalCard key={signal.id} signal={signal} />
+            {filteredSignals.map((signal: SignalData, index: number) => (
+              <SignalCard
+                key={`${signal.instrument}-${signal.fired_at ?? index}`}
+                signal={signal}
+              />
             ))}
           </div>
         )}

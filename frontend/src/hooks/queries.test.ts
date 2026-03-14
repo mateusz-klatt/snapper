@@ -239,37 +239,34 @@ describe('queries', () => {
     it('sorts signals by timestamp and applies limit', async () => {
       mockedApiClient.getSignals.mockResolvedValueOnce([
         {
-          id: '1',
           exchange: 'kraken',
           instrument: 'BTC/USD',
           side: 'buy',
           strength: 0.5,
           reason: 'oldest',
-          strategy_name: 'test',
+          strategyName: 'test',
           price: 50000,
-          timestamp: new Date('2026-01-15T10:00:00Z'),
+          firedAt: new Date('2026-01-15T10:00:00Z'),
         },
         {
-          id: '2',
           exchange: 'kraken',
           instrument: 'BTC/USD',
           side: 'buy',
           strength: 0.6,
           reason: 'newest',
-          strategy_name: 'test',
+          strategyName: 'test',
           price: 50100,
-          timestamp: new Date('2026-01-15T12:00:00Z'),
+          firedAt: new Date('2026-01-15T12:00:00Z'),
         },
         {
-          id: '3',
           exchange: 'kraken',
           instrument: 'BTC/USD',
           side: 'sell',
           strength: 0.4,
           reason: 'middle',
-          strategy_name: 'test',
+          strategyName: 'test',
           price: 49900,
-          timestamp: new Date('2026-01-15T11:00:00Z'),
+          firedAt: new Date('2026-01-15T11:00:00Z'),
         },
       ] as never)
       const { result } = renderHook(() => useLatestSignals(2), { wrapper: createWrapper() })
@@ -278,43 +275,40 @@ describe('queries', () => {
         expect(result.current.isLoading).toBe(false)
       })
       expect(result.current.data).toHaveLength(2)
-      expect(result.current.data?.[0].id).toBe('2')
-      expect(result.current.data?.[1].id).toBe('3')
+      expect(result.current.data?.[0].reason).toBe('newest')
+      expect(result.current.data?.[1].reason).toBe('middle')
     })
     it('handles signals with undefined timestamp in sorting', async () => {
       mockedApiClient.getSignals.mockResolvedValueOnce([
         {
-          id: '1',
           exchange: 'kraken',
           instrument: 'BTC/USD',
           side: 'buy',
           strength: 0.5,
           reason: 'with-timestamp',
-          strategy_name: 'test',
+          strategyName: 'test',
           price: 50000,
-          timestamp: new Date('2026-01-15T10:00:00Z'),
+          firedAt: new Date('2026-01-15T10:00:00Z'),
         },
         {
-          id: '2',
           exchange: 'kraken',
           instrument: 'ETH/USD',
           side: 'sell',
           strength: 0.6,
           reason: 'no-timestamp',
-          strategy_name: 'test',
+          strategyName: 'test',
           price: 3000,
-          timestamp: undefined,
+          firedAt: undefined,
         },
         {
-          id: '3',
           exchange: 'kraken',
           instrument: 'SOL/USD',
           side: 'buy',
           strength: 0.4,
           reason: 'newer-timestamp',
-          strategy_name: 'test',
+          strategyName: 'test',
           price: 100,
-          timestamp: new Date('2026-01-15T12:00:00Z'),
+          firedAt: new Date('2026-01-15T12:00:00Z'),
         },
       ] as never)
       const { result } = renderHook(() => useLatestSignals(3), { wrapper: createWrapper() })
@@ -323,9 +317,9 @@ describe('queries', () => {
         expect(result.current.isLoading).toBe(false)
       })
       expect(result.current.data).toHaveLength(3)
-      expect(result.current.data?.[0].id).toBe('3')
-      expect(result.current.data?.[1].id).toBe('1')
-      expect(result.current.data?.[2].id).toBe('2')
+      expect(result.current.data?.[0].reason).toBe('newer-timestamp')
+      expect(result.current.data?.[1].reason).toBe('with-timestamp')
+      expect(result.current.data?.[2].reason).toBe('no-timestamp')
     })
   })
   describe('useAvailableProcesses', () => {

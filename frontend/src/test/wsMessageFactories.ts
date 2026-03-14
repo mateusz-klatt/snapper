@@ -115,7 +115,6 @@ export function createCandle(
   overrides: {
     timestamp?: string
     open_at?: string
-    meta?: Record<string, unknown>
     instrument?: string
     exchange?: string
     timeframe?: string
@@ -134,7 +133,6 @@ export function createCandle(
     type: 'candle' as const,
     timestamp: overrides.timestamp ?? now,
     open_at: overrides.open_at ?? now,
-    meta: overrides.meta,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     volume: overrides.volume ?? 1000,
@@ -151,7 +149,6 @@ export function createCandle(
 export function createTick(
   overrides: {
     timestamp?: string
-    meta?: Record<string, unknown>
     instrument?: string
     exchange?: string
     volume?: number
@@ -165,7 +162,6 @@ export function createTick(
   return {
     type: 'tick' as const,
     timestamp: overrides.timestamp ?? now,
-    meta: overrides.meta,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     volume: overrides.volume ?? 1000,
@@ -178,9 +174,9 @@ export function createTick(
 export function createTrade(
   overrides: {
     timestamp?: string
-    meta?: Record<string, unknown>
     instrument?: string
     exchange?: string
+    executed_at?: string | null
     price?: number
     volume?: number
     side?: string | null
@@ -191,9 +187,9 @@ export function createTrade(
   return {
     type: 'trade' as const,
     timestamp: overrides.timestamp ?? now,
-    meta: overrides.meta,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
+    executed_at: overrides.executed_at ?? null,
     price: overrides.price ?? 50000,
     volume: overrides.volume ?? 1.5,
     side: overrides.side ?? 'buy',
@@ -203,8 +199,6 @@ export function createTrade(
 export function createSignal(
   overrides: {
     timestamp?: string
-    meta?: Record<string, unknown>
-    id?: string | null
     exchange?: string
     instrument?: string
     side?: 'buy' | 'sell'
@@ -212,6 +206,7 @@ export function createSignal(
     reason?: string
     strategy_name?: string | null
     price?: number | null
+    fired_at?: string
   } = {}
 ) {
   const now = new Date().toISOString()
@@ -219,8 +214,6 @@ export function createSignal(
   return {
     type: 'signal' as const,
     timestamp: overrides.timestamp ?? now,
-    meta: overrides.meta,
-    id: overrides.id ?? 'signal-1',
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     side: overrides.side ?? ('buy' as const),
@@ -228,6 +221,7 @@ export function createSignal(
     reason: overrides.reason ?? 'Test signal',
     strategy_name: overrides.strategy_name ?? 'test-strategy',
     price: overrides.price ?? 50000,
+    fired_at: overrides.fired_at ?? now,
   }
 }
 
@@ -239,7 +233,6 @@ export function createHeartbeat(
     sequence?: number
     status?: 'healthy' | 'warning' | 'error'
     lag_ms?: number
-    metadata?: Record<string, unknown>
   } = {}
 ) {
   const now = new Date().toISOString()
@@ -247,20 +240,19 @@ export function createHeartbeat(
   return {
     type: 'heartbeat' as const,
     timestamp: overrides.timestamp ?? now,
-    meta: overrides.meta,
     component: overrides.component ?? 'bridge',
     sequence: overrides.sequence ?? 0,
     status: overrides.status ?? ('healthy' as const),
     lag_ms: overrides.lag_ms ?? 0,
-    metadata: overrides.metadata,
+    meta: overrides.meta,
   }
 }
 
 export function createOrder(
   overrides: {
     timestamp?: string
-    meta?: Record<string, unknown>
-    id?: string
+    client_order_id?: string
+    exchange_order_id?: string | null
     instrument?: string
     exchange?: string
     side?: 'buy' | 'sell'
@@ -270,6 +262,9 @@ export function createOrder(
     filled_size?: number
     price?: number | null
     average_price?: number | null
+    reason?: string | null
+    time_in_force?: string | null
+    error?: string | null
     created_at?: string
     updated_at?: string | null
   } = {}
@@ -277,10 +272,10 @@ export function createOrder(
   const now = new Date().toISOString()
 
   return {
-    type: 'order_status' as const,
+    type: 'order' as const,
     timestamp: overrides.timestamp ?? now,
-    meta: overrides.meta,
-    id: overrides.id ?? 'order-1',
+    client_order_id: overrides.client_order_id ?? 'order-1',
+    exchange_order_id: overrides.exchange_order_id ?? null,
     instrument: overrides.instrument ?? 'BTC-USD',
     exchange: overrides.exchange ?? 'kraken',
     side: overrides.side ?? ('buy' as const),
@@ -290,6 +285,9 @@ export function createOrder(
     filled_size: overrides.filled_size ?? 0,
     price: overrides.price ?? 50000,
     average_price: overrides.average_price ?? null,
+    reason: overrides.reason ?? null,
+    time_in_force: overrides.time_in_force ?? null,
+    error: overrides.error ?? null,
     created_at: overrides.created_at ?? now,
     updated_at: overrides.updated_at ?? null,
   }
@@ -298,9 +296,9 @@ export function createOrder(
 export function createExecution(
   overrides: {
     timestamp?: string
-    meta?: Record<string, unknown>
-    id?: string
-    order_id?: string
+    trade_id?: string | null
+    exchange_order_id?: string | null
+    client_order_id?: string
     exchange?: string
     instrument?: string
     side?: 'buy' | 'sell'
@@ -308,18 +306,18 @@ export function createExecution(
     price?: number
     fee?: number
     fee_asset?: string
-    status?: 'filled' | 'partial' | 'rejected' | 'cancelled'
+    status?: 'filled' | 'partial'
     executed_at?: string
   } = {}
 ) {
   const now = new Date().toISOString()
 
   return {
-    type: 'fill' as const,
+    type: 'execution' as const,
     timestamp: overrides.timestamp ?? now,
-    meta: overrides.meta,
-    id: overrides.id ?? 'exec-1',
-    order_id: overrides.order_id ?? 'order-1',
+    trade_id: overrides.trade_id ?? null,
+    exchange_order_id: overrides.exchange_order_id ?? null,
+    client_order_id: overrides.client_order_id ?? 'order-1',
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     side: overrides.side ?? ('buy' as const),

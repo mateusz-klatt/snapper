@@ -16,9 +16,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.config.settings import get_settings
 from snapper.data.models import Instrument
-from snapper.data.models import SignalEvent
+from snapper.data.models import Signal
 from snapper.data.repository import get_repository
-from snapper.strategies.base import Signal
+from snapper.strategies.base import StrategySignal
 
 
 class SignalReadService:
@@ -31,11 +31,11 @@ class SignalReadService:
 
     async def store_signal(
         self,
-        signal: Signal,
+        signal: StrategySignal,
         exchange: str,
         strategy_name: str | None = None,
         price: float | None = None,
-    ) -> int:
+    ) -> str:
         """Store a trading signal in the database.
 
         Args:
@@ -45,7 +45,7 @@ class SignalReadService:
             price: Current price at signal generation time.
 
         Returns:
-            Signal event ID or -1 on error.
+            Signal event UUID or empty string on error.
         """
         try:
             async with self.repo.session() as session:
@@ -76,7 +76,7 @@ class SignalReadService:
                     )
                 else:
                     inst_id = inst.id
-                signal_event = SignalEvent(
+                signal_event = Signal(
                     instrument_id=inst_id,
                     timestamp=signal.timestamp or datetime.now(UTC),
                     side=signal.side,
@@ -88,10 +88,10 @@ class SignalReadService:
                 session.add(signal_event)
                 await session.commit()
                 await session.refresh(signal_event)
-                return signal_event.id
+                return signal_event.public_id
         except SQLAlchemyError as e:
             logger.error(f"Error storing signal: {e}")
-            return -1
+            return ""
 
     async def get_recent_signals(
         self,
@@ -116,15 +116,15 @@ class SignalReadService:
         try:
             async with self.repo.session() as session:
                 since = datetime.now(UTC) - timedelta(hours=hours)
-                query = select(SignalEvent, Instrument).join(Instrument)
-                query = query.where(SignalEvent.timestamp >= since)
+                query = select(Signal, Instrument).join(Instrument)
+                query = query.where(Signal.timestamp >= since)
                 if instrument:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:
-                    query = query.where(SignalEvent.strategy_name == strategy)
+                    query = query.where(Signal.strategy_name == strategy)
                 if exchange:
                     query = query.where(Instrument.exchange == exchange)
-                query = query.order_by(desc(SignalEvent.timestamp)).limit(limit)
+                query = query.order_by(desc(Signal.timestamp)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
                 return [

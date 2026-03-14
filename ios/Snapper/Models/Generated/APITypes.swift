@@ -15,13 +15,6 @@ enum AvailableProcessRole: String, Codable, Sendable {
     case backtest
 }
 
-enum CandleDataExchange: String, Codable, Sendable {
-    case kraken
-    case zonda
-    case walutomat
-    case polygon
-}
-
 enum ConfiguredProcessMode: String, Codable, Sendable {
     case thread
     case process
@@ -39,58 +32,10 @@ enum ConfiguredProcessRole: String, Codable, Sendable {
     case backtest
 }
 
-enum ExecutionRecordSide: String, Codable, Sendable {
-    case buy
-    case sell
-}
-
-enum ExecutionRecordExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
-}
-
 enum HealthCheckResponseStatus: String, Codable, Sendable {
     case healthy
     case warning
     case error
-}
-
-enum OrderStatusExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
-}
-
-enum OrderStatusSide: String, Codable, Sendable {
-    case buy
-    case sell
-}
-
-enum OrderStatusType: String, Codable, Sendable {
-    case market
-    case limit
-    case stop
-    case stopLimit = "stop_limit"
-}
-
-enum OrderStatusStatus: String, Codable, Sendable {
-    case new
-    case submitted
-    case openStatus = "open"
-    case filled
-    case partiallyFilled = "partially_filled"
-    case cancelled
-    case rejected
-}
-
-enum PositionSnapshotExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
 }
 
 enum ProcessRunStatus: String, Codable, Sendable {
@@ -145,18 +90,6 @@ enum ProcessStopResponseStatus: String, Codable, Sendable {
 enum StrategyProcessMode: String, Codable, Sendable {
     case thread
     case process
-}
-
-enum TradingSignalExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
-}
-
-enum TradingSignalSide: String, Codable, Sendable {
-    case buy
-    case sell
 }
 
 enum ZmqComponentsZmqContext: String, Codable, Sendable {
@@ -219,6 +152,9 @@ struct AvailableProcessesResponse: Codable, Sendable {
 }
 
 struct CandleData: Codable, Sendable {
+    let id: String?
+    let type: String?
+    let timestamp: Date?
     let instrument: String
     let exchange: String
     let timeframe: String
@@ -232,6 +168,9 @@ struct CandleData: Codable, Sendable {
     let trades: Int?
 
     enum CodingKeys: String, CodingKey {
+        case id
+        case type
+        case timestamp
         case instrument
         case exchange
         case timeframe
@@ -285,8 +224,8 @@ struct ConfiguredProcess: Codable, Sendable {
     let parametersSchema: [String: AnyCodable]?
     /// Whether process is one-shot task
     let isOneShot: Bool
-    /// Active run ID if running
-    let activeRunId: String?
+    /// Active public ID if running
+    let activePublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -303,7 +242,7 @@ struct ConfiguredProcess: Codable, Sendable {
         case tags
         case parametersSchema = "parameters_schema"
         case isOneShot = "is_one_shot"
-        case activeRunId = "active_run_id"
+        case activePublicId = "active_public_id"
     }
 }
 
@@ -349,35 +288,39 @@ struct CreateUserRequest: Codable, Sendable {
     }
 }
 
-struct ExecutionRecord: Codable, Sendable {
-    let id: Int
-    let orderId: Int
-    let execId: String?
+struct ExecutionData: Codable, Sendable {
+    let id: String?
+    let type: String?
+    let timestamp: Date?
     let tradeId: String?
-    let timestamp: Date
-    let executedAt: Date?
-    let price: Double
+    let exchangeOrderId: String?
+    let clientOrderId: String
+    let instrument: String
+    let exchange: String
+    let side: String
     let size: Double
+    let price: Double
     let fee: Double
     let feeAsset: String
-    let instrument: String
-    let side: String
-    let exchange: String
+    let status: String
+    let executedAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case id
-        case orderId = "order_id"
-        case execId = "exec_id"
-        case tradeId = "trade_id"
+        case type
         case timestamp
-        case executedAt = "executed_at"
-        case price
+        case tradeId = "trade_id"
+        case exchangeOrderId = "exchange_order_id"
+        case clientOrderId = "client_order_id"
+        case instrument
+        case exchange
+        case side
         case size
+        case price
         case fee
         case feeAsset = "fee_asset"
-        case instrument
-        case side
-        case exchange
+        case status
+        case executedAt = "executed_at"
     }
 }
 
@@ -433,63 +376,71 @@ struct MessageResponse: Codable, Sendable {
     let message: String
 }
 
-struct OrderStatus: Codable, Sendable {
-    let id: Int
+struct OrderData: Codable, Sendable {
+    let id: String?
+    let type: String?
+    let timestamp: Date?
+    let exchangeOrderId: String?
+    let clientOrderId: String
     let instrument: String
     let exchange: String
-    let clientOrderId: String?
-    let exchangeOrderId: String?
-    let createdAt: Date
-    let updatedAt: Date?
     let side: String
-    let type: String
-    let price: Double?
-    let size: Double
-    let filledSize: Double?
-    let averagePrice: Double?
     let status: String
+    let orderType: String
+    let size: Double
+    let filledSize: Double
+    let price: Double?
+    let averagePrice: Double?
+    let reason: String?
     let timeInForce: String?
     let error: String?
+    let createdAt: Date?
+    let updatedAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case id
+        case type
+        case timestamp
+        case exchangeOrderId = "exchange_order_id"
+        case clientOrderId = "client_order_id"
         case instrument
         case exchange
-        case clientOrderId = "client_order_id"
-        case exchangeOrderId = "exchange_order_id"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
         case side
-        case type
-        case price
+        case status
+        case orderType = "order_type"
         case size
         case filledSize = "filled_size"
+        case price
         case averagePrice = "average_price"
-        case status
+        case reason
         case timeInForce = "time_in_force"
         case error
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
     }
 }
 
-struct PositionSnapshot: Codable, Sendable {
-    let id: Int
+struct PositionData: Codable, Sendable {
+    let id: String?
+    let type: String?
+    let timestamp: Date?
     let instrument: String
     let exchange: String
     let quantity: Double
     let averagePrice: Double
     let unrealizedPnl: Double
     let realizedPnl: Double
-    let updatedAt: Date
 
     enum CodingKeys: String, CodingKey {
         case id
+        case type
+        case timestamp
         case instrument
         case exchange
         case quantity
         case averagePrice = "average_price"
         case unrealizedPnl = "unrealized_pnl"
         case realizedPnl = "realized_pnl"
-        case updatedAt = "updated_at"
     }
 }
 
@@ -533,7 +484,7 @@ struct ProcessCreatedInfo: Codable, Sendable {
 
 struct ProcessRun: Codable, Sendable {
     /// Unique run identifier
-    let runId: String
+    let publicId: String
     /// Process name
     let processName: String
     /// Run status
@@ -556,7 +507,7 @@ struct ProcessRun: Codable, Sendable {
     let completedAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case runId = "run_id"
+        case publicId = "public_id"
         case processName = "process_name"
         case status
         case role
@@ -624,15 +575,15 @@ struct ProcessStartResponse: Codable, Sendable {
     let status: String
     /// Process name
     let name: String
-    /// Run ID if started
-    let runId: String?
+    /// Public ID if started
+    let publicId: String?
     /// Additional message
     let message: String?
 
     enum CodingKeys: String, CodingKey {
         case status
         case name
-        case runId = "run_id"
+        case publicId = "public_id"
         case message
     }
 }
@@ -727,6 +678,34 @@ struct SettingUpdate: Codable, Sendable {
     let category: String?
     /// Setting description
     let description: String?
+}
+
+struct SignalData: Codable, Sendable {
+    let id: String?
+    let type: String?
+    let timestamp: Date?
+    let instrument: String
+    let exchange: String
+    let side: String
+    let strength: Double
+    let reason: String
+    let price: Double?
+    let strategyName: String?
+    let firedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case type
+        case timestamp
+        case instrument
+        case exchange
+        case side
+        case strength
+        case reason
+        case price
+        case strategyName = "strategy_name"
+        case firedAt = "fired_at"
+    }
 }
 
 struct StrategyListResponse: Codable, Sendable {
@@ -833,30 +812,6 @@ struct TopicMetricSnapshotSchema: Codable, Sendable {
         case lastMessageTs = "last_message_ts"
         case throttleMs = "throttle_ms"
         case pattern
-    }
-}
-
-struct TradingSignal: Codable, Sendable {
-    let id: Int
-    let instrument: String
-    let exchange: String
-    let timestamp: Date
-    let side: String
-    let strength: Double
-    let reason: String
-    let strategyName: String?
-    let price: Double?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case instrument
-        case exchange
-        case timestamp
-        case side
-        case strength
-        case reason
-        case strategyName = "strategy_name"
-        case price
     }
 }
 

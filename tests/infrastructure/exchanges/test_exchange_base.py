@@ -251,7 +251,7 @@ async def test_log_order_to_db_logs_successfully() -> None:
     """
     mock_repo = MagicMock(spec=Repository)
     mock_repo.upsert_instrument = AsyncMock(return_value=42)
-    mock_repo.insert_order = AsyncMock(return_value=123)
+    mock_repo.insert_order = AsyncMock(return_value="order-uuid-123")
     client = DummyExchangeClient(repository=mock_repo)
     request = ExchangeOrderRequest(
         client_order_id="client_123",
@@ -275,7 +275,7 @@ async def test_log_order_to_db_logs_successfully() -> None:
         timestamp=1234567890.0,
     )
     result = await client._log_order_to_db(request, order)
-    assert result == 123
+    assert result == "order-uuid-123"
     mock_repo.upsert_instrument.assert_called_once_with(
         symbol="BTC-USD", exchange="dummy", base="BTC", quote="USD"
     )
@@ -292,7 +292,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter() -> None:
     """
     mock_repo = MagicMock(spec=Repository)
     mock_repo.upsert_instrument = AsyncMock(return_value=42)
-    mock_repo.insert_order = AsyncMock(return_value=123)
+    mock_repo.insert_order = AsyncMock(return_value="order-uuid-123")
     client = DummyExchangeClient(repository=mock_repo)
     request = ExchangeOrderRequest(
         client_order_id="client_456",
@@ -316,7 +316,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter() -> None:
         timestamp=1234567890.0,
     )
     result = await client._log_order_to_db(request, order)
-    assert result == 123
+    assert result == "order-uuid-123"
     mock_repo.upsert_instrument.assert_called_once_with(
         symbol="BTCUSD", exchange="dummy", base="BTCUSD", quote="USD"
     )
@@ -368,7 +368,7 @@ async def test_log_order_update_to_db_returns_early_when_no_repository() -> None
     """
     client = DummyExchangeClient(repository=None)
     await client._log_order_update_to_db(
-        db_order_id=123,
+        db_order_id=42,
         status=OrderStatusEnum.FILLED,
         exchange_order_id="order_123",
     )
@@ -386,14 +386,14 @@ async def test_log_order_update_to_db_logs_successfully() -> None:
     mock_repo.update_order = AsyncMock()
     client = DummyExchangeClient(repository=mock_repo)
     await client._log_order_update_to_db(
-        db_order_id=123,
+        db_order_id=42,
         status=OrderStatusEnum.FILLED,
         exchange_order_id="order_123",
         error=None,
     )
     mock_repo.update_order.assert_called_once()
     call_args = mock_repo.update_order.call_args[1]
-    assert call_args["order_id"] == 123
+    assert call_args["order_id"] == 42
     assert call_args["status"] == "filled"
     assert call_args["exchange_order_id"] == "order_123"
     assert call_args["error"] is None
@@ -411,7 +411,7 @@ async def test_log_order_update_to_db_handles_exception() -> None:
     mock_repo.update_order = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
     await client._log_order_update_to_db(
-        db_order_id=123,
+        db_order_id=42,
         status=OrderStatusEnum.FILLED,
     )
 
@@ -436,7 +436,7 @@ async def test_log_execution_to_db_returns_early_when_no_repository() -> None:
         last_price=50000.0,
         last_qty=1.0,
     )
-    await client._log_execution_to_db(db_order_id=123, execution=execution)
+    await client._log_execution_to_db(db_order_id=42, execution=execution)
 
 
 @pytest.mark.asyncio()
@@ -464,10 +464,10 @@ async def test_log_execution_to_db_logs_successfully() -> None:
         last_qty=1.0,
         fee_usd_equiv=10.0,
     )
-    await client._log_execution_to_db(db_order_id=123, execution=execution)
+    await client._log_execution_to_db(db_order_id=42, execution=execution)
     mock_repo.insert_execution.assert_called_once()
     call_args = mock_repo.insert_execution.call_args[1]
-    assert call_args["order_id"] == 123
+    assert call_args["order_id"] == 42
     assert call_args["price"] == pytest.approx(50000.0)
     assert call_args["size"] == pytest.approx(1.0)
     assert call_args["fee"] == pytest.approx(10.0)
@@ -501,7 +501,7 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
         cum_qty=2.5,
         fee_usd_equiv=None,
     )
-    await client._log_execution_to_db(db_order_id=123, execution=execution)
+    await client._log_execution_to_db(db_order_id=42, execution=execution)
     mock_repo.insert_execution.assert_called_once()
     call_args = mock_repo.insert_execution.call_args[1]
     assert call_args["price"] == pytest.approx(49500.0)
@@ -529,4 +529,4 @@ async def test_log_execution_to_db_handles_exception() -> None:
         order_status=OrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
     )
-    await client._log_execution_to_db(db_order_id=123, execution=execution)
+    await client._log_execution_to_db(db_order_id=42, execution=execution)

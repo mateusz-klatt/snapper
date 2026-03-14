@@ -1,12 +1,12 @@
 export type {
   WsMessageSchema,
-  TickEnvelope,
-  CandleEnvelope,
-  TradeEnvelope,
-  SignalEnvelope,
-  OrderStatusEnvelope,
-  FillEnvelope,
-  HeartbeatEnvelope,
+  TickData,
+  CandleData,
+  TradeData,
+  SignalData,
+  OrderData,
+  ExecutionData,
+  HeartbeatData,
   WSErrorResponse,
   WSAuthRequiredResponse,
   WSAuthOkResponse,
@@ -28,13 +28,13 @@ export type {
   WSPongResponse,
 } from './ws.generated'
 import type {
-  TickEnvelope,
-  CandleEnvelope,
-  TradeEnvelope,
-  SignalEnvelope,
-  OrderStatusEnvelope,
-  FillEnvelope,
-  HeartbeatEnvelope,
+  TickData,
+  CandleData,
+  TradeData,
+  SignalData,
+  OrderData,
+  ExecutionData,
+  HeartbeatData,
   WSErrorResponse,
   WSAuthRequiredResponse,
   WSAuthOkResponse,
@@ -57,13 +57,13 @@ import type {
 } from './ws.generated'
 
 export type WebSocketMessages =
-  | TickEnvelope
-  | CandleEnvelope
-  | TradeEnvelope
-  | SignalEnvelope
-  | OrderStatusEnvelope
-  | FillEnvelope
-  | HeartbeatEnvelope
+  | TickData
+  | CandleData
+  | TradeData
+  | SignalData
+  | OrderData
+  | ExecutionData
+  | HeartbeatData
   | WSErrorResponse
   | WSAuthRequiredResponse
   | WSAuthOkResponse
@@ -84,30 +84,30 @@ export type WebSocketMessages =
   | WSTopicSuggestionsResponse
   | WSPongResponse
 
-export function isCandle(msg: WebSocketMessages): msg is CandleEnvelope {
+export function isCandle(msg: WebSocketMessages): msg is CandleData {
   return msg.type === 'candle'
 }
 
-export function isTick(msg: WebSocketMessages): msg is TickEnvelope {
+export function isTick(msg: WebSocketMessages): msg is TickData {
   return msg.type === 'tick'
 }
 
-export function isTrade(msg: WebSocketMessages): msg is TradeEnvelope {
+export function isTrade(msg: WebSocketMessages): msg is TradeData {
   return msg.type === 'trade'
 }
 
-export function isOrder(msg: WebSocketMessages): msg is OrderStatusEnvelope {
-  return msg.type === 'order_status'
+export function isOrder(msg: WebSocketMessages): msg is OrderData {
+  return msg.type === 'order'
 }
 
-export function isExecution(msg: WebSocketMessages): msg is FillEnvelope {
-  return msg.type === 'fill'
+export function isExecution(msg: WebSocketMessages): msg is ExecutionData {
+  return msg.type === 'execution'
 }
 
-export function isSignal(msg: WebSocketMessages): msg is SignalEnvelope {
+export function isSignal(msg: WebSocketMessages): msg is SignalData {
   return msg.type === 'signal'
 }
 
-export function isHeartbeat(msg: WebSocketMessages): msg is HeartbeatEnvelope {
+export function isHeartbeat(msg: WebSocketMessages): msg is HeartbeatData {
   return msg.type === 'heartbeat'
 }

@@ -369,7 +369,7 @@ _ORDER_EVENTS: set[str] = {
     "submitted",
     "accepted",
     "rejected",
-    "fill",
+    "executed",
     "cancelled",
     "expired",
     "replaced",
@@ -395,7 +395,7 @@ def _validate_orders_events_topic(topic: str) -> tuple[bool, str]:
     """Validate order event topic structure.
 
     Expected format: orders.events.{exchange}.{instrument}.{event}
-    where event is 'submitted', 'accepted', 'rejected', 'fill', 'cancelled', etc.
+    where event is 'submitted', 'accepted', 'rejected', 'executed', 'cancelled', etc.
 
     Args:
         topic: Topic string starting with "orders.events.".

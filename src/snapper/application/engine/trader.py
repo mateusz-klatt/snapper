@@ -39,12 +39,12 @@ from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.messages import FillEnvelope
+from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import OrderEventData
+from snapper.messaging.schemas.data import SettingChangedData
+from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.messages import MessageParseError
-from snapper.messaging.schemas.messages import OrderEventEnvelope
-from snapper.messaging.schemas.messages import OrderStatusEnvelope
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
-from snapper.messaging.schemas.messages import SignalEnvelope
 from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import parse_order_event_topic
 from snapper.messaging.topics.builders import parse_signal_topic
@@ -145,10 +145,10 @@ class TraderCoordinator(RegisterableProcess):
         in the system.
 
         Args:
-            payload: JSON-encoded SettingChangedEnvelope.
+            payload: JSON-encoded settings change data.
         """
         try:
-            message = SettingChangedEnvelope.from_json(payload.decode("utf-8"))
+            message = SettingChangedData.from_json(payload.decode("utf-8"))
             settings_service = SettingsService.get_instance()
             if settings_service:
                 parsed_value = settings_service._parse_value(message.value)
@@ -160,38 +160,38 @@ class TraderCoordinator(RegisterableProcess):
     def _dispatch_order_event(self, topic: str, payload: bytes) -> None:
         """Dispatch order event to appropriate handler based on message type.
 
-        Uses parse_message() to determine envelope type and routes accordingly:
-        - FillEnvelope -> _handle_execution_fill
-        - OrderStatusEnvelope -> _handle_order_status
-        - OrderEventEnvelope -> _handle_order_event
+        Uses parse_message() to determine message type and routes accordingly:
+        - ExecutionData -> _handle_execution_fill
+        - OrderData -> _handle_order_status
+        - OrderEventData -> _handle_order_event
 
         Args:
-            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.fill").
-            payload: JSON-encoded message envelope.
+            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.executed").
+            payload: JSON-encoded message data.
         """
         try:
             msg = parse_message(payload.decode("utf-8"))
         except MessageParseError as e:
             logger.error(f"ZMQTrader: Invalid orders.events payload on {topic}: {e}")
             return
-        if isinstance(msg, FillEnvelope):
+        if isinstance(msg, ExecutionData):
             self._handle_execution_fill(topic, msg)
-        elif isinstance(msg, OrderStatusEnvelope):
+        elif isinstance(msg, OrderData):
             self._handle_order_status(topic, msg)
-        elif isinstance(msg, OrderEventEnvelope):
+        elif isinstance(msg, OrderEventData):
             self._handle_order_event(topic, msg)
         else:
             logger.debug(f"ZMQTrader: Ignoring orders.events message type={msg.type} on {topic}")
 
-    def _handle_execution_fill(self, topic: str, fill: FillEnvelope) -> None:
+    def _handle_execution_fill(self, topic: str, fill: ExecutionData) -> None:
         """Handle execution fill event from ZMQ.
 
         Logs fill information when an order is executed.
         Performs invariant checks: topic exchange/instrument must match payload.
 
         Args:
-            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.fill").
-            fill: Parsed FillEnvelope.
+            topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.executed").
+            fill: Parsed execution fill data.
         """
         parsed = parse_order_event_topic(topic)
         if parsed is None:
@@ -209,7 +209,7 @@ class TraderCoordinator(RegisterableProcess):
             f"{fill.side} {fill.size}@{fill.price} {fill.instrument} on {parsed.exchange}"
         )
 
-    def _handle_order_status(self, topic: str, order_status: OrderStatusEnvelope) -> None:
+    def _handle_order_status(self, topic: str, order_status: OrderData) -> None:
         """Handle order status event from ZMQ.
 
         Logs order status changes (submitted, accepted, rejected, etc.).
@@ -217,13 +217,13 @@ class TraderCoordinator(RegisterableProcess):
         - topic exchange/instrument must match payload
         - topic suffix must match payload status
 
-        For 'rejected' status, the log includes envelope type to disambiguate
-        submit rejection (OrderStatusEnvelope) vs cancel/replace rejection
-        (OrderEventEnvelope).
+        For 'rejected' status, the log includes message type to disambiguate
+        submit rejection (OrderData) vs cancel/replace rejection
+        (OrderEventData).
 
         Args:
             topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.accepted").
-            order_status: Parsed OrderStatusEnvelope.
+            order_status: Parsed order status data.
         """
         parsed = parse_order_event_topic(topic)
         if parsed is None:
@@ -243,7 +243,7 @@ class TraderCoordinator(RegisterableProcess):
             return
         if parsed.suffix == "rejected":
             logger.info(
-                f"ZMQTrader: Order status [OrderStatusEnvelope] - {order_status.client_order_id} "
+                f"ZMQTrader: Order status [OrderData] - {order_status.client_order_id} "
                 f"{parsed.suffix} (submit rejection) {order_status.instrument} "
                 f"on {parsed.exchange}"
             )
@@ -253,7 +253,7 @@ class TraderCoordinator(RegisterableProcess):
                 f"{order_status.instrument} on {parsed.exchange}"
             )
 
-    def _handle_order_event(self, topic: str, order_event: OrderEventEnvelope) -> None:
+    def _handle_order_event(self, topic: str, order_event: OrderEventData) -> None:
         """Handle lightweight order event from ZMQ (cancel/replace confirmations).
 
         Logs cancel/replace event confirmations (cancelled, replaced, rejected).
@@ -261,13 +261,13 @@ class TraderCoordinator(RegisterableProcess):
         - topic exchange/instrument must match payload
         - topic suffix must match payload event
 
-        For 'rejected' event, the log includes envelope type to disambiguate
-        cancel/replace rejection (OrderEventEnvelope) vs submit rejection
-        (OrderStatusEnvelope).
+        For 'rejected' event, the log includes message type to disambiguate
+        cancel/replace rejection (OrderEventData) vs submit rejection
+        (OrderData).
 
         Args:
             topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.cancelled").
-            order_event: Parsed OrderEventEnvelope.
+            order_event: Parsed order event data.
         """
         parsed = parse_order_event_topic(topic)
         if parsed is None:
@@ -287,7 +287,7 @@ class TraderCoordinator(RegisterableProcess):
             return
         if parsed.suffix == "rejected":
             logger.info(
-                f"ZMQTrader: Order event [OrderEventEnvelope] - {order_event.client_order_id} "
+                f"ZMQTrader: Order event [OrderEventData] - {order_event.client_order_id} "
                 f"{parsed.suffix} (cancel/replace rejection) {order_event.instrument} "
                 f"on {parsed.exchange}"
             )
@@ -435,7 +435,7 @@ class TraderCoordinator(RegisterableProcess):
                 if topic_str.startswith("orders.events."):
                     self._dispatch_order_event(topic_str, msg_bytes)
                     continue
-                signal = SignalEnvelope.from_json(msg_bytes.decode())
+                signal = SignalData.from_json(msg_bytes.decode())
                 logger.info(f"ZMQTrader: Received signal from {topic_str}: {signal}")
                 self._current_topic = topic_str
                 await self._on_signal(signal)
@@ -445,7 +445,7 @@ class TraderCoordinator(RegisterableProcess):
         except Exception as e:
             logger.error(f"ZMQTrader: Error in signal listen loop: {e}", exc_info=True)
 
-    async def _on_signal(self, signal: SignalEnvelope) -> None:
+    async def _on_signal(self, signal: SignalData) -> None:
         """Process incoming trading signal.
 
         Extracts exchange and mode from topic, creates engine if needed,

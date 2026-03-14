@@ -58,7 +58,7 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
 
     Topics Published:
         - orders.events.kraken.{instrument}.submitted
-        - orders.events.kraken.{instrument}.fill
+        - orders.events.kraken.{instrument}.executed
         - orders.events.kraken.{instrument}.rejected
         - system.heartbeats.executor.kraken
 

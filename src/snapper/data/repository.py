@@ -38,17 +38,20 @@ from collections.abc import AsyncIterator
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
+from datetime import UTC
 from datetime import datetime
 from inspect import isawaitable
 from typing import Any
 from typing import cast
 from urllib.parse import parse_qsl
 from urllib.parse import urlencode
+from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import and_
 from sqlalchemy import create_engine as create_sync_engine
 from sqlalchemy import event
+from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import select
 from sqlalchemy import update
@@ -71,7 +74,7 @@ from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
-from snapper.data.models import OrderRecord
+from snapper.data.models import Order
 from snapper.data.models import Trade
 
 _MSSQL_PREFIX = "mssql+pyodbc://"
@@ -144,6 +147,19 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
+        """Load the latest candle public_id per (instrument_id, timeframe).
+
+        Used by the publisher to populate the in-memory candle ID cache on
+        startup so that live upserts reuse existing public_ids for the
+        current open_at window.
+
+        Returns:
+            Mapping of (instrument_id, timeframe) to (open_at, public_id).
+        """
+        ...
+
+    @abstractmethod
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Insert or update candles. Return affected row count."""
         ...
@@ -189,6 +205,8 @@ class Repository(ABC):
         self,
         order_id: int,
         timestamp: datetime,
+        side: str,
+        status: str,
         price: float,
         size: float,
         fee: float,
@@ -318,6 +336,34 @@ class SQLAlchemyRepository(Repository):
                 await s.rollback()
                 raise
 
+    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
+        """Load the latest candle public_id per (instrument_id, timeframe)."""
+        async with self.session() as s:
+            latest = (
+                select(
+                    Candle.instrument_id,
+                    Candle.timeframe,
+                    func.max(Candle.open_at).label("max_open_at"),
+                )
+                .group_by(Candle.instrument_id, Candle.timeframe)
+                .subquery()
+            )
+            q = await s.execute(
+                select(
+                    Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id
+                ).join(
+                    latest,
+                    and_(
+                        Candle.instrument_id == latest.c.instrument_id,
+                        Candle.timeframe == latest.c.timeframe,
+                        Candle.open_at == latest.c.max_open_at,
+                    ),
+                )
+            )
+            return {
+                (row.instrument_id, row.timeframe): (row.open_at, row.public_id) for row in q.all()
+            }
+
     async def upsert_instrument(self, **kwargs: Any) -> int:
         """Insert or retrieve instrument by (symbol, exchange), returning its ID."""
         filtered = _filter_instrument_kwargs(kwargs)
@@ -368,6 +414,9 @@ class SQLAlchemyRepository(Repository):
         Returns:
             Number of rows successfully inserted.
         """
+        for r in rows:
+            if "public_id" not in r:
+                r["public_id"] = str(uuid7())
         name = self.dialect_name
         if name == "sqlite":
             async with self.session() as s:
@@ -404,9 +453,15 @@ class SQLAlchemyRepository(Repository):
         incoming values.  This is essential for live-updating partial candles
         (e.g. Kraken publishes intra-interval updates that must overwrite earlier
         snapshots).
+
+        Rows without ``public_id`` get a generated UUID7 automatically.
+        On conflict the existing ``public_id`` is preserved (not overwritten).
         """
         if not rows:
             return 0
+        for r in rows:
+            if "public_id" not in r:
+                r["public_id"] = str(uuid7())
         index_elements = ["instrument_id", "timeframe", "open_at"]
         update_cols = {
             "timestamp": "timestamp",
@@ -487,14 +542,15 @@ class SQLAlchemyRepository(Repository):
     ) -> int:
         """Insert new order record and return generated ID."""
         async with self.session() as s:
-            order = OrderRecord(
+            order = Order(
                 instrument_id=instrument_id,
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
                 created_at=created_at,
                 updated_at=None,
+                timestamp=datetime.now(UTC),
                 side=side,
-                type=order_type,
+                order_type=order_type,
                 price=price,
                 size=size,
                 filled_size=0.0,
@@ -506,7 +562,7 @@ class SQLAlchemyRepository(Repository):
             s.add(order)
             await s.commit()
             await s.refresh(order)
-            return int(order.id)
+            return order.id
 
     async def update_order(
         self,
@@ -524,17 +580,15 @@ class SQLAlchemyRepository(Repository):
                 "status": status,
                 "updated_at": updated_at,
                 "exchange_order_id": (
-                    exchange_order_id
-                    if exchange_order_id is not None
-                    else OrderRecord.exchange_order_id
+                    exchange_order_id if exchange_order_id is not None else Order.exchange_order_id
                 ),
-                "error": error if error is not None else OrderRecord.error,
+                "error": error if error is not None else Order.error,
             }
             if filled_size is not None:
                 values["filled_size"] = filled_size
             if average_price is not None:
                 values["average_price"] = average_price
-            stmt = update(OrderRecord).where(OrderRecord.id == order_id).values(**values)
+            stmt = update(Order).where(Order.id == order_id).values(**values)
             await s.execute(stmt)
             await s.commit()
 
@@ -542,6 +596,8 @@ class SQLAlchemyRepository(Repository):
         self,
         order_id: int,
         timestamp: datetime,
+        side: str,
+        status: str,
         price: float,
         size: float,
         fee: float,
@@ -557,6 +613,8 @@ class SQLAlchemyRepository(Repository):
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
+                side=side,
+                status=status,
                 executed_at=executed_at,
                 price=price,
                 size=size,
@@ -566,7 +624,7 @@ class SQLAlchemyRepository(Repository):
             s.add(execution)
             await s.commit()
             await s.refresh(execution)
-            return int(execution.id)
+            return execution.id
 
     async def get_candles(
         self,
@@ -673,7 +731,7 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             q = await s.execute(
                 select(
-                    MarketSnapshot.updated_at,
+                    MarketSnapshot.timestamp,
                     MarketSnapshot.symbol,
                     MarketSnapshot.exchange,
                     MarketSnapshot.bid,
@@ -690,16 +748,16 @@ class SQLAlchemyRepository(Repository):
                     and_(
                         MarketSnapshot.exchange == exchange,
                         MarketSnapshot.symbol.in_(symbols),
-                        MarketSnapshot.updated_at >= start,
-                        MarketSnapshot.updated_at <= end,
+                        MarketSnapshot.timestamp >= start,
+                        MarketSnapshot.timestamp <= end,
                     )
                 )
-                .order_by(MarketSnapshot.updated_at.asc())
+                .order_by(MarketSnapshot.timestamp.asc())
             )
             rows = q.all()
             return [
                 {
-                    "ts": r.updated_at,
+                    "ts": r.timestamp,
                     "symbol": r.symbol,
                     "exchange": r.exchange,
                     "bid": r.bid,
@@ -898,6 +956,9 @@ class MSSQLRepository(Repository):
         Returns:
             Number of rows successfully inserted.
         """
+        for r in rows:
+            if "public_id" not in r:
+                r["public_id"] = str(uuid7())
         inserted = 0
         for r in rows:
             try:
@@ -908,6 +969,37 @@ class MSSQLRepository(Repository):
                 continue
         s.commit()
         return inserted
+
+    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
+        """Load the latest candle public_id per (instrument_id, timeframe) via sync thread."""
+
+        def _do(s: SyncSession) -> dict[tuple[int, str], tuple[datetime, str]]:
+            latest = (
+                select(
+                    Candle.instrument_id,
+                    Candle.timeframe,
+                    func.max(Candle.open_at).label("max_open_at"),
+                )
+                .group_by(Candle.instrument_id, Candle.timeframe)
+                .subquery()
+            )
+            q = s.execute(
+                select(
+                    Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id
+                ).join(
+                    latest,
+                    and_(
+                        Candle.instrument_id == latest.c.instrument_id,
+                        Candle.timeframe == latest.c.timeframe,
+                        Candle.open_at == latest.c.max_open_at,
+                    ),
+                )
+            )
+            return {
+                (row.instrument_id, row.timeframe): (row.open_at, row.public_id) for row in q.all()
+            }
+
+        return await self._run_sync(_do)
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
         """Insert or retrieve instrument by (symbol, exchange) via sync thread."""
@@ -954,6 +1046,9 @@ class MSSQLRepository(Repository):
         """
         if not rows:
             return 0
+        for r in rows:
+            if "public_id" not in r:
+                r["public_id"] = str(uuid7())
         update_cols = ["open", "high", "low", "close", "volume", "vwap", "trades"]
 
         def _do(s: SyncSession) -> int:
@@ -1004,14 +1099,15 @@ class MSSQLRepository(Repository):
         """Insert order record via sync thread."""
 
         def _do(s: SyncSession) -> int:
-            order = OrderRecord(
+            order = Order(
                 instrument_id=instrument_id,
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
                 created_at=created_at,
                 updated_at=None,
+                timestamp=datetime.now(UTC),
                 side=side,
-                type=order_type,
+                order_type=order_type,
                 price=price,
                 size=size,
                 filled_size=0.0,
@@ -1023,7 +1119,7 @@ class MSSQLRepository(Repository):
             s.add(order)
             s.commit()
             s.refresh(order)
-            return int(order.id)
+            return order.id
 
         return await self._run_sync(_do)
 
@@ -1044,17 +1140,15 @@ class MSSQLRepository(Repository):
                 "status": status,
                 "updated_at": updated_at,
                 "exchange_order_id": (
-                    exchange_order_id
-                    if exchange_order_id is not None
-                    else OrderRecord.exchange_order_id
+                    exchange_order_id if exchange_order_id is not None else Order.exchange_order_id
                 ),
-                "error": error if error is not None else OrderRecord.error,
+                "error": error if error is not None else Order.error,
             }
             if filled_size is not None:
                 values["filled_size"] = filled_size
             if average_price is not None:
                 values["average_price"] = average_price
-            stmt = update(OrderRecord).where(OrderRecord.id == order_id).values(**values)
+            stmt = update(Order).where(Order.id == order_id).values(**values)
             s.execute(stmt)
             s.commit()
 
@@ -1064,6 +1158,8 @@ class MSSQLRepository(Repository):
         self,
         order_id: int,
         timestamp: datetime,
+        side: str,
+        status: str,
         price: float,
         size: float,
         fee: float,
@@ -1080,6 +1176,8 @@ class MSSQLRepository(Repository):
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
+                side=side,
+                status=status,
                 executed_at=executed_at,
                 price=price,
                 size=size,
@@ -1089,7 +1187,7 @@ class MSSQLRepository(Repository):
             s.add(execution)
             s.commit()
             s.refresh(execution)
-            return int(execution.id)
+            return execution.id
 
         return await self._run_sync(_do)
 
@@ -1205,7 +1303,7 @@ class MSSQLRepository(Repository):
         def _do(s: SyncSession) -> list[dict[str, Any]]:
             q = s.execute(
                 select(
-                    MarketSnapshot.updated_at,
+                    MarketSnapshot.timestamp,
                     MarketSnapshot.symbol,
                     MarketSnapshot.exchange,
                     MarketSnapshot.bid,
@@ -1222,16 +1320,16 @@ class MSSQLRepository(Repository):
                     and_(
                         MarketSnapshot.exchange == exchange,
                         MarketSnapshot.symbol.in_(symbols),
-                        MarketSnapshot.updated_at >= start,
-                        MarketSnapshot.updated_at <= end,
+                        MarketSnapshot.timestamp >= start,
+                        MarketSnapshot.timestamp <= end,
                     )
                 )
-                .order_by(MarketSnapshot.updated_at.asc())
+                .order_by(MarketSnapshot.timestamp.asc())
             )
             rows = q.all()
             return [
                 {
-                    "ts": r.updated_at,
+                    "ts": r.timestamp,
                     "symbol": r.symbol,
                     "exchange": r.exchange,
                     "bid": r.bid,

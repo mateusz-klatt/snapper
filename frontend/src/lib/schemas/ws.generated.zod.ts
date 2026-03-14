@@ -12,11 +12,11 @@ export const WsMessageBaseSchema = z
   })
   .strict()
 
-export const CandleEnvelopeSchema = z
+export const CandleDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('candle'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     timeframe: z.string(),
@@ -31,11 +31,11 @@ export const CandleEnvelopeSchema = z
   })
   .strict()
 
-export const FillEnvelopeSchema = z
+export const ExecutionDataSchema = z
   .object({
-    type: z.literal('fill'),
+    id: z.string().optional(),
+    type: z.literal('execution'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     trade_id: z.string().nullable(),
     exchange_order_id: z.string().nullable(),
     client_order_id: z.string(),
@@ -51,23 +51,24 @@ export const FillEnvelopeSchema = z
   })
   .strict()
 
-export const HeartbeatEnvelopeSchema = z
+export const HeartbeatDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('heartbeat'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     component: z.string(),
     sequence: z.number().int(),
     status: z.enum(['healthy', 'warning', 'error']),
     lag_ms: z.number().int(),
+    meta: z.record(z.string(), z.unknown()).optional(),
   })
   .strict()
 
-export const OrderCancelEnvelopeSchema = z
+export const OrderCancelDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('order_cancel'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     instrument: z.string(),
     exchange_order_id: z.string(),
@@ -75,11 +76,35 @@ export const OrderCancelEnvelopeSchema = z
   })
   .strict()
 
-export const OrderEventEnvelopeSchema = z
+export const OrderDataSchema = z
   .object({
+    id: z.string().optional(),
+    type: z.literal('order'),
+    timestamp: z.iso.datetime().optional(),
+    exchange_order_id: z.string().nullable(),
+    client_order_id: z.string(),
+    instrument: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
+    side: z.enum(['buy', 'sell']),
+    status: z.string(),
+    order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
+    size: z.number(),
+    filled_size: z.number(),
+    price: z.number().nullable(),
+    average_price: z.number().nullable(),
+    reason: z.string().nullable(),
+    time_in_force: z.string().nullable(),
+    error: z.string().nullable(),
+    created_at: z.iso.datetime().optional(),
+    updated_at: z.iso.datetime().nullable(),
+  })
+  .strict()
+
+export const OrderEventDataSchema = z
+  .object({
+    id: z.string().optional(),
     type: z.literal('order_event'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     exchange_order_id: z.string(),
     client_order_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
@@ -89,11 +114,11 @@ export const OrderEventEnvelopeSchema = z
   })
   .strict()
 
-export const OrderReplaceEnvelopeSchema = z
+export const OrderReplaceDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('order_replace'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     instrument: z.string(),
     exchange_order_id: z.string(),
@@ -103,11 +128,11 @@ export const OrderReplaceEnvelopeSchema = z
   })
   .strict()
 
-export const OrderRequestEnvelopeSchema = z
+export const OrderRequestDataSchema = z
   .object({
-    type: z.literal('order_req'),
+    id: z.string().optional(),
+    type: z.literal('order_request'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     strategy_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     instrument: z.string(),
@@ -121,50 +146,42 @@ export const OrderRequestEnvelopeSchema = z
   })
   .strict()
 
-export const OrderStatusEnvelopeSchema = z
+export const PositionDataSchema = z
   .object({
-    type: z.literal('order_status'),
+    id: z.string().optional(),
+    type: z.literal('position'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
-    exchange_order_id: z.string().nullable(),
-    client_order_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
-    side: z.enum(['buy', 'sell']),
-    status: z.enum(['submitted', 'accepted', 'rejected', 'cancelled', 'expired', 'replaced']),
-    order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
-    size: z.number(),
-    filled_size: z.number(),
-    price: z.number().nullable(),
-    average_price: z.number().nullable(),
-    reason: z.string().nullable(),
-    created_at: z.iso.datetime().optional(),
-    updated_at: z.iso.datetime().nullable(),
+    quantity: z.number(),
+    average_price: z.number(),
+    unrealized_pnl: z.number(),
+    realized_pnl: z.number(),
   })
   .strict()
 
-export const ReplayEndEnvelopeSchema = z
+export const ReplayEndDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('replay_end'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
   })
   .strict()
 
-export const ReplayStartEnvelopeSchema = z
+export const ReplayStartDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('replay_start'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     started_at: z.iso.datetime().nullable(),
   })
   .strict()
 
-export const SettingChangedEnvelopeSchema = z
+export const SettingChangedDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('setting_changed'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     key: z.string(),
     value: z.string(),
     category: z.string(),
@@ -172,11 +189,11 @@ export const SettingChangedEnvelopeSchema = z
   })
   .strict()
 
-export const SignalEnvelopeSchema = z
+export const SignalDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('signal'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     side: z.enum(['buy', 'sell']),
@@ -184,25 +201,25 @@ export const SignalEnvelopeSchema = z
     reason: z.string(),
     price: z.number().nullable(),
     strategy_name: z.string().nullable(),
-    id: z.string().nullable(),
+    fired_at: z.iso.datetime().optional(),
   })
   .strict()
 
-export const SymbolAliasUpdateEnvelopeSchema = z
+export const SymbolAliasUpdateDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('symbol_alias_update'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     event: z.literal('symbol_aliases_updated'),
     action: z.literal('clear_cache'),
   })
   .strict()
 
-export const TickEnvelopeSchema = z
+export const TickDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('tick'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     volume: z.number(),
@@ -212,11 +229,11 @@ export const TickEnvelopeSchema = z
   })
   .strict()
 
-export const TradeEnvelopeSchema = z
+export const TradeDataSchema = z
   .object({
+    id: z.string().optional(),
     type: z.literal('trade'),
     timestamp: z.iso.datetime().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
     executed_at: z.iso.datetime().nullable(),

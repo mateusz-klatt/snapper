@@ -30,7 +30,7 @@ vi.mock('./topics', () => ({
     return msg.topic || msg.type || null
   }),
   shouldThrottle: vi.fn((type: string) =>
-    ['candle', 'order_status', 'fill', 'position'].includes(type)
+    ['candle', 'order', 'execution', 'position'].includes(type)
   ),
   buildMarketTopic: vi.fn((type: string, inst: string) => `market:${type}:${inst}`),
   MARKET_TOPIC_PREFIX: 'market.',

@@ -404,7 +404,7 @@ async def test_update_market_snapshots_persists_bulk_insert(
         change_24h=0.1,
         spread=0.2,
         spread_pct=0.2 / 4.4 * 100,
-        updated_at=datetime.now(UTC),
+        timestamp=datetime.now(UTC),
     )
 
     async def fake_collect(_timeout: int) -> list[MarketSnapshot]:

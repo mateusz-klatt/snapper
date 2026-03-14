@@ -30,13 +30,13 @@ from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
-from snapper.messaging.schemas.messages import FillEnvelope
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
+from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.schemas.data import OrderCancelData
+from snapper.messaging.schemas.data import OrderReplaceData
+from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.messages import MessageParseError
-from snapper.messaging.schemas.messages import OrderCancelEnvelope
-from snapper.messaging.schemas.messages import OrderReplaceEnvelope
-from snapper.messaging.schemas.messages import OrderRequestEnvelope
-from snapper.messaging.schemas.messages import SettingChangedEnvelope
 
 
 def zmq_socket_stub(
@@ -215,10 +215,10 @@ class MergedDummyExecutor(ExchangeExecutorService[Any]):
         return "kraken"
 
 
-def make_order(**overrides: Any) -> OrderRequestEnvelope:
-    """Create an OrderRequestEnvelope with optional overrides."""
-    return OrderRequestEnvelope(
-        type="order_req",
+def make_order(**overrides: Any) -> OrderRequestData:
+    """Create an OrderRequestData with optional overrides."""
+    return OrderRequestData(
+        type="order_request",
         exchange="paper",
         instrument=overrides.get("instrument", "BTC-USD"),
         side=overrides.get("side", "buy"),
@@ -265,13 +265,13 @@ async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.Monkey
     ex: Any = MergedDummyExecutor()
     ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
     ex.running = True
-    ex._publish_fill = AsyncMock()
+    ex._publish_execution = AsyncMock()
     ex._publish_order_status = AsyncMock()
     ex._execute_live_order = AsyncMock(side_effect=RuntimeError("fail"))
     monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
     order = make_order()
     await ex._process_order(order)
-    ex._publish_fill.assert_not_awaited()
+    ex._publish_execution.assert_not_awaited()
     ex._publish_order_status.assert_awaited()
 
 
@@ -717,7 +717,7 @@ async def test_process_execution_default_filled_and_removes_pending(
     order = make_order()
     ex.pending_orders[order.client_order_id] = order
     ex.client_by_exchange["ex1"] = order.client_order_id
-    ex._publish_fill = AsyncMock()
+    ex._publish_execution = AsyncMock()
     execution = SimpleNamespace(
         order_id="ex1",
         exec_type="trade",
@@ -729,7 +729,7 @@ async def test_process_execution_default_filled_and_removes_pending(
     )
     await ex._process_execution(execution)
     assert order.client_order_id not in ex.pending_orders
-    ex._publish_fill.assert_awaited()
+    ex._publish_execution.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -746,10 +746,10 @@ async def test_process_execution_none_exchange_order_id() -> None:
     ex.pending_orders[order.client_order_id] = order
     published_fills: list[Any] = []
 
-    async def track_publish_fill(fill: Any) -> None:
+    async def track_publish_execution(fill: Any) -> None:
         published_fills.append(fill)
 
-    ex._publish_fill = track_publish_fill
+    ex._publish_execution = track_publish_execution
     execution = SimpleNamespace(
         order_id=None,
         exec_type="filled",
@@ -776,10 +776,10 @@ async def test_process_execution_orphaned_client_by_exchange() -> None:
     ex.client_by_exchange["ex1"] = "orphaned_client_id"
     published_fills: list[Any] = []
 
-    async def track_publish_fill(fill: Any) -> None:
+    async def track_publish_execution(fill: Any) -> None:
         published_fills.append(fill)
 
-    ex._publish_fill = track_publish_fill
+    ex._publish_execution = track_publish_execution
     execution = SimpleNamespace(
         order_id="ex1",
         exec_type="filled",
@@ -805,10 +805,10 @@ async def test_process_execution_duplicate_fill_idempotent() -> None:
     ex.running = True
     published_fills: list[Any] = []
 
-    async def track_publish_fill(fill: Any) -> None:
+    async def track_publish_execution(fill: Any) -> None:
         published_fills.append(fill)
 
-    ex._publish_fill = track_publish_fill
+    ex._publish_execution = track_publish_execution
     execution = SimpleNamespace(
         order_id="already_filled_ex1",
         exec_type="filled",
@@ -837,10 +837,10 @@ async def test_process_execution_orphan_buffering_and_replay() -> None:
     ex.pending_orders[order.client_order_id] = order
     published_fills: list[Any] = []
 
-    async def track_publish_fill(fill: Any) -> None:
+    async def track_publish_execution(fill: Any) -> None:
         published_fills.append(fill)
 
-    ex._publish_fill = track_publish_fill
+    ex._publish_execution = track_publish_execution
     execution = SimpleNamespace(
         order_id="fast_exchange_id",
         exec_type="filled",
@@ -911,7 +911,7 @@ async def test_orphan_duplicate_updates_timestamp_without_relogging() -> None:
 async def test_process_execution_exception_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test execution processing keeps order on publish error.
 
-    Given: An executor with pending order, mapping, and failing _publish_fill,
+    Given: An executor with pending order, mapping, and failing _publish_execution,
     When: Execution update is processed,
     Then: Order remains in pending_orders after exception.
     """
@@ -920,7 +920,7 @@ async def test_process_execution_exception_path(monkeypatch: pytest.MonkeyPatch)
     order = make_order()
     ex.pending_orders[order.client_order_id] = order
     ex.client_by_exchange["ex1"] = order.client_order_id
-    ex._publish_fill = AsyncMock(side_effect=RuntimeError("fail"))
+    ex._publish_execution = AsyncMock(side_effect=RuntimeError("fail"))
     execution = SimpleNamespace(
         order_id="ex1",
         exec_type="trade",
@@ -1096,7 +1096,7 @@ class TestOrderHandlerEdgeCases:
                 return (
                     "orders.commands.binance.BTC-USD.submit",
                     (
-                        b'{"type":"order_req","strategy_id":"test","exchange":"binance",'
+                        b'{"type":"order_request","strategy_id":"test","exchange":"binance",'
                         b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
                         b'"quantity":0.1,"client_order_id":"test123"}'
                     ),
@@ -1251,7 +1251,7 @@ class TestExecuteLiveOrderErrors:
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         return mock_settings
 
-    def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
+    def _create_order(self, **overrides: Any) -> OrderRequestData:
         base: dict[str, Any] = {
             "strategy_id": "test_strategy",
             "exchange": "kraken",
@@ -1263,7 +1263,7 @@ class TestExecuteLiveOrderErrors:
             "client_order_id": "test_order_123",
         }
         base.update(overrides)
-        return OrderRequestEnvelope(**base)
+        return OrderRequestData(**base)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1318,7 +1318,7 @@ class TestProcessOrder:
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         return mock_settings
 
-    def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
+    def _create_order(self, **overrides: Any) -> OrderRequestData:
         base: dict[str, Any] = {
             "strategy_id": "test_strategy",
             "exchange": "kraken",
@@ -1330,7 +1330,7 @@ class TestProcessOrder:
             "client_order_id": "test_order_123",
         }
         base.update(overrides)
-        return OrderRequestEnvelope(**base)
+        return OrderRequestData(**base)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1350,14 +1350,14 @@ class TestProcessOrder:
         service_any.running = True
         published_statuses: list[tuple[Any, str]] = []
 
-        async def track_publish_fill(fill: Any) -> None:
+        async def track_publish_execution(fill: Any) -> None:
             """Intentionally empty async stub for testing."""
             pass
 
         async def track_publish_order_status(order: Any, status: str) -> None:
             published_statuses.append((order, status))
 
-        service_any._publish_fill = track_publish_fill
+        service_any._publish_execution = track_publish_execution
         service_any._publish_order_status = track_publish_order_status
         service_any._execute_live_order = AsyncMock(side_effect=Exception("Order execution failed"))
         order = self._create_order()
@@ -1416,7 +1416,7 @@ class TestProcessExecution:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1430,10 +1430,10 @@ class TestProcessExecution:
         service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
-        async def track_publish_fill(fill: Any) -> None:
+        async def track_publish_execution(fill: Any) -> None:
             published_fills.append(fill)
 
-        service_any._publish_fill = track_publish_fill
+        service_any._publish_execution = track_publish_execution
         execution = ExecutionUpdate(
             order_id="exchange_order_456",
             exec_type="canceled",
@@ -1464,7 +1464,7 @@ class TestProcessExecution:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1479,10 +1479,10 @@ class TestProcessExecution:
         service_any.client_by_exchange = {"exchange_order_789": order.client_order_id}
         published_fills: list[Any] = []
 
-        async def track_publish_fill(fill: Any) -> None:
+        async def track_publish_execution(fill: Any) -> None:
             published_fills.append(fill)
 
-        service_any._publish_fill = track_publish_fill
+        service_any._publish_execution = track_publish_execution
         execution = ExecutionUpdate(
             order_id="exchange_order_789",
             exec_type="expired",
@@ -1510,7 +1510,7 @@ class TestProcessExecution:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1525,10 +1525,10 @@ class TestProcessExecution:
         service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
-        async def track_publish_fill(fill: Any) -> None:
+        async def track_publish_execution(fill: Any) -> None:
             published_fills.append(fill)
 
-        service_any._publish_fill = track_publish_fill
+        service_any._publish_execution = track_publish_execution
         execution = ExecutionUpdate(
             order_id="exchange_order_456",
             exec_type="trade",
@@ -1571,7 +1571,7 @@ class TestHeartbeat:
         service_any = cast(Any, service)
         service_any.publisher = None
         service_any.running = True
-        hb = HeartbeatEnvelope(
+        hb = HeartbeatData(
             component="test",
             sequence=1,
             status="healthy",
@@ -1596,7 +1596,7 @@ class TestHeartbeat:
         mock_publisher = MagicMock()
         mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Send failed"))
         service_any.publisher = mock_publisher
-        hb = HeartbeatEnvelope(
+        hb = HeartbeatData(
             component="test",
             sequence=1,
             status="healthy",
@@ -1696,7 +1696,7 @@ class TestSettingsUpdate:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        envelope = SettingChangedEnvelope(
+        envelope = SettingChangedData(
             key="test_key",
             value="test_value",
             category="test",
@@ -1724,7 +1724,7 @@ class TestSettingsUpdate:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        envelope = SettingChangedEnvelope(
+        envelope = SettingChangedData(
             key="test_key",
             value="test_value",
             category="test",
@@ -1760,7 +1760,7 @@ class TestPublishOrderStatus:
         service_any = cast(Any, service)
         service_any.publisher = None
         service_any.running = True
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -2034,7 +2034,7 @@ class TestOrderHandlerWrongExchange:
                 return (
                     "orders.commands.kraken.BTC-USD.submit",
                     (
-                        b'{"type":"order_req","strategy_id":"test","exchange":"binance",'
+                        b'{"type":"order_request","strategy_id":"test","exchange":"binance",'
                         b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
                         b'"quantity":0.1,"client_order_id":"test123"}'
                     ),
@@ -2277,7 +2277,7 @@ async def test_order_handler_processes_order_and_stops(monkeypatch: pytest.Monke
     """
     executor = DummyExecutorSimple()
     executor.running = True
-    order = OrderRequestEnvelope(
+    order = OrderRequestData(
         strategy_id="s1",
         exchange="paper",
         instrument="BTC-USD",
@@ -2293,9 +2293,9 @@ async def test_order_handler_processes_order_and_stops(monkeypatch: pytest.Monke
         payload,
     )
     executor.subscriber = cast(Any, subscriber)
-    processed: list[OrderRequestEnvelope] = []
+    processed: list[OrderRequestData] = []
 
-    async def fake_process(order_msg: OrderRequestEnvelope) -> None:
+    async def fake_process(order_msg: OrderRequestData) -> None:
         processed.append(order_msg)
         executor.running = False
 
@@ -2470,7 +2470,7 @@ class TestExecutorCoverage:
         mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
         return mock_settings
 
-    def _create_order(self, **overrides: Any) -> OrderRequestEnvelope:
+    def _create_order(self, **overrides: Any) -> OrderRequestData:
         base_payload: dict[str, Any] = {
             "strategy_id": "test_strategy",
             "exchange": "kraken",
@@ -2482,7 +2482,7 @@ class TestExecutorCoverage:
             "client_order_id": "test_order_123",
         }
         base_payload.update(overrides)
-        return OrderRequestEnvelope(**base_payload)
+        return OrderRequestData(**base_payload)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2520,7 +2520,7 @@ class TestExecutorCoverage:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_publish_fill(self, mock_get_settings: MagicMock) -> None:
+    async def test_publish_execution(self, mock_get_settings: MagicMock) -> None:
         """Verify fill message is published successfully.
 
         Given: Service running with publisher configured,
@@ -2534,7 +2534,7 @@ class TestExecutorCoverage:
         mock_publisher = AsyncMock()
         service_any.publisher = mock_publisher
         service_any.running = True
-        fill_msg = FillEnvelope(
+        fill_msg = ExecutionData(
             trade_id="trade-1",
             exchange_order_id="exchange_123",
             client_order_id="test_order_123",
@@ -2547,12 +2547,12 @@ class TestExecutorCoverage:
             fee_asset="USD",
             status="filled",
         )
-        await service_any._publish_fill(fill_msg)
+        await service_any._publish_execution(fill_msg)
         mock_publisher.send_multipart.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_publish_fill_not_running(self, mock_get_settings: MagicMock) -> None:
+    async def test_publish_execution_not_running(self, mock_get_settings: MagicMock) -> None:
         """Verify fill publishing skipped when not running.
 
         Given: Service not running,
@@ -2564,7 +2564,7 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = False
-        fill_msg = FillEnvelope(
+        fill_msg = ExecutionData(
             trade_id="trade-1",
             exchange_order_id="test_order_123",
             client_order_id="test_order_123",
@@ -2577,7 +2577,7 @@ class TestExecutorCoverage:
             fee_asset="USD",
             status="filled",
         )
-        await service_any._publish_fill(fill_msg)
+        await service_any._publish_execution(fill_msg)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2754,14 +2754,14 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any._publish_order_status = AsyncMock()
-        service_any._publish_fill = AsyncMock()
+        service_any._publish_execution = AsyncMock()
         service_any._execute_live_order = AsyncMock(return_value="abc123")
         order = self._create_order(mode="live")
         await service_any._process_order(order)
         service_any._publish_order_status.assert_any_await(order, "submitted")
         service_any._publish_order_status.assert_any_await(order, "accepted", "abc123")
         assert service_any._publish_order_status.await_count == 2
-        service_any._publish_fill.assert_not_awaited()
+        service_any._publish_execution.assert_not_awaited()
         service_any._execute_live_order.assert_awaited_once_with(order)
 
     @pytest.mark.asyncio
@@ -2779,7 +2779,7 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any._publish_order_status = AsyncMock()
-        service_any._publish_fill = AsyncMock()
+        service_any._publish_execution = AsyncMock()
         service_any._execute_paper_order = AsyncMock(return_value=None)
         order = self._create_order()
         await service_any._process_order(order)
@@ -2825,7 +2825,7 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any._publish_fill = AsyncMock()
+        service_any._publish_execution = AsyncMock()
         order = self._create_order(mode="live")
         service_any.pending_orders[order.client_order_id] = order
         service_any.client_by_exchange = {"ex123": order.client_order_id}
@@ -2843,7 +2843,7 @@ class TestExecutorCoverage:
             fee_usd_equiv=0.5,
         )
         await service_any._process_execution(execution)
-        service_any._publish_fill.assert_awaited_once()
+        service_any._publish_execution.assert_awaited_once()
         assert order.client_order_id not in service_any.pending_orders
 
     @pytest.mark.asyncio
@@ -2862,7 +2862,7 @@ class TestExecutorCoverage:
         service_any.running = True
         publish_heartbeat_mock = AsyncMock()
 
-        async def publish_side_effect(topic: str, message: HeartbeatEnvelope) -> None:
+        async def publish_side_effect(topic: str, message: HeartbeatData) -> None:
             assert topic == "system.heartbeats.executor.kraken"
             assert message.component == "executor_kraken"
             service_any.running = False
@@ -2893,7 +2893,7 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.publisher = AsyncMock()
-        hb = HeartbeatEnvelope(component="executor", sequence=1, status="healthy", lag_ms=0)
+        hb = HeartbeatData(component="executor", sequence=1, status="healthy", lag_ms=0)
         await service_any._publish_heartbeat("system.heartbeats", hb)
         service_any.publisher.send_multipart.assert_awaited_once()
 
@@ -3170,7 +3170,7 @@ class TestExecutorCoverage:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_publish_fill_handles_error(
+    async def test_publish_execution_handles_error(
         self,
         mock_get_settings: MagicMock,
     ) -> None:
@@ -3187,7 +3187,7 @@ class TestExecutorCoverage:
         service_any.running = True
         service_any.publisher = AsyncMock()
         service_any.publisher.send_multipart.side_effect = RuntimeError("fill failed")
-        fill_msg = FillEnvelope(
+        fill_msg = ExecutionData(
             trade_id="trade-1",
             exchange_order_id="one",
             client_order_id="one",
@@ -3200,7 +3200,7 @@ class TestExecutorCoverage:
             fee_asset="USD",
             status="filled",
         )
-        await service_any._publish_fill(fill_msg)
+        await service_any._publish_execution(fill_msg)
         service_any.publisher.send_multipart.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -3254,7 +3254,7 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any._publish_fill = AsyncMock()
+        service_any._publish_execution = AsyncMock()
         execution = ExecutionUpdate(
             order_id="missing",
             exec_type="trade",
@@ -3267,7 +3267,7 @@ class TestExecutorCoverage:
             cum_cost=10.0,
         )
         await service_any._process_execution(execution)
-        service_any._publish_fill.assert_not_awaited()
+        service_any._publish_execution.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3512,7 +3512,7 @@ class TestExecutorWebSocketExecutions:
         mock_exchange_client = MagicMock()
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3525,7 +3525,7 @@ class TestExecutorWebSocketExecutions:
         mock_order_result = type("ExchangeOrderSnapshot", (), {"id": "KRAKEN-ORDER-ABC123"})()
         mock_exchange_client.create_order = AsyncMock(return_value=mock_order_result)
         result = await service._execute_live_order(order)
-        assert isinstance(result, str), "Should return order_id string, not FillEnvelope!"
+        assert isinstance(result, str), "Should return order_id string, not ExecutionData!"
         assert result == "KRAKEN-ORDER-ABC123"
         assert "KRAKEN-ORDER-ABC123" in service.pending_orders
         assert service.pending_orders["KRAKEN-ORDER-ABC123"] == order
@@ -3548,7 +3548,7 @@ class TestExecutorWebSocketExecutions:
         mock_exchange_client = MagicMock()
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3582,7 +3582,7 @@ class TestExecutorWebSocketExecutions:
         mock_exchange_client = MagicMock()
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3612,7 +3612,7 @@ class TestExecutorWebSocketExecutions:
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3637,11 +3637,11 @@ class TestExecutorWebSocketExecutions:
             average_price=45123.50,
             fee_usd_equiv=4.51,
         )
-        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+        with patch.object(service, "_publish_execution", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
             mock_publish.assert_called_once()
-            fill: FillEnvelope = mock_publish.call_args[0][0]
-            assert isinstance(fill, FillEnvelope)
+            fill: ExecutionData = mock_publish.call_args[0][0]
+            assert isinstance(fill, ExecutionData)
             assert fill.client_order_id == "test-order-123"
             assert fill.exchange_order_id == "KRAKEN-ORDER-ABC123"
             assert fill.instrument == "BTC-USD"
@@ -3667,7 +3667,7 @@ class TestExecutorWebSocketExecutions:
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3693,9 +3693,9 @@ class TestExecutorWebSocketExecutions:
             average_price=45000.0,
             fee_usd_equiv=22.50,
         )
-        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+        with patch.object(service, "_publish_execution", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
-            fill: FillEnvelope = mock_publish.call_args[0][0]
+            fill: ExecutionData = mock_publish.call_args[0][0]
             assert fill.size == pytest.approx(0.5)
             assert fill.status == "partial"
             assert order.client_order_id in service.pending_orders
@@ -3715,7 +3715,7 @@ class TestExecutorWebSocketExecutions:
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3740,7 +3740,7 @@ class TestExecutorWebSocketExecutions:
             cum_cost=0.0,
             average_price=0.0,
         )
-        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+        with patch.object(service, "_publish_execution", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
             mock_publish.assert_not_called()
             assert order.client_order_id not in service.pending_orders
@@ -3773,7 +3773,7 @@ class TestExecutorWebSocketExecutions:
             cum_cost=4500.0,
             average_price=45000.0,
         )
-        with patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish:
+        with patch.object(service, "_publish_execution", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
             mock_publish.assert_not_called()
 
@@ -3794,7 +3794,7 @@ class TestExecutorWebSocketExecutions:
         service = KrakenOrderExecutor()
         service.running = True
         service.publisher = AsyncMock()
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3814,12 +3814,14 @@ class TestExecutorWebSocketExecutions:
             patch.object(
                 service, "_publish_order_status", new_callable=AsyncMock
             ) as mock_publish_status,
-            patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish_fill,
+            patch.object(
+                service, "_publish_execution", new_callable=AsyncMock
+            ) as mock_publish_execution,
         ):
             await service._process_order(order)
             mock_execute_live.assert_called_once_with(order)
             assert mock_publish_status.call_args_list[0] == call(order, "submitted")
-            mock_publish_fill.assert_not_called()
+            mock_publish_execution.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3838,7 +3840,7 @@ class TestExecutorWebSocketExecutions:
         service = KrakenOrderExecutor()
         service.running = True
         service.publisher = AsyncMock()
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3858,10 +3860,12 @@ class TestExecutorWebSocketExecutions:
             patch.object(
                 service, "_publish_order_status", new_callable=AsyncMock
             ) as mock_publish_status,
-            patch.object(service, "_publish_fill", new_callable=AsyncMock) as mock_publish_fill,
+            patch.object(
+                service, "_publish_execution", new_callable=AsyncMock
+            ) as mock_publish_execution,
         ):
             await service._process_order(order)
-            mock_publish_fill.assert_not_called()
+            mock_publish_execution.assert_not_called()
             assert mock_publish_status.call_args_list[1] == call(order, "rejected")
 
     @pytest.mark.asyncio
@@ -3918,7 +3922,7 @@ class TestCancelReplaceHandlers:
     ) -> None:
         """Verify cancel command handler processes valid cancel requests.
 
-        Given: A valid OrderCancelEnvelope for correct exchange,
+        Given: A valid OrderCancelData for correct exchange,
         When: Cancel command handler processes it,
         Then: _process_cancel is called with the envelope.
         """
@@ -3945,7 +3949,7 @@ class TestCancelReplaceHandlers:
     ) -> None:
         """Verify cancel command handler rejects wrong exchange.
 
-        Given: An OrderCancelEnvelope for different exchange,
+        Given: An OrderCancelData for different exchange,
         When: Cancel command handler processes it,
         Then: _process_cancel is not called.
         """
@@ -3994,7 +3998,7 @@ class TestCancelReplaceHandlers:
     ) -> None:
         """Verify replace command handler processes valid replace requests.
 
-        Given: A valid OrderReplaceEnvelope for correct exchange,
+        Given: A valid OrderReplaceData for correct exchange,
         When: Replace command handler processes it,
         Then: _process_replace is called with the envelope.
         """
@@ -4022,7 +4026,7 @@ class TestCancelReplaceHandlers:
     ) -> None:
         """Verify replace command handler rejects wrong exchange.
 
-        Given: An OrderReplaceEnvelope for different exchange,
+        Given: An OrderReplaceData for different exchange,
         When: Replace command handler processes it,
         Then: _process_replace is not called.
         """
@@ -4140,7 +4144,7 @@ class TestCancelReplaceHandlers:
     ) -> None:
         """Verify submit command handler rejects instrument mismatch.
 
-        Given: An OrderRequestEnvelope with different instrument than topic,
+        Given: An OrderRequestData with different instrument than topic,
         When: Submit command handler processes it,
         Then: _process_order is not called due to invariant violation.
         """
@@ -4150,7 +4154,7 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_order = AsyncMock()
         payload = (
-            '{"type":"order_req","strategy_id":"test","exchange":"kraken",'
+            '{"type":"order_request","strategy_id":"test","exchange":"kraken",'
             '"instrument":"ETH-USD","mode":"paper","side":"buy","order_type":"market",'
             '"quantity":1.0,"client_order_id":"test-123"}'
         )
@@ -4165,7 +4169,7 @@ class TestCancelReplaceHandlers:
     ) -> None:
         """Verify cancel command handler rejects instrument mismatch.
 
-        Given: An OrderCancelEnvelope with different instrument than topic,
+        Given: An OrderCancelData with different instrument than topic,
         When: Cancel command handler processes it,
         Then: _process_cancel is not called due to invariant violation.
         """
@@ -4189,7 +4193,7 @@ class TestCancelReplaceHandlers:
     ) -> None:
         """Verify replace command handler rejects instrument mismatch.
 
-        Given: An OrderReplaceEnvelope with different instrument than topic,
+        Given: An OrderReplaceData with different instrument than topic,
         When: Replace command handler processes it,
         Then: _process_replace is not called due to invariant violation.
         """
@@ -4227,7 +4231,7 @@ class TestCancelReplaceHandlers:
         mock_result.status = OrderStatusEnum.CANCELED
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
-        cancel_envelope = OrderCancelEnvelope(
+        cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4253,7 +4257,7 @@ class TestCancelReplaceHandlers:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any._publish_cancel_event = AsyncMock()
-        order = OrderRequestEnvelope(
+        order = OrderRequestData(
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -4271,7 +4275,7 @@ class TestCancelReplaceHandlers:
         mock_result.status = OrderStatusEnum.CANCELED
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
-        cancel_envelope = OrderCancelEnvelope(
+        cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4304,7 +4308,7 @@ class TestCancelReplaceHandlers:
         mock_result.status = OrderStatusEnum.OPEN
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
-        cancel_envelope = OrderCancelEnvelope(
+        cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4333,7 +4337,7 @@ class TestCancelReplaceHandlers:
         mock_client = AsyncMock()
         mock_client.cancel_order = AsyncMock(side_effect=Exception("Network error"))
         service_any.exchange_client = mock_client
-        cancel_envelope = OrderCancelEnvelope(
+        cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4359,7 +4363,7 @@ class TestCancelReplaceHandlers:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any._publish_replace_event = AsyncMock()
-        replace_envelope = OrderReplaceEnvelope(
+        replace_envelope = OrderReplaceData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4388,7 +4392,7 @@ class TestCancelReplaceHandlers:
         service_any.running = True
         mock_publisher = AsyncMock()
         service_any.publisher = mock_publisher
-        cancel_envelope = OrderCancelEnvelope(
+        cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4417,7 +4421,7 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.publisher = None
-        cancel_envelope = OrderCancelEnvelope(
+        cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4445,7 +4449,7 @@ class TestCancelReplaceHandlers:
         mock_publisher = AsyncMock()
         mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Network error"))
         service_any.publisher = mock_publisher
-        cancel_envelope = OrderCancelEnvelope(
+        cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4472,7 +4476,7 @@ class TestCancelReplaceHandlers:
         service_any.running = True
         mock_publisher = AsyncMock()
         service_any.publisher = mock_publisher
-        replace_envelope = OrderReplaceEnvelope(
+        replace_envelope = OrderReplaceData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4503,7 +4507,7 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.publisher = None
-        replace_envelope = OrderReplaceEnvelope(
+        replace_envelope = OrderReplaceData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4531,7 +4535,7 @@ class TestCancelReplaceHandlers:
         mock_publisher = AsyncMock()
         mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Network error"))
         service_any.publisher = mock_publisher
-        replace_envelope = OrderReplaceEnvelope(
+        replace_envelope = OrderReplaceData(
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",

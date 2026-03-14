@@ -63,9 +63,9 @@ export function getMessageTopic(message: WebSocketMessages): string | null {
       return 'market.'
     }
 
-    case 'order_status':
+    case 'order':
       return 'orders.'
-    case 'fill':
+    case 'execution':
       return 'executions.'
 
     case 'signal': {
@@ -86,7 +86,7 @@ export function getMessageTopic(message: WebSocketMessages): string | null {
   }
 }
 
-const THROTTLED_MESSAGE_TYPES = new Set(['candle', 'order_status', 'fill', 'position'])
+const THROTTLED_MESSAGE_TYPES = new Set(['candle', 'order', 'execution', 'position'])
 
 export function shouldThrottle(messageType: string): boolean {
   return THROTTLED_MESSAGE_TYPES.has(messageType)

@@ -893,6 +893,19 @@ export type Components = {
          *         trades: Number of trades in the candle (optional).
          */
         CandleData: {
+            /** Id */
+            id?: string;
+            /**
+             * Type
+             * @default candle
+             * @constant
+             */
+            type: "candle";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
             /** Instrument */
             instrument: string;
             /**
@@ -959,7 +972,7 @@ export type Components = {
          *         tags: Categorization tags.
          *         parameters_schema: JSON Schema for parameters.
          *         is_one_shot: Whether process is one-shot task.
-         *         active_run_id: Active run ID if running.
+         *         active_public_id: Active public ID if running.
          */
         ConfiguredProcess: {
             /**
@@ -1040,10 +1053,10 @@ export type Components = {
              */
             is_one_shot: boolean;
             /**
-             * Active Run Id
-             * @description Active run ID if running
+             * Active Public Id
+             * @description Active public ID if running
              */
-            active_run_id?: string | null;
+            active_public_id?: string | null;
         };
         /**
          * ConfiguredProcessesResponse
@@ -1128,62 +1141,78 @@ export type Components = {
             is_active: boolean;
         };
         /**
-         * ExecutionRecord
-         * @description Trade execution record response schema.
+         * ExecutionData
+         * @description Order fill/execution details from an exchange.
          *
-         *     Represents a single trade execution (fill) from an order.
+         *     Represents a completed or partial fill of an order.
+         *     Contains all information needed for trade tracking and P&L calculation.
          *
          *     Attributes:
-         *         id: Unique execution identifier.
-         *         order_id: Related order identifier.
-         *         exec_id: Exchange-assigned execution ID.
-         *         trade_id: Exchange-assigned trade ID.
-         *         timestamp: Wall-clock timestamp when execution was recorded.
-         *         executed_at: Exchange-provided execution time.
+         *         trade_id: Unique fill/trade ID from exchange (e.g., Kraken exec_id).
+         *             May be None for exchanges that don't provide it.
+         *         exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
+         *             May be None if exchange hasn't assigned an ID yet.
+         *         client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+         *         instrument: Trading pair symbol.
+         *         exchange: Exchange where the fill occurred.
+         *         side: Trade direction ('buy' or 'sell').
+         *         size: Filled quantity.
          *         price: Execution price.
-         *         size: Executed quantity.
-         *         fee: Transaction fee.
-         *         fee_asset: Currency of the fee.
-         *         instrument: Trading instrument symbol.
-         *         side: Trade side (buy/sell).
-         *         exchange: Exchange name.
+         *         fee: Transaction fee charged.
+         *         fee_asset: Currency of the fee (e.g., 'USD', 'BTC').
+         *         status: Fill status ('filled', 'partial', etc.).
+         *         executed_at: Timestamp of the fill.
          */
-        ExecutionRecord: {
+        ExecutionData: {
             /** Id */
-            id: number;
-            /** Order Id */
-            order_id: number;
-            /** Exec Id */
-            exec_id?: string | null;
-            /** Trade Id */
-            trade_id?: string | null;
+            id?: string;
+            /**
+             * Type
+             * @default execution
+             * @constant
+             */
+            type: "execution";
             /**
              * Timestamp
              * Format: date-time
              */
-            timestamp: string;
-            /** Executed At */
-            executed_at?: string | null;
-            /** Price */
-            price: number;
-            /** Size */
-            size: number;
-            /** Fee */
-            fee: number;
-            /** Fee Asset */
-            fee_asset: string;
+            timestamp?: string;
+            /** Trade Id */
+            trade_id?: string | null;
+            /** Exchange Order Id */
+            exchange_order_id?: string | null;
+            /** Client Order Id */
+            client_order_id: string;
             /** Instrument */
             instrument: string;
-            /**
-             * Side
-             * @enum {string}
-             */
-            side: "buy" | "sell";
             /**
              * Exchange
              * @enum {string}
              */
             exchange: "paper" | "kraken" | "zonda" | "walutomat";
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+            /** Size */
+            size: number;
+            /** Price */
+            price: number;
+            /** Fee */
+            fee: number;
+            /** Fee Asset */
+            fee_asset: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "filled" | "partial";
+            /**
+             * Executed At
+             * Format: date-time
+             */
+            executed_at?: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1299,32 +1328,51 @@ export type Components = {
             message: string;
         };
         /**
-         * OrderStatus
-         * @description Order status response schema.
+         * OrderData
+         * @description Current state of an order.
          *
-         *     Represents the current state of a trading order.
+         *     Used for both ZMQ event publishing and REST API responses.
+         *     Published on orders.events.{exchange}.{instrument}.{status} topics.
+         *
+         *     INVARIANT: The 'status' field MUST match the topic suffix.
          *
          *     Attributes:
-         *         id: Unique internal order identifier.
-         *         instrument: Trading instrument symbol.
-         *         exchange: Exchange name.
-         *         client_order_id: Client-assigned order ID.
-         *         exchange_order_id: Exchange-assigned order ID.
-         *         created_at: Order creation timestamp.
-         *         updated_at: Last update timestamp.
-         *         side: Order side (buy/sell).
-         *         type: Order type (market/limit).
-         *         price: Limit price (None for market orders).
-         *         size: Order quantity.
-         *         filled_size: Cumulative filled quantity.
-         *         average_price: Volume-weighted average fill price.
-         *         status: Current order status.
+         *         exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
+         *             May be None before exchange ACK (e.g., for 'submitted' event).
+         *         client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+         *         instrument: Trading pair symbol.
+         *         exchange: Exchange where the order is placed.
+         *         side: Order direction ('buy' or 'sell').
+         *         status: Event type matching topic suffix (OrderEventType, excludes 'execution').
+         *         order_type: Type of order ('market', 'limit', etc.).
+         *         size: Total order size.
+         *         filled_size: Amount filled so far.
+         *         price: Limit price (for limit orders).
+         *         average_price: Average fill price (for partial fills).
+         *         reason: Optional rejection/failure reason (for 'rejected' status).
          *         time_in_force: Order time-in-force setting.
          *         error: Error message if order failed.
+         *         created_at: Order creation timestamp.
+         *         updated_at: Last status update timestamp.
          */
-        OrderStatus: {
+        OrderData: {
             /** Id */
-            id: number;
+            id?: string;
+            /**
+             * Type
+             * @default order
+             * @constant
+             */
+            type: "order";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Exchange Order Id */
+            exchange_order_id?: string | null;
+            /** Client Order Id */
+            client_order_id: string;
             /** Instrument */
             instrument: string;
             /**
@@ -1332,67 +1380,70 @@ export type Components = {
              * @enum {string}
              */
             exchange: "paper" | "kraken" | "zonda" | "walutomat";
-            /** Client Order Id */
-            client_order_id?: string | null;
-            /** Exchange Order Id */
-            exchange_order_id?: string | null;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /** Updated At */
-            updated_at?: string | null;
             /**
              * Side
              * @enum {string}
              */
             side: "buy" | "sell";
+            /** Status */
+            status: string;
             /**
-             * Type
+             * Order Type
              * @enum {string}
              */
-            type: "market" | "limit" | "stop" | "stop_limit";
-            /** Price */
-            price?: number | null;
+            order_type: "market" | "limit" | "stop" | "stop_limit";
             /** Size */
             size: number;
-            /**
-             * Filled Size
-             * @default 0
-             */
+            /** Filled Size */
             filled_size: number;
+            /** Price */
+            price?: number | null;
             /** Average Price */
             average_price?: number | null;
-            /**
-             * Status
-             * @enum {string}
-             */
-            status: "new" | "submitted" | "open" | "filled" | "partially_filled" | "cancelled" | "rejected";
+            /** Reason */
+            reason?: string | null;
             /** Time In Force */
             time_in_force?: string | null;
             /** Error */
             error?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at?: string;
+            /** Updated At */
+            updated_at?: string | null;
         };
         /**
-         * PositionSnapshot
-         * @description Portfolio position snapshot response schema.
+         * PositionData
+         * @description Portfolio position snapshot.
          *
-         *     Represents a snapshot of a single position in the portfolio.
+         *     Represents a single position in the portfolio.
+         *     Used for both ZMQ event publishing and REST API responses.
+         *     The inherited ``timestamp`` field carries the last-update time.
          *
          *     Attributes:
-         *         id: Unique position identifier.
-         *         instrument: Trading instrument symbol.
-         *         exchange: Exchange name.
+         *         instrument: Trading pair symbol.
+         *         exchange: Exchange where the position is held.
          *         quantity: Position size (positive for long, negative for short).
          *         average_price: Average entry price.
          *         unrealized_pnl: Unrealized profit/loss.
          *         realized_pnl: Realized profit/loss.
-         *         updated_at: Last update timestamp.
          */
-        PositionSnapshot: {
+        PositionData: {
             /** Id */
-            id: number;
+            id?: string;
+            /**
+             * Type
+             * @default position
+             * @constant
+             */
+            type: "position";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
             /** Instrument */
             instrument: string;
             /**
@@ -1408,11 +1459,6 @@ export type Components = {
             unrealized_pnl: number;
             /** Realized Pnl */
             realized_pnl: number;
-            /**
-             * Updated At
-             * Format: date-time
-             */
-            updated_at: string;
         };
         /**
          * ProcessCategoryCount
@@ -1533,7 +1579,7 @@ export type Components = {
          *     Represents a single execution run of a process.
          *
          *     Attributes:
-         *         run_id: Unique run identifier.
+         *         public_id: Unique run identifier.
          *         process_name: Process name.
          *         status: Run status.
          *         role: Process role.
@@ -1547,10 +1593,10 @@ export type Components = {
          */
         ProcessRun: {
             /**
-             * Run Id
+             * Public Id
              * @description Unique run identifier
              */
-            run_id: string;
+            public_id: string;
             /**
              * Process Name
              * @description Process name
@@ -1744,7 +1790,7 @@ export type Components = {
          *     Attributes:
          *         status: Operation status (success, already_running, error).
          *         name: Process name.
-         *         run_id: Run ID if started.
+         *         public_id: Public ID if started.
          *         message: Additional message.
          */
         ProcessStartResponse: {
@@ -1760,10 +1806,10 @@ export type Components = {
              */
             name: string;
             /**
-             * Run Id
-             * @description Run ID if started
+             * Public Id
+             * @description Public ID if started
              */
-            run_id?: string | null;
+            public_id?: string | null;
             /**
              * Message
              * @description Additional message
@@ -1964,6 +2010,63 @@ export type Components = {
              * @description Setting description
              */
             description?: string | null;
+        };
+        /**
+         * SignalData
+         * @description Trading signal generated by a strategy.
+         *
+         *     Represents a recommendation to enter or exit a position.
+         *     Signals are published to the messaging bus for execution.
+         *
+         *     Attributes:
+         *         instrument: Target trading pair symbol.
+         *         exchange: Target exchange for execution.
+         *         side: Recommended direction ('buy' or 'sell').
+         *         strength: Signal confidence from 0.0 (weak) to 1.0 (strong).
+         *         reason: Human-readable explanation for the signal.
+         *         price: Suggested entry/exit price (optional).
+         *         strategy_name: Name of the generating strategy (optional).
+         *         fired_at: Domain timestamp when the signal was generated.
+         */
+        SignalData: {
+            /** Id */
+            id?: string;
+            /**
+             * Type
+             * @default signal
+             * @constant
+             */
+            type: "signal";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Instrument */
+            instrument: string;
+            /**
+             * Exchange
+             * @enum {string}
+             */
+            exchange: "paper" | "kraken" | "zonda" | "walutomat";
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+            /** Strength */
+            strength: number;
+            /** Reason */
+            reason: string;
+            /** Price */
+            price?: number | null;
+            /** Strategy Name */
+            strategy_name?: string | null;
+            /**
+             * Fired At
+             * Format: date-time
+             */
+            fired_at?: string;
         };
         /**
          * StrategyListResponse
@@ -2204,52 +2307,6 @@ export type Components = {
              * @description ZMQ subscription pattern
              */
             pattern?: string | null;
-        };
-        /**
-         * TradingSignal
-         * @description Trading signal response schema.
-         *
-         *     Represents a trading signal generated by a strategy.
-         *
-         *     Attributes:
-         *         id: Unique signal identifier.
-         *         instrument: Trading instrument symbol.
-         *         exchange: Exchange name.
-         *         timestamp: When the signal was generated.
-         *         side: Trade direction (buy/sell).
-         *         strength: Signal strength (0.0-1.0).
-         *         reason: Human-readable reason for the signal.
-         *         strategy_name: Name of the strategy that generated the signal.
-         *         price: Target price for the trade (optional).
-         */
-        TradingSignal: {
-            /** Id */
-            id: number;
-            /** Instrument */
-            instrument: string;
-            /**
-             * Exchange
-             * @enum {string}
-             */
-            exchange: "paper" | "kraken" | "zonda" | "walutomat";
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /**
-             * Side
-             * @enum {string}
-             */
-            side: "buy" | "sell";
-            /** Strength */
-            strength: number;
-            /** Reason */
-            reason: string;
-            /** Strategy Name */
-            strategy_name?: string | null;
-            /** Price */
-            price?: number | null;
         };
         /**
          * UpdateUserRequest
@@ -3309,7 +3366,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["TradingSignal"][];
+                    "application/json": Components["schemas"]["SignalData"][];
                 };
             };
             /** @description Validation Error */
@@ -3419,7 +3476,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["OrderStatus"][];
+                    "application/json": Components["schemas"]["OrderData"][];
                 };
             };
             /** @description Validation Error */
@@ -3458,7 +3515,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["ExecutionRecord"][];
+                    "application/json": Components["schemas"]["ExecutionData"][];
                 };
             };
             /** @description Validation Error */
@@ -3494,7 +3551,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["PositionSnapshot"][];
+                    "application/json": Components["schemas"]["PositionData"][];
                 };
             };
             /** @description Internal server error */

@@ -9,21 +9,22 @@
  */
 export type WebSocketMessages =
   | WsMessageSchema
-  | CandleEnvelope
-  | FillEnvelope
-  | HeartbeatEnvelope
-  | OrderCancelEnvelope
-  | OrderEventEnvelope
-  | OrderReplaceEnvelope
-  | OrderRequestEnvelope
-  | OrderStatusEnvelope
-  | ReplayEndEnvelope
-  | ReplayStartEnvelope
-  | SettingChangedEnvelope
-  | SignalEnvelope
-  | SymbolAliasUpdateEnvelope
-  | TickEnvelope
-  | TradeEnvelope
+  | CandleData
+  | ExecutionData
+  | HeartbeatData
+  | OrderCancelData
+  | OrderData
+  | OrderEventData
+  | OrderReplaceData
+  | OrderRequestData
+  | PositionData
+  | ReplayEndData
+  | ReplayStartData
+  | SettingChangedData
+  | SignalData
+  | SymbolAliasUpdateData
+  | TickData
+  | TradeData
   | WSAuthCompleteResponse
   | WSAuthExpiredResponse
   | WSAuthFailedResponse
@@ -47,7 +48,7 @@ export type Type = "candle";
 export type Exchange = "kraken" | "zonda" | "walutomat" | "polygon";
 export type Vwap = number | null;
 export type Trades = number | null;
-export type Type1 = "fill";
+export type Type1 = "execution";
 export type TradeId = string | null;
 export type ExchangeOrderId = string | null;
 export type Exchange1 = "paper" | "kraken" | "zonda" | "walutomat";
@@ -57,58 +58,60 @@ export type Type2 = "heartbeat";
 export type Status1 = "healthy" | "warning" | "error";
 export type Type3 = "order_cancel";
 export type Exchange2 = "paper" | "kraken" | "zonda" | "walutomat";
-export type Type4 = "order_event";
+export type Type4 = "order";
+export type ExchangeOrderId1 = string | null;
 export type Exchange3 = "paper" | "kraken" | "zonda" | "walutomat";
-export type Event = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
-export type Reason = string | null;
-export type Type5 = "order_replace";
-export type Exchange4 = "paper" | "kraken" | "zonda" | "walutomat";
-export type NewQuantity = number | null;
-export type NewPrice = number | null;
-export type Type6 = "order_req";
-export type Exchange5 = "paper" | "kraken" | "zonda" | "walutomat";
-export type Mode = "live" | "paper";
 export type Side1 = "buy" | "sell";
 export type OrderType = "market" | "limit" | "stop" | "stop_limit";
 export type Price = number | null;
-export type SignaledAt = string | null;
-export type Type7 = "order_status";
-export type ExchangeOrderId1 = string | null;
+export type AveragePrice = number | null;
+export type Reason = string | null;
+export type TimeInForce = string | null;
+export type Error = string | null;
+export type UpdatedAt = string | null;
+export type Type5 = "order_event";
+export type Exchange4 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Event = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
+export type Reason1 = string | null;
+export type Type6 = "order_replace";
+export type Exchange5 = "paper" | "kraken" | "zonda" | "walutomat";
+export type NewQuantity = number | null;
+export type NewPrice = number | null;
+export type Type7 = "order_request";
 export type Exchange6 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Mode = "live" | "paper";
 export type Side2 = "buy" | "sell";
-export type Status2 = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
 export type OrderType1 = "market" | "limit" | "stop" | "stop_limit";
 export type Price1 = number | null;
-export type AveragePrice = number | null;
-export type Reason1 = string | null;
-export type UpdatedAt = string | null;
-export type Type8 = "replay_end";
-export type Type9 = "replay_start";
-export type StartedAt = string | null;
-export type Type10 = "setting_changed";
-export type UpdatedBy = string | null;
-export type Type11 = "signal";
+export type SignaledAt = string | null;
+export type Type8 = "position";
 export type Exchange7 = "paper" | "kraken" | "zonda" | "walutomat";
+export type Type9 = "replay_end";
+export type Type10 = "replay_start";
+export type StartedAt = string | null;
+export type Type11 = "setting_changed";
+export type UpdatedBy = string | null;
+export type Type12 = "signal";
+export type Exchange8 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Side3 = "buy" | "sell";
 export type Price2 = number | null;
 export type StrategyName = string | null;
-export type Id = string | null;
-export type Type12 = "symbol_alias_update";
+export type Type13 = "symbol_alias_update";
 export type Event1 = "symbol_aliases_updated";
 export type Action = "clear_cache";
-export type Type13 = "tick";
-export type Exchange8 = "kraken" | "zonda" | "walutomat" | "polygon";
+export type Type14 = "tick";
+export type Exchange9 = "kraken" | "zonda" | "walutomat" | "polygon";
 export type Bid = number | null;
 export type Ask = number | null;
 export type Last = number | null;
-export type Type14 = "trade";
-export type Exchange9 = "kraken" | "zonda" | "walutomat" | "polygon";
+export type Type15 = "trade";
+export type Exchange10 = "kraken" | "zonda" | "walutomat" | "polygon";
 export type ExecutedAt = string | null;
 export type Side4 = string | null;
 /**
  * Message type discriminator
  */
-export type Type15 = "auth_complete";
+export type Type16 = "auth_complete";
 /**
  * Topics available for subscription
  */
@@ -124,11 +127,11 @@ export type SessionExpiresAt = string | null;
 /**
  * Message type discriminator
  */
-export type Type16 = "auth_expired";
+export type Type17 = "auth_expired";
 /**
  * Message type discriminator
  */
-export type Type17 = "auth_failed";
+export type Type18 = "auth_failed";
 /**
  * Failure reason
  */
@@ -136,51 +139,51 @@ export type Reason2 = string | null;
 /**
  * Message type discriminator
  */
-export type Type18 = "auth_ok";
+export type Type19 = "auth_ok";
 /**
  * Message type discriminator
  */
-export type Type19 = "auth_required";
+export type Type20 = "auth_required";
 /**
  * Message type discriminator
  */
-export type Type20 = "authenticate";
+export type Type21 = "authenticate";
 /**
  * Message type discriminator
  */
-export type Type21 = "error";
+export type Type22 = "error";
 /**
  * Message type discriminator
  */
-export type Type22 = "get_subscriptions";
+export type Type23 = "get_subscriptions";
 /**
  * Message type discriminator
  */
-export type Type23 = "get_topic_suggestions";
+export type Type24 = "get_topic_suggestions";
 /**
  * Message type discriminator
  */
-export type Type24 = "ping";
+export type Type25 = "ping";
 /**
  * Message type discriminator
  */
-export type Type25 = "pong";
+export type Type26 = "pong";
 /**
  * Message type discriminator
  */
-export type Type26 = "reauth_ok";
+export type Type27 = "reauth_ok";
 /**
  * Message type discriminator
  */
-export type Type27 = "reauth";
+export type Type28 = "reauth";
 /**
  * Message type discriminator
  */
-export type Type28 = "reauth_required";
+export type Type29 = "reauth_required";
 /**
  * Message type discriminator
  */
-export type Type29 = "subscribe";
+export type Type30 = "subscribe";
 /**
  * Topics to subscribe to
  */
@@ -188,7 +191,7 @@ export type Topics = string[];
 /**
  * Message type discriminator
  */
-export type Type30 = "subscription_success";
+export type Type31 = "subscription_success";
 /**
  * The subscription action performed
  */
@@ -196,7 +199,7 @@ export type Action1 = "subscribe" | "unsubscribe";
 /**
  * Result status of the subscription operation
  */
-export type Status3 = "subscribed" | "unsubscribed" | "partial" | "denied" | "no_topics";
+export type Status2 = "subscribed" | "unsubscribed" | "partial" | "denied" | "no_topics";
 /**
  * Topics that were successfully processed
  */
@@ -220,7 +223,7 @@ export type Message = string | null;
 /**
  * Message type discriminator
  */
-export type Type31 = "subscriptions_list";
+export type Type32 = "subscriptions_list";
 /**
  * Current active subscriptions
  */
@@ -232,7 +235,7 @@ export type AvailableTopics1 = string[];
 /**
  * Message type discriminator
  */
-export type Type32 = "topic_suggestions";
+export type Type33 = "topic_suggestions";
 /**
  * Matching topic names
  */
@@ -240,7 +243,7 @@ export type Suggestions = string[];
 /**
  * Message type discriminator
  */
-export type Type33 = "unsubscribe";
+export type Type34 = "unsubscribe";
 /**
  * Topics to unsubscribe from
  */
@@ -261,18 +264,28 @@ export interface WsMessageSchema {
   timestamp?: string;
 }
 /**
- * OHLCV candle message envelope.
+ * OHLCV candlestick data for technical analysis.
  *
- * Wraps CandleData for transmission over the messaging bus.
- * Published when a candle closes or during historical replay.
+ * Represents aggregated price action over a specific timeframe.
+ * Used by strategies for pattern recognition and indicator calculation.
  *
  * Attributes:
- *     type: Fixed as 'candle' for message routing.
+ *     instrument: Trading pair symbol (e.g., 'BTC-USD').
+ *     exchange: Source exchange producing this candle data.
+ *     timeframe: Candle duration (e.g., '1m', '1h', '1d').
+ *     open_at: Exchange-provided candle interval start time.
+ *     open: Opening price of the candle.
+ *     high: Highest price during the candle.
+ *     low: Lowest price during the candle.
+ *     close: Closing price of the candle.
+ *     volume: Total traded volume during the candle.
+ *     vwap: Volume-weighted average price (optional).
+ *     trades: Number of trades in the candle (optional).
  */
-export interface CandleEnvelope {
+export interface CandleData {
+  id?: string;
   type: Type;
   timestamp?: string;
-  meta?: Meta;
   instrument: string;
   exchange: Exchange;
   timeframe: string;
@@ -285,23 +298,32 @@ export interface CandleEnvelope {
   vwap?: Vwap;
   trades?: Trades;
 }
-export interface Meta {
-  [k: string]: unknown;
-}
 /**
- * Order fill message envelope.
+ * Order fill/execution details from an exchange.
  *
- * Wraps FillData for transmission from executors.
- * Published when an order is filled (fully or partially).
+ * Represents a completed or partial fill of an order.
+ * Contains all information needed for trade tracking and P&L calculation.
  *
  * Attributes:
- *     type: Fixed as 'fill' for message routing.
- *     executed_at: Fill execution timestamp.
+ *     trade_id: Unique fill/trade ID from exchange (e.g., Kraken exec_id).
+ *         May be None for exchanges that don't provide it.
+ *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
+ *         May be None if exchange hasn't assigned an ID yet.
+ *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ *     instrument: Trading pair symbol.
+ *     exchange: Exchange where the fill occurred.
+ *     side: Trade direction ('buy' or 'sell').
+ *     size: Filled quantity.
+ *     price: Execution price.
+ *     fee: Transaction fee charged.
+ *     fee_asset: Currency of the fee (e.g., 'USD', 'BTC').
+ *     status: Fill status ('filled', 'partial', etc.).
+ *     executed_at: Timestamp of the fill.
  */
-export interface FillEnvelope {
+export interface ExecutionData {
+  id?: string;
   type: Type1;
   timestamp?: string;
-  meta?: Meta1;
   trade_id?: TradeId;
   exchange_order_id?: ExchangeOrderId;
   client_order_id: string;
@@ -315,9 +337,6 @@ export interface FillEnvelope {
   status: Status;
   executed_at?: string;
 }
-export interface Meta1 {
-  [k: string]: unknown;
-}
 /**
  * Component health heartbeat message.
  *
@@ -325,128 +344,157 @@ export interface Meta1 {
  * Used for health monitoring and dead component detection.
  *
  * Attributes:
- *     type: Fixed as 'heartbeat' for message routing.
  *     component: Name of the sending component.
  *     sequence: Monotonically increasing sequence number.
  *     status: Current health status.
  *     lag_ms: Processing lag in milliseconds.
+ *     meta: Optional metadata dictionary for extensions.
  */
-export interface HeartbeatEnvelope {
+export interface HeartbeatData {
+  id?: string;
   type: Type2;
   timestamp?: string;
-  meta?: Meta2;
   component: string;
   sequence: number;
   status: Status1;
   lag_ms: number;
+  meta?: Meta;
 }
-export interface Meta2 {
+export interface Meta {
   [k: string]: unknown;
 }
 /**
- * Order cancel request message from strategy to executor.
+ * Order cancel request from strategy to executor.
  *
  * Sent to request cancellation of an existing order.
  * Published on: orders.commands.{exchange}.{instrument}.cancel
  *
- * Cancel commands only carry identifying information since
- * the executor already has order context from when the order was placed.
- *
  * Attributes:
- *     type: Fixed as 'order_cancel' for message routing.
  *     exchange: Target exchange for the cancel.
  *     instrument: Trading pair symbol.
- *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
- *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ *     exchange_order_id: Exchange-assigned order ID.
+ *     client_order_id: Our generated order ID.
  */
-export interface OrderCancelEnvelope {
+export interface OrderCancelData {
+  id?: string;
   type: Type3;
   timestamp?: string;
-  meta?: Meta3;
   exchange: Exchange2;
   instrument: string;
   exchange_order_id: string;
   client_order_id: string;
 }
-export interface Meta3 {
-  [k: string]: unknown;
+/**
+ * Current state of an order.
+ *
+ * Used for both ZMQ event publishing and REST API responses.
+ * Published on orders.events.{exchange}.{instrument}.{status} topics.
+ *
+ * INVARIANT: The 'status' field MUST match the topic suffix.
+ *
+ * Attributes:
+ *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
+ *         May be None before exchange ACK (e.g., for 'submitted' event).
+ *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ *     instrument: Trading pair symbol.
+ *     exchange: Exchange where the order is placed.
+ *     side: Order direction ('buy' or 'sell').
+ *     status: Event type matching topic suffix (OrderEventType, excludes 'execution').
+ *     order_type: Type of order ('market', 'limit', etc.).
+ *     size: Total order size.
+ *     filled_size: Amount filled so far.
+ *     price: Limit price (for limit orders).
+ *     average_price: Average fill price (for partial fills).
+ *     reason: Optional rejection/failure reason (for 'rejected' status).
+ *     time_in_force: Order time-in-force setting.
+ *     error: Error message if order failed.
+ *     created_at: Order creation timestamp.
+ *     updated_at: Last status update timestamp.
+ */
+export interface OrderData {
+  id?: string;
+  type: Type4;
+  timestamp?: string;
+  exchange_order_id?: ExchangeOrderId1;
+  client_order_id: string;
+  instrument: string;
+  exchange: Exchange3;
+  side: Side1;
+  status: string;
+  order_type: OrderType;
+  size: number;
+  filled_size: number;
+  price?: Price;
+  average_price?: AveragePrice;
+  reason?: Reason;
+  time_in_force?: TimeInForce;
+  error?: Error;
+  created_at?: string;
+  updated_at?: UpdatedAt;
 }
 /**
- * Lightweight order event envelope for cancel/replace confirmations.
+ * Lightweight order event for cancel/replace confirmations.
  *
  * Used for publishing order lifecycle events that don't require full order
- * details. This is the preferred envelope for cancel/replace results because
- * those commands don't carry side/order_type information.
+ * details. Preferred for cancel/replace results because those commands
+ * don't carry side/order_type information.
  *
  * Published on: orders.events.{exchange}.{instrument}.{event}
- * where event is 'cancelled', 'rejected', 'replaced', etc.
  *
  * INVARIANT: The 'event' field MUST match the topic suffix.
  *
  * Attributes:
- *     type: Fixed as 'order_event' for message routing.
- *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
- *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ *     exchange_order_id: Exchange-assigned order ID.
+ *     client_order_id: Our generated order ID.
  *     exchange: Exchange where the order exists.
  *     instrument: Trading pair symbol.
  *     event: Event type matching topic suffix (OrderEventType).
  *     reason: Optional rejection/cancellation reason.
  */
-export interface OrderEventEnvelope {
-  type: Type4;
+export interface OrderEventData {
+  id?: string;
+  type: Type5;
   timestamp?: string;
-  meta?: Meta4;
   exchange_order_id: string;
   client_order_id: string;
-  exchange: Exchange3;
+  exchange: Exchange4;
   instrument: string;
   event: Event;
-  reason?: Reason;
-}
-export interface Meta4 {
-  [k: string]: unknown;
+  reason?: Reason1;
 }
 /**
- * Order replace/modify request message from strategy to executor.
+ * Order replace/modify request from strategy to executor.
  *
  * Sent to request modification of an existing order (price/quantity).
  * Published on: orders.commands.{exchange}.{instrument}.replace
  *
- * Replace commands carry only the fields needed for modification
- * (exchange_order_id + new values). The executor has full order context.
- *
  * Attributes:
- *     type: Fixed as 'order_replace' for message routing.
  *     exchange: Target exchange for the replace.
  *     instrument: Trading pair symbol.
- *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken's txid/UUID).
- *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
+ *     exchange_order_id: Exchange-assigned order ID.
+ *     client_order_id: Our generated order ID.
  *     new_quantity: New order quantity (optional).
  *     new_price: New limit price (optional).
  */
-export interface OrderReplaceEnvelope {
-  type: Type5;
+export interface OrderReplaceData {
+  id?: string;
+  type: Type6;
   timestamp?: string;
-  meta?: Meta5;
-  exchange: Exchange4;
+  exchange: Exchange5;
   instrument: string;
   exchange_order_id: string;
   client_order_id: string;
   new_quantity?: NewQuantity;
   new_price?: NewPrice;
 }
-export interface Meta5 {
-  [k: string]: unknown;
-}
 /**
- * Order request message from strategy to executor.
+ * Order request from strategy to executor.
  *
  * Sent by strategies to request order placement on an exchange.
  * Contains all information needed for order creation.
  * Published on: orders.commands.{exchange}.{instrument}.submit
  *
  * Attributes:
- *     type: Fixed as 'order_req' for message routing.
  *     strategy_id: Identifier of the requesting strategy.
  *     exchange: Target exchange for the order.
  *     instrument: Trading pair symbol.
@@ -458,72 +506,57 @@ export interface Meta5 {
  *     client_order_id: Client-side order identifier.
  *     signaled_at: Original signal timestamp (optional).
  */
-export interface OrderRequestEnvelope {
-  type: Type6;
+export interface OrderRequestData {
+  id?: string;
+  type: Type7;
   timestamp?: string;
-  meta?: Meta6;
   strategy_id: string;
-  exchange: Exchange5;
+  exchange: Exchange6;
   instrument: string;
   mode: Mode;
-  side: Side1;
-  order_type: OrderType;
+  side: Side2;
+  order_type: OrderType1;
   quantity: number;
-  price?: Price;
+  price?: Price1;
   client_order_id: string;
   signaled_at?: SignaledAt;
 }
-export interface Meta6 {
-  [k: string]: unknown;
-}
 /**
- * Order status update message envelope.
+ * Portfolio position snapshot.
  *
- * Wraps OrderStatusData for transmission from executors.
- * Published when order state changes.
+ * Represents a single position in the portfolio.
+ * Used for both ZMQ event publishing and REST API responses.
+ * The inherited ``timestamp`` field carries the last-update time.
  *
  * Attributes:
- *     type: Fixed as 'order_status' for message routing.
- *     created_at: Order creation timestamp.
+ *     instrument: Trading pair symbol.
+ *     exchange: Exchange where the position is held.
+ *     quantity: Position size (positive for long, negative for short).
+ *     average_price: Average entry price.
+ *     unrealized_pnl: Unrealized profit/loss.
+ *     realized_pnl: Realized profit/loss.
  */
-export interface OrderStatusEnvelope {
-  type: Type7;
+export interface PositionData {
+  id?: string;
+  type: Type8;
   timestamp?: string;
-  meta?: Meta7;
-  exchange_order_id?: ExchangeOrderId1;
-  client_order_id: string;
   instrument: string;
-  exchange: Exchange6;
-  side: Side2;
-  status: Status2;
-  order_type: OrderType1;
-  size: number;
-  filled_size: number;
-  price?: Price1;
-  average_price?: AveragePrice;
-  reason?: Reason1;
-  created_at?: string;
-  updated_at?: UpdatedAt;
-}
-export interface Meta7 {
-  [k: string]: unknown;
+  exchange: Exchange7;
+  quantity: number;
+  average_price: number;
+  unrealized_pnl: number;
+  realized_pnl: number;
 }
 /**
  * Historical data replay end marker.
  *
  * Sent at the end of a historical data replay session.
  * Strategies use this to finalize analysis and generate reports.
- *
- * Attributes:
- *     type: Fixed as 'replay_end' for message routing.
  */
-export interface ReplayEndEnvelope {
-  type: Type8;
+export interface ReplayEndData {
+  id?: string;
+  type: Type9;
   timestamp?: string;
-  meta?: Meta8;
-}
-export interface Meta8 {
-  [k: string]: unknown;
 }
 /**
  * Historical data replay start marker.
@@ -532,17 +565,13 @@ export interface Meta8 {
  * Strategies use this to reset state before receiving replayed data.
  *
  * Attributes:
- *     type: Fixed as 'replay_start' for message routing.
  *     started_at: Replay start timestamp (optional).
  */
-export interface ReplayStartEnvelope {
-  type: Type9;
+export interface ReplayStartData {
+  id?: string;
+  type: Type10;
   timestamp?: string;
-  meta?: Meta9;
   started_at?: StartedAt;
-}
-export interface Meta9 {
-  [k: string]: unknown;
 }
 /**
  * Configuration setting change notification.
@@ -551,49 +580,48 @@ export interface Meta9 {
  * Subscribers use this to invalidate caches or reload config.
  *
  * Attributes:
- *     type: Fixed as 'setting_changed' for message routing.
  *     key: Setting key that changed.
  *     value: New setting value.
  *     category: Setting category for grouping.
  *     updated_by: User who made the change (optional).
  */
-export interface SettingChangedEnvelope {
-  type: Type10;
+export interface SettingChangedData {
+  id?: string;
+  type: Type11;
   timestamp?: string;
-  meta?: Meta10;
   key: string;
   value: string;
   category: string;
   updated_by?: UpdatedBy;
 }
-export interface Meta10 {
-  [k: string]: unknown;
-}
 /**
- * Trading signal message envelope.
+ * Trading signal generated by a strategy.
  *
- * Wraps SignalData for transmission from strategies to executors.
- * Contains the recommendation to enter or exit a position.
+ * Represents a recommendation to enter or exit a position.
+ * Signals are published to the messaging bus for execution.
  *
  * Attributes:
- *     type: Fixed as 'signal' for message routing.
- *     id: Unique signal identifier (optional).
+ *     instrument: Target trading pair symbol.
+ *     exchange: Target exchange for execution.
+ *     side: Recommended direction ('buy' or 'sell').
+ *     strength: Signal confidence from 0.0 (weak) to 1.0 (strong).
+ *     reason: Human-readable explanation for the signal.
+ *     price: Suggested entry/exit price (optional).
+ *     strategy_name: Name of the generating strategy (optional).
+ *     fired_at: Domain timestamp when the signal was generated.
  */
-export interface SignalEnvelope {
-  type: Type11;
+export interface SignalData {
+  id?: string;
+  type: Type12;
   timestamp?: string;
-  meta?: Meta11;
   instrument: string;
-  exchange: Exchange7;
+  exchange: Exchange8;
   side: Side3;
   strength: number;
   reason: string;
   price?: Price2;
   strategy_name?: StrategyName;
-  id?: Id;
-}
-export interface Meta11 {
-  [k: string]: unknown;
+  fired_at?: string;
 }
 /**
  * Symbol alias cache invalidation message.
@@ -602,65 +630,65 @@ export interface Meta11 {
  * Subscribers should clear their symbol mapper caches.
  *
  * Attributes:
- *     type: Fixed as 'symbol_alias_update' for message routing.
  *     event: Event type (always 'symbol_aliases_updated').
  *     action: Required action (always 'clear_cache').
  */
-export interface SymbolAliasUpdateEnvelope {
-  type: Type12;
+export interface SymbolAliasUpdateData {
+  id?: string;
+  type: Type13;
   timestamp?: string;
-  meta?: Meta12;
   event: Event1;
   action: Action;
 }
-export interface Meta12 {
-  [k: string]: unknown;
-}
 /**
- * Real-time price tick message envelope.
+ * Real-time price tick snapshot from an exchange.
  *
- * Wraps TickData for transmission over the messaging bus.
- * Published by market data publishers on tick updates.
+ * Represents a point-in-time snapshot of bid/ask prices and last trade.
+ * Used for real-time price monitoring and spread calculations.
  *
  * Attributes:
- *     type: Fixed as 'tick' for message routing.
+ *     instrument: Trading pair symbol (e.g., 'BTC-USD').
+ *     exchange: Source exchange producing this tick data.
+ *     volume: Trading volume for the current period.
+ *     bid: Best bid price (highest buy order).
+ *     ask: Best ask price (lowest sell order).
+ *     last: Last traded price.
  */
-export interface TickEnvelope {
-  type: Type13;
+export interface TickData {
+  id?: string;
+  type: Type14;
   timestamp?: string;
-  meta?: Meta13;
   instrument: string;
-  exchange: Exchange8;
+  exchange: Exchange9;
   volume: number;
   bid?: Bid;
   ask?: Ask;
   last?: Last;
 }
-export interface Meta13 {
-  [k: string]: unknown;
-}
 /**
- * Trade execution message envelope.
+ * Individual trade execution from the market.
  *
- * Wraps TradeData for transmission over the messaging bus.
- * Published for each trade that occurs on an exchange.
+ * Represents a single trade that occurred on the exchange.
+ * Used for trade tape analysis and market activity monitoring.
  *
  * Attributes:
- *     type: Fixed as 'trade' for message routing.
+ *     instrument: Trading pair symbol (e.g., 'BTC-USD').
+ *     exchange: Source exchange where the trade occurred.
+ *     executed_at: Exchange-provided trade execution timestamp.
+ *     price: Execution price of the trade.
+ *     volume: Size of the trade.
+ *     side: Trade direction ('buy'/'sell') if available.
  */
-export interface TradeEnvelope {
-  type: Type14;
+export interface TradeData {
+  id?: string;
+  type: Type15;
   timestamp?: string;
-  meta?: Meta14;
   instrument: string;
-  exchange: Exchange9;
+  exchange: Exchange10;
   executed_at?: ExecutedAt;
   price: number;
   volume: number;
   side?: Side4;
-}
-export interface Meta14 {
-  [k: string]: unknown;
 }
 /**
  * Authentication complete message with session info.
@@ -675,7 +703,7 @@ export interface Meta14 {
  *     ws_token_exp: WebSocket token expiration (ISO 8601).
  */
 export interface WSAuthCompleteResponse {
-  type: Type15;
+  type: Type16;
   timestamp?: string;
   available_topics: AvailableTopics;
   user_role: UserRole;
@@ -694,7 +722,7 @@ export interface WSAuthCompleteResponse {
  *     type: Message type discriminator ('auth_expired').
  */
 export interface WSAuthExpiredResponse {
-  type: Type16;
+  type: Type17;
   timestamp?: string;
 }
 /**
@@ -707,7 +735,7 @@ export interface WSAuthExpiredResponse {
  *     reason: Optional failure reason code.
  */
 export interface WSAuthFailedResponse {
-  type: Type17;
+  type: Type18;
   timestamp?: string;
   reason?: Reason2;
 }
@@ -721,7 +749,7 @@ export interface WSAuthFailedResponse {
  *     exp: Token expiration timestamp (ISO 8601).
  */
 export interface WSAuthOkResponse {
-  type: Type18;
+  type: Type19;
   timestamp?: string;
   /**
    * Token expiration (ISO 8601)
@@ -738,7 +766,7 @@ export interface WSAuthOkResponse {
  *     timeout: Seconds until authentication timeout.
  */
 export interface WSAuthRequiredResponse {
-  type: Type19;
+  type: Type20;
   timestamp?: string;
   /**
    * Authentication timeout in seconds
@@ -755,7 +783,7 @@ export interface WSAuthRequiredResponse {
  *     ws_token: WebSocket authentication token.
  */
 export interface WSAuthenticateRequest {
-  type: Type20;
+  type: Type21;
   timestamp?: string;
   /**
    * WebSocket authentication token
@@ -772,7 +800,7 @@ export interface WSAuthenticateRequest {
  *     message: Human-readable error description.
  */
 export interface WSErrorResponse {
-  type: Type21;
+  type: Type22;
   timestamp?: string;
   /**
    * Error description
@@ -786,7 +814,7 @@ export interface WSErrorResponse {
  *     type: Message type discriminator ('get_subscriptions').
  */
 export interface WSGetSubscriptionsRequest {
-  type: Type22;
+  type: Type23;
   timestamp?: string;
 }
 /**
@@ -797,7 +825,7 @@ export interface WSGetSubscriptionsRequest {
  *     prefix: Search prefix for filtering topics.
  */
 export interface WSGetTopicSuggestionsRequest {
-  type: Type23;
+  type: Type24;
   timestamp?: string;
   /**
    * Search prefix for topics
@@ -813,7 +841,7 @@ export interface WSGetTopicSuggestionsRequest {
  *     type: Message type discriminator ('ping').
  */
 export interface WSPingRequest {
-  type: Type24;
+  type: Type25;
   timestamp?: string;
 }
 /**
@@ -827,7 +855,7 @@ export interface WSPingRequest {
  *     active_connections: Number of active WebSocket connections.
  */
 export interface WSPongResponse {
-  type: Type25;
+  type: Type26;
   /**
    * Server timestamp (ISO 8601)
    */
@@ -847,7 +875,7 @@ export interface WSPongResponse {
  *     exp: New token expiration timestamp (ISO 8601).
  */
 export interface WSReauthOkResponse {
-  type: Type26;
+  type: Type27;
   timestamp?: string;
   /**
    * New token expiration (ISO 8601)
@@ -864,7 +892,7 @@ export interface WSReauthOkResponse {
  *     ws_token: New WebSocket authentication token.
  */
 export interface WSReauthRequest {
-  type: Type27;
+  type: Type28;
   timestamp?: string;
   /**
    * New WebSocket authentication token
@@ -881,7 +909,7 @@ export interface WSReauthRequest {
  *     deadline: Deadline for reauthentication (ISO 8601).
  */
 export interface WSReauthRequiredResponse {
-  type: Type28;
+  type: Type29;
   timestamp?: string;
   /**
    * Deadline for reauthentication (ISO 8601)
@@ -896,7 +924,7 @@ export interface WSReauthRequiredResponse {
  *     topics: List of topics to subscribe to.
  */
 export interface WSSubscribeRequest {
-  type: Type29;
+  type: Type30;
   timestamp?: string;
   topics: Topics;
 }
@@ -916,10 +944,10 @@ export interface WSSubscribeRequest {
  *     message: Optional additional details.
  */
 export interface WSSubscriptionSuccessResponse {
-  type: Type30;
+  type: Type31;
   timestamp?: string;
   action: Action1;
-  status: Status3;
+  status: Status2;
   topics: Topics1;
   denied_topics?: DeniedTopics;
   active_subscriptions: ActiveSubscriptions;
@@ -938,7 +966,7 @@ export interface WSSubscriptionSuccessResponse {
  *     total_available: Total number of available topics.
  */
 export interface WSSubscriptionsListResponse {
-  type: Type31;
+  type: Type32;
   timestamp?: string;
   subscriptions: Subscriptions;
   available_topics: AvailableTopics1;
@@ -958,7 +986,7 @@ export interface WSSubscriptionsListResponse {
  *     suggestions: Matching topic names.
  */
 export interface WSTopicSuggestionsResponse {
-  type: Type32;
+  type: Type33;
   timestamp?: string;
   /**
    * Search prefix that was used
@@ -974,7 +1002,7 @@ export interface WSTopicSuggestionsResponse {
  *     topics: List of topics to unsubscribe from.
  */
 export interface WSUnsubscribeRequest {
-  type: Type33;
+  type: Type34;
   timestamp?: string;
   topics: Topics2;
 }

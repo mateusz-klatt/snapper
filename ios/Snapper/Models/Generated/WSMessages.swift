@@ -9,51 +9,70 @@ enum UserRole: String, Codable, Sendable {
     case admin
 }
 
-enum CandleEnvelopeExchange: String, Codable, Sendable {
+enum CandleDataExchange: String, Codable, Sendable {
     case kraken
     case zonda
     case walutomat
     case polygon
 }
 
-enum FillEnvelopeExchange: String, Codable, Sendable {
+enum ExecutionDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case zonda
     case walutomat
 }
 
-enum FillEnvelopeSide: String, Codable, Sendable {
+enum ExecutionDataSide: String, Codable, Sendable {
     case buy
     case sell
 }
 
-enum FillEnvelopeStatus: String, Codable, Sendable {
+enum ExecutionDataStatus: String, Codable, Sendable {
     case filled
     case partial
 }
 
-enum HeartbeatEnvelopeStatus: String, Codable, Sendable {
+enum HeartbeatDataStatus: String, Codable, Sendable {
     case healthy
     case warning
     case error
 }
 
-enum OrderCancelEnvelopeExchange: String, Codable, Sendable {
+enum OrderCancelDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case zonda
     case walutomat
 }
 
-enum OrderEventEnvelopeExchange: String, Codable, Sendable {
+enum OrderDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case zonda
     case walutomat
 }
 
-enum OrderEventEnvelopeEvent: String, Codable, Sendable {
+enum OrderDataSide: String, Codable, Sendable {
+    case buy
+    case sell
+}
+
+enum OrderDataOrderType: String, Codable, Sendable {
+    case market
+    case limit
+    case stop
+    case stopLimit = "stop_limit"
+}
+
+enum OrderEventDataExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
+enum OrderEventDataEvent: String, Codable, Sendable {
     case submitted
     case accepted
     case rejected
@@ -62,85 +81,64 @@ enum OrderEventEnvelopeEvent: String, Codable, Sendable {
     case replaced
 }
 
-enum OrderReplaceEnvelopeExchange: String, Codable, Sendable {
+enum OrderReplaceDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case zonda
     case walutomat
 }
 
-enum OrderRequestEnvelopeExchange: String, Codable, Sendable {
+enum OrderRequestDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case zonda
     case walutomat
 }
 
-enum OrderRequestEnvelopeMode: String, Codable, Sendable {
+enum OrderRequestDataMode: String, Codable, Sendable {
     case live
     case paper
 }
 
-enum OrderRequestEnvelopeSide: String, Codable, Sendable {
+enum OrderRequestDataSide: String, Codable, Sendable {
     case buy
     case sell
 }
 
-enum OrderRequestEnvelopeOrderType: String, Codable, Sendable {
+enum OrderRequestDataOrderType: String, Codable, Sendable {
     case market
     case limit
     case stop
     case stopLimit = "stop_limit"
 }
 
-enum OrderStatusEnvelopeExchange: String, Codable, Sendable {
+enum PositionDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case zonda
     case walutomat
 }
 
-enum OrderStatusEnvelopeSide: String, Codable, Sendable {
-    case buy
-    case sell
-}
-
-enum OrderStatusEnvelopeStatus: String, Codable, Sendable {
-    case submitted
-    case accepted
-    case rejected
-    case cancelled
-    case expired
-    case replaced
-}
-
-enum OrderStatusEnvelopeOrderType: String, Codable, Sendable {
-    case market
-    case limit
-    case stop
-    case stopLimit = "stop_limit"
-}
-
-enum SignalEnvelopeExchange: String, Codable, Sendable {
+enum SignalDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case zonda
     case walutomat
 }
 
-enum SignalEnvelopeSide: String, Codable, Sendable {
+enum SignalDataSide: String, Codable, Sendable {
     case buy
     case sell
 }
 
-enum TickEnvelopeExchange: String, Codable, Sendable {
+enum TickDataExchange: String, Codable, Sendable {
     case kraken
     case zonda
     case walutomat
     case polygon
 }
 
-enum TradeEnvelopeExchange: String, Codable, Sendable {
+enum TradeDataExchange: String, Codable, Sendable {
     case kraken
     case zonda
     case walutomat
@@ -165,10 +163,10 @@ struct WsMessageBase: Codable, Sendable {
     let timestamp: Date?
 }
 
-struct CandleEnvelope: Codable, Sendable {
+struct CandleData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let instrument: String
     let exchange: String
     let timeframe: String
@@ -182,9 +180,9 @@ struct CandleEnvelope: Codable, Sendable {
     let trades: Int?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case instrument
         case exchange
         case timeframe
@@ -199,10 +197,10 @@ struct CandleEnvelope: Codable, Sendable {
     }
 }
 
-struct FillEnvelope: Codable, Sendable {
+struct ExecutionData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let tradeId: String?
     let exchangeOrderId: String?
     let clientOrderId: String
@@ -217,9 +215,9 @@ struct FillEnvelope: Codable, Sendable {
     let executedAt: Date?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case tradeId = "trade_id"
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
@@ -235,39 +233,41 @@ struct FillEnvelope: Codable, Sendable {
     }
 }
 
-struct HeartbeatEnvelope: Codable, Sendable {
+struct HeartbeatData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let component: String
     let sequence: Int
     let status: String
     let lagMs: Int
+    let meta: [String: AnyCodable]?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case component
         case sequence
         case status
         case lagMs = "lag_ms"
+        case meta
     }
 }
 
-struct OrderCancelEnvelope: Codable, Sendable {
+struct OrderCancelData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
     let clientOrderId: String
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case exchange
         case instrument
         case exchangeOrderId = "exchange_order_id"
@@ -275,10 +275,54 @@ struct OrderCancelEnvelope: Codable, Sendable {
     }
 }
 
-struct OrderEventEnvelope: Codable, Sendable {
+struct OrderData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
+    let exchangeOrderId: String?
+    let clientOrderId: String
+    let instrument: String
+    let exchange: String
+    let side: String
+    let status: String
+    let orderType: String
+    let size: Double
+    let filledSize: Double
+    let price: Double?
+    let averagePrice: Double?
+    let reason: String?
+    let timeInForce: String?
+    let error: String?
+    let createdAt: Date?
+    let updatedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case type
+        case timestamp
+        case exchangeOrderId = "exchange_order_id"
+        case clientOrderId = "client_order_id"
+        case instrument
+        case exchange
+        case side
+        case status
+        case orderType = "order_type"
+        case size
+        case filledSize = "filled_size"
+        case price
+        case averagePrice = "average_price"
+        case reason
+        case timeInForce = "time_in_force"
+        case error
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct OrderEventData: Codable, Sendable {
+    let id: String?
+    let type: String
+    let timestamp: Date?
     let exchangeOrderId: String
     let clientOrderId: String
     let exchange: String
@@ -287,9 +331,9 @@ struct OrderEventEnvelope: Codable, Sendable {
     let reason: String?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
         case exchange
@@ -299,10 +343,10 @@ struct OrderEventEnvelope: Codable, Sendable {
     }
 }
 
-struct OrderReplaceEnvelope: Codable, Sendable {
+struct OrderReplaceData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
@@ -311,9 +355,9 @@ struct OrderReplaceEnvelope: Codable, Sendable {
     let newPrice: Double?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case exchange
         case instrument
         case exchangeOrderId = "exchange_order_id"
@@ -323,10 +367,10 @@ struct OrderReplaceEnvelope: Codable, Sendable {
     }
 }
 
-struct OrderRequestEnvelope: Codable, Sendable {
+struct OrderRequestData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let strategyId: String
     let exchange: String
     let instrument: String
@@ -339,9 +383,9 @@ struct OrderRequestEnvelope: Codable, Sendable {
     let signaledAt: Date?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case strategyId = "strategy_id"
         case exchange
         case instrument
@@ -355,79 +399,63 @@ struct OrderRequestEnvelope: Codable, Sendable {
     }
 }
 
-struct OrderStatusEnvelope: Codable, Sendable {
+struct PositionData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
-    let exchangeOrderId: String?
-    let clientOrderId: String
     let instrument: String
     let exchange: String
-    let side: String
-    let status: String
-    let orderType: String
-    let size: Double
-    let filledSize: Double
-    let price: Double?
-    let averagePrice: Double?
-    let reason: String?
-    let createdAt: Date?
-    let updatedAt: Date?
+    let quantity: Double
+    let averagePrice: Double
+    let unrealizedPnl: Double
+    let realizedPnl: Double
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
-        case exchangeOrderId = "exchange_order_id"
-        case clientOrderId = "client_order_id"
         case instrument
         case exchange
-        case side
-        case status
-        case orderType = "order_type"
-        case size
-        case filledSize = "filled_size"
-        case price
+        case quantity
         case averagePrice = "average_price"
-        case reason
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
+        case unrealizedPnl = "unrealized_pnl"
+        case realizedPnl = "realized_pnl"
     }
 }
 
-struct ReplayEndEnvelope: Codable, Sendable {
+struct ReplayEndData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
 }
 
-struct ReplayStartEnvelope: Codable, Sendable {
+struct ReplayStartData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let startedAt: Date?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case startedAt = "started_at"
     }
 }
 
-struct SettingChangedEnvelope: Codable, Sendable {
+struct SettingChangedData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let key: String
     let value: String
     let category: String
     let updatedBy: String?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case key
         case value
         case category
@@ -435,10 +463,10 @@ struct SettingChangedEnvelope: Codable, Sendable {
     }
 }
 
-struct SignalEnvelope: Codable, Sendable {
+struct SignalData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let instrument: String
     let exchange: String
     let side: String
@@ -446,12 +474,12 @@ struct SignalEnvelope: Codable, Sendable {
     let reason: String
     let price: Double?
     let strategyName: String?
-    let id: String?
+    let firedAt: Date?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case instrument
         case exchange
         case side
@@ -459,22 +487,22 @@ struct SignalEnvelope: Codable, Sendable {
         case reason
         case price
         case strategyName = "strategy_name"
-        case id
+        case firedAt = "fired_at"
     }
 }
 
-struct SymbolAliasUpdateEnvelope: Codable, Sendable {
+struct SymbolAliasUpdateData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let event: String
     let action: String
 }
 
-struct TickEnvelope: Codable, Sendable {
+struct TickData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let instrument: String
     let exchange: String
     let volume: Double
@@ -483,10 +511,10 @@ struct TickEnvelope: Codable, Sendable {
     let last: Double?
 }
 
-struct TradeEnvelope: Codable, Sendable {
+struct TradeData: Codable, Sendable {
+    let id: String?
     let type: String
     let timestamp: Date?
-    let meta: [String: AnyCodable]?
     let instrument: String
     let exchange: String
     let executedAt: Date?
@@ -495,9 +523,9 @@ struct TradeEnvelope: Codable, Sendable {
     let side: String?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case type
         case timestamp
-        case meta
         case instrument
         case exchange
         case executedAt = "executed_at"

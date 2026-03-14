@@ -3,6 +3,8 @@
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from uuid import UUID
+from uuid import uuid7
 
 from sqlalchemy import JSON
 from sqlalchemy import Boolean
@@ -15,12 +17,19 @@ from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import UniqueConstraint
 from sqlalchemy import text
+from sqlalchemy import types
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import TypeDecorator
+
+
+def _public_id() -> str:
+    """Generate a new UUID7 string for use as a public identifier."""
+    return str(uuid7())
 
 
 class TZDateTime(TypeDecorator[datetime]):
@@ -43,15 +52,36 @@ class TZDateTime(TypeDecorator[datetime]):
         return value
 
 
+class UUIDColumn(TypeDecorator[str]):
+    """UUID storage: native UUID on PostgreSQL, String(36) on SQLite."""
+
+    impl = String(36)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> types.TypeEngine[Any]:
+        if dialect.name == "postgresql":
+
+            return dialect.type_descriptor(PG_UUID(as_uuid=False))
+        return dialect.type_descriptor(String(36))
+
+    def process_bind_param(self, value: str | UUID | None, dialect: Dialect) -> str | None:
+        if value is None:
+            return None
+        return str(value)
+
+    def process_result_value(self, value: str | None, dialect: Dialect) -> str | None:
+        return value
+
+
 __all__ = [
     "Base",
     "Instrument",
     "Candle",
     "Trade",
-    "OrderRecord",
+    "Order",
     "Execution",
     "Position",
-    "SignalEvent",
+    "Signal",
     "User",
     "Setting",
     "SymbolCatalog",
@@ -82,11 +112,14 @@ class Instrument(Base):
         Index("ix_instruments_exchange", "exchange"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOL_CATALOG), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
-    updated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    timestamp: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     candles: Mapped[list[Candle]] = relationship(back_populates="instrument")
     trades: Mapped[list[Trade]] = relationship(back_populates="instrument")
 
@@ -100,6 +133,9 @@ class Candle(Base):
         Index("ix_candle_instrument_open", "instrument_id", "open_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     open_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
@@ -123,6 +159,9 @@ class Trade(Base):
         Index("ix_trade_instrument_ts", "instrument_id", "timestamp"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     price: Mapped[float] = mapped_column(Float)
@@ -132,7 +171,7 @@ class Trade(Base):
     instrument: Mapped[Instrument] = relationship(back_populates="trades")
 
 
-class OrderRecord(Base):
+class Order(Base):
     """SQLAlchemy model for trading order records."""
 
     __tablename__ = "orders"
@@ -153,13 +192,17 @@ class OrderRecord(Base):
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     updated_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     side: Mapped[str] = mapped_column(String(4))
-    type: Mapped[str] = mapped_column(String(16))
+    order_type: Mapped[str] = mapped_column(String(16))
     price: Mapped[float | None] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(16))
@@ -190,16 +233,21 @@ class Execution(Base):
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
     exec_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    side: Mapped[str] = mapped_column(String(4))
+    status: Mapped[str] = mapped_column(String(16))
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
-    order: Mapped[OrderRecord] = relationship()
+    order: Mapped[Order] = relationship()
 
 
 class Position(Base):
@@ -208,21 +256,28 @@ class Position(Base):
     __tablename__ = "positions"
     __table_args__ = (UniqueConstraint("instrument_id", name="uq_positions_instrument_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
     unrealized_pnl: Mapped[float] = mapped_column(Float)
     realized_pnl: Mapped[float] = mapped_column(Float)
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
 
 
-class SignalEvent(Base):
+class Signal(Base):
     """SQLAlchemy model for trading signal events."""
 
-    __tablename__ = "signal_events"
+    __tablename__ = "signals"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
+    fired_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(256))
@@ -236,6 +291,9 @@ class User(Base):
 
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
@@ -243,18 +301,23 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     last_login: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
 
 
 class Setting(Base):
     """SQLAlchemy model for application configuration settings."""
 
     __tablename__ = "settings"
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
+    key: Mapped[str] = mapped_column(String(64), unique=True)
     value: Mapped[str] = mapped_column(String(1024))
     category: Mapped[str] = mapped_column(String(32))
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)
     is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
@@ -279,12 +342,16 @@ class SymbolCatalog(Base):
         ),
         Index("ix_sc_base_quote", "base", "quote"),
     )
-    native_symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
+    native_symbol: Mapped[str] = mapped_column(String(32), unique=True)
     base: Mapped[str] = mapped_column(String(16), nullable=False)
     quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
     asset_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="crypto")
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     aliases: Mapped[list[SymbolAlias]] = relationship(back_populates="catalog")
 
 
@@ -319,6 +386,9 @@ class SymbolAlias(Base):
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     native_symbol: Mapped[str] = mapped_column(
         String(32),
         ForeignKey(_FK_SYMBOL_CATALOG),
@@ -329,7 +399,7 @@ class SymbolAlias(Base):
     channel: Mapped[str] = mapped_column(String(10), nullable=False)
     exchange_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     catalog: Mapped[SymbolCatalog] = relationship(back_populates="aliases")
 
 
@@ -349,12 +419,13 @@ class SymbolExchangeCapability(Base):
         source: Origin of the capability information (e.g., updater name).
         reason: Human-readable explanation for the capability values.
         created_at: Row creation timestamp (UTC).
-        updated_at: Last modification timestamp (UTC).
+        timestamp: Last modification timestamp (UTC).
         catalog: Relationship to SymbolCatalog.
     """
 
     __tablename__ = "symbol_exchange_capabilities"
     __table_args__ = (
+        UniqueConstraint("native_symbol", "exchange", name="uq_sec_symbol_exchange"),
         CheckConstraint(
             _CK_EXCHANGE_LOWER,
             name="ck_sec_exchange_lower",
@@ -373,18 +444,23 @@ class SymbolExchangeCapability(Base):
             sqlite_where=text("can_market_data = 1"),
         ),
     )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     native_symbol: Mapped[str] = mapped_column(
         String(32),
         ForeignKey(_FK_SYMBOL_CATALOG),
-        primary_key=True,
+        nullable=False,
+        index=True,
     )
-    exchange: Mapped[str] = mapped_column(String(20), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False)
     can_market_data: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     can_trade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source: Mapped[str | None] = mapped_column(String(50), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     catalog: Mapped[SymbolCatalog] = relationship()
 
 
@@ -393,7 +469,9 @@ class ProcessRun(Base):
 
     __tablename__ = "process_runs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     process_name: Mapped[str] = mapped_column(String(64), index=True)
     role: Mapped[str] = mapped_column(String(16))
     lifecycle: Mapped[str] = mapped_column(String(16))
@@ -404,6 +482,7 @@ class ProcessRun(Base):
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
 
 
 class InstrumentSpec(Base):
@@ -412,6 +491,9 @@ class InstrumentSpec(Base):
     __tablename__ = "instrument_specs"
     __table_args__ = (UniqueConstraint("instrument_id", name="uq_instrument_spec_instrument"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     instrument_id: Mapped[int] = mapped_column(
         ForeignKey(_INSTRUMENT_FK), nullable=False, index=True
     )
@@ -445,7 +527,7 @@ class InstrumentSpec(Base):
     status: Mapped[str | None] = mapped_column(
         String(20), nullable=True, comment="Trading status (e.g., online, offline)"
     )
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime())
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
 
 
 class MarketSnapshot(Base):
@@ -453,10 +535,13 @@ class MarketSnapshot(Base):
 
     __tablename__ = "market_snapshots"
     __table_args__ = (
-        Index("ix_market_snapshots_symbol_updated", "symbol", "updated_at"),
-        Index("ix_market_snapshots_exchange_symbol_updated", "exchange", "symbol", "updated_at"),
+        Index("ix_market_snapshots_symbol_ts", "symbol", "timestamp"),
+        Index("ix_market_snapshots_exchange_symbol_ts", "exchange", "symbol", "timestamp"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        UUIDColumn(), unique=True, index=True, default=_public_id
+    )
     exchange: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -496,6 +581,6 @@ class MarketSnapshot(Base):
     spread_pct: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="Spread as percentage of mid price"
     )
-    updated_at: Mapped[datetime] = mapped_column(
+    timestamp: Mapped[datetime] = mapped_column(
         TZDateTime(), index=True, comment="Snapshot timestamp"
     )

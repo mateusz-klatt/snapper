@@ -598,13 +598,15 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
     exec_id = await ms_repo.insert_execution(
         order_id=1,
         timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
+        side="buy",
+        status="filled",
         price=100.0,
         size=0.5,
         fee=0.01,
         fee_asset="USD",
     )
     assert isinstance(exec_id, int)
-    assert exec_id >= 1
+    assert exec_id > 0
     candles = await ms_repo.get_candles(
         instrument="BTC-USD",
         timeframe="1m",
@@ -841,7 +843,7 @@ async def test_mssql_get_market_snapshots_returns_results(
         def __init__(self) -> None:
             self.exchange = "kraken"
             self.symbol = "BTC/USD"
-            self.updated_at = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+            self.timestamp = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
             self.bid = 42000.0
             self.ask = 42100.0
             self.bid_volume = 1.5
@@ -996,7 +998,7 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
                 quote="USD",
                 asset_type="crypto",
                 created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
         )
         await s.commit()
@@ -1080,7 +1082,7 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
                 quote="USD",
                 asset_type="crypto",
                 created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
             )
         )
         await s.commit()

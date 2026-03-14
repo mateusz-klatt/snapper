@@ -732,7 +732,7 @@ async def test_update_existing_symbols_when_insert_disabled(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()
@@ -762,7 +762,7 @@ async def test_update_existing_symbols_when_insert_disabled(
             select(SymbolCatalog).where(SymbolCatalog.native_symbol == "EUR-USD")
         ).scalar_one_or_none()
     assert btc_alias.exchange_symbol == "X:BTCUSD"
-    assert btc_alias.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert btc_alias.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
     assert eur_catalog is None
 
 
@@ -787,7 +787,7 @@ async def test_update_existing_alias_exchange_symbol(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -797,7 +797,7 @@ async def test_update_existing_alias_exchange_symbol(
                 channel="rest",
                 exchange_symbol="X:BTCOLD",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()
@@ -819,7 +819,7 @@ async def test_update_existing_alias_exchange_symbol(
             )
         ).scalar_one()
     assert btc_alias.exchange_symbol == "X:BTCUSD"
-    assert btc_alias.updated_at.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
+    assert btc_alias.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio()
@@ -843,7 +843,7 @@ async def test_existing_alias_unchanged_when_same_symbol(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.add(
@@ -853,7 +853,7 @@ async def test_existing_alias_unchanged_when_same_symbol(
                 channel="rest",
                 exchange_symbol="X:BTCUSD",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()
@@ -875,7 +875,7 @@ async def test_existing_alias_unchanged_when_same_symbol(
             )
         ).scalar_one()
     assert btc_alias.exchange_symbol == "X:BTCUSD"
-    assert btc_alias.updated_at.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
+    assert btc_alias.timestamp.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio()
@@ -1207,7 +1207,7 @@ async def test_update_database_creates_capability_rows(
                 quote="USD",
                 asset_type="crypto",
                 created_at=original_timestamp,
-                updated_at=original_timestamp,
+                timestamp=original_timestamp,
             )
         )
         session.commit()

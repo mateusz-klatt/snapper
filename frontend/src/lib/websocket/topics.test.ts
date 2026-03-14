@@ -147,10 +147,10 @@ describe('topics', () => {
       expect(shouldThrottle('candle')).toBe(true)
     })
     it('returns true for order messages', () => {
-      expect(shouldThrottle('order_status')).toBe(true)
+      expect(shouldThrottle('order')).toBe(true)
     })
     it('returns true for execution messages', () => {
-      expect(shouldThrottle('fill')).toBe(true)
+      expect(shouldThrottle('execution')).toBe(true)
     })
     it('returns true for position messages', () => {
       expect(shouldThrottle('position')).toBe(true)

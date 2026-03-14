@@ -14,7 +14,7 @@ flowchart TB
         OnTick["on_tick()"]
     end
 
-    Strategy -->|Signal| SignalOut["Signal ZMQ"]
+    Strategy -->|StrategySignal| SignalOut["StrategySignal ZMQ"]
     SignalOut --> Coordinator["Trader Coordinator"]
     Coordinator --> Executor
 ```
@@ -24,7 +24,7 @@ flowchart TB
 ### Basic Structure
 
 ```python
-from snapper.strategies.base import BaseStrategy, Signal, StrategyConfig
+from snapper.strategies.base import BaseStrategy, StrategySignal, StrategyConfig
 from snapper.strategies.decorators import register_strategy, create_strategy_process
 from snapper.messaging.schemas.messages import CandleEnvelope
 
@@ -52,7 +52,7 @@ class MyStrategy(BaseStrategy):
         self.threshold = self.params.get("threshold", 0.5)
         self.period = self.params.get("period", 14)
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> StrategySignal | None:
         """Process candle and generate signal."""
         # Access candle buffer
         candles = self.candle_buffer.get(instrument, [])
@@ -64,7 +64,7 @@ class MyStrategy(BaseStrategy):
         current_price = closes[-1]
 
         if self._should_buy(closes):
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="buy",
                 strength=1.0,
@@ -74,7 +74,7 @@ class MyStrategy(BaseStrategy):
             )
 
         if self._should_sell(closes):
-            return Signal(
+            return StrategySignal(
                 instrument=instrument,
                 side="sell",
                 strength=1.0,
@@ -158,17 +158,17 @@ Generated automatically:
 - Paper: `signals.paper.{instrument}.{strategy_name}`
 - Live: `signals.{exchange}.{instrument}.live`
 
-## Signal Structure
+## StrategySignal Structure
 
 ```python
 @dataclass
-class Signal:
+class StrategySignal:
     """Trading signal."""
 
     instrument: str      # Instrument symbol
     side: TradeSide      # "buy" or "sell"
-    strength: float      # Signal strength 0.0-1.0
-    reason: str          # Signal reason
+    strength: float      # StrategySignal strength 0.0-1.0
+    reason: str          # StrategySignal reason
     price: float         # Price at generation
     timestamp: float     # Unix timestamp (optional)
     metadata: dict       # Additional data
@@ -208,7 +208,7 @@ Trend-following strategy based on MACD.
 | --------- | ------- | ----------- |
 | `fast` | 12 | Fast EMA |
 | `slow` | 26 | Slow EMA |
-| `signal_period` | 9 | Signal line period |
+| `signal_period` | 9 | StrategySignal line period |
 
 **Logic:**
 
@@ -232,7 +232,7 @@ from snapper.strategies.cointegration import CointegrationStrategy
 ### Candle Buffer
 
 ```python
-async def on_candle(self, instrument: str, candle: CandleEnvelope) -> Signal | None:
+async def on_candle(self, instrument: str, candle: CandleEnvelope) -> StrategySignal | None:
     candles = self.candle_buffer.get(instrument, [])
 
     # Last N candles
@@ -305,7 +305,7 @@ flowchart TB
 
     subgraph Loop["Listen loop"]
         Receive["Receive message"] --> Process["on_candle() / on_tick()"]
-        Process -->|Signal| SignalOut["Signal"]
+        Process -->|StrategySignal| SignalOut["StrategySignal"]
         Process --> Receive
     end
 

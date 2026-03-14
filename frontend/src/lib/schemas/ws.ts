@@ -1,13 +1,13 @@
 import { z } from 'zod/v4'
 
 export {
-  TickEnvelopeSchema as tickSchema,
-  CandleEnvelopeSchema as candleSchema,
-  TradeEnvelopeSchema as tradeSchema,
-  SignalEnvelopeSchema as signalSchema,
-  OrderStatusEnvelopeSchema as orderStatusSchema,
-  FillEnvelopeSchema as fillSchema,
-  HeartbeatEnvelopeSchema as heartbeatSchema,
+  TickDataSchema as tickSchema,
+  CandleDataSchema as candleSchema,
+  TradeDataSchema as tradeSchema,
+  SignalDataSchema as signalSchema,
+  OrderDataSchema as orderSchema,
+  ExecutionDataSchema as executionSchema,
+  HeartbeatDataSchema as heartbeatSchema,
   WSAuthRequiredResponseSchema as authRequiredMessageSchema,
   WSAuthOkResponseSchema as authOkMessageSchema,
   WSAuthFailedResponseSchema as authFailedMessageSchema,
@@ -24,13 +24,13 @@ export {
   WSPongResponseSchema as pongMessageSchema,
 } from './ws.generated.zod'
 import {
-  TickEnvelopeSchema,
-  CandleEnvelopeSchema,
-  TradeEnvelopeSchema,
-  SignalEnvelopeSchema,
-  OrderStatusEnvelopeSchema,
-  FillEnvelopeSchema,
-  HeartbeatEnvelopeSchema,
+  TickDataSchema,
+  CandleDataSchema,
+  TradeDataSchema,
+  SignalDataSchema,
+  OrderDataSchema,
+  ExecutionDataSchema,
+  HeartbeatDataSchema,
   WSAuthRequiredResponseSchema,
   WSAuthOkResponseSchema,
   WSAuthFailedResponseSchema,
@@ -46,13 +46,13 @@ import {
 } from './ws.generated.zod'
 
 export const wsMessageUnionSchema = z.discriminatedUnion('type', [
-  TickEnvelopeSchema,
-  CandleEnvelopeSchema,
-  TradeEnvelopeSchema,
-  SignalEnvelopeSchema,
-  OrderStatusEnvelopeSchema,
-  FillEnvelopeSchema,
-  HeartbeatEnvelopeSchema,
+  TickDataSchema,
+  CandleDataSchema,
+  TradeDataSchema,
+  SignalDataSchema,
+  OrderDataSchema,
+  ExecutionDataSchema,
+  HeartbeatDataSchema,
   WSAuthRequiredResponseSchema,
   WSAuthOkResponseSchema,
   WSAuthFailedResponseSchema,
@@ -72,20 +72,20 @@ export const wsMessageBaseSchema = z.looseObject({
 })
 export type WsMessageBase = z.infer<typeof wsMessageBaseSchema>
 export type WsMessageUnion = z.infer<typeof wsMessageUnionSchema>
-export type Tick = z.infer<typeof TickEnvelopeSchema>
-export type Candle = z.infer<typeof CandleEnvelopeSchema>
-export type Trade = z.infer<typeof TradeEnvelopeSchema>
-export type Signal = z.infer<typeof SignalEnvelopeSchema>
-export type OrderStatus = z.infer<typeof OrderStatusEnvelopeSchema>
-export type Fill = z.infer<typeof FillEnvelopeSchema>
-export type Heartbeat = z.infer<typeof HeartbeatEnvelopeSchema>
+export type Tick = z.infer<typeof TickDataSchema>
+export type Candle = z.infer<typeof CandleDataSchema>
+export type Trade = z.infer<typeof TradeDataSchema>
+export type Signal = z.infer<typeof SignalDataSchema>
+export type Order = z.infer<typeof OrderDataSchema>
+export type Execution = z.infer<typeof ExecutionDataSchema>
+export type Heartbeat = z.infer<typeof HeartbeatDataSchema>
 const KNOWN_MESSAGE_TYPES = new Set([
   'tick',
   'candle',
   'trade',
   'signal',
-  'order_status',
-  'fill',
+  'order',
+  'execution',
   'heartbeat',
   'auth_expired',
   'auth_failed',

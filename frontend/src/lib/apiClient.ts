@@ -4,10 +4,10 @@ import { storeWsTicket } from './wsTicketCache'
 import { validateResponse } from './schemas/api'
 import {
   CandleDataSchema,
-  OrderStatusSchema,
-  ExecutionRecordSchema,
-  PositionSnapshotSchema,
-  TradingSignalSchema,
+  OrderDataSchema,
+  ExecutionDataSchema,
+  PositionDataSchema,
+  SignalDataSchema,
   SettingReadSchema,
   SettingCategoriesResponseSchema,
   SystemStatusSchema,
@@ -26,10 +26,10 @@ import {
 import type {
   SystemStatus,
   CandleData,
-  OrderStatus,
-  ExecutionRecord,
-  PositionSnapshot,
-  TradingSignal,
+  OrderData,
+  ExecutionData,
+  PositionData,
+  SignalData,
   SettingRead,
   SettingUpdate,
   ConfiguredProcessesResponse,
@@ -310,7 +310,7 @@ class APIClient {
     limit: number = 100,
     offset: number = 0,
     exchange?: string
-  ): Promise<OrderStatus[]> {
+  ): Promise<OrderData[]> {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
 
     if (symbol) {
@@ -323,18 +323,18 @@ class APIClient {
 
     const data = await this.getJSON(`/api/orders?${params}`)
 
-    return validateResponse(data, z.array(OrderStatusSchema), '/orders')
+    return validateResponse(data, z.array(OrderDataSchema), '/orders')
   }
-  async getExecutions(limit: number = 100): Promise<ExecutionRecord[]> {
+  async getExecutions(limit: number = 100): Promise<ExecutionData[]> {
     const params = new URLSearchParams({ limit: String(limit) })
     const data = await this.getJSON(`/api/executions?${params}`)
 
-    return validateResponse(data, z.array(ExecutionRecordSchema), '/executions')
+    return validateResponse(data, z.array(ExecutionDataSchema), '/executions')
   }
-  async getPositions(): Promise<PositionSnapshot[]> {
+  async getPositions(): Promise<PositionData[]> {
     const data = await this.getJSON('/api/positions')
 
-    return validateResponse(data, z.array(PositionSnapshotSchema), '/positions')
+    return validateResponse(data, z.array(PositionDataSchema), '/positions')
   }
   async getSignals(
     strategy?: string,
@@ -342,7 +342,7 @@ class APIClient {
     instrument?: string,
     hours: number = 24,
     exchange?: string
-  ): Promise<TradingSignal[]> {
+  ): Promise<SignalData[]> {
     const params = new URLSearchParams({
       limit: String(limit),
       hours: String(hours),
@@ -353,7 +353,7 @@ class APIClient {
     if (exchange) params.set('exchange', exchange)
     const data = await this.getJSON(`/api/signals?${params}`)
 
-    return validateResponse(data, z.array(TradingSignalSchema), '/signals')
+    return validateResponse(data, z.array(SignalDataSchema), '/signals')
   }
   async getExchanges(): Promise<string[]> {
     const data = await this.getJSON('/api/exchanges')
