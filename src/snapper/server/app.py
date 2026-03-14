@@ -62,7 +62,6 @@ from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import and_
 from sqlalchemy import desc
 from sqlalchemy import distinct
-from sqlalchemy import func
 from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
@@ -489,16 +488,15 @@ def _create_candles_signals_router() -> APIRouter:
         try:
             async with repo.session() as session:
                 since = dt.datetime.now(dt.UTC) - timedelta(hours=hours)
-                signal_time = func.coalesce(Signal.fired_at, Signal.timestamp)
                 query = select(Signal, Instrument).join(Instrument)
-                query = query.where(signal_time >= since)
+                query = query.where(Signal.fired_at >= since)
                 if instrument:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:
                     query = query.where(Signal.strategy_name == strategy)
                 if exchange:
                     query = query.where(Instrument.exchange == exchange)
-                query = query.order_by(desc(signal_time)).limit(limit)
+                query = query.order_by(desc(Signal.fired_at)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
                 return [
@@ -511,7 +509,7 @@ def _create_candles_signals_router() -> APIRouter:
                         reason=signal.reason,
                         strategy_name=signal.strategy_name,
                         price=signal.price,
-                        fired_at=signal.fired_at or signal.timestamp,
+                        fired_at=signal.fired_at,
                     )
                     for signal, inst in signals_with_instruments
                 ]

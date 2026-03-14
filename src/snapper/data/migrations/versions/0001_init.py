@@ -348,7 +348,7 @@ def upgrade() -> None:
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("fired_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("fired_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
         sa.Column("strength", sa.Float(), nullable=False),
         sa.Column("reason", sa.String(256), nullable=False),
@@ -359,7 +359,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_signals_public_id", "signals", ["public_id"], unique=True)
     op.create_index("ix_signals_instrument_id", "signals", ["instrument_id"])
-    op.create_index("ix_signals_timestamp", "signals", ["timestamp"])
+    op.create_index("ix_signals_fired_at", "signals", ["fired_at"])
     op.create_table(
         "users",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),

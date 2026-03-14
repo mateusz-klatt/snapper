@@ -276,8 +276,8 @@ class Signal(Base):
         UUIDColumn(), unique=True, index=True, default=_public_id
     )
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
-    fired_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    fired_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(256))
