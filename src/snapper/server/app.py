@@ -453,7 +453,7 @@ def _create_candles_signals_router() -> APIRouter:
                 candles = candles_query.scalars().all()
                 return [
                     CandleData(
-                        id=candle.public_id,
+                        public_id=candle.public_id,
                         timestamp=candle.timestamp,
                         instrument=instrument,
                         exchange=exchange,
@@ -502,7 +502,7 @@ def _create_candles_signals_router() -> APIRouter:
                 signals_with_instruments = result.all()
                 return [
                     SignalData(
-                        id=signal.public_id,
+                        public_id=signal.public_id,
                         timestamp=signal.timestamp,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
@@ -603,7 +603,7 @@ def _create_orders_executions_router() -> APIRouter:
                 orders_with_instruments = result.all()
                 return [
                     OrderData(
-                        id=order.public_id,
+                        public_id=order.public_id,
                         timestamp=order.timestamp,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
@@ -647,7 +647,7 @@ def _create_orders_executions_router() -> APIRouter:
                 rows = result.all()
                 return [
                     ExecutionData(
-                        id=execution.public_id,
+                        public_id=execution.public_id,
                         timestamp=execution.timestamp,
                         trade_id=execution.trade_id,
                         exchange_order_id=order.exchange_order_id,
@@ -681,7 +681,7 @@ def _create_orders_executions_router() -> APIRouter:
                 positions_with_instruments = result.all()
                 return [
                     PositionData(
-                        id=position.public_id,
+                        public_id=position.public_id,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
                         quantity=position.quantity,

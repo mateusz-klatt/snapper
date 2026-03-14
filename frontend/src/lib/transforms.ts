@@ -165,7 +165,7 @@ export function signalFromWS(ws: SignalData): Signal {
 
 export function positionFromAPI(api: PositionData): Position {
   return {
-    id: api.instrument,
+    publicId: api.instrument,
     instrument: api.instrument,
     exchange: api.exchange,
     quantity: api.quantity,
@@ -262,7 +262,7 @@ export function heartbeatFromWS(ws: HeartbeatData): Heartbeat {
 export function orderDataFromEnvelope(env: OrderData): OrderData {
   return {
     type: env.type,
-    id: env.id,
+    public_id: env.public_id,
     exchange_order_id: env.exchange_order_id,
     client_order_id: env.client_order_id,
     instrument: env.instrument,
@@ -285,7 +285,7 @@ export function orderDataFromEnvelope(env: OrderData): OrderData {
 export function executionDataFromEnvelope(env: ExecutionData): ExecutionData {
   return {
     type: env.type,
-    id: env.id,
+    public_id: env.public_id,
     trade_id: env.trade_id,
     exchange_order_id: env.exchange_order_id,
     client_order_id: env.client_order_id,
@@ -304,7 +304,7 @@ export function executionDataFromEnvelope(env: ExecutionData): ExecutionData {
 export function signalDataFromEnvelope(env: SignalData): SignalData {
   return {
     type: env.type,
-    id: env.id,
+    public_id: env.public_id,
     instrument: env.instrument,
     exchange: env.exchange,
     side: env.side,

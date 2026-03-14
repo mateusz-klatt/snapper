@@ -893,8 +893,8 @@ export type Components = {
          *         trades: Number of trades in the candle (optional).
          */
         CandleData: {
-            /** Id */
-            id?: string;
+            /** Public Id */
+            public_id?: string;
             /**
              * Type
              * @default candle
@@ -1164,8 +1164,8 @@ export type Components = {
          *         executed_at: Timestamp of the fill.
          */
         ExecutionData: {
-            /** Id */
-            id?: string;
+            /** Public Id */
+            public_id?: string;
             /**
              * Type
              * @default execution
@@ -1356,8 +1356,8 @@ export type Components = {
          *         updated_at: Last status update timestamp.
          */
         OrderData: {
-            /** Id */
-            id?: string;
+            /** Public Id */
+            public_id?: string;
             /**
              * Type
              * @default order
@@ -1431,8 +1431,8 @@ export type Components = {
          *         realized_pnl: Realized profit/loss.
          */
         PositionData: {
-            /** Id */
-            id?: string;
+            /** Public Id */
+            public_id?: string;
             /**
              * Type
              * @default position
@@ -2029,8 +2029,8 @@ export type Components = {
          *         fired_at: Domain timestamp when the signal was generated.
          */
         SignalData: {
-            /** Id */
-            id?: string;
+            /** Public Id */
+            public_id?: string;
             /**
              * Type
              * @default signal

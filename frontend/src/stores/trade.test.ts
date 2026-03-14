@@ -208,7 +208,7 @@ describe('useTradeStore', () => {
           unrealizedPnl: 100,
         }),
         createTestPosition({
-          id: 2,
+          publicId: 2,
           instrument: 'ETH-USD',
           quantity: 2,
           averagePrice: 3000,

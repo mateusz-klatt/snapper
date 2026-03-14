@@ -120,6 +120,7 @@ class Instrument(Base):
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
     timestamp: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     candles: Mapped[list[Candle]] = relationship(back_populates="instrument")
     trades: Mapped[list[Trade]] = relationship(back_populates="instrument")
 
@@ -147,6 +148,7 @@ class Candle(Base):
     volume: Mapped[float] = mapped_column(Float)
     vwap: Mapped[float | None] = mapped_column(Float, nullable=True)
     trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     instrument: Mapped[Instrument] = relationship(back_populates="candles")
 
 
@@ -168,6 +170,7 @@ class Trade(Base):
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
     trade_id: Mapped[str] = mapped_column(String(64))
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     instrument: Mapped[Instrument] = relationship(back_populates="trades")
 
 
@@ -210,6 +213,7 @@ class Order(Base):
     filled_size: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str | None] = mapped_column(String(512))
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class Execution(Base):
@@ -247,6 +251,7 @@ class Execution(Base):
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     order: Mapped[Order] = relationship()
 
 
@@ -265,6 +270,7 @@ class Position(Base):
     unrealized_pnl: Mapped[float] = mapped_column(Float)
     realized_pnl: Mapped[float] = mapped_column(Float)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class Signal(Base):
@@ -283,6 +289,7 @@ class Signal(Base):
     reason: Mapped[str] = mapped_column(String(256))
     strategy_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     instrument: Mapped[Instrument] = relationship()
 
 
@@ -302,6 +309,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     last_login: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class Setting(Base):
@@ -319,6 +327,7 @@ class Setting(Base):
     is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class SymbolCatalog(Base):
@@ -352,6 +361,7 @@ class SymbolCatalog(Base):
     asset_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="crypto")
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     aliases: Mapped[list[SymbolAlias]] = relationship(back_populates="catalog")
 
 
@@ -400,6 +410,7 @@ class SymbolAlias(Base):
     exchange_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     catalog: Mapped[SymbolCatalog] = relationship(back_populates="aliases")
 
 
@@ -461,6 +472,7 @@ class SymbolExchangeCapability(Base):
     reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     catalog: Mapped[SymbolCatalog] = relationship()
 
 
@@ -483,6 +495,7 @@ class ProcessRun(Base):
     started_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class InstrumentSpec(Base):
@@ -528,6 +541,7 @@ class InstrumentSpec(Base):
         String(20), nullable=True, comment="Trading status (e.g., online, offline)"
     )
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class MarketSnapshot(Base):
@@ -584,3 +598,4 @@ class MarketSnapshot(Base):
     timestamp: Mapped[datetime] = mapped_column(
         TZDateTime(), index=True, comment="Snapshot timestamp"
     )
+    known_to: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

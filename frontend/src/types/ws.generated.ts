@@ -283,7 +283,7 @@ export interface WsMessageSchema {
  *     trades: Number of trades in the candle (optional).
  */
 export interface CandleData {
-  id?: string;
+  public_id?: string;
   type: Type;
   timestamp?: string;
   instrument: string;
@@ -321,7 +321,7 @@ export interface CandleData {
  *     executed_at: Timestamp of the fill.
  */
 export interface ExecutionData {
-  id?: string;
+  public_id?: string;
   type: Type1;
   timestamp?: string;
   trade_id?: TradeId;
@@ -351,7 +351,7 @@ export interface ExecutionData {
  *     meta: Optional metadata dictionary for extensions.
  */
 export interface HeartbeatData {
-  id?: string;
+  public_id?: string;
   type: Type2;
   timestamp?: string;
   component: string;
@@ -376,7 +376,7 @@ export interface Meta {
  *     client_order_id: Our generated order ID.
  */
 export interface OrderCancelData {
-  id?: string;
+  public_id?: string;
   type: Type3;
   timestamp?: string;
   exchange: Exchange2;
@@ -412,7 +412,7 @@ export interface OrderCancelData {
  *     updated_at: Last status update timestamp.
  */
 export interface OrderData {
-  id?: string;
+  public_id?: string;
   type: Type4;
   timestamp?: string;
   exchange_order_id?: ExchangeOrderId1;
@@ -452,7 +452,7 @@ export interface OrderData {
  *     reason: Optional rejection/cancellation reason.
  */
 export interface OrderEventData {
-  id?: string;
+  public_id?: string;
   type: Type5;
   timestamp?: string;
   exchange_order_id: string;
@@ -477,7 +477,7 @@ export interface OrderEventData {
  *     new_price: New limit price (optional).
  */
 export interface OrderReplaceData {
-  id?: string;
+  public_id?: string;
   type: Type6;
   timestamp?: string;
   exchange: Exchange5;
@@ -507,7 +507,7 @@ export interface OrderReplaceData {
  *     signaled_at: Original signal timestamp (optional).
  */
 export interface OrderRequestData {
-  id?: string;
+  public_id?: string;
   type: Type7;
   timestamp?: string;
   strategy_id: string;
@@ -537,7 +537,7 @@ export interface OrderRequestData {
  *     realized_pnl: Realized profit/loss.
  */
 export interface PositionData {
-  id?: string;
+  public_id?: string;
   type: Type8;
   timestamp?: string;
   instrument: string;
@@ -554,7 +554,7 @@ export interface PositionData {
  * Strategies use this to finalize analysis and generate reports.
  */
 export interface ReplayEndData {
-  id?: string;
+  public_id?: string;
   type: Type9;
   timestamp?: string;
 }
@@ -568,7 +568,7 @@ export interface ReplayEndData {
  *     started_at: Replay start timestamp (optional).
  */
 export interface ReplayStartData {
-  id?: string;
+  public_id?: string;
   type: Type10;
   timestamp?: string;
   started_at?: StartedAt;
@@ -586,7 +586,7 @@ export interface ReplayStartData {
  *     updated_by: User who made the change (optional).
  */
 export interface SettingChangedData {
-  id?: string;
+  public_id?: string;
   type: Type11;
   timestamp?: string;
   key: string;
@@ -611,7 +611,7 @@ export interface SettingChangedData {
  *     fired_at: Domain timestamp when the signal was generated.
  */
 export interface SignalData {
-  id?: string;
+  public_id?: string;
   type: Type12;
   timestamp?: string;
   instrument: string;
@@ -634,7 +634,7 @@ export interface SignalData {
  *     action: Required action (always 'clear_cache').
  */
 export interface SymbolAliasUpdateData {
-  id?: string;
+  public_id?: string;
   type: Type13;
   timestamp?: string;
   event: Event1;
@@ -655,7 +655,7 @@ export interface SymbolAliasUpdateData {
  *     last: Last traded price.
  */
 export interface TickData {
-  id?: string;
+  public_id?: string;
   type: Type14;
   timestamp?: string;
   instrument: string;
@@ -680,7 +680,7 @@ export interface TickData {
  *     side: Trade direction ('buy'/'sell') if available.
  */
 export interface TradeData {
-  id?: string;
+  public_id?: string;
   type: Type15;
   timestamp?: string;
   instrument: string;

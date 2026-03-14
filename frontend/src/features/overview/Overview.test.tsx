@@ -195,7 +195,7 @@ describe('Overview', () => {
       isLoading: false,
       data: [
         {
-          id: 1,
+          publicId: 1,
           instrument: 'BTC/USD',
           side: 'buy',
           timestamp: new Date('2024-01-01T12:00:00Z'),
@@ -211,7 +211,7 @@ describe('Overview', () => {
     vi.mocked(useTradeStore).mockReturnValue({
       executions: [
         {
-          id: 1,
+          publicId: 1,
           instrument: 'ETH/USD',
           side: 'buy',
           size: 1.5,
@@ -232,7 +232,7 @@ describe('Overview', () => {
     vi.mocked(useTradeStore).mockReturnValue({
       executions: [
         {
-          id: 1,
+          publicId: 1,
           instrument: 'BTC/USD',
           side: 'buy',
           size: 1,
@@ -240,7 +240,7 @@ describe('Overview', () => {
           executedAt: today,
         },
         {
-          id: 2,
+          publicId: 2,
           instrument: 'ETH/USD',
           side: 'sell',
           size: 2,
@@ -248,7 +248,7 @@ describe('Overview', () => {
           executedAt: yesterday,
         },
         {
-          id: 3,
+          publicId: 3,
           instrument: 'SOL/USD',
           side: 'buy',
           size: 10,
@@ -267,7 +267,7 @@ describe('Overview', () => {
       isLoading: false,
       data: [
         {
-          id: 1,
+          publicId: 1,
           instrument: 'BTC/USD',
           side: 'sell',
           timestamp: new Date('2024-01-01T12:00:00Z'),
@@ -283,7 +283,7 @@ describe('Overview', () => {
     vi.mocked(useTradeStore).mockReturnValue({
       executions: [
         {
-          id: 1,
+          publicId: 1,
           instrument: 'BTC/USD',
           side: 'sell',
           size: 0.5,
@@ -318,7 +318,7 @@ describe('Overview', () => {
       isLoading: false,
       data: [
         {
-          id: null,
+          publicId: null,
           instrument: 'XRP/USD',
           side: 'buy',
           timestamp: new Date('2024-01-01T12:00:00Z'),
@@ -335,7 +335,7 @@ describe('Overview', () => {
       isLoading: false,
       data: [
         {
-          id: null,
+          publicId: null,
           instrument: 'AVAX/USD',
           side: 'sell',
           timestamp: undefined,
@@ -352,7 +352,7 @@ describe('Overview', () => {
       isLoading: false,
       data: [
         {
-          id: 1,
+          publicId: 1,
           instrument: 'ADA/USD',
           side: 'buy',
           timestamp: undefined,
@@ -374,7 +374,7 @@ describe('Overview', () => {
     vi.mocked(useTradeStore).mockReturnValue({
       executions: [
         {
-          id: 1,
+          publicId: 1,
           instrument: 'DOT/USD',
           side: 'sell',
           size: 10,

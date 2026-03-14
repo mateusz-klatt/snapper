@@ -388,7 +388,7 @@ describe('WSDispatcher', () => {
     it('order message merges new order into cache', () => {
       const existingOrders = [
         {
-          id: 'uuid-1',
+          public_id: 'uuid-1',
           client_order_id: 'existing-1',
           instrument: 'ETH/USD',
           exchange: 'kraken' as const,
@@ -430,7 +430,7 @@ describe('WSDispatcher', () => {
     it('order message updates existing order in cache by client_order_id', () => {
       const existingOrders = [
         {
-          id: 'uuid-1',
+          public_id: 'uuid-1',
           client_order_id: 'client-1',
           instrument: 'BTC/USD',
           exchange: 'kraken' as const,
@@ -475,7 +475,7 @@ describe('WSDispatcher', () => {
     it('execution message merges into cache', () => {
       const existingExecs = [
         {
-          id: 'uuid-1',
+          public_id: 'uuid-1',
           client_order_id: 'ord-old',
           instrument: 'ETH/USD',
           exchange: 'kraken' as const,
@@ -521,7 +521,7 @@ describe('WSDispatcher', () => {
       const executedAt = new Date().toISOString()
       const existingExecs = [
         {
-          id: 'uuid-1',
+          public_id: 'uuid-1',
           client_order_id: 'ord-1',
           instrument: 'BTC/USD',
           exchange: 'kraken' as const,
@@ -562,7 +562,7 @@ describe('WSDispatcher', () => {
     it('signal message merges into cache', () => {
       const existingSignals = [
         {
-          id: 'uuid-1',
+          public_id: 'uuid-1',
           instrument: 'ETH/USD',
           exchange: 'kraken' as const,
           side: 'sell' as const,
@@ -606,7 +606,7 @@ describe('WSDispatcher', () => {
       const firedAt = new Date().toISOString()
       const existingSignals = [
         {
-          id: 'uuid-1',
+          public_id: 'uuid-1',
           instrument: 'BTC/USD',
           exchange: 'kraken' as const,
           side: 'buy' as const,

@@ -184,7 +184,7 @@ def _make_order_json() -> str:
     return json.dumps(
         {
             "type": "order",
-            "id": "1",
+            "public_id": "1",
             "instrument": "BTCUSD",
             "exchange": "kraken",
             "side": "buy",
@@ -3091,7 +3091,7 @@ class TestBackpressure:
         )
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        raw_json = '{"type": "order", "id": "123"}'
+        raw_json = '{"type": "order", "public_id": "123"}'
         await bridge._forward_to_clients(topic, "orders.events.kraken.BTC-USD.accepted", raw_json)
         bridge.disconnect_client.assert_awaited_once()
 

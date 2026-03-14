@@ -14,7 +14,7 @@ export const WsMessageBaseSchema = z
 
 export const CandleDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('candle'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
@@ -33,7 +33,7 @@ export const CandleDataSchema = z
 
 export const ExecutionDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('execution'),
     timestamp: z.iso.datetime().optional(),
     trade_id: z.string().nullable(),
@@ -53,7 +53,7 @@ export const ExecutionDataSchema = z
 
 export const HeartbeatDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('heartbeat'),
     timestamp: z.iso.datetime().optional(),
     component: z.string(),
@@ -66,7 +66,7 @@ export const HeartbeatDataSchema = z
 
 export const OrderCancelDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('order_cancel'),
     timestamp: z.iso.datetime().optional(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
@@ -78,7 +78,7 @@ export const OrderCancelDataSchema = z
 
 export const OrderDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('order'),
     timestamp: z.iso.datetime().optional(),
     exchange_order_id: z.string().nullable(),
@@ -102,7 +102,7 @@ export const OrderDataSchema = z
 
 export const OrderEventDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('order_event'),
     timestamp: z.iso.datetime().optional(),
     exchange_order_id: z.string(),
@@ -116,7 +116,7 @@ export const OrderEventDataSchema = z
 
 export const OrderReplaceDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('order_replace'),
     timestamp: z.iso.datetime().optional(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
@@ -130,7 +130,7 @@ export const OrderReplaceDataSchema = z
 
 export const OrderRequestDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('order_request'),
     timestamp: z.iso.datetime().optional(),
     strategy_id: z.string(),
@@ -148,7 +148,7 @@ export const OrderRequestDataSchema = z
 
 export const PositionDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('position'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
@@ -162,7 +162,7 @@ export const PositionDataSchema = z
 
 export const ReplayEndDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('replay_end'),
     timestamp: z.iso.datetime().optional(),
   })
@@ -170,7 +170,7 @@ export const ReplayEndDataSchema = z
 
 export const ReplayStartDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('replay_start'),
     timestamp: z.iso.datetime().optional(),
     started_at: z.iso.datetime().nullable(),
@@ -179,7 +179,7 @@ export const ReplayStartDataSchema = z
 
 export const SettingChangedDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('setting_changed'),
     timestamp: z.iso.datetime().optional(),
     key: z.string(),
@@ -191,7 +191,7 @@ export const SettingChangedDataSchema = z
 
 export const SignalDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('signal'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
@@ -207,7 +207,7 @@ export const SignalDataSchema = z
 
 export const SymbolAliasUpdateDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('symbol_alias_update'),
     timestamp: z.iso.datetime().optional(),
     event: z.literal('symbol_aliases_updated'),
@@ -217,7 +217,7 @@ export const SymbolAliasUpdateDataSchema = z
 
 export const TickDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('tick'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
@@ -231,7 +231,7 @@ export const TickDataSchema = z
 
 export const TradeDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('trade'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),

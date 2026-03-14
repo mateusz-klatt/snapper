@@ -93,7 +93,7 @@ export function createTestPosition(
   const now = new Date()
 
   return {
-    id: overrides.id ?? 1,
+    publicId: overrides.publicId ?? 1,
     instrument: overrides.instrument,
     exchange: overrides.exchange ?? 'kraken',
     quantity: overrides.quantity ?? 1,

@@ -130,7 +130,7 @@ class SignalReadService:
                 signals_with_instruments = result.all()
                 return [
                     {
-                        "id": signal.public_id,
+                        "public_id": signal.public_id,
                         "instrument": inst.symbol,
                         "exchange": inst.exchange,
                         "timestamp": signal.timestamp,

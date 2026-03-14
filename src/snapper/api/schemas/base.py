@@ -93,14 +93,14 @@ class StrictDataSchema(BaseModel):
     Also provides to_json/from_json for ZMQ serialization.
 
     Attributes:
-        id: Unique identifier (UUID7), generated at creation time.
+        public_id: Unique identifier (UUID7), generated at creation time.
         type: Message type discriminator for routing and deserialization.
         timestamp: Bus arrival timestamp (UTC), generated once at creation.
     """
 
     model_config = STRICT_DATA_CONFIG
 
-    id: str = Field(default_factory=lambda: str(uuid7()))
+    public_id: str = Field(default_factory=lambda: str(uuid7()))
     type: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

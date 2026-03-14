@@ -164,7 +164,7 @@ struct WsMessageBase: Codable, Sendable {
 }
 
 struct CandleData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let instrument: String
@@ -180,7 +180,7 @@ struct CandleData: Codable, Sendable {
     let trades: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case instrument
@@ -198,7 +198,7 @@ struct CandleData: Codable, Sendable {
 }
 
 struct ExecutionData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let tradeId: String?
@@ -215,7 +215,7 @@ struct ExecutionData: Codable, Sendable {
     let executedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case tradeId = "trade_id"
@@ -234,7 +234,7 @@ struct ExecutionData: Codable, Sendable {
 }
 
 struct HeartbeatData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let component: String
@@ -244,7 +244,7 @@ struct HeartbeatData: Codable, Sendable {
     let meta: [String: AnyCodable]?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case component
@@ -256,7 +256,7 @@ struct HeartbeatData: Codable, Sendable {
 }
 
 struct OrderCancelData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let exchange: String
@@ -265,7 +265,7 @@ struct OrderCancelData: Codable, Sendable {
     let clientOrderId: String
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case exchange
@@ -276,7 +276,7 @@ struct OrderCancelData: Codable, Sendable {
 }
 
 struct OrderData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let exchangeOrderId: String?
@@ -297,7 +297,7 @@ struct OrderData: Codable, Sendable {
     let updatedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case exchangeOrderId = "exchange_order_id"
@@ -320,7 +320,7 @@ struct OrderData: Codable, Sendable {
 }
 
 struct OrderEventData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let exchangeOrderId: String
@@ -331,7 +331,7 @@ struct OrderEventData: Codable, Sendable {
     let reason: String?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case exchangeOrderId = "exchange_order_id"
@@ -344,7 +344,7 @@ struct OrderEventData: Codable, Sendable {
 }
 
 struct OrderReplaceData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let exchange: String
@@ -355,7 +355,7 @@ struct OrderReplaceData: Codable, Sendable {
     let newPrice: Double?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case exchange
@@ -368,7 +368,7 @@ struct OrderReplaceData: Codable, Sendable {
 }
 
 struct OrderRequestData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let strategyId: String
@@ -383,7 +383,7 @@ struct OrderRequestData: Codable, Sendable {
     let signaledAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case strategyId = "strategy_id"
@@ -400,7 +400,7 @@ struct OrderRequestData: Codable, Sendable {
 }
 
 struct PositionData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let instrument: String
@@ -411,7 +411,7 @@ struct PositionData: Codable, Sendable {
     let realizedPnl: Double
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case instrument
@@ -424,19 +424,25 @@ struct PositionData: Codable, Sendable {
 }
 
 struct ReplayEndData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case publicId = "public_id"
+        case type
+        case timestamp
+    }
 }
 
 struct ReplayStartData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let startedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case startedAt = "started_at"
@@ -444,7 +450,7 @@ struct ReplayStartData: Codable, Sendable {
 }
 
 struct SettingChangedData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let key: String
@@ -453,7 +459,7 @@ struct SettingChangedData: Codable, Sendable {
     let updatedBy: String?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case key
@@ -464,7 +470,7 @@ struct SettingChangedData: Codable, Sendable {
 }
 
 struct SignalData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let instrument: String
@@ -477,7 +483,7 @@ struct SignalData: Codable, Sendable {
     let firedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case instrument
@@ -492,15 +498,23 @@ struct SignalData: Codable, Sendable {
 }
 
 struct SymbolAliasUpdateData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let event: String
     let action: String
+
+    enum CodingKeys: String, CodingKey {
+        case publicId = "public_id"
+        case type
+        case timestamp
+        case event
+        case action
+    }
 }
 
 struct TickData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let instrument: String
@@ -509,10 +523,22 @@ struct TickData: Codable, Sendable {
     let bid: Double?
     let ask: Double?
     let last: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case publicId = "public_id"
+        case type
+        case timestamp
+        case instrument
+        case exchange
+        case volume
+        case bid
+        case ask
+        case last
+    }
 }
 
 struct TradeData: Codable, Sendable {
-    let id: String?
+    let publicId: String?
     let type: String
     let timestamp: Date?
     let instrument: String
@@ -523,7 +549,7 @@ struct TradeData: Codable, Sendable {
     let side: String?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case publicId = "public_id"
         case type
         case timestamp
         case instrument

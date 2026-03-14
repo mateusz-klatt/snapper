@@ -330,7 +330,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     instrument_id, timeframe, candle.interval_begin
                 )
                 candle_msg = CandleData(
-                    id=public_id,
+                    public_id=public_id,
                     exchange=exchange,
                     instrument=native_symbol,
                     volume=candle.volume,
@@ -471,7 +471,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _save_to_db(self, native_symbol: str, candle_msg: CandleData) -> None:
         """Persist candle data to the database.
 
-        The candle_msg.id carries the public_id resolved by the candle ID
+        The candle_msg.public_id carries the public_id resolved by the candle ID
         cache, ensuring DB and ZMQ use the same identifier.
 
         Args:
@@ -490,7 +490,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             vwap_price = candle_msg.vwap if candle_msg.vwap is not None else candle_msg.close
             trades = candle_msg.trades if candle_msg.trades is not None else 0
             candle_row: dict[str, Any] = {
-                "public_id": candle_msg.id,
+                "public_id": candle_msg.public_id,
                 "instrument_id": instrument_id,
                 "open_at": candle_msg.open_at,
                 "timestamp": candle_msg.timestamp,

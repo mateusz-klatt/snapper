@@ -107,7 +107,7 @@ async def test_forward_to_clients_backpressure_trade_disconnects_client() -> Non
     bridge.topic_metrics[topic] = TopicMetricsModel()
     bridge.disconnect_client = AsyncMock()
     order_payload = {
-        "id": "1",
+        "public_id": "1",
         "instrument": "BTC-USD",
         "exchange": "kraken",
         "side": "buy",
@@ -1222,7 +1222,7 @@ class TestForwardToClientsBackpressure:
         )
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "order", "id": "123"}'
+        message_str = '{"type": "order", "public_id": "123"}'
         await bridge._forward_to_clients(topic, topic, message_str)
         bridge.disconnect_client.assert_awaited_once()
 

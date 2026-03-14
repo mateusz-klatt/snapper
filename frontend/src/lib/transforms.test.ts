@@ -376,7 +376,7 @@ describe('Position Transformers', () => {
     }
     const result = positionFromAPI(apiPosition)
 
-    expect(result.id).toBe('BTC/USD')
+    expect(result.publicId).toBe('BTC/USD')
     expect(result.instrument).toBe('BTC/USD')
 
     expect(result.exchange).toBe('kraken')
@@ -906,7 +906,7 @@ describe('Safe API Transformers', () => {
     const envelope: OrderData = {
       type: 'order',
       timestamp: '2026-01-15T10:00:00Z',
-      id: 'uuid-1',
+      public_id: 'uuid-1',
       client_order_id: 'client-1',
       exchange_order_id: 'exch-1',
       instrument: 'BTC/USD',
@@ -926,7 +926,7 @@ describe('Safe API Transformers', () => {
     }
     const data = orderDataFromEnvelope(envelope)
 
-    expect(data.id).toBe('uuid-1')
+    expect(data.public_id).toBe('uuid-1')
     expect(data.client_order_id).toBe('client-1')
     expect(data.exchange).toBe('kraken')
     expect(data.order_type).toBe('limit')
@@ -938,7 +938,7 @@ describe('Safe API Transformers', () => {
     const envelope: ExecutionData = {
       type: 'execution',
       timestamp: '2026-01-15T10:00:00Z',
-      id: 'uuid-2',
+      public_id: 'uuid-2',
       trade_id: 'trade-1',
       exchange_order_id: 'exch-1',
       client_order_id: 'ord-1',
@@ -954,7 +954,7 @@ describe('Safe API Transformers', () => {
     }
     const data = executionDataFromEnvelope(envelope)
 
-    expect(data.id).toBe('uuid-2')
+    expect(data.public_id).toBe('uuid-2')
     expect(data.trade_id).toBe('trade-1')
     expect(data.client_order_id).toBe('ord-1')
     expect(data.executed_at).toBe('2026-01-15T10:00:01Z')
@@ -965,7 +965,7 @@ describe('Safe API Transformers', () => {
     const envelope: SignalData = {
       type: 'signal',
       timestamp: '2026-01-15T10:00:00Z',
-      id: 'uuid-3',
+      public_id: 'uuid-3',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       side: 'buy',
@@ -977,7 +977,7 @@ describe('Safe API Transformers', () => {
     }
     const data = signalDataFromEnvelope(envelope)
 
-    expect(data.id).toBe('uuid-3')
+    expect(data.public_id).toBe('uuid-3')
     expect(data.strategy_name).toBe('macd')
     expect(data.fired_at).toBe('2026-01-15T10:00:00Z')
     expect(data.type).toBe('signal')

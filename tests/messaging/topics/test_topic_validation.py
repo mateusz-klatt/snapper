@@ -344,7 +344,7 @@ class TestBridgeNormalizerContract:
         """
         fill_data: dict[str, Any] = {
             "type": "execution",
-            "id": "exch-456",
+            "public_id": "exch-456",
             "order_id": "order-123",
             "instrument": "BTC-USD",
             "exchange": "kraken",
@@ -357,7 +357,7 @@ class TestBridgeNormalizerContract:
             "executed_at": "2024-01-01T00:00:00+00:00",
         }
         assert fill_data["order_id"] == "order-123"
-        assert fill_data["id"] == "exch-456"
+        assert fill_data["public_id"] == "exch-456"
         assert fill_data["size"] == pytest.approx(0.5)
         assert fill_data["price"] == pytest.approx(50000.0)
         assert fill_data["executed_at"] == "2024-01-01T00:00:00+00:00"
@@ -379,7 +379,7 @@ class TestOrderStatusPayloadContract:
         Then: Uses size not quantity, created_at not timestamp.
         """
         order_status = {
-            "id": "client-order-123",
+            "public_id": "client-order-123",
             "instrument": "BTC-USD",
             "side": "buy",
             "size": 0.5,

@@ -210,7 +210,7 @@ describe('queries', () => {
   })
   describe('useExecutions', () => {
     it('returns data when authenticated', async () => {
-      mockedApiClient.getExecutions.mockResolvedValueOnce([null, { id: 'exec-1' }])
+      mockedApiClient.getExecutions.mockResolvedValueOnce([null, { public_id: 'exec-1' }])
       const { result } = renderHook(() => useExecutions(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -408,11 +408,32 @@ describe('queries', () => {
   describe('useOrdersGrouped', () => {
     it('groups orders by status', async () => {
       mockedApiClient.getOrders.mockResolvedValueOnce([
-        { id: '1', status: 'NEW', instrument: 'BTC/USD', side: 'buy', price: 100, quantity: 1 },
-        { id: '2', status: 'OPEN', instrument: 'BTC/USD', side: 'buy', price: 100, quantity: 1 },
-        { id: '3', status: 'FILLED', instrument: 'BTC/USD', side: 'buy', price: 100, quantity: 1 },
         {
-          id: '4',
+          public_id: '1',
+          status: 'NEW',
+          instrument: 'BTC/USD',
+          side: 'buy',
+          price: 100,
+          quantity: 1,
+        },
+        {
+          public_id: '2',
+          status: 'OPEN',
+          instrument: 'BTC/USD',
+          side: 'buy',
+          price: 100,
+          quantity: 1,
+        },
+        {
+          public_id: '3',
+          status: 'FILLED',
+          instrument: 'BTC/USD',
+          side: 'buy',
+          price: 100,
+          quantity: 1,
+        },
+        {
+          public_id: '4',
           status: 'PARTIALLY_FILLED',
           instrument: 'BTC/USD',
           side: 'buy',
@@ -420,7 +441,7 @@ describe('queries', () => {
           quantity: 1,
         },
         {
-          id: '5',
+          public_id: '5',
           status: 'CANCELLED',
           instrument: 'BTC/USD',
           side: 'buy',
@@ -428,7 +449,7 @@ describe('queries', () => {
           quantity: 1,
         },
         {
-          id: '6',
+          public_id: '6',
           status: 'REJECTED',
           instrument: 'BTC/USD',
           side: 'buy',
@@ -463,7 +484,7 @@ describe('queries', () => {
     it('calculates position summary', async () => {
       mockedApiClient.getPositions.mockResolvedValueOnce([
         {
-          id: '1',
+          public_id: '1',
           instrument: 'BTC/USD',
           quantity: 10,
           average_price: 100,
@@ -471,7 +492,7 @@ describe('queries', () => {
           realized_pnl: 20,
         },
         {
-          id: '2',
+          public_id: '2',
           instrument: 'ETH/USD',
           quantity: 5,
           average_price: 200,
@@ -502,7 +523,7 @@ describe('queries', () => {
     it('handles zero totalCost', async () => {
       mockedApiClient.getPositions.mockResolvedValueOnce([
         {
-          id: '1',
+          public_id: '1',
           instrument: 'BTC/USD',
           quantity: 0,
           average_price: 0,

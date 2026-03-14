@@ -26,7 +26,7 @@ export const AvailableProcessSchema = z
 
 export const CandleDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('candle'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
@@ -82,7 +82,7 @@ export const ConnectionStatsSchemaSchema = z
 
 export const ExecutionDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('execution'),
     timestamp: z.iso.datetime().optional(),
     trade_id: z.string().nullable().optional(),
@@ -123,7 +123,7 @@ export const MessageResponseSchema = z
 
 export const OrderDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('order'),
     timestamp: z.iso.datetime().optional(),
     exchange_order_id: z.string().nullable().optional(),
@@ -147,7 +147,7 @@ export const OrderDataSchema = z
 
 export const PositionDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('position'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),
@@ -279,7 +279,7 @@ export const SettingUpdateSchema = z
 
 export const SignalDataSchema = z
   .object({
-    id: z.string().optional(),
+    public_id: z.string().optional(),
     type: z.literal('signal'),
     timestamp: z.iso.datetime().optional(),
     instrument: z.string(),

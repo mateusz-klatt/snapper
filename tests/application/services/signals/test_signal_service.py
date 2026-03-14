@@ -163,8 +163,8 @@ class TestSignalService:
             signal_ids.append(signal_id)
         recent_signals = await signal_service.get_recent_signals(limit=2)
         assert len(recent_signals) == 2
-        assert isinstance(recent_signals[0]["id"], str)
-        assert recent_signals[0]["id"] > recent_signals[1]["id"]
+        assert isinstance(recent_signals[0]["public_id"], str)
+        assert recent_signals[0]["public_id"] > recent_signals[1]["public_id"]
 
     async def test_get_recent_signals_by_strategy(
         self,
@@ -193,7 +193,7 @@ class TestSignalService:
             strategy="strategy_b", limit=10
         )
         assert len(strategy_b_signals) == 1
-        assert isinstance(strategy_b_signals[0]["id"], str)
+        assert isinstance(strategy_b_signals[0]["public_id"], str)
         assert strategy_b_signals[0]["strategy_name"] == "strategy_b"
 
     async def test_get_recent_signals_by_instrument(
@@ -239,7 +239,7 @@ class TestSignalService:
         await signal_service.store_signal(eth_signal, "testexchange", "strategy_a", 3000.0)
         btc_signals = await signal_service.get_recent_signals(instrument="BTCUSD", limit=10)
         assert len(btc_signals) == 1
-        assert isinstance(btc_signals[0]["id"], str)
+        assert isinstance(btc_signals[0]["public_id"], str)
         assert btc_signals[0]["instrument"] == "BTCUSD"
 
     async def test_get_recent_signals_by_exchange(
@@ -280,7 +280,7 @@ class TestSignalService:
             exchange="exchange_b", limit=10
         )
         assert len(exchange_b_signals) == 1
-        assert isinstance(exchange_b_signals[0]["id"], str)
+        assert isinstance(exchange_b_signals[0]["public_id"], str)
         assert exchange_b_signals[0]["exchange"] == "exchange_b"
 
     async def test_get_recent_signals_empty(self, signal_service: SignalReadService) -> None:

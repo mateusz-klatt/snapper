@@ -23,7 +23,7 @@ type TradeSide = 'buy' | 'sell'
  * From WebSocket CandleData.
  */
 export interface Candle {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   instrument: string
   exchange: MarketDataExchange
@@ -43,7 +43,7 @@ export interface Candle {
  * From WebSocket ExecutionData.
  */
 export interface Execution {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   tradeId?: string | null
   exchangeOrderId?: string | null
@@ -64,7 +64,7 @@ export interface Execution {
  * From WebSocket HeartbeatData.
  */
 export interface Heartbeat {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   component: string
   sequence: number
@@ -78,7 +78,7 @@ export interface Heartbeat {
  * From WebSocket OrderCancelData.
  */
 export interface OrderCancel {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   exchange: OrderExchange
   instrument: string
@@ -91,7 +91,7 @@ export interface OrderCancel {
  * From WebSocket OrderData.
  */
 export interface Order {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   exchangeOrderId?: string | null
   clientOrderId: string
@@ -116,7 +116,7 @@ export interface Order {
  * From WebSocket OrderEventData.
  */
 export interface OrderEvent {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   exchangeOrderId: string
   clientOrderId: string
@@ -131,7 +131,7 @@ export interface OrderEvent {
  * From WebSocket OrderReplaceData.
  */
 export interface OrderReplace {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   exchange: OrderExchange
   instrument: string
@@ -146,7 +146,7 @@ export interface OrderReplace {
  * From WebSocket OrderRequestData.
  */
 export interface OrderRequest {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   strategyId: string
   exchange: OrderExchange
@@ -165,7 +165,7 @@ export interface OrderRequest {
  * From WebSocket PositionData.
  */
 export interface Position {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   instrument: string
   exchange: OrderExchange
@@ -180,7 +180,7 @@ export interface Position {
  * From WebSocket ReplayEndData.
  */
 export interface ReplayEnd {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
 }
 
@@ -189,7 +189,7 @@ export interface ReplayEnd {
  * From WebSocket ReplayStartData.
  */
 export interface ReplayStart {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   startedAt?: Date | null
 }
@@ -199,7 +199,7 @@ export interface ReplayStart {
  * From WebSocket SettingChangedData.
  */
 export interface SettingChanged {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   key: string
   value: string
@@ -212,7 +212,7 @@ export interface SettingChanged {
  * From WebSocket SignalData.
  */
 export interface Signal {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   instrument: string
   exchange: OrderExchange
@@ -229,7 +229,7 @@ export interface Signal {
  * From WebSocket SymbolAliasUpdateData.
  */
 export interface SymbolAliasUpdate {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   event: string
   action: string
@@ -240,7 +240,7 @@ export interface SymbolAliasUpdate {
  * From WebSocket TickData.
  */
 export interface Tick {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   instrument: string
   exchange: MarketDataExchange
@@ -255,7 +255,7 @@ export interface Tick {
  * From WebSocket TradeData.
  */
 export interface Trade {
-  id?: string | number
+  publicId?: string
   timestamp?: Date
   instrument: string
   exchange: MarketDataExchange
