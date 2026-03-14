@@ -623,7 +623,7 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
     assert sent_topic == strategy.output_topics[0]
     payload_data = json.loads(payload)
     assert payload_data["instrument"] == "BTC-USD"
-    assert datetime.fromisoformat(payload_data["timestamp"]).timestamp() == pytest.approx(123.0)
+    assert datetime.fromisoformat(payload_data["fired_at"]).timestamp() == pytest.approx(123.0)
 
 
 @pytest.mark.asyncio
@@ -842,7 +842,7 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
     sent_topic, payload, _ = publisher.sent[0]
     assert sent_topic == "signals.kraken.BTC-USD.live"
     payload_data = json.loads(payload)
-    assert datetime.fromisoformat(payload_data["timestamp"]).timestamp() == captured_time
+    assert datetime.fromisoformat(payload_data["fired_at"]).timestamp() == captured_time
     assert payload_data["instrument"] == "BTC-USD"
     with pytest.raises(ValueError, match="not allowed"):
         await strategy.emit_signal(

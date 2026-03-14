@@ -456,7 +456,7 @@ class BaseStrategy(ABC):
             price=signal.price,
             exchange=self.exchange,
             strategy_name=self.name,
-            timestamp=signal.timestamp,
+            fired_at=signal.timestamp or datetime.now(UTC),
         )
         payload_bytes = signal_envelope.to_json().encode("utf-8")
         if self.publisher is not None:

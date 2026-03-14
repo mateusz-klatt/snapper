@@ -54,6 +54,24 @@ class TimeInForceEnum(Enum):
     IOC = "IOC"
 
 
+def to_fill_status(execution: ExecutionUpdate) -> Literal["filled", "partial"]:
+    """Derive FillStatus from an ExecutionUpdate.
+
+    Single source of truth for mapping exchange-level order status to
+    the domain FillStatus used in ExecutionData and the DB executions table.
+
+    Args:
+        execution: Execution update from exchange WebSocket or REST.
+
+    Returns:
+        'partial' when order is still open with partial fills,
+        'filled' otherwise (closed, explicitly filled, or default).
+    """
+    if execution.order_status == OrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
+        return "partial"
+    return "filled"
+
+
 def normalize_order_status(status: OrderStatusEnum) -> OrderStatusEnum:
     normalization_map = {
         OrderStatusEnum.PENDING: OrderStatusEnum.OPEN,
@@ -130,6 +148,7 @@ type ExecType = Literal[
 ]
 type LiquidityIndicator = Literal["m", "t"]
 __all__ = [
+    "to_fill_status",
     "OrderSideEnum",
     "OrderTypeEnum",
     "OrderStatusEnum",

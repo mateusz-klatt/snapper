@@ -32,9 +32,9 @@ from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
+from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
-from snapper.interface.websocket.schemas import FillStatus
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.data import ExecutionData
@@ -622,22 +622,6 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
 
-    @staticmethod
-    def _determine_fill_status(execution: ExecutionUpdate) -> FillStatus:
-        """Determine the fill status from an execution update.
-
-        Args:
-            execution: Execution update to evaluate.
-
-        Returns:
-            Fill status string.
-        """
-        if execution.exec_type == "filled" or execution.order_status == OrderStatusEnum.CLOSED:
-            return "filled"
-        if execution.order_status == OrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
-            return "partial"
-        return "filled"
-
     def _resolve_execution_order(
         self, execution: ExecutionUpdate, exchange_name: str
     ) -> tuple[str, str, OrderRequestData] | None:
@@ -722,7 +706,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             ExecutionData ready for publishing.
         """
-        status = self._determine_fill_status(execution)
+        status = to_fill_status(execution)
         total_fee = execution.fee_usd_equiv or 0.0
         return ExecutionData(
             trade_id=execution.exec_id,

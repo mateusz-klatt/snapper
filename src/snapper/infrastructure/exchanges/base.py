@@ -36,6 +36,7 @@ from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.contracts import to_fill_status
 
 __all__ = ["ExchangeClientBase"]
 
@@ -423,7 +424,7 @@ class ExchangeClientBase(ABC):
                 order_id=db_order_id,
                 timestamp=execution.timestamp,
                 side=execution.side.value,
-                status=execution.order_status.value,
+                status=to_fill_status(execution),
                 price=execution.last_price or execution.average_price or 0.0,
                 size=execution.last_qty or execution.cum_qty or 0.0,
                 fee=execution.fee_usd_equiv or 0.0,

@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import and_
 from sqlalchemy import desc
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -78,7 +79,8 @@ class SignalReadService:
                     inst_id = inst.id
                 signal_event = Signal(
                     instrument_id=inst_id,
-                    timestamp=signal.timestamp or datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
+                    fired_at=signal.timestamp,
                     side=signal.side,
                     strength=signal.strength,
                     reason=signal.reason,
@@ -116,23 +118,25 @@ class SignalReadService:
         try:
             async with self.repo.session() as session:
                 since = datetime.now(UTC) - timedelta(hours=hours)
+                signal_time = func.coalesce(Signal.fired_at, Signal.timestamp)
                 query = select(Signal, Instrument).join(Instrument)
-                query = query.where(Signal.timestamp >= since)
+                query = query.where(signal_time >= since)
                 if instrument:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:
                     query = query.where(Signal.strategy_name == strategy)
                 if exchange:
                     query = query.where(Instrument.exchange == exchange)
-                query = query.order_by(desc(Signal.timestamp)).limit(limit)
+                query = query.order_by(desc(signal_time)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
                 return [
                     {
-                        "id": signal.id,
+                        "id": signal.public_id,
                         "instrument": inst.symbol,
                         "exchange": inst.exchange,
                         "timestamp": signal.timestamp,
+                        "fired_at": signal.fired_at,
                         "side": signal.side,
                         "strength": signal.strength,
                         "reason": signal.reason,

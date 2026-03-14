@@ -1945,7 +1945,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         strength=0.5,
         price=10_000.0,
         strategy_name="demo",
-        timestamp=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        fired_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
         exchange="kraken",
         reason="test",
     )

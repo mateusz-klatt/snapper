@@ -513,7 +513,7 @@ class TraderCoordinator(RegisterableProcess):
             f"{engine_key} {side} (strength={strength:.2f}, price={price:.2f}, "
             f"desired_units={desired_units:.4f})"
         )
-        signaled_at = signal.timestamp.timestamp()
+        signaled_at = signal.fired_at.timestamp()
         engine = self.engines[engine_key]
         await engine.execute_desired_units(desired_units, price, signaled_at=signaled_at)
 

@@ -471,6 +471,7 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     assert call_args["price"] == pytest.approx(50000.0)
     assert call_args["size"] == pytest.approx(1.0)
     assert call_args["fee"] == pytest.approx(10.0)
+    assert call_args["status"] == "filled"
     assert call_args["fee_asset"] == "USD"
     assert call_args["exec_id"] == "exec-123"
     assert call_args["trade_id"] == "987654321"
@@ -504,9 +505,39 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
     await client._log_execution_to_db(db_order_id=42, execution=execution)
     mock_repo.insert_execution.assert_called_once()
     call_args = mock_repo.insert_execution.call_args[1]
+    assert call_args["status"] == "filled"
     assert call_args["price"] == pytest.approx(49500.0)
     assert call_args["size"] == pytest.approx(2.5)
     assert call_args["fee"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio()
+async def test_log_execution_to_db_partial_fill_status() -> None:
+    """Log execution stores partial status for open orders with fills.
+
+    Given: Execution with OPEN status and positive cum_qty,
+    When: _log_execution_to_db is called,
+    Then: Status is stored as 'partial' (not raw order_status value).
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.insert_execution = AsyncMock()
+    client = DummyExchangeClient(repository=mock_repo)
+    execution = ExecutionUpdate(
+        order_id="order_456",
+        exec_type="trade",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        order_status=OrderStatusEnum.OPEN,
+        timestamp=datetime.now(UTC),
+        last_price=50000.0,
+        last_qty=0.5,
+        cum_qty=0.5,
+        fee_usd_equiv=5.0,
+    )
+    await client._log_execution_to_db(db_order_id=99, execution=execution)
+    call_args = mock_repo.insert_execution.call_args[1]
+    assert call_args["status"] == "partial"
 
 
 @pytest.mark.asyncio()

@@ -1260,6 +1260,7 @@ class MockSignal:
         self.public_id = "signal-uuid-1234"
         self.instrument_id = 1
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
+        self.fired_at = dt.datetime(2024, 1, 1, 11, 59, tzinfo=dt.UTC)
         self.side = "buy"
         self.strength = 0.8
         self.reason = "RSI oversold"
