@@ -26,7 +26,7 @@ flowchart TB
 ```python
 from snapper.strategies.base import BaseStrategy, StrategySignal, StrategyConfig
 from snapper.strategies.decorators import register_strategy, create_strategy_process
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 
 
 @register_strategy("MyStrategy")
@@ -52,14 +52,12 @@ class MyStrategy(BaseStrategy):
         self.threshold = self.params.get("threshold", 0.5)
         self.period = self.params.get("period", 14)
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> StrategySignal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process candle and generate signal."""
-        # Access candle buffer
         candles = self.candle_buffer.get(instrument, [])
         if len(candles) < self.period:
             return None
 
-        # Strategy logic
         closes = [c.close for c in candles]
         current_price = closes[-1]
 
@@ -70,7 +68,6 @@ class MyStrategy(BaseStrategy):
                 strength=1.0,
                 price=current_price,
                 reason="Buy condition met",
-                metadata={"custom_field": "value"},
             )
 
         if self._should_sell(closes):
@@ -165,13 +162,12 @@ Generated automatically:
 class StrategySignal:
     """Trading signal."""
 
-    instrument: str      # Instrument symbol
-    side: TradeSide      # "buy" or "sell"
-    strength: float      # StrategySignal strength 0.0-1.0
-    reason: str          # StrategySignal reason
-    price: float         # Price at generation
-    timestamp: float     # Unix timestamp (optional)
-    metadata: dict       # Additional data
+    instrument: str
+    side: TradeSide
+    strength: float
+    reason: str
+    price: float
+    timestamp: float
 ```
 
 ## Built-in Strategies
@@ -232,31 +228,36 @@ from snapper.strategies.cointegration import CointegrationStrategy
 ### Candle Buffer
 
 ```python
-async def on_candle(self, instrument: str, candle: CandleEnvelope) -> StrategySignal | None:
+async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
     candles = self.candle_buffer.get(instrument, [])
 
-    # Last N candles
     recent = candles[-20:]
 
-    # Close prices as pandas Series
     import pandas as pd
     closes = pd.Series([c.close for c in candles])
 ```
 
-### CandleEnvelope
+### CandleData
 
 ```python
-@dataclass
-class CandleEnvelope:
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    timestamp: int
-    timeframe: str
-    instrument: str
+from snapper.messaging.schemas.data import CandleData
 ```
+
+**Fields:**
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `type` | string | `"candle"` |
+| `public_id` | string | UUID7 external identifier |
+| `open` | float | Open price |
+| `high` | float | High |
+| `low` | float | Low |
+| `close` | float | Close price |
+| `volume` | float | Volume |
+| `timestamp` | datetime | Timestamp |
+| `timeframe` | string | Timeframe |
+| `instrument` | string | Symbol |
+| `exchange` | string | Exchange |
 
 ## Technical Indicators
 
@@ -357,7 +358,7 @@ asyncio.run(main())
 import pytest
 from snapper.strategies.rsi import RSIReversion
 from snapper.strategies.base import StrategyConfig
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 
 
 @pytest.fixture

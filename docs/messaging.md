@@ -82,13 +82,18 @@ Topic format: `{category}.{exchange}.{instrument}.{type}.{timeframe}`
 | `signals.paper.BTC-USD.rsi_btc_1h` | Paper trading signals |
 | `signals.kraken.BTC-USD.live` | Live signals from Kraken |
 
-### Orders & Fills
+### Orders & Executions
 
 | Topic | Description |
 | ----- | ----------- |
 | `orders.kraken.BTC-USD` | Order requests for Kraken |
-| `fills.kraken.BTC-USD` | Order executions from Kraken |
-| `order_status.kraken.*` | Order statuses |
+| `orders.events.kraken.BTC-USD.executed` | Order executions from Kraken |
+| `orders.events.kraken.BTC-USD.submitted` | Order submitted events |
+| `orders.events.kraken.BTC-USD.accepted` | Order accepted events |
+| `orders.events.kraken.BTC-USD.rejected` | Order rejected events |
+| `orders.events.kraken.BTC-USD.cancelled` | Order cancelled events |
+| `orders.events.kraken.BTC-USD.expired` | Order expired events |
+| `orders.events.kraken.BTC-USD.replaced` | Order replaced events |
 
 ### System
 
@@ -99,16 +104,19 @@ Topic format: `{category}.{exchange}.{instrument}.{type}.{timeframe}`
 | `replay.start` | Data replay start |
 | `replay.end` | Replay end |
 
-## Message Envelopes
+## Message Data Classes
 
-All messages use typed envelopes (Pydantic).
+All messages use typed Data classes (Pydantic) from `snapper.messaging.schemas.data`.
+Every Data class carries `public_id: str` (UUID7), `type: Literal[...]`, and `timestamp: datetime`.
 
-### TickEnvelope
+The old `messaging.schemas.messages` module still exists but only contains `parse_message()` and `MessageParseError`.
+
+### TickData
 
 ```python
-from snapper.messaging.schemas.messages import TickEnvelope
+from snapper.messaging.schemas.data import TickData
 
-tick = TickEnvelope(
+tick = TickData(
     instrument="BTC-USD",
     exchange="kraken",
     price=42000.0,
@@ -122,18 +130,19 @@ tick = TickEnvelope(
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `type` | string | `"tick"` |
+| `public_id` | string | UUID7 external identifier |
 | `instrument` | string | Instrument symbol |
 | `exchange` | string | Exchange name |
 | `price` | float | Price |
 | `volume` | float | Volume |
 | `timestamp` | datetime | Timestamp |
 
-### CandleEnvelope
+### CandleData
 
 ```python
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 
-candle = CandleEnvelope(
+candle = CandleData(
     instrument="BTC-USD",
     exchange="kraken",
     timeframe="1h",
@@ -151,6 +160,7 @@ candle = CandleEnvelope(
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `type` | string | `"candle"` |
+| `public_id` | string | UUID7 external identifier |
 | `instrument` | string | Symbol |
 | `exchange` | string | Exchange |
 | `timeframe` | string | Timeframe (`1m`, `5m`, `1h`, etc.) |
@@ -161,12 +171,12 @@ candle = CandleEnvelope(
 | `volume` | float | Volume |
 | `timestamp` | datetime | Timestamp |
 
-### SignalEnvelope
+### SignalData
 
 ```python
-from snapper.messaging.schemas.messages import SignalEnvelope
+from snapper.messaging.schemas.data import SignalData
 
-signal = SignalEnvelope(
+signal = SignalData(
     instrument="BTC-USD",
     exchange="paper",
     side="buy",
@@ -174,6 +184,7 @@ signal = SignalEnvelope(
     reason="RSI <= 30",
     strategy_name="rsi_btc_1h",
     price=42000.0,
+    fired_at=datetime.now(UTC),
 )
 ```
 
@@ -182,6 +193,7 @@ signal = SignalEnvelope(
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `type` | string | `"signal"` |
+| `public_id` | string | UUID7 external identifier |
 | `instrument` | string | Symbol |
 | `exchange` | string | Target exchange |
 | `side` | string | `"buy"` or `"sell"` |
@@ -189,14 +201,15 @@ signal = SignalEnvelope(
 | `reason` | string | Reason |
 | `strategy_name` | string | Strategy name |
 | `price` | float | Price |
-| `metadata` | dict | Additional data |
+| `fired_at` | datetime | Domain time when signal was generated |
+| `timestamp` | datetime | System timestamp |
 
-### OrderRequestEnvelope
+### OrderRequestData
 
 ```python
-from snapper.messaging.schemas.messages import OrderRequestEnvelope
+from snapper.messaging.schemas.data import OrderRequestData
 
-order = OrderRequestEnvelope(
+order = OrderRequestData(
     instrument="BTC-USD",
     exchange="kraken",
     client_order_id="ord_123",
@@ -207,12 +220,12 @@ order = OrderRequestEnvelope(
 )
 ```
 
-### FillEnvelope
+### ExecutionData
 
 ```python
-from snapper.messaging.schemas.messages import FillEnvelope
+from snapper.messaging.schemas.data import ExecutionData
 
-fill = FillEnvelope(
+execution = ExecutionData(
     instrument="BTC-USD",
     exchange="kraken",
     order_id="ord_123",
@@ -225,12 +238,24 @@ fill = FillEnvelope(
 )
 ```
 
-### HeartbeatEnvelope
+### OrderData
 
 ```python
-from snapper.messaging.schemas.messages import HeartbeatEnvelope
+from snapper.messaging.schemas.data import OrderData
 
-heartbeat = HeartbeatEnvelope(
+order_status = OrderData(
+    instrument="BTC-USD",
+    exchange="kraken",
+    status="accepted",
+)
+```
+
+### HeartbeatData
+
+```python
+from snapper.messaging.schemas.data import HeartbeatData
+
+heartbeat = HeartbeatData(
     component="zmq_broker",
     status="healthy",
 )
@@ -242,14 +267,14 @@ Publishing messages via validated socket:
 
 ```python
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 
 async def publish_bars():
     publisher = ValidatedPublisher()
     await publisher.connect()
 
     topic = "market.kraken.BTC-USD.candles.1h"
-    candle = CandleEnvelope(
+    candle = CandleData(
         instrument="BTC-USD",
         exchange="kraken",
         timeframe="1h",
@@ -260,7 +285,7 @@ async def publish_bars():
         volume=1234.56,
     )
 
-    await publisher.publish(topic, bar)
+    await publisher.publish(topic, candle)
     await publisher.close()
 ```
 
@@ -312,9 +337,9 @@ snapper executor -e kraken
 Executor:
 
 1.  Subscribes to `orders.{exchange}.*` topics
-2.  Receives OrderRequestEnvelope
+2.  Receives OrderRequestData
 3.  Executes order via exchange API
-4.  Publishes FillEnvelope or OrderStatusEnvelope
+4.  Publishes ExecutionData or OrderData
 
 ## ZMQ-WebSocket Bridge
 
@@ -387,6 +412,6 @@ Sockets automatically:
 
 1.  **One broker per system** — All components connect to the same broker
 2.  **Topic hierarchy** — Use hierarchy for filtering (`market.kraken.*`)
-3.  **Envelope types** — Always use typed envelopes
+3.  **Data types** — Always use typed Data classes from `messaging.schemas.data`
 4.  **Heartbeats** — Send heartbeats every 30s from components
 5.  **Graceful shutdown** — Close sockets with LINGER=0

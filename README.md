@@ -173,7 +173,7 @@ Creating your own strategy:
 ```python
 from snapper.strategies.base import BaseStrategy, StrategySignal, StrategyConfig
 from snapper.strategies.decorators import register_strategy, create_strategy_process
-from snapper.messaging.schemas.messages import CandleEnvelope
+from snapper.messaging.schemas.data import CandleData
 
 @register_strategy("MyStrategy")
 @create_strategy_process(
@@ -191,8 +191,7 @@ class MyStrategy(BaseStrategy):
         super().__init__(config)
         self.threshold = self.params.get("threshold", 0.5)
 
-    async def on_candle(self, instrument: str, candle: CandleEnvelope) -> StrategySignal | None:
-        # Strategy logic
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         if some_condition:
             return StrategySignal(
                 instrument=instrument,

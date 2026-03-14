@@ -69,14 +69,25 @@ Persistence layer with SQLAlchemy:
     - `Instrument` — Financial instruments
     - `Candle` — OHLCV candles
     - `Trade` — Transactions
-    - `OrderRecord` — Order history
+    - `Order` — Order history
     - `Execution` — Order executions
     - `Position` — Portfolio positions
-    - `SignalEvent` — Signal events
+    - `Signal` — Signal events
     - `User` — System users
     - `Setting` — Settings (encrypted)
     - `SymbolCatalog` — Native symbol registry (base, quote, asset_type)
     - `SymbolAlias` — Exchange-specific symbol aliases (one row per native/exchange/channel)
+    - `SymbolExchangeCapability` — Exchange-specific symbol capabilities
+    - `ProcessRun` — Background process execution records
+    - `InstrumentSpec` — Instrument trading specifications
+    - `MarketSnapshot` — Real-time market data snapshots
+
+    All ORM models use a dual-key pattern:
+
+    - `id` (INTEGER, internal PK, never exposed outside repository)
+    - `public_id` (UUID7 string, external identifier)
+    - `timestamp` (DateTime, system time / known_from)
+    - `known_to` (DateTime nullable, bitemporal versioning - NULL = active record)
 
 - **Repository** (`repository.py`) — Async CRUD operations
 
@@ -85,7 +96,7 @@ Persistence layer with SQLAlchemy:
 Trading strategies framework:
 
 - **BaseStrategy** (`base.py`) — Base class for all strategies
-- **Signal** — Trading signal structure
+- **StrategySignal** — Trading signal structure
 - **StrategyConfig** — Strategy configuration
 
 Built-in strategies:
@@ -121,13 +132,18 @@ Components:
 - **Schemas** (`schemas/`) — Pydantic message models
 - **Topics** (`topics/`) — ZMQ topic definitions
 
-Message types:
+Message types (in `messaging.schemas.data`):
 
-- `TickEnvelope` — Price tick
-- `CandleEnvelope` — OHLCV candle
-- `SignalEnvelope` — Trading signal
-- `TradeEnvelope` — Trade execution
-- `HeartbeatEnvelope` — Component heartbeat
+- `TickData` — Price tick
+- `CandleData` — OHLCV candle
+- `SignalData` — Trading signal
+- `TradeData` — Trade execution
+- `OrderData` — Order status
+- `ExecutionData` — Order execution
+- `OrderRequestData` — Order request
+- `HeartbeatData` — Component heartbeat
+
+Every Data class carries `public_id: str` (UUID7), `type: Literal[...]`, and `timestamp: datetime`.
 
 ### Application (`src/snapper/application/`)
 
@@ -159,7 +175,7 @@ FastAPI application:
 - **WebSocket** — Real-time streaming via ZMQ bridge
 - **Static Files** — Frontend dashboard
 
-### API (`src/api/`)
+### API (`src/snapper/api/`)
 
 API schemas:
 
@@ -223,12 +239,12 @@ SQLite by default, with PostgreSQL and Azure SQL support.
 instruments     -- Financial instruments
 candles         -- OHLCV data
 trades          -- Transaction history
-order_records   -- Orders
+orders          -- Orders
 executions      -- Executions
 positions       -- Positions
 
 -- Strategies
-signal_events   -- Signals
+signals         -- Signals
 
 -- System
 users           -- Users

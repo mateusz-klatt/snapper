@@ -132,6 +132,9 @@ X-CSRF-Token: <csrf_token>
 ```json
 [
     {
+        "public_id": "019e1a2b-...",
+        "type": "candle",
+        "timestamp": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
         "exchange": "kraken",
         "timeframe": "1h",
@@ -167,7 +170,9 @@ X-CSRF-Token: <csrf_token>
 ```json
 [
     {
-        "id": 1,
+        "public_id": "019e1a2b-...",
+        "type": "order",
+        "timestamp": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
         "exchange": "kraken",
         "client_order_id": "ord_123",
@@ -175,7 +180,7 @@ X-CSRF-Token: <csrf_token>
         "created_at": "2026-01-18T12:00:00Z",
         "updated_at": "2026-01-18T12:01:00Z",
         "side": "buy",
-        "type": "limit",
+        "order_type": "limit",
         "price": 42000.0,
         "size": 0.1,
         "filled_size": 0.1,
@@ -208,10 +213,12 @@ X-CSRF-Token: <csrf_token>
 ```json
 [
     {
-        "id": 1,
+        "public_id": "019e1a2b-...",
+        "type": "signal",
+        "timestamp": "2026-01-18T12:00:00Z",
+        "fired_at": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
         "exchange": "paper",
-        "timestamp": "2026-01-18T12:00:00Z",
         "side": "buy",
         "strength": 0.85,
         "reason": "RSI 28.5 <= 30",
@@ -233,11 +240,11 @@ X-CSRF-Token: <csrf_token>
 ```json
 [
     {
-        "id": 1,
-        "order_id": 123,
+        "public_id": "019e1a2b-...",
+        "type": "execution",
+        "timestamp": "2026-01-18T12:01:00Z",
         "exec_id": "TEXEC-123",
         "trade_id": "TTRAD-456",
-        "timestamp": "2026-01-18T12:01:00Z",
         "executed_at": "2026-01-18T12:00:59Z",
         "price": 42000.0,
         "size": 0.1,
@@ -245,7 +252,8 @@ X-CSRF-Token: <csrf_token>
         "fee_asset": "USD",
         "instrument": "BTC-USD",
         "side": "buy",
-        "exchange": "kraken"
+        "exchange": "kraken",
+        "status": "filled"
     }
 ]
 ```
@@ -262,14 +270,15 @@ X-CSRF-Token: <csrf_token>
 ```json
 [
     {
-        "id": 1,
+        "public_id": "019e1a2b-...",
+        "type": "position",
+        "timestamp": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
         "exchange": "kraken",
         "quantity": 0.5,
         "average_price": 41500.0,
         "unrealized_pnl": 250.0,
-        "realized_pnl": 100.0,
-        "updated_at": "2026-01-18T12:00:00Z"
+        "realized_pnl": 100.0
     }
 ]
 ```
@@ -484,9 +493,9 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
+    "public_id": "019e1a2b-...",
     "type": "candle",
     "timestamp": "2026-01-18T11:00:00Z",
-    "meta": {},
     "instrument": "BTC-USD",
     "exchange": "kraken",
     "timeframe": "1h",
@@ -505,9 +514,9 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
+    "public_id": "019e1a2b-...",
     "type": "tick",
     "timestamp": "2026-01-18T12:00:00Z",
-    "meta": {},
     "instrument": "BTC-USD",
     "exchange": "kraken",
     "volume": 1234.5,
@@ -521,9 +530,10 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
+    "public_id": "019e1a2b-...",
     "type": "signal",
     "timestamp": "2026-01-18T12:00:00Z",
-    "meta": {},
+    "fired_at": "2026-01-18T12:00:00Z",
     "instrument": "BTC-USD",
     "exchange": "paper",
     "side": "buy",
@@ -534,13 +544,13 @@ forwarded directly to WebSocket clients.
 }
 ```
 
-#### Fill
+#### Execution
 
 ```json
 {
-    "type": "fill",
+    "public_id": "019e1a2b-...",
+    "type": "execution",
     "timestamp": "2026-01-18T12:01:00Z",
-    "meta": {},
     "client_order_id": "signal-a1b2c3d4",
     "exchange_order_id": "KRAKEN-456",
     "trade_id": "TTRAD-789",
@@ -556,13 +566,13 @@ forwarded directly to WebSocket clients.
 }
 ```
 
-#### Order Status
+#### Order
 
 ```json
 {
-    "type": "order_status",
+    "public_id": "019e1a2b-...",
+    "type": "order",
     "timestamp": "2026-01-18T12:00:00Z",
-    "meta": {},
     "exchange_order_id": "KRAKEN-456",
     "client_order_id": "signal-a1b2c3d4",
     "instrument": "BTC-USD",
@@ -582,9 +592,9 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
+    "public_id": "019e1a2b-...",
     "type": "heartbeat",
     "timestamp": "2026-01-18T12:00:00Z",
-    "meta": {},
     "component": "zmq_broker",
     "sequence": 42,
     "status": "healthy",
@@ -614,9 +624,15 @@ forwarded directly to WebSocket clients.
 - `signals.paper.{instrument}.{strategy}` — Paper trading signals
 - `signals.{exchange}.{instrument}.live` — Live signals
 
-#### Fills
+#### Order Events
 
-- `fills.{exchange}.{instrument}` — Order executions
+- `orders.events.{exchange}.{instrument}.submitted` — Order submitted
+- `orders.events.{exchange}.{instrument}.accepted` — Order accepted
+- `orders.events.{exchange}.{instrument}.rejected` — Order rejected
+- `orders.events.{exchange}.{instrument}.executed` — Order executed (fill)
+- `orders.events.{exchange}.{instrument}.cancelled` — Order cancelled
+- `orders.events.{exchange}.{instrument}.expired` — Order expired
+- `orders.events.{exchange}.{instrument}.replaced` — Order replaced
 
 #### System
 
