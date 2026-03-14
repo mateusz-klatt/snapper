@@ -4041,14 +4041,14 @@ files = [
 
 [[package]]
 name = "poetry-plugin-dotenv"
-version = "3.2.0"
+version = "3.3.0"
 description = "poetry-plugin-dotenv - is the plugin that automatically loads environment variables from a dotenv file into the environment before poetry commands are run."
 optional = false
 python-versions = "<4.0,>=3.9"
 groups = ["dev"]
 files = [
-    {file = "poetry_plugin_dotenv-3.2.0-py3-none-any.whl", hash = "sha256:73866af571b0b17fdef89bb0c111ef2221addd367cc0e0a441efc96b6b3058d9"},
-    {file = "poetry_plugin_dotenv-3.2.0.tar.gz", hash = "sha256:984ddb159ea9b0cc735e762fe194b8cac75821c1ef400c92b30a5f2322cd4e2d"},
+    {file = "poetry_plugin_dotenv-3.3.0-py3-none-any.whl", hash = "sha256:9f9b7d4bb0de0a2de1f615eacc62c0dcfa3eacf4fa840672d936d4f74604280c"},
+    {file = "poetry_plugin_dotenv-3.3.0.tar.gz", hash = "sha256:6b567ca1aa8ca656408e00e360c662427efe3627c6004c1c164f3443eabd45ab"},
 ]
 
 [package.dependencies]
@@ -7201,4 +7201,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "899ecf0bd4627faea4bc5930dbcbf76e3b94c0f978a7743e0ea8444a95150810"
+content-hash = "76f73936cf74902150b0dad546eb10d8377a18416f75df42344ee3fa16d8f094"
