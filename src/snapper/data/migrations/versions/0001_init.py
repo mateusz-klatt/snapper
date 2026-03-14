@@ -17,6 +17,7 @@ from sqlalchemy import text
 _INSTRUMENT_FK = "instruments.id"
 _FK_SYMBOL_CATALOG = "symbol_catalog.native_symbol"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
+_KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -112,7 +113,7 @@ def upgrade() -> None:
         sa.Column("asset_type", sa.String(16), server_default="crypto", nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("native_symbol", name="uq_symbol_catalog_native_symbol"),
         sa.CheckConstraint(
@@ -136,7 +137,7 @@ def upgrade() -> None:
         sa.Column("exchange_symbol", sa.String(40), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOL_CATALOG]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
@@ -174,7 +175,7 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(1024), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOL_CATALOG]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("native_symbol", "exchange", name="uq_sec_symbol_exchange"),
@@ -207,7 +208,7 @@ def upgrade() -> None:
         sa.Column("base", sa.String(16), nullable=False),
         sa.Column("quote", sa.String(16), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.ForeignKeyConstraint(["symbol"], [_FK_SYMBOL_CATALOG]),
         sa.UniqueConstraint("symbol", "exchange", name="uq_instrument_symbol_exchange"),
@@ -231,7 +232,7 @@ def upgrade() -> None:
         sa.Column("vwap", sa.Float(), nullable=True),
         sa.Column("trades", sa.Integer(), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("instrument_id", "timeframe", "open_at", name="uq_candle_itf_open"),
@@ -249,7 +250,7 @@ def upgrade() -> None:
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("trade_id", name="uq_trade_trade_id"),
@@ -277,7 +278,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -314,7 +315,7 @@ def upgrade() -> None:
         sa.Column("fee_asset", sa.String(16), nullable=False),
         sa.Column("executed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["order_id"], ["orders.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -344,7 +345,7 @@ def upgrade() -> None:
         sa.Column("unrealized_pnl", sa.Float(), nullable=False),
         sa.Column("realized_pnl", sa.Float(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("instrument_id", name="uq_positions_instrument_id"),
@@ -363,7 +364,7 @@ def upgrade() -> None:
         sa.Column("price", sa.Float(), nullable=True),
         sa.Column("fired_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -382,7 +383,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_login", sa.DateTime(timezone=True), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_users_public_id", "users", ["public_id"], unique=True)
@@ -398,7 +399,7 @@ def upgrade() -> None:
         sa.Column("is_encrypted", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column("updated_by", sa.String(64), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("key", name="uq_settings_key"),
     )
@@ -418,7 +419,7 @@ def upgrade() -> None:
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_process_runs_public_id", "process_runs", ["public_id"], unique=True)
@@ -441,7 +442,7 @@ def upgrade() -> None:
         sa.Column("position_limit_short", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(20), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("instrument_id", name="uq_instrument_spec_instrument"),
@@ -467,7 +468,7 @@ def upgrade() -> None:
         sa.Column("spread", sa.Float(), nullable=True),
         sa.Column("spread_pct", sa.Float(), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_market_snapshots_public_id", "market_snapshots", ["public_id"], unique=True)
@@ -485,8 +486,8 @@ def upgrade() -> None:
         conn.execute(
             text("""
                 INSERT INTO symbol_catalog
-                (public_id, native_symbol, base, quote, asset_type, created_at, timestamp)
-                VALUES (:public_id, :native_symbol, :base, :quote, :asset_type, :created_at, :timestamp)
+                (public_id, native_symbol, base, quote, asset_type, created_at, timestamp, known_to)
+                VALUES (:public_id, :native_symbol, :base, :quote, :asset_type, :created_at, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
@@ -496,14 +497,15 @@ def upgrade() -> None:
                 "asset_type": entry[3],
                 "created_at": now,
                 "timestamp": now,
+                "known_to": _KNOWN_TO_MAX,
             },
         )
     for alias in SYMBOL_ALIASES:
         conn.execute(
             text("""
                 INSERT INTO symbol_aliases
-                (public_id, native_symbol, exchange, channel, exchange_symbol, created_at, timestamp)
-                VALUES (:public_id, :native_symbol, :exchange, :channel, :exchange_symbol, :created_at, :timestamp)
+                (public_id, native_symbol, exchange, channel, exchange_symbol, created_at, timestamp, known_to)
+                VALUES (:public_id, :native_symbol, :exchange, :channel, :exchange_symbol, :created_at, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
@@ -513,14 +515,15 @@ def upgrade() -> None:
                 "exchange_symbol": alias[3],
                 "created_at": now,
                 "timestamp": now,
+                "known_to": _KNOWN_TO_MAX,
             },
         )
     for cap in SYMBOL_CAPABILITIES:
         conn.execute(
             text("""
                 INSERT INTO symbol_exchange_capabilities
-                (public_id, native_symbol, exchange, can_market_data, can_trade, source, created_at, timestamp)
-                VALUES (:public_id, :native_symbol, :exchange, :can_market_data, :can_trade, :source, :created_at, :timestamp)
+                (public_id, native_symbol, exchange, can_market_data, can_trade, source, created_at, timestamp, known_to)
+                VALUES (:public_id, :native_symbol, :exchange, :can_market_data, :can_trade, :source, :created_at, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
@@ -531,6 +534,7 @@ def upgrade() -> None:
                 "source": "seed",
                 "created_at": now,
                 "timestamp": now,
+                "known_to": _KNOWN_TO_MAX,
             },
         )
 

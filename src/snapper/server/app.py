@@ -42,6 +42,8 @@ import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import UTC
+from datetime import datetime
 from datetime import timedelta
 from typing import Annotated
 from typing import Any
@@ -428,9 +430,11 @@ def _create_candles_signals_router() -> APIRouter:
         exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
         timeframe: Annotated[str, Query(description="Timeframe")],
         limit: Annotated[int, Query(le=1000, description="Number of candles to return")] = 100,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> list[CandleData] | Response:
         settings = get_settings()
         repo = get_repository(settings.db_url)
+        processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
                 inst_query = await session.execute(
@@ -446,7 +450,12 @@ def _create_candles_signals_router() -> APIRouter:
                     return Response(status_code=204)
                 candles_query = await session.execute(
                     select(Candle)
-                    .where(Candle.instrument_id == inst.id, Candle.timeframe == timeframe)
+                    .where(
+                        Candle.instrument_id == inst.id,
+                        Candle.timeframe == timeframe,
+                        Candle.timestamp <= processing_date,
+                        Candle.known_to > processing_date,
+                    )
                     .order_by(desc(Candle.open_at))
                     .limit(limit)
                 )
@@ -485,12 +494,17 @@ def _create_candles_signals_router() -> APIRouter:
         exchange: Annotated[OrderExchange | None, Query(description="Filter by exchange")] = None,
         hours: Annotated[int, Query(le=168, description="Hours of history to return")] = 24,
         limit: Annotated[int, Query(le=1000, description="Number of signals to return")] = 100,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> list[SignalData]:
+        processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
-                since = dt.datetime.now(dt.UTC) - timedelta(hours=hours)
+                since = processing_date - timedelta(hours=hours)
                 query = select(Signal, Instrument).join(Instrument)
                 query = query.where(Signal.fired_at >= since)
+                query = query.where(
+                    Signal.timestamp <= processing_date, Signal.known_to > processing_date
+                )
                 if instrument:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:
@@ -590,10 +604,15 @@ def _create_orders_executions_router() -> APIRouter:
         exchange: Annotated[OrderExchange | None, Query(description="Filter by exchange")] = None,
         limit: Annotated[int, Query(ge=1, le=1000, description="Number of orders to return")] = 100,
         offset: Annotated[int, Query(ge=0, description="Number of orders to skip")] = 0,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> list[OrderData]:
+        processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
                 query = select(Order, Instrument).join(Instrument)
+                query = query.where(
+                    Order.timestamp <= processing_date, Order.known_to > processing_date
+                )
                 if symbol:
                     query = query.where(Instrument.symbol == symbol)
                 if exchange:
@@ -633,13 +652,17 @@ def _create_orders_executions_router() -> APIRouter:
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         limit: Annotated[int, Query(le=1000, description="Number of executions to return")] = 100,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> list[ExecutionData]:
+        processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
                 query = (
                     select(Execution, Order, Instrument)
                     .join(Order, Execution.order_id == Order.id)
                     .join(Instrument, Order.instrument_id == Instrument.id)
+                    .where(Execution.timestamp <= processing_date)
+                    .where(Execution.known_to > processing_date)
                     .order_by(desc(Execution.timestamp))
                     .limit(limit)
                 )
@@ -673,10 +696,16 @@ def _create_orders_executions_router() -> APIRouter:
         _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_POSITIONS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> list[PositionData]:
+        processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
                 query = select(Position, Instrument).join(Instrument)
+                query = query.where(
+                    Position.timestamp <= processing_date,
+                    Position.known_to > processing_date,
+                )
                 result = await session.execute(query)
                 positions_with_instruments = result.all()
                 return [

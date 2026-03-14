@@ -116,9 +116,11 @@ class SignalReadService:
         """
         try:
             async with self.repo.session() as session:
-                since = datetime.now(UTC) - timedelta(hours=hours)
+                now = datetime.now(UTC)
+                since = now - timedelta(hours=hours)
                 query = select(Signal, Instrument).join(Instrument)
                 query = query.where(Signal.fired_at >= since)
+                query = query.where(Signal.timestamp <= now, Signal.known_to > now)
                 if instrument:
                     query = query.where(Instrument.symbol == instrument)
                 if strategy:

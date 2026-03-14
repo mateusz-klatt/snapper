@@ -21,6 +21,8 @@ Example:
     "BTC-USD"
 """
 
+from datetime import UTC
+from datetime import datetime
 from typing import NamedTuple
 
 from loguru import logger
@@ -222,7 +224,10 @@ class SymbolMapperService:
         """
         try:
             with self.repository.get_session() as session:
-                stmt = select(SymbolAlias)
+                now = datetime.now(UTC)
+                stmt = select(SymbolAlias).where(
+                    SymbolAlias.timestamp <= now, SymbolAlias.known_to > now
+                )
                 result = session.execute(stmt)
                 aliases = result.scalars().all()
                 logger.info(f"Loaded {len(aliases)} symbol aliases from database")
@@ -275,7 +280,11 @@ class SymbolMapperService:
         """
         try:
             with self.repository.get_session() as session:
-                stmt = select(SymbolExchangeCapability)
+                now = datetime.now(UTC)
+                stmt = select(SymbolExchangeCapability).where(
+                    SymbolExchangeCapability.timestamp <= now,
+                    SymbolExchangeCapability.known_to > now,
+                )
                 result = session.execute(stmt)
                 capabilities = result.scalars().all()
                 logger.info(f"Loaded {len(capabilities)} symbol capabilities from database")

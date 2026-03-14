@@ -31,6 +31,8 @@ function normalizeSide(side: string): TradeSide {
 
 export function orderFromAPI(api: OrderData): Order {
   return {
+    publicId: api.public_id,
+    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
     clientOrderId: api.client_order_id,
     exchangeOrderId: api.exchange_order_id ?? null,
     instrument: api.instrument,
@@ -56,6 +58,8 @@ export function orderFromWS(ws: OrderData): Order {
   }
 
   return {
+    publicId: ws.public_id,
+    timestamp: ws.timestamp ? new Date(ws.timestamp) : undefined,
     clientOrderId: ws.client_order_id,
     exchangeOrderId: ws.exchange_order_id ?? null,
     instrument: ws.instrument,
@@ -92,6 +96,8 @@ function normalizeOrderType(type: string): OrderType {
 
 export function executionFromAPI(api: ExecutionData): Execution {
   return {
+    publicId: api.public_id,
+    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
     clientOrderId: api.client_order_id,
     tradeId: api.trade_id ?? null,
     exchangeOrderId: api.exchange_order_id ?? null,
@@ -113,6 +119,8 @@ export function executionFromWS(ws: ExecutionData): Execution {
   }
 
   return {
+    publicId: ws.public_id,
+    timestamp: ws.timestamp ? new Date(ws.timestamp) : undefined,
     clientOrderId: ws.client_order_id,
     tradeId: ws.trade_id ?? null,
     exchangeOrderId: ws.exchange_order_id ?? null,
@@ -130,6 +138,8 @@ export function executionFromWS(ws: ExecutionData): Execution {
 
 export function signalFromAPI(api: SignalData): Signal {
   return {
+    publicId: api.public_id,
+    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
     exchange: api.exchange,
     instrument: api.instrument,
     side: normalizeSide(api.side),
@@ -151,6 +161,7 @@ export function signalFromWS(ws: SignalData): Signal {
   const timestamp = ws.timestamp ? new Date(ws.timestamp) : undefined
 
   return {
+    publicId: ws.public_id,
     exchange: ws.exchange,
     instrument: ws.instrument,
     side: ws.side,
@@ -165,19 +176,22 @@ export function signalFromWS(ws: SignalData): Signal {
 
 export function positionFromAPI(api: PositionData): Position {
   return {
-    publicId: api.instrument,
+    publicId: api.public_id,
+    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
     instrument: api.instrument,
     exchange: api.exchange,
     quantity: api.quantity,
     averagePrice: api.average_price,
     unrealizedPnl: api.unrealized_pnl,
     realizedPnl: api.realized_pnl,
-    updatedAt: api.updated_at ? new Date(api.updated_at) : new Date(),
+    updatedAt: api.timestamp ? new Date(api.timestamp) : new Date(),
   }
 }
 
 export function candleFromAPI(api: CandleData): Candle {
   return {
+    publicId: api.public_id,
+    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
     instrument: api.instrument,
     exchange: api.exchange,
     timeframe: api.timeframe,
@@ -214,6 +228,7 @@ export function candleFromWS(ws: CandleData): Candle {
   }
 
   return {
+    publicId: ws.public_id,
     instrument: ws.instrument,
     timeframe: ws.timeframe,
     open: ws.open,
@@ -263,6 +278,7 @@ export function orderDataFromEnvelope(env: OrderData): OrderData {
   return {
     type: env.type,
     public_id: env.public_id,
+    timestamp: env.timestamp,
     exchange_order_id: env.exchange_order_id,
     client_order_id: env.client_order_id,
     instrument: env.instrument,
@@ -286,6 +302,7 @@ export function executionDataFromEnvelope(env: ExecutionData): ExecutionData {
   return {
     type: env.type,
     public_id: env.public_id,
+    timestamp: env.timestamp,
     trade_id: env.trade_id,
     exchange_order_id: env.exchange_order_id,
     client_order_id: env.client_order_id,
@@ -305,6 +322,7 @@ export function signalDataFromEnvelope(env: SignalData): SignalData {
   return {
     type: env.type,
     public_id: env.public_id,
+    timestamp: env.timestamp,
     instrument: env.instrument,
     exchange: env.exchange,
     side: env.side,

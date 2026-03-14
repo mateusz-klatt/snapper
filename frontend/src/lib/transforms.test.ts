@@ -40,6 +40,7 @@ describe('Order Transformers', () => {
   it('transforms REST API order to canonical entity', () => {
     const apiOrder: OrderData = {
       type: 'order',
+      timestamp: '2026-01-15T10:30:00Z',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       client_order_id: 'client-123',
@@ -57,6 +58,7 @@ describe('Order Transformers', () => {
     }
     const result = orderFromAPI(apiOrder)
 
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
     expect(result.clientOrderId).toBe('client-123')
     expect(result.instrument).toBe('BTC/USD')
     expect(result.exchange).toBe('kraken')
@@ -89,6 +91,8 @@ describe('Order Transformers', () => {
   it('transforms WebSocket order to canonical entity', () => {
     const wsOrder: OrderData = {
       type: 'order',
+      public_id: 'ws-order-uuid',
+      timestamp: '2026-01-15T10:30:00Z',
       client_order_id: 'client-2',
       instrument: 'ETH/USD',
       exchange: 'kraken',
@@ -103,6 +107,8 @@ describe('Order Transformers', () => {
     }
     const result = orderFromWS(wsOrder)
 
+    expect(result.publicId).toBe('ws-order-uuid')
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
     expect(result.clientOrderId).toBe('client-2')
     expect(result.instrument).toBe('ETH/USD')
     expect(result.exchange).toBe('kraken')
@@ -170,6 +176,23 @@ describe('Order Transformers', () => {
       'Invalid order type: "unknown_type". Expected "market", "limit", "stop", or "stop_limit".'
     )
   })
+  it('sets timestamp to undefined when API order has no timestamp', () => {
+    const apiOrder = {
+      type: 'order',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      client_order_id: 'client-1',
+      side: 'buy',
+      order_type: 'market',
+      size: 1,
+      filled_size: 0,
+      status: 'new',
+      created_at: '2026-01-15T10:30:00Z',
+    } as unknown as OrderData
+    const result = orderFromAPI(apiOrder)
+
+    expect(result.timestamp).toBeUndefined()
+  })
   it('passes through order status without validation', () => {
     const apiOrder = {
       instrument: 'BTC/USD',
@@ -196,6 +219,7 @@ describe('Execution Transformers', () => {
   it('transforms REST API execution to canonical entity', () => {
     const apiExecution: ExecutionData = {
       type: 'execution',
+      timestamp: '2026-01-15T10:30:00Z',
       client_order_id: 'client-10',
       executed_at: '2026-01-15T10:30:00Z',
       price: 50000,
@@ -209,6 +233,7 @@ describe('Execution Transformers', () => {
     }
     const result = executionFromAPI(apiExecution)
 
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
     expect(result.clientOrderId).toBe('client-10')
     expect(result.exchange).toBe('kraken')
     expect(result.instrument).toBe('BTC/USD')
@@ -220,6 +245,8 @@ describe('Execution Transformers', () => {
   it('transforms WebSocket execution to canonical entity', () => {
     const wsExecution: ExecutionData = {
       type: 'execution',
+      public_id: 'ws-exec-uuid',
+      timestamp: '2026-01-15T10:30:00Z',
       client_order_id: 'client-11',
       exchange: 'zonda',
       instrument: 'ETH/PLN',
@@ -233,6 +260,8 @@ describe('Execution Transformers', () => {
     }
     const result = executionFromWS(wsExecution)
 
+    expect(result.publicId).toBe('ws-exec-uuid')
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
     expect(result.clientOrderId).toBe('client-11')
     expect(result.exchange).toBe('zonda')
     expect(result.instrument).toBe('ETH/PLN')
@@ -257,6 +286,24 @@ describe('Execution Transformers', () => {
       'ExecutionData missing required field: executed_at'
     )
   })
+  it('sets timestamp to undefined when API execution has no timestamp', () => {
+    const apiExecution = {
+      type: 'execution',
+      client_order_id: 'client-10',
+      executed_at: '2026-01-15T10:30:00Z',
+      price: 50000,
+      size: 0.1,
+      fee: 5,
+      fee_asset: 'USD',
+      instrument: 'BTC/USD',
+      side: 'buy',
+      exchange: 'kraken',
+      status: 'filled',
+    } as unknown as ExecutionData
+    const result = executionFromAPI(apiExecution)
+
+    expect(result.timestamp).toBeUndefined()
+  })
   it('falls back to current date when executed_at is undefined in API execution', () => {
     const apiExecution = {
       client_order_id: 'client-12',
@@ -280,6 +327,7 @@ describe('Signal Transformers', () => {
   it('transforms REST API signal to canonical entity', () => {
     const apiSignal: SignalData = {
       type: 'signal',
+      timestamp: '2026-01-15T10:29:00Z',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       fired_at: '2026-01-15T10:30:00Z',
@@ -291,6 +339,7 @@ describe('Signal Transformers', () => {
     }
     const result = signalFromAPI(apiSignal)
 
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:29:00Z'))
     expect(result.exchange).toBe('kraken')
     expect(result.instrument).toBe('BTC/USD')
     expect(result.strategyName).toBe('momentum_v1')
@@ -327,6 +376,22 @@ describe('Signal Transformers', () => {
     } as unknown as SignalData
 
     expect(() => signalFromWS(wsSignal)).toThrow('SignalData missing required field: timestamp')
+  })
+  it('sets timestamp to undefined when API signal has no timestamp', () => {
+    const apiSignal = {
+      type: 'signal',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      fired_at: '2026-01-15T10:30:00Z',
+      side: 'buy',
+      strength: 0.85,
+      reason: 'RSI oversold',
+      strategy_name: 'momentum_v1',
+      price: 49500,
+    } as unknown as SignalData
+    const result = signalFromAPI(apiSignal)
+
+    expect(result.timestamp).toBeUndefined()
   })
   it('falls back to current date when fired_at is undefined in API signal', () => {
     const apiSignal = {
@@ -366,17 +431,18 @@ describe('Position Transformers', () => {
   it('transforms REST API position to canonical entity', () => {
     const apiPosition: PositionData = {
       type: 'position',
+      public_id: 'pos-uuid-1',
+      timestamp: '2026-01-15T10:30:00Z',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       quantity: 1.5,
       average_price: 48000,
       unrealized_pnl: 3000,
       realized_pnl: 500,
-      updated_at: '2026-01-15T10:30:00Z',
     }
     const result = positionFromAPI(apiPosition)
 
-    expect(result.publicId).toBe('BTC/USD')
+    expect(result.publicId).toBe('pos-uuid-1')
     expect(result.instrument).toBe('BTC/USD')
 
     expect(result.exchange).toBe('kraken')
@@ -385,8 +451,9 @@ describe('Position Transformers', () => {
     expect(result.realizedPnl).toBe(500)
     expect(result.updatedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
-  it('falls back to current date when updated_at is undefined in API position', () => {
+  it('falls back to current date when timestamp is undefined in API position', () => {
     const apiPosition = {
+      type: 'position',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       quantity: 1.5,
@@ -404,6 +471,7 @@ describe('Candle Transformers', () => {
   it('transforms REST API candle to canonical entity', () => {
     const apiCandle: CandleData = {
       type: 'candle',
+      timestamp: '2026-01-15T10:00:00Z',
       instrument: 'BTC/USD',
       exchange: 'kraken',
       timeframe: '1h',
@@ -418,11 +486,29 @@ describe('Candle Transformers', () => {
     }
     const result = candleFromAPI(apiCandle)
 
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:00:00Z'))
     expect(result.instrument).toBe('BTC/USD')
     expect(result.timeframe).toBe('1h')
     expect(result.vwap).toBe(49750)
     expect(result.trades).toBe(5000)
     expect(result.openAt).toEqual(new Date('2026-01-15T10:00:00Z'))
+  })
+  it('sets timestamp to undefined when API candle has no timestamp', () => {
+    const apiCandle = {
+      type: 'candle',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      timeframe: '1h',
+      open_at: '2026-01-15T10:00:00Z',
+      open: 49000,
+      high: 50500,
+      low: 48500,
+      close: 50000,
+      volume: 1000,
+    } as unknown as CandleData
+    const result = candleFromAPI(apiCandle)
+
+    expect(result.timestamp).toBeUndefined()
   })
   it('transforms WebSocket candle to canonical entity', () => {
     const wsCandle: CandleData = {
@@ -734,7 +820,7 @@ describe('Batch Transformers', () => {
         average_price: 48000,
         unrealized_pnl: 3000,
         realized_pnl: 500,
-        updated_at: '2026-01-15T10:30:00Z',
+        timestamp: '2026-01-15T10:30:00Z',
       },
     ]
     const result = positionsFromAPI(apiPositions)
@@ -932,7 +1018,7 @@ describe('Safe API Transformers', () => {
     expect(data.order_type).toBe('limit')
     expect(data.time_in_force).toBe('GTC')
     expect(data.type).toBe('order')
-    expect((data as unknown as Record<string, unknown>)['timestamp']).toBeUndefined()
+    expect(data.timestamp).toBe('2026-01-15T10:00:00Z')
   })
   it('executionDataFromEnvelope converts to ExecutionData preserving type', () => {
     const envelope: ExecutionData = {
@@ -959,7 +1045,7 @@ describe('Safe API Transformers', () => {
     expect(data.client_order_id).toBe('ord-1')
     expect(data.executed_at).toBe('2026-01-15T10:00:01Z')
     expect(data.type).toBe('execution')
-    expect((data as unknown as Record<string, unknown>)['timestamp']).toBeUndefined()
+    expect(data.timestamp).toBe('2026-01-15T10:00:00Z')
   })
   it('signalDataFromEnvelope converts to SignalData preserving type', () => {
     const envelope: SignalData = {
@@ -981,7 +1067,7 @@ describe('Safe API Transformers', () => {
     expect(data.strategy_name).toBe('macd')
     expect(data.fired_at).toBe('2026-01-15T10:00:00Z')
     expect(data.type).toBe('signal')
-    expect((data as unknown as Record<string, unknown>)['timestamp']).toBeUndefined()
+    expect(data.timestamp).toBe('2026-01-15T10:00:00Z')
   })
   it('signalDataFromEnvelope falls back to timestamp when fired_at is absent', () => {
     const envelope: SignalData = {

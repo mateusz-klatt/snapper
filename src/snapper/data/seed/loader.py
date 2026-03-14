@@ -31,6 +31,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import get_encryption_service
 
@@ -150,6 +151,20 @@ def _hash_password(password: str) -> str:
     return hashed.decode()
 
 
+def _known_to_value(conn: Connection) -> datetime | str:
+    """Build a KNOWN_TO_MAX value compatible with the current SQL driver.
+
+    Args:
+        conn: Active SQLAlchemy connection.
+
+    Returns:
+        KNOWN_TO_MAX datetime for non-SQLite engines, ISO string for SQLite.
+    """
+    if conn.dialect.name == "sqlite":
+        return KNOWN_TO_MAX.isoformat(timespec="seconds")
+    return KNOWN_TO_MAX
+
+
 def _timestamp_value(conn: Connection) -> datetime | str:
     """Build a UTC timestamp value compatible with the current SQL driver.
 
@@ -195,8 +210,8 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
         conn.execute(
             text(
                 "INSERT INTO users"
-                " (public_id, username, email, password_hash, role, is_active, created_at, timestamp)"
-                " VALUES (:public_id, :username, :email, :password_hash, :role, 1, :created_at, :timestamp)"
+                " (public_id, username, email, password_hash, role, is_active, created_at, timestamp, known_to)"
+                " VALUES (:public_id, :username, :email, :password_hash, :role, 1, :created_at, :timestamp, :known_to)"
             ),
             {
                 "public_id": str(uuid7()),
@@ -206,6 +221,7 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
                 "role": user.role,
                 "created_at": now,
                 "timestamp": now,
+                "known_to": _known_to_value(conn),
             },
         )
     logger.info(f"Seeded {len(users)} users")
@@ -239,8 +255,8 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
         result = conn.execute(
             text(
                 "INSERT INTO settings"
-                " (public_id, key, value, category, description, is_encrypted, timestamp)"
-                " VALUES (:public_id, :key, :value, :category, :description, :is_encrypted, :timestamp)"
+                " (public_id, key, value, category, description, is_encrypted, timestamp, known_to)"
+                " VALUES (:public_id, :key, :value, :category, :description, :is_encrypted, :timestamp, :known_to)"
                 " ON CONFLICT(key) DO NOTHING"
             ),
             {
@@ -251,6 +267,7 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
                 "description": setting.description,
                 "is_encrypted": is_encrypted,
                 "timestamp": now,
+                "known_to": _known_to_value(conn),
             },
         )
         inserted += result.rowcount

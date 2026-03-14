@@ -145,7 +145,10 @@ class SettingsService:
         """
         repository = get_repository(self.db_url)
         async with repository.session() as session:
-            result = await session.execute(select(Setting))
+            now = datetime.now(UTC)
+            result = await session.execute(
+                select(Setting).where(Setting.timestamp <= now, Setting.known_to > now)
+            )
             settings = result.scalars().all()
             self._cache = {}
             for setting in settings:

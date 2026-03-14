@@ -39,7 +39,8 @@ export type {
  * Derived from REST PositionData (no WS envelope exists for positions).
  */
 export interface Position {
-  publicId: string | number
+  publicId?: string | number
+  timestamp?: Date
   instrument: string
   exchange: string
   quantity: number

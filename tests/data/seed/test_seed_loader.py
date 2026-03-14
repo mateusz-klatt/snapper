@@ -13,10 +13,12 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.seed.loader import SeedProfile
 from snapper.data.seed.loader import SeedSetting
 from snapper.data.seed.loader import SeedUser
 from snapper.data.seed.loader import _hash_password
+from snapper.data.seed.loader import _known_to_value
 from snapper.data.seed.loader import _package_dir
 from snapper.data.seed.loader import _sync_db_url
 from snapper.data.seed.loader import _timestamp_value
@@ -291,6 +293,35 @@ class TestTimestampValue:
         assert value.tzinfo == UTC
 
 
+class TestKnownToValue:
+    """Tests for KNOWN_TO_MAX value conversion by database dialect."""
+
+    def test_returns_iso_string_for_sqlite(self) -> None:
+        """Test SQLite known_to is serialized to ISO string.
+
+        Given: a connection dialect named "sqlite",
+        When: building a known_to value,
+        Then: value is an ISO string ending with UTC offset.
+        """
+        conn_mock = Mock()
+        conn_mock.dialect.name = "sqlite"
+        value = _known_to_value(cast(Connection, conn_mock))
+        assert isinstance(value, str)
+        assert value.endswith("+00:00")
+
+    def test_returns_datetime_for_non_sqlite(self) -> None:
+        """Test non-SQLite known_to remains the KNOWN_TO_MAX datetime.
+
+        Given: a connection dialect named "postgresql",
+        When: building a known_to value,
+        Then: value is KNOWN_TO_MAX datetime.
+        """
+        conn_mock = Mock()
+        conn_mock.dialect.name = "postgresql"
+        value = _known_to_value(cast(Connection, conn_mock))
+        assert value is KNOWN_TO_MAX
+
+
 class TestSyncDbUrl:
     """Tests for async-to-sync database URL conversion."""
 
@@ -344,7 +375,8 @@ class TestSeedUsers:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -381,7 +413,8 @@ class TestSeedUsers:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -425,7 +458,8 @@ class TestSeedUsers:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -458,7 +492,8 @@ class TestSeedUsers:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -490,7 +525,8 @@ class TestSeedUsers:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -530,7 +566,8 @@ class TestSeedSettings:
                     "CREATE TABLE settings ("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -566,7 +603,8 @@ class TestSeedSettings:
                     "CREATE TABLE settings ("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -605,7 +643,8 @@ class TestSeedSettings:
                     "CREATE TABLE settings ("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -650,7 +689,8 @@ class TestSeedSettings:
                     "CREATE TABLE settings ("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -679,7 +719,8 @@ class TestRunSeed:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.execute(
@@ -687,7 +728,8 @@ class TestRunSeed:
                     "CREATE TABLE settings ("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
@@ -726,7 +768,8 @@ class TestRunSeed:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
-                    "created_at TIMESTAMP, timestamp TIMESTAMP)"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.execute(
@@ -734,7 +777,8 @@ class TestRunSeed:
                     "CREATE TABLE settings ("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
-                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP)"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL)"
                 )
             )
             conn.commit()
