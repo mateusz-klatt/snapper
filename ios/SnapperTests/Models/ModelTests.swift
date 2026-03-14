@@ -6,7 +6,6 @@ final class ModelTests: XCTestCase {
     func testUserProfileDecoding() throws {
         let json = """
         {
-            "id": "1",
             "username": "testuser",
             "email": "test@example.com",
             "role": "viewer",
@@ -21,7 +20,6 @@ final class ModelTests: XCTestCase {
 
         let user = try decoder.decode(UserProfile.self, from: json)
 
-        XCTAssertEqual(user.id, "1")
         XCTAssertEqual(user.username, "testuser")
         XCTAssertEqual(user.email, "test@example.com")
         XCTAssertEqual(user.role, .viewer)
@@ -31,7 +29,7 @@ final class ModelTests: XCTestCase {
     func testOrderStatusDecoding() throws {
         let json = """
         {
-            "id": 123,
+            "public_id": "01961234-5678-7000-8000-000000000001",
             "instrument": "BTCUSD",
             "exchange": "kraken",
             "client_order_id": "client-123",
@@ -39,9 +37,10 @@ final class ModelTests: XCTestCase {
             "created_at": "2025-11-22T10:00:00Z",
             "updated_at": "2025-11-22T10:00:00Z",
             "side": "buy",
-            "type": "limit",
+            "order_type": "limit",
             "price": 50000.0,
             "size": 0.5,
+            "filled_size": 0.0,
             "status": "open"
         }
         """.data(using: .utf8)!
@@ -51,10 +50,10 @@ final class ModelTests: XCTestCase {
 
         let order = try decoder.decode(OrderStatus.self, from: json)
 
-        XCTAssertEqual(order.id, 123)
+        XCTAssertEqual(order.publicId, "01961234-5678-7000-8000-000000000001")
         XCTAssertEqual(order.instrument, "BTCUSD")
         XCTAssertEqual(order.side, "buy")
-        XCTAssertEqual(order.type, "limit")
+        XCTAssertEqual(order.orderType, "limit")
         XCTAssertEqual(order.size, 0.5)
         XCTAssertEqual(order.price, 50000.0)
         XCTAssertEqual(order.status, "open")
@@ -93,9 +92,9 @@ final class ModelTests: XCTestCase {
         {
             "type": "candle",
             "timestamp": "2025-11-22T10:00:00Z",
-            "meta": null,
             "instrument": "BTCUSD",
             "timeframe": "1m",
+            "open_at": "2025-11-22T10:00:00Z",
             "open": 50000.0,
             "high": 50100.0,
             "low": 49900.0,

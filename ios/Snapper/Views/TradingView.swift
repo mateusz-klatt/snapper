@@ -135,7 +135,7 @@ struct OrderRowView: View {
                     .cornerRadius(4)
             }
             HStack {
-                Text("\(order.side) \(order.type)")
+                Text("\(order.side) \(order.orderType)")
                 Spacer()
                 Text("Size: \(order.size, specifier: "%.4f")")
             }

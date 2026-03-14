@@ -36,12 +36,14 @@ final class APIClientNetworkTests: XCTestCase {
 
             let json: [[String: Any]] = [
                 [
-                    "id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000001",
                     "instrument": "BTCUSD",
                     "exchange": "kraken",
+                    "client_order_id": "client-123",
                     "side": "buy",
-                    "type": "limit",
+                    "order_type": "limit",
                     "size": 1.0,
+                    "filled_size": 0.0,
                     "status": "open",
                     "created_at": "2025-11-22T10:00:00Z"
                 ]
@@ -54,7 +56,7 @@ final class APIClientNetworkTests: XCTestCase {
         let orders = try await apiClient.fetchOrders()
 
         XCTAssertEqual(orders.count, 1)
-        XCTAssertEqual(orders[0].id, 1)
+        XCTAssertEqual(orders[0].clientOrderId, "client-123")
         XCTAssertEqual(orders[0].instrument, "BTCUSD")
     }
 
@@ -103,14 +105,13 @@ final class APIClientNetworkTests: XCTestCase {
 
             let json: [[String: Any]] = [
                 [
-                    "id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000002",
                     "instrument": "BTCUSD",
                     "exchange": "kraken",
                     "quantity": 1.5,
                     "average_price": 50000.0,
                     "unrealized_pnl": 500.0,
-                    "realized_pnl": 0.0,
-                    "updated_at": "2025-11-22T10:00:00Z"
+                    "realized_pnl": 0.0
                 ]
             ]
             let data = try JSONSerialization.data(withJSONObject: json)
@@ -138,7 +139,7 @@ final class APIClientNetworkTests: XCTestCase {
 
             let json: [[String: Any]] = [
                 [
-                    "id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000003",
                     "instrument": "ETHUSD",
                     "exchange": "kraken",
                     "side": "buy",
@@ -155,7 +156,7 @@ final class APIClientNetworkTests: XCTestCase {
         let signals = try await apiClient.fetchSignals()
 
         XCTAssertEqual(signals.count, 1)
-        XCTAssertEqual(signals[0].id, 1)
+        XCTAssertEqual(signals[0].publicId, "01961234-5678-7000-8000-000000000003")
         XCTAssertEqual(signals[0].instrument, "ETHUSD")
     }
 
@@ -167,12 +168,14 @@ final class APIClientNetworkTests: XCTestCase {
 
             let json: [[String: Any]] = [
                 [
-                    "id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000001",
                     "instrument": "BTCUSD",
                     "exchange": "kraken",
+                    "client_order_id": "client-123",
                     "side": "buy",
-                    "type": "limit",
+                    "order_type": "limit",
                     "size": 1.0,
+                    "filled_size": 0.0,
                     "status": "open",
                     "created_at": "2025-11-22T10:00:00Z"
                 ]

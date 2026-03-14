@@ -808,7 +808,7 @@ class TestGenerateSwiftTypes:
 
         result = generate_swift_types(tmp_path, schema_path, output_path)
 
-        assert result == {"Status"}
+        assert result == ({"Status"}, {"User"})
 
     def test_exclude_enums_skips_duplicates(self, tmp_path: Path) -> None:
         """Excludes enums already emitted in another file."""
@@ -835,7 +835,37 @@ class TestGenerateSwiftTypes:
         content = output_path.read_text()
         assert "enum UserRole" not in content
         assert "struct Profile" in content
-        assert result == set()
+        assert result == (set(), {"Profile"})
+
+    def test_exclude_structs_skips_duplicates(self, tmp_path: Path) -> None:
+        """Excludes structs already emitted in another file."""
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "OrderData": {
+                            "type": "object",
+                            "properties": {"instrument": {"type": "string"}},
+                        },
+                        "UserProfile": {
+                            "type": "object",
+                            "properties": {"username": {"type": "string"}},
+                        },
+                    }
+                }
+            )
+        )
+        output_path = tmp_path / "Types.swift"
+
+        result = generate_swift_types(
+            tmp_path, schema_path, output_path, exclude_structs={"OrderData"}
+        )
+
+        content = output_path.read_text()
+        assert "struct OrderData" not in content
+        assert "struct UserProfile" in content
+        assert result == (set(), {"UserProfile"})
 
 
 class TestGenerateIosTypes:
@@ -881,7 +911,7 @@ class TestGenerateIosTypes:
         assert not (ios_dir / "APITypes.swift").exists()
 
     def test_deduplicates_shared_enums_across_files(self, tmp_path: Path) -> None:
-        """Shared enums between WS and API schemas appear only in WSMessages."""
+        """Shared enums between WS and API schemas appear only in APITypes."""
         build_dir = tmp_path / "build"
         build_dir.mkdir()
         (build_dir / "ws-schemas.json").write_text(
@@ -915,9 +945,52 @@ class TestGenerateIosTypes:
 
         ws_content = (ios_dir / "WSMessages.swift").read_text()
         api_content = (ios_dir / "APITypes.swift").read_text()
-        assert "enum UserRole" in ws_content
-        assert "enum UserRole" not in api_content
+        assert "enum UserRole" in api_content
+        assert "enum UserRole" not in ws_content
         assert "struct UserProfile" in api_content
+
+    def test_deduplicates_shared_structs_across_files(self, tmp_path: Path) -> None:
+        """Shared structs between WS and API schemas appear only in APITypes."""
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "OrderData": {
+                            "type": "object",
+                            "properties": {"instrument": {"type": "string"}},
+                        },
+                    }
+                }
+            )
+        )
+        (build_dir / "openapi-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "OrderData": {
+                            "type": "object",
+                            "properties": {"instrument": {"type": "string"}},
+                        },
+                        "SystemStatus": {
+                            "type": "object",
+                            "properties": {"status": {"type": "string"}},
+                        },
+                    }
+                }
+            )
+        )
+        ios_dir = tmp_path / "ios" / "Snapper" / "Models" / "Generated"
+        ios_dir.mkdir(parents=True)
+
+        generate_ios_types(tmp_path)
+
+        ws_content = (ios_dir / "WSMessages.swift").read_text()
+        api_content = (ios_dir / "APITypes.swift").read_text()
+        assert "struct OrderData" in api_content
+        assert "struct OrderData" not in ws_content
+        assert "struct SystemStatus" in api_content
 
 
 class TestGenerateIosPermissions:

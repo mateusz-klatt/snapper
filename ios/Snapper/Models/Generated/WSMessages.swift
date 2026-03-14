@@ -3,36 +3,6 @@
 
 import Foundation
 
-enum UserRole: String, Codable, Sendable {
-    case viewer
-    case operatorRole = "operator"
-    case admin
-}
-
-enum CandleDataExchange: String, Codable, Sendable {
-    case kraken
-    case zonda
-    case walutomat
-    case polygon
-}
-
-enum ExecutionDataExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
-}
-
-enum ExecutionDataSide: String, Codable, Sendable {
-    case buy
-    case sell
-}
-
-enum ExecutionDataStatus: String, Codable, Sendable {
-    case filled
-    case partial
-}
-
 enum HeartbeatDataStatus: String, Codable, Sendable {
     case healthy
     case warning
@@ -44,25 +14,6 @@ enum OrderCancelDataExchange: String, Codable, Sendable {
     case kraken
     case zonda
     case walutomat
-}
-
-enum OrderDataExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
-}
-
-enum OrderDataSide: String, Codable, Sendable {
-    case buy
-    case sell
-}
-
-enum OrderDataOrderType: String, Codable, Sendable {
-    case market
-    case limit
-    case stop
-    case stopLimit = "stop_limit"
 }
 
 enum OrderEventDataExchange: String, Codable, Sendable {
@@ -112,25 +63,6 @@ enum OrderRequestDataOrderType: String, Codable, Sendable {
     case stopLimit = "stop_limit"
 }
 
-enum PositionDataExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
-}
-
-enum SignalDataExchange: String, Codable, Sendable {
-    case paper
-    case kraken
-    case zonda
-    case walutomat
-}
-
-enum SignalDataSide: String, Codable, Sendable {
-    case buy
-    case sell
-}
-
 enum TickDataExchange: String, Codable, Sendable {
     case kraken
     case zonda
@@ -161,76 +93,6 @@ enum WSSubscriptionSuccessResponseStatus: String, Codable, Sendable {
 struct WsMessageBase: Codable, Sendable {
     let type: String
     let timestamp: Date?
-}
-
-struct CandleData: Codable, Sendable {
-    let publicId: String?
-    let type: String
-    let timestamp: Date?
-    let instrument: String
-    let exchange: String
-    let timeframe: String
-    let openAt: Date
-    let open: Double
-    let high: Double
-    let low: Double
-    let close: Double
-    let volume: Double
-    let vwap: Double?
-    let trades: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
-        case type
-        case timestamp
-        case instrument
-        case exchange
-        case timeframe
-        case openAt = "open_at"
-        case open
-        case high
-        case low
-        case close
-        case volume
-        case vwap
-        case trades
-    }
-}
-
-struct ExecutionData: Codable, Sendable {
-    let publicId: String?
-    let type: String
-    let timestamp: Date?
-    let tradeId: String?
-    let exchangeOrderId: String?
-    let clientOrderId: String
-    let instrument: String
-    let exchange: String
-    let side: String
-    let size: Double
-    let price: Double
-    let fee: Double
-    let feeAsset: String
-    let status: String
-    let executedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
-        case type
-        case timestamp
-        case tradeId = "trade_id"
-        case exchangeOrderId = "exchange_order_id"
-        case clientOrderId = "client_order_id"
-        case instrument
-        case exchange
-        case side
-        case size
-        case price
-        case fee
-        case feeAsset = "fee_asset"
-        case status
-        case executedAt = "executed_at"
-    }
 }
 
 struct HeartbeatData: Codable, Sendable {
@@ -272,50 +134,6 @@ struct OrderCancelData: Codable, Sendable {
         case instrument
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
-    }
-}
-
-struct OrderData: Codable, Sendable {
-    let publicId: String?
-    let type: String
-    let timestamp: Date?
-    let exchangeOrderId: String?
-    let clientOrderId: String
-    let instrument: String
-    let exchange: String
-    let side: String
-    let status: String
-    let orderType: String
-    let size: Double
-    let filledSize: Double
-    let price: Double?
-    let averagePrice: Double?
-    let reason: String?
-    let timeInForce: String?
-    let error: String?
-    let createdAt: Date?
-    let updatedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
-        case type
-        case timestamp
-        case exchangeOrderId = "exchange_order_id"
-        case clientOrderId = "client_order_id"
-        case instrument
-        case exchange
-        case side
-        case status
-        case orderType = "order_type"
-        case size
-        case filledSize = "filled_size"
-        case price
-        case averagePrice = "average_price"
-        case reason
-        case timeInForce = "time_in_force"
-        case error
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
     }
 }
 
@@ -399,30 +217,6 @@ struct OrderRequestData: Codable, Sendable {
     }
 }
 
-struct PositionData: Codable, Sendable {
-    let publicId: String?
-    let type: String
-    let timestamp: Date?
-    let instrument: String
-    let exchange: String
-    let quantity: Double
-    let averagePrice: Double
-    let unrealizedPnl: Double
-    let realizedPnl: Double
-
-    enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
-        case type
-        case timestamp
-        case instrument
-        case exchange
-        case quantity
-        case averagePrice = "average_price"
-        case unrealizedPnl = "unrealized_pnl"
-        case realizedPnl = "realized_pnl"
-    }
-}
-
 struct ReplayEndData: Codable, Sendable {
     let publicId: String?
     let type: String
@@ -466,34 +260,6 @@ struct SettingChangedData: Codable, Sendable {
         case value
         case category
         case updatedBy = "updated_by"
-    }
-}
-
-struct SignalData: Codable, Sendable {
-    let publicId: String?
-    let type: String
-    let timestamp: Date?
-    let instrument: String
-    let exchange: String
-    let side: String
-    let strength: Double
-    let reason: String
-    let price: Double?
-    let strategyName: String?
-    let firedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
-        case type
-        case timestamp
-        case instrument
-        case exchange
-        case side
-        case strength
-        case reason
-        case price
-        case strategyName = "strategy_name"
-        case firedAt = "fired_at"
     }
 }
 

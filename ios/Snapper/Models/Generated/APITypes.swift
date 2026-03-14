@@ -3,6 +3,12 @@
 
 import Foundation
 
+enum UserRole: String, Codable, Sendable {
+    case viewer
+    case operatorRole = "operator"
+    case admin
+}
+
 enum AvailableProcessLifecycle: String, Codable, Sendable {
     case longRunning = "long_running"
     case oneShot = "one_shot"
@@ -13,6 +19,13 @@ enum AvailableProcessRole: String, Codable, Sendable {
     case task
     case strategy
     case backtest
+}
+
+enum CandleDataExchange: String, Codable, Sendable {
+    case kraken
+    case zonda
+    case walutomat
+    case polygon
 }
 
 enum ConfiguredProcessMode: String, Codable, Sendable {
@@ -32,10 +45,53 @@ enum ConfiguredProcessRole: String, Codable, Sendable {
     case backtest
 }
 
+enum ExecutionDataExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
+enum ExecutionDataSide: String, Codable, Sendable {
+    case buy
+    case sell
+}
+
+enum ExecutionDataStatus: String, Codable, Sendable {
+    case filled
+    case partial
+}
+
 enum HealthCheckResponseStatus: String, Codable, Sendable {
     case healthy
     case warning
     case error
+}
+
+enum OrderDataExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
+enum OrderDataSide: String, Codable, Sendable {
+    case buy
+    case sell
+}
+
+enum OrderDataOrderType: String, Codable, Sendable {
+    case market
+    case limit
+    case stop
+    case stopLimit = "stop_limit"
+}
+
+enum PositionDataExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
 }
 
 enum ProcessRunStatus: String, Codable, Sendable {
@@ -85,6 +141,18 @@ enum ProcessStopResponseStatus: String, Codable, Sendable {
     case success
     case notRunning = "not_running"
     case error
+}
+
+enum SignalDataExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case zonda
+    case walutomat
+}
+
+enum SignalDataSide: String, Codable, Sendable {
+    case buy
+    case sell
 }
 
 enum StrategyProcessMode: String, Codable, Sendable {

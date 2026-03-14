@@ -96,7 +96,6 @@ final class AuthServiceTests: XCTestCase {
 
     private func makeUser(role: UserRole) -> UserProfile {
         UserProfile(
-            id: "1",
             username: "testuser",
             email: "test@example.com",
             role: role,

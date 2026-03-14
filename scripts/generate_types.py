@@ -785,17 +785,28 @@ def _collect_inline_enums(
 def _collect_structs(
     definitions: dict[str, Any],
     lines: list[str],
-) -> None:
+    generated_structs: set[str] | None = None,
+) -> set[str]:
     """Emit Swift structs for object definitions.
 
     Args:
         definitions: JSON Schema definitions dict.
         lines: Mutable output lines list.
+        generated_structs: Struct names already emitted to skip.
+
+    Returns:
+        Set of struct names generated in this call.
     """
+    skip = set(generated_structs or ())
+    emitted: set[str] = set()
     for name, type_schema in definitions.items():
         if type_schema.get("type") == "object":
+            if name in skip:
+                continue
             lines.extend(generate_swift_struct(name, type_schema, definitions))
             lines.append("")
+            emitted.add(name)
+    return emitted
 
 
 def generate_swift_types(
@@ -804,7 +815,8 @@ def generate_swift_types(
     output_path: Path,
     include_any_codable: bool = True,
     exclude_enums: set[str] | None = None,
-) -> set[str]:
+    exclude_structs: set[str] | None = None,
+) -> tuple[set[str], set[str]]:
     """Generate Swift types from JSON Schema.
 
     Args:
@@ -813,9 +825,10 @@ def generate_swift_types(
         output_path: Path for the generated Swift file.
         include_any_codable: Whether to include the AnyCodable helper.
         exclude_enums: Enum names already emitted in another file to skip here.
+        exclude_structs: Struct names already emitted in another file to skip.
 
     Returns:
-        Set of enum names generated in this file.
+        Tuple of (enum names, struct names) generated in this file.
     """
     with schema_path.open() as f:
         schema = json.load(f)
@@ -829,12 +842,12 @@ def generate_swift_types(
     generated_enums: set[str] = set(exclude_enums or ())
     _collect_top_level_enums(definitions, lines, generated_enums)
     _collect_inline_enums(definitions, lines, generated_enums)
-    _collect_structs(definitions, lines)
+    emitted_structs = _collect_structs(definitions, lines, exclude_structs)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines))
     print(f"Generated {output_path} ({len(definitions)} types)")
-    return generated_enums - (exclude_enums or set())
+    return generated_enums - (exclude_enums or set()), emitted_structs
 
 
 def generate_ios_types(project_root: Path) -> None:
@@ -854,22 +867,26 @@ def generate_ios_types(project_root: Path) -> None:
 
     ws_enums: set[str] = set()
     ws_schema_path = project_root / "build" / _WS_SCHEMAS_FILE
-    if ws_schema_path.exists():
-        ws_enums = generate_swift_types(
-            project_root,
-            ws_schema_path,
-            ios_gen_dir / "WSMessages.swift",
-            include_any_codable=False,
-        )
 
     api_schema_path = project_root / "build" / "openapi-schemas.json"
+    api_enums: set[str] = set()
+    api_structs: set[str] = set()
     if api_schema_path.exists():
-        generate_swift_types(
+        api_enums, api_structs = generate_swift_types(
             project_root,
             api_schema_path,
             ios_gen_dir / "APITypes.swift",
             include_any_codable=False,
-            exclude_enums=ws_enums,
+        )
+
+    if ws_schema_path.exists():
+        ws_enums, _ = generate_swift_types(
+            project_root,
+            ws_schema_path,
+            ios_gen_dir / "WSMessages.swift",
+            include_any_codable=False,
+            exclude_enums=api_enums,
+            exclude_structs=api_structs,
         )
 
     generate_ios_permissions(project_root)
@@ -1735,7 +1752,7 @@ def generate_ios_permissions(project_root: Path) -> None:
     ``Permission`` enum, ``rolePermissions`` dictionary, and ``resourceAccess``
     dictionary that mirror ``permissions.generated.ts`` used by the frontend.
     ``UserRole`` is deliberately omitted because it is already emitted by the
-    WS schema generator in ``WSMessages.swift``.
+    API schema generator in ``APITypes.swift``.
 
     Args:
         project_root: Root directory of the project.
