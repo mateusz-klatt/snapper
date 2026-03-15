@@ -21,7 +21,8 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Order
 from snapper.data.models import Setting
-from snapper.data.models import SymbolCatalog
+from snapper.data.models import Symbol
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import SQLAlchemyRepository
 
 
@@ -54,13 +55,13 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await repo.create_all()
     async with repo.session() as s:
+        s.add(Symbol(native_symbol="BTC-USD", created_at=datetime.now(UTC)))
         s.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
             )
         )

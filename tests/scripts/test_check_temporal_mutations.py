@@ -54,10 +54,9 @@ class TestShouldSkipPath:
     def test_does_not_skip_symbol_updater_base(self, tmp_path: Path) -> None:
         """Verify should_skip_path returns False for symbol updater base.
 
-        Given: A file path for the symbol updater base module (scanned at
-               line level via WHITELIST_PATH_LINE_PATTERNS instead),
+        Given: A file path for the symbol updater base module,
         When: should_skip_path is called,
-        Then: It returns False.
+        Then: It returns False (scanned at line level for violations).
         """
         python_file = (
             tmp_path / "src" / "snapper" / "application" / "updaters" / "symbols" / "base.py"
@@ -349,7 +348,7 @@ class TestCheckFile:
 
         Given: A file with .base = assignment,
         When: check_file is called,
-        Then: It returns a violation for Instrument.base / SymbolCatalog.base.
+        Then: It returns a violation for Instrument.base / SymbolVersion.base.
         """
         python_file = tmp_path / "inst_svc.py"
         python_file.write_text('instrument.base = "BTC"\n')
@@ -364,7 +363,7 @@ class TestCheckFile:
 
         Given: A file with .quote = assignment,
         When: check_file is called,
-        Then: It returns a violation for Instrument.quote / SymbolCatalog.quote.
+        Then: It returns a violation for Instrument.quote / SymbolVersion.quote.
         """
         python_file = tmp_path / "inst_svc.py"
         python_file.write_text('catalog.quote = "USD"\n')
@@ -375,11 +374,11 @@ class TestCheckFile:
         assert "quote" in findings[0][1]
 
     def test_detects_asset_type_mutation(self, tmp_path: Path) -> None:
-        """Verify check_file detects SymbolCatalog.asset_type mutation.
+        """Verify check_file detects SymbolVersion.asset_type mutation.
 
         Given: A file with .asset_type = assignment,
         When: check_file is called,
-        Then: It returns a violation for SymbolCatalog.asset_type.
+        Then: It returns a violation for SymbolVersion.asset_type.
         """
         python_file = tmp_path / "catalog_svc.py"
         python_file.write_text('catalog.asset_type = "equity"\n')
@@ -387,7 +386,7 @@ class TestCheckFile:
         findings = checker.check_file(python_file)
 
         assert len(findings) == 1
-        assert findings[0][1] == "SymbolCatalog.asset_type"
+        assert findings[0][1] == "SymbolVersion.asset_type"
 
     def test_detects_reason_mutation(self, tmp_path: Path) -> None:
         """Verify check_file detects reason attribute mutation.
@@ -659,31 +658,10 @@ class TestMain:
 class TestPathSpecificWhitelist:
     """Test suite for path-specific line whitelist functionality."""
 
-    def test_catalog_mutation_whitelisted_in_base_py(self, tmp_path: Path) -> None:
-        """Verify SymbolCatalog mutations are whitelisted in the updater base file.
+    def test_mutation_flagged_in_any_file(self, tmp_path: Path) -> None:
+        """Verify attribute mutations are flagged in all files (no path-specific whitelist).
 
-        Given: A file at updaters/symbols/base.py with existing.base = assignment,
-        When: check_file is called,
-        Then: No violation reported for catalog mutations.
-        """
-        base_dir = tmp_path / "application" / "updaters" / "symbols"
-        base_dir.mkdir(parents=True)
-        base_file = base_dir / "base.py"
-        base_file.write_text(
-            "existing.base = base\n"
-            "existing.quote = quote\n"
-            "existing.asset_type = asset_type\n"
-            "existing.timestamp = now\n"
-        )
-
-        findings = checker.check_file(base_file)
-
-        assert findings == []
-
-    def test_catalog_mutation_flagged_in_other_file(self, tmp_path: Path) -> None:
-        """Verify SymbolCatalog mutations are flagged in non-whitelisted files.
-
-        Given: A file not matching updaters/symbols/base.py with .base = assignment,
+        Given: A file with .base = assignment,
         When: check_file is called,
         Then: Violation reported.
         """
@@ -695,8 +673,8 @@ class TestPathSpecificWhitelist:
         assert len(findings) == 1
         assert "base" in findings[0][1]
 
-    def test_non_catalog_mutation_flagged_in_base_py(self, tmp_path: Path) -> None:
-        """Verify non-catalog mutations are still flagged in updater base file.
+    def test_setting_mutation_flagged_in_base_py(self, tmp_path: Path) -> None:
+        """Verify Setting mutations are flagged in updater base file.
 
         Given: A file at updaters/symbols/base.py with .value = assignment,
         When: check_file is called,

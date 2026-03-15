@@ -18,8 +18,9 @@ from sqlalchemy.orm import Session
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
-from snapper.data.models import SymbolCatalog
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import close_and_insert_sync
@@ -807,11 +808,11 @@ def test_get_last_update_timestamp_returns_none_for_empty_value(
 def test_upsert_catalog_creates_new_entry(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog creates new catalog entry when none exists.
+    """Verify _upsert_catalog creates new Symbol and SymbolVersion when none exists.
 
     Given: Empty database,
     When: _upsert_catalog called with new native_symbol,
-    Then: New SymbolCatalog row created and True returned.
+    Then: New Symbol and SymbolVersion rows created and True returned.
     """
     updater = updater_factory(3, False)
     assert updater.repository is not None
@@ -825,35 +826,35 @@ def test_upsert_catalog_creates_new_entry(
     assert result is True
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        version = session.execute(
+            select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD")
         ).scalar_one()
-    assert catalog.base == "BTC"
-    assert catalog.quote == "USD"
-    assert catalog.asset_type == "crypto"
+    assert version.base == "BTC"
+    assert version.quote == "USD"
+    assert version.asset_type == "crypto"
 
 
 def test_upsert_catalog_updates_base_currency(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog updates base currency when changed.
+    """Verify _upsert_catalog creates new version via close+insert when base changes.
 
-    Given: Existing catalog entry with base=BTC,
+    Given: Existing Symbol + SymbolVersion with base=BTC,
     When: _upsert_catalog called with base=XBT,
-    Then: Base updated to XBT and updated_at refreshed.
+    Then: Old version closed, new version inserted with base=XBT.
     """
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_time))
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -868,34 +869,37 @@ def test_upsert_catalog_updates_base_currency(
     assert result is False
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        active = session.execute(
+            select(SymbolVersion).where(
+                SymbolVersion.native_symbol == "BTC-USD",
+                SymbolVersion.known_to == KNOWN_TO_MAX,
+            )
         ).scalar_one()
-    assert catalog.base == "XBT"
-    assert catalog.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert active.base == "XBT"
+    assert active.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_catalog_updates_quote_currency(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog updates quote currency when changed.
+    """Verify _upsert_catalog creates new version via close+insert when quote changes.
 
-    Given: Existing catalog entry with quote=USD,
+    Given: Existing Symbol + SymbolVersion with quote=USD,
     When: _upsert_catalog called with quote=USDT,
-    Then: Quote updated to USDT and updated_at refreshed.
+    Then: Old version closed, new version inserted with quote=USDT.
     """
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_time))
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -910,34 +914,37 @@ def test_upsert_catalog_updates_quote_currency(
     assert result is False
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        active = session.execute(
+            select(SymbolVersion).where(
+                SymbolVersion.native_symbol == "BTC-USD",
+                SymbolVersion.known_to == KNOWN_TO_MAX,
+            )
         ).scalar_one()
-    assert catalog.quote == "USDT"
-    assert catalog.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert active.quote == "USDT"
+    assert active.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_catalog_updates_asset_type(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog updates asset_type when changed.
+    """Verify _upsert_catalog creates new version via close+insert when asset_type changes.
 
-    Given: Existing catalog entry with asset_type=crypto,
+    Given: Existing Symbol + SymbolVersion with asset_type=crypto,
     When: _upsert_catalog called with asset_type=forex,
-    Then: Asset type updated to forex and updated_at refreshed.
+    Then: Old version closed, new version inserted with asset_type=forex.
     """
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="EUR-USD", created_at=original_time))
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="EUR-USD",
                 base="EUR",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -952,34 +959,37 @@ def test_upsert_catalog_updates_asset_type(
     assert result is False
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "EUR-USD")
+        active = session.execute(
+            select(SymbolVersion).where(
+                SymbolVersion.native_symbol == "EUR-USD",
+                SymbolVersion.known_to == KNOWN_TO_MAX,
+            )
         ).scalar_one()
-    assert catalog.asset_type == "forex"
-    assert catalog.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
+    assert active.asset_type == "forex"
+    assert active.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
 def test_upsert_catalog_preserves_timestamp_when_unchanged(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog preserves updated_at when no fields changed.
+    """Verify _upsert_catalog preserves version when no fields changed.
 
-    Given: Existing catalog entry with identical values,
+    Given: Existing Symbol + SymbolVersion with identical values,
     When: _upsert_catalog called with same values,
-    Then: updated_at timestamp preserved unchanged.
+    Then: No new version created, original timestamp preserved.
     """
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_time))
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -994,24 +1004,27 @@ def test_upsert_catalog_preserves_timestamp_when_unchanged(
     assert result is False
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "BTC-USD")
+        active = session.execute(
+            select(SymbolVersion).where(
+                SymbolVersion.native_symbol == "BTC-USD",
+                SymbolVersion.known_to == KNOWN_TO_MAX,
+            )
         ).scalar_one()
-    assert catalog.timestamp.replace(tzinfo=None) == original_time.replace(tzinfo=None)
+    assert active.timestamp.replace(tzinfo=None) == original_time.replace(tzinfo=None)
 
 
 def _seed_catalog(updater: DummySymbolUpdater, native_symbol: str, now: datetime) -> None:
-    """Insert a SymbolCatalog row required as FK parent for capability tests."""
+    """Insert Symbol + SymbolVersion rows required as FK parent for capability tests."""
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol=native_symbol, created_at=now))
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol=native_symbol,
                 base=native_symbol.split("-", maxsplit=1)[0],
                 quote=native_symbol.split("-")[1],
                 asset_type="crypto",
-                created_at=now,
                 timestamp=now,
             )
         )

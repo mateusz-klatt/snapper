@@ -14,9 +14,10 @@ from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import Position
 from snapper.data.models import Signal
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolVersion
 from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
 from snapper.data.models import UUIDColumn
@@ -379,48 +380,62 @@ class TestPositionModel:
         assert total_pnl == pytest.approx(2500.0)
 
 
-class TestSymbolCatalogModel:
-    """Tests for SymbolCatalog SQLAlchemy ORM model."""
+class TestSymbolModel:
+    """Tests for Symbol SQLAlchemy ORM model."""
 
-    def test_symbol_catalog_crypto_pair(self) -> None:
-        """Test SymbolCatalog for a crypto currency pair.
+    def test_symbol_creation(self) -> None:
+        """Test Symbol identity table creation.
+
+        Given: A native symbol string,
+        When: Symbol is created,
+        Then: native_symbol is set as PK.
+        """
+        now = datetime.now(UTC)
+        sym = Symbol(native_symbol="BTC-USD", created_at=now)
+        assert sym.native_symbol == "BTC-USD"
+        assert sym.created_at == now
+
+
+class TestSymbolVersionModel:
+    """Tests for SymbolVersion SQLAlchemy ORM model."""
+
+    def test_symbol_version_crypto_pair(self) -> None:
+        """Test SymbolVersion for a crypto currency pair.
 
         Given: Crypto pair parameters with base, quote, and asset_type,
-        When: SymbolCatalog is created,
+        When: SymbolVersion is created,
         Then: All fields match and quote is set.
         """
         now = datetime.now(UTC)
-        catalog = SymbolCatalog(
+        version = SymbolVersion(
             native_symbol="BTC-USD",
             base="BTC",
             quote="USD",
             asset_type="crypto",
-            created_at=now,
             timestamp=now,
         )
-        assert catalog.native_symbol == "BTC-USD"
-        assert catalog.base == "BTC"
-        assert catalog.quote == "USD"
-        assert catalog.asset_type == "crypto"
+        assert version.native_symbol == "BTC-USD"
+        assert version.base == "BTC"
+        assert version.quote == "USD"
+        assert version.asset_type == "crypto"
 
-    def test_symbol_catalog_equity_nullable_quote(self) -> None:
-        """Test SymbolCatalog allows nullable quote for equity.
+    def test_symbol_version_equity_nullable_quote(self) -> None:
+        """Test SymbolVersion allows nullable quote for equity.
 
         Given: Equity parameters without quote,
-        When: SymbolCatalog is created,
+        When: SymbolVersion is created,
         Then: Quote is None.
         """
         now = datetime.now(UTC)
-        catalog = SymbolCatalog(
+        version = SymbolVersion(
             native_symbol="AAPL",
             base="AAPL",
             quote=None,
             asset_type="equity",
-            created_at=now,
             timestamp=now,
         )
-        assert catalog.quote is None
-        assert catalog.asset_type == "equity"
+        assert version.quote is None
+        assert version.asset_type == "equity"
 
 
 class TestSymbolAliasModel:

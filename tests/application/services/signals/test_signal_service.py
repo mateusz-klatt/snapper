@@ -15,7 +15,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from snapper.application.services.signals.service import SignalReadService
 from snapper.data.models import Instrument
 from snapper.data.models import Signal
-from snapper.data.models import SymbolCatalog
+from snapper.data.models import Symbol
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.strategies.base import StrategySignal
 
@@ -32,13 +33,13 @@ class TestSignalService:
         await repo.create_all()
         async with repo.session() as s:
             for sym, base, quote in [("BTCUSD", "BTC", "USD"), ("ETHUSD", "ETH", "USD")]:
+                s.add(Symbol(native_symbol=sym, created_at=datetime.now(UTC)))
                 s.add(
-                    SymbolCatalog(
+                    SymbolVersion(
                         native_symbol=sym,
                         base=base,
                         quote=quote,
                         asset_type="crypto",
-                        created_at=datetime.now(UTC),
                         timestamp=datetime.now(UTC),
                     )
                 )
@@ -316,13 +317,13 @@ class TestSignalServiceCoverage:
         repo = SQLAlchemyRepository(url)
         await repo.create_all()
         async with repo.session() as s:
+            s.add(Symbol(native_symbol="BTC-USD", created_at=datetime.now(UTC)))
             s.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=datetime.now(UTC),
                     timestamp=datetime.now(UTC),
                 )
             )
@@ -522,13 +523,13 @@ class TestSignalServiceCoverage:
         Then: Instrument created with base='GOLD' and quote='USD'.
         """
         async with test_repository.session() as s:
+            s.add(Symbol(native_symbol="GOLD", created_at=datetime.now(UTC)))
             s.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="GOLD",
                     base="GOLD",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=datetime.now(UTC),
                     timestamp=datetime.now(UTC),
                 )
             )

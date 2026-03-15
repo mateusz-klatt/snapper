@@ -26,9 +26,10 @@ from snapper.core.types import AliasChannel
 from snapper.core.types import AssetType
 from snapper.core.types import UpsertResult
 from snapper.data.models import Setting
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import close_and_insert_sync
@@ -126,7 +127,11 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         asset_type: AssetType,
         now: datetime,
     ) -> bool:
-        """Upsert a SymbolCatalog row.
+        """Upsert a Symbol identity row and a SymbolVersion versioned row.
+
+        Ensures the Symbol identity row exists (INSERT if missing), then
+        upserts the SymbolVersion using SCD Type 2 close+insert when
+        payload attributes (base, quote, asset_type) have changed.
 
         Args:
             session: SQLAlchemy session.
@@ -137,36 +142,54 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             now: Current UTC timestamp.
 
         Returns:
-            True if a new row was created, False if it already existed.
+            True if a new Symbol identity row was created, False if it
+            already existed.
         """
-        existing = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == native_symbol)
+        existing_symbol = session.execute(
+            select(Symbol).where(Symbol.native_symbol == native_symbol)
         ).scalar_one_or_none()
-        if existing is None:
+        created = existing_symbol is None
+        if created:
+            session.add(Symbol(native_symbol=native_symbol, created_at=now))
+            session.flush()
+
+        existing_version = session.execute(
+            select(SymbolVersion).where(
+                SymbolVersion.native_symbol == native_symbol,
+                SymbolVersion.timestamp <= now,
+                SymbolVersion.known_to > now,
+            )
+        ).scalar_one_or_none()
+        if existing_version is None:
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol=native_symbol,
                     base=base,
                     quote=quote,
                     asset_type=asset_type,
-                    created_at=now,
                     timestamp=now,
                 )
             )
-            return True
-        changed = False
-        if existing.base != base:
-            existing.base = base
-            changed = True
-        if existing.quote != quote:
-            existing.quote = quote
-            changed = True
-        if existing.asset_type != asset_type:
-            existing.asset_type = asset_type
-            changed = True
-        if changed:
-            existing.timestamp = now
-        return False
+        else:
+            changed = (
+                existing_version.base != base
+                or existing_version.quote != quote
+                or existing_version.asset_type != asset_type
+            )
+            if changed:
+                close_and_insert_sync(
+                    session=session,
+                    model=SymbolVersion,
+                    match_filters=[SymbolVersion.native_symbol == native_symbol],
+                    new_values={
+                        "native_symbol": native_symbol,
+                        "base": base,
+                        "quote": quote,
+                        "asset_type": asset_type,
+                    },
+                    bus_time=now,
+                )
+        return created
 
     @staticmethod
     def _upsert_alias(
@@ -179,14 +202,9 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
     ) -> UpsertResult:
         """Upsert a SymbolAlias row using SCD Type 2 close+insert.
 
-        SymbolCatalog uses in-place UPDATE because native_symbol has a
-        global unique constraint (it is an FK target).  SymbolAlias and
-        SymbolExchangeCapability use partial-unique constraints scoped
-        to active rows, so close+insert is safe.
-
         Args:
             session: SQLAlchemy session.
-            native_symbol: Native symbol (FK to symbol_catalog).
+            native_symbol: Native symbol (FK to symbols).
             exchange: Exchange name (lowercase).
             channel: Channel type (ws, rest, or ccxt).
             exchange_symbol: Exchange-specific symbol string.
@@ -252,7 +270,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         Args:
             session: SQLAlchemy session.
-            native_symbol: Native symbol (FK to symbol_catalog).
+            native_symbol: Native symbol (FK to symbols).
             exchange: Exchange name (lowercase).
             can_market_data: Whether exchange provides market data for this symbol.
             can_trade: Whether exchange supports trading this symbol.

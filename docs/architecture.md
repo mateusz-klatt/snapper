@@ -75,7 +75,8 @@ Persistence layer with SQLAlchemy:
     - `Signal` — Signal events
     - `User` — System users
     - `Setting` — Settings (encrypted)
-    - `SymbolCatalog` — Native symbol registry (base, quote, asset_type)
+    - `Symbol` — Stable identity table for native symbols
+    - `SymbolVersion` — Versioned attributes (base, quote, asset_type) with SCD Type 2
     - `SymbolAlias` — Exchange-specific symbol aliases (one row per native/exchange/channel)
     - `SymbolExchangeCapability` — Exchange-specific symbol capabilities
     - `ProcessRun` — Background process execution records
@@ -249,7 +250,8 @@ signals         -- Signals
 -- System
 users           -- Users
 settings        -- Settings (encrypted)
-symbol_catalog  -- Symbol catalog (native symbols, base/quote, asset type)
+symbols         -- Symbol identity (native_symbol PK)
+symbol_versions -- Versioned symbol attributes (base/quote, asset type, SCD2)
 symbol_aliases  -- Symbol aliases (exchange-specific symbol mappings)
 process_runs    -- Process history
 ```

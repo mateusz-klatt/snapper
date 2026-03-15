@@ -88,7 +88,8 @@ __all__ = [
     "User",
     "UserLoginEvent",
     "Setting",
-    "SymbolCatalog",
+    "Symbol",
+    "SymbolVersion",
     "SymbolAlias",
     "SymbolExchangeCapability",
     "ProcessRun",
@@ -98,7 +99,7 @@ __all__ = [
 
 
 _INSTRUMENT_FK = "instruments.id"
-_FK_SYMBOL_CATALOG = "symbol_catalog.native_symbol"
+_FK_SYMBOLS = "symbols.native_symbol"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_ACTIVE = text("known_to = '9999-12-31T23:59:59+00:00'")
 
@@ -132,7 +133,7 @@ class Instrument(Base):
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
-    symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOL_CATALOG), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOLS), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
@@ -442,28 +443,39 @@ class Setting(Base):
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
 
-class SymbolCatalog(Base):
-    """SQLAlchemy model for the native symbol registry.
+class Symbol(Base):
+    """Stable identity table for native symbols. No versioning."""
 
-    Authoritative source for native_symbol, base, and asset_type.
-    Quote is authoritative for pairs (crypto/forex) where it is encoded
-    in the native symbol; informational for single-asset (equity/index)
-    where the exchange determines the denomination.
-    """
+    __tablename__ = "symbols"
+    native_symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    aliases: Mapped[list[SymbolAlias]] = relationship(back_populates="symbol")
+    versions: Mapped[list[SymbolVersion]] = relationship(back_populates="symbol")
 
-    __tablename__ = "symbol_catalog"
+
+class SymbolVersion(Base):
+    """Versioned attributes for a native symbol (SCD Type 2)."""
+
+    __tablename__ = "symbol_versions"
     __table_args__ = (
         CheckConstraint(
             "asset_type IN ('crypto', 'forex', 'equity', 'index')",
-            name="ck_symbol_catalog_asset_type",
+            name="ck_symbol_version_asset_type",
         ),
         CheckConstraint(
             "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
-            name="ck_symbol_catalog_quote_required_for_pairs",
+            name="ck_symbol_version_quote_required_for_pairs",
         ),
-        Index("ix_sc_base_quote", "base", "quote"),
+        Index("ix_sv_base_quote", "base", "quote"),
         Index(
-            "ix_symbol_catalog_public_id",
+            "uq_symbol_version_active",
+            "native_symbol",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index(
+            "ix_symbol_versions_public_id",
             "public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
@@ -472,14 +484,13 @@ class SymbolCatalog(Base):
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
-    native_symbol: Mapped[str] = mapped_column(String(32), unique=True)
+    native_symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOLS), index=True)
     base: Mapped[str] = mapped_column(String(16), nullable=False)
     quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
     asset_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="crypto")
-    created_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
-    aliases: Mapped[list[SymbolAlias]] = relationship(back_populates="catalog")
+    symbol: Mapped[Symbol] = relationship(back_populates="versions")
 
 
 class SymbolAlias(Base):
@@ -529,7 +540,7 @@ class SymbolAlias(Base):
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(
         String(32),
-        ForeignKey(_FK_SYMBOL_CATALOG),
+        ForeignKey(_FK_SYMBOLS),
         nullable=False,
         index=True,
     )
@@ -539,7 +550,7 @@ class SymbolAlias(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
-    catalog: Mapped[SymbolCatalog] = relationship(back_populates="aliases")
+    symbol: Mapped[Symbol] = relationship(back_populates="aliases")
 
 
 class SymbolExchangeCapability(Base):
@@ -551,7 +562,7 @@ class SymbolExchangeCapability(Base):
     special case in code and has no rows in this table.
 
     Attributes:
-        native_symbol: FK to symbol_catalog. Part of composite PK.
+        native_symbol: FK to symbols. Part of composite PK.
         exchange: Exchange identifier (lowercase). Part of composite PK.
         can_market_data: Whether exchange provides market data for this symbol.
         can_trade: Whether exchange supports trading this symbol.
@@ -559,7 +570,7 @@ class SymbolExchangeCapability(Base):
         reason: Human-readable explanation for the capability values.
         created_at: Row creation timestamp (UTC).
         timestamp: Last modification timestamp (UTC).
-        catalog: Relationship to SymbolCatalog.
+        symbol: Relationship to Symbol.
     """
 
     __tablename__ = "symbol_exchange_capabilities"
@@ -601,7 +612,7 @@ class SymbolExchangeCapability(Base):
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(
         String(32),
-        ForeignKey(_FK_SYMBOL_CATALOG),
+        ForeignKey(_FK_SYMBOLS),
         nullable=False,
         index=True,
     )
@@ -613,7 +624,7 @@ class SymbolExchangeCapability(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
-    catalog: Mapped[SymbolCatalog] = relationship()
+    symbol: Mapped[Symbol] = relationship()
 
 
 class ProcessRun(Base):

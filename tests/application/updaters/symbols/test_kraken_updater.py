@@ -22,9 +22,10 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolVersion
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 
@@ -301,7 +302,7 @@ class TestKrakenSymbolUpdater:
         mock_repo.get_session.return_value = mock_session
         with patch.object(updater, "repository", mock_repo):
             await updater._update_database(symbols)
-        assert mock_session.add.call_count == 5
+        assert mock_session.add.call_count == 6
         mock_session.commit.assert_called_once()
 
 
@@ -480,13 +481,14 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
         session_local = sessionmaker(bind=engine)
         now = datetime.now(UTC)
         with session_local() as session:
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -548,8 +550,8 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
         ]
         await svc._update_database(symbols)
         with session_local() as session:
-            btc_catalog = session.query(SymbolCatalog).filter_by(native_symbol="BTC-USD").one()
-            eth_catalog = session.query(SymbolCatalog).filter_by(native_symbol="ETH-USD").one()
+            btc_catalog = session.query(SymbolVersion).filter_by(native_symbol="BTC-USD").one()
+            eth_catalog = session.query(SymbolVersion).filter_by(native_symbol="ETH-USD").one()
             assert btc_catalog.base == "BTC"
             assert eth_catalog.base == "ETH"
             btc_rest = (
@@ -600,6 +602,9 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
             )
 
         def add(self, _obj: Any) -> None:
+            return None
+
+        def flush(self) -> None:
             return None
 
         def commit(self) -> None:
@@ -1768,7 +1773,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
 
 
 class TestKrakenUpdateDatabaseBranches:
-    """Test cases for database update branch coverage using SymbolCatalog and SymbolAlias."""
+    """Test cases for database update branch coverage using Symbol, SymbolVersion, and SymbolAlias."""
 
     @pytest.fixture
     def updater(self) -> KrakenSymbolUpdaterService:
@@ -1800,13 +1805,14 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -1888,13 +1894,14 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -1976,13 +1983,14 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -2064,13 +2072,14 @@ class TestKrakenUpdateDatabaseBranches:
         """
         original_updated_at = datetime(2020, 1, 1, tzinfo=UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTC-USD", created_at=original_updated_at))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=original_updated_at,
                     timestamp=original_updated_at,
                 )
             )
@@ -2611,13 +2620,14 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTGOX-USD",
                     base="BTGOx",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -2656,13 +2666,14 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="FOO-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="FOO-USD",
                     base="FOO",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -2697,13 +2708,14 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTGOX-USD",
                     base="BTGOX",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -2750,13 +2762,14 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTGOX-USD",
                     base="BTGOX",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )
@@ -2795,13 +2808,14 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+
             session.add(
-                SymbolCatalog(
+                SymbolVersion(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=now,
                     timestamp=now,
                 )
             )

@@ -29,7 +29,7 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolCatalog
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
@@ -563,23 +563,23 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             chunk_end = chunk_start - timedelta(days=1)
 
     def _lookup_context_by_native(self, native_symbol: str) -> _SymbolContext | None:
-        """Look up catalog and polygon alias for a native symbol.
+        """Look up symbol version and polygon alias for a native symbol.
 
-        Queries SymbolCatalog for base/quote, then SymbolAlias for the
+        Queries SymbolVersion for base/quote, then SymbolAlias for the
         polygon rest exchange_symbol.
 
         Args:
             native_symbol: Internal normalized symbol (e.g., "BTC-USD").
 
         Returns:
-            _SymbolContext or None if catalog or polygon alias not found.
+            _SymbolContext or None if symbol version or polygon alias not found.
         """
         assert self._db_sync is not None
         with self._db_sync.get_session() as session:
-            catalog = session.execute(
-                select(SymbolCatalog).where(SymbolCatalog.native_symbol == native_symbol)
+            version = session.execute(
+                select(SymbolVersion).where(SymbolVersion.native_symbol == native_symbol)
             ).scalar_one_or_none()
-            if not catalog:
+            if not version:
                 return None
             alias = session.execute(
                 select(SymbolAlias)
@@ -590,23 +590,23 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             if not alias:
                 return None
             return _SymbolContext(
-                native_symbol=catalog.native_symbol,
+                native_symbol=version.native_symbol,
                 polygon_symbol=alias.exchange_symbol,
-                base_currency=catalog.base,
-                quote_currency=catalog.quote or catalog.base,
+                base_currency=version.base,
+                quote_currency=version.quote or version.base,
             )
 
     def _lookup_context_by_polygon_symbol(self, polygon_symbol: str) -> _SymbolContext | None:
-        """Look up alias and catalog for a polygon exchange symbol.
+        """Look up alias and symbol version for a polygon exchange symbol.
 
-        Queries SymbolAlias for polygon rest alias, then SymbolCatalog
+        Queries SymbolAlias for polygon rest alias, then SymbolVersion
         for base/quote.
 
         Args:
             polygon_symbol: Polygon API symbol (e.g., "X:BTCUSD").
 
         Returns:
-            _SymbolContext or None if alias or catalog not found.
+            _SymbolContext or None if alias or symbol version not found.
         """
         assert self._db_sync is not None
         with self._db_sync.get_session() as session:
@@ -618,16 +618,16 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             ).scalar_one_or_none()
             if not alias:
                 return None
-            catalog = session.execute(
-                select(SymbolCatalog).where(SymbolCatalog.native_symbol == alias.native_symbol)
+            version = session.execute(
+                select(SymbolVersion).where(SymbolVersion.native_symbol == alias.native_symbol)
             ).scalar_one_or_none()
-            if not catalog:
+            if not version:
                 return None
             return _SymbolContext(
-                native_symbol=catalog.native_symbol,
+                native_symbol=version.native_symbol,
                 polygon_symbol=alias.exchange_symbol,
-                base_currency=catalog.base,
-                quote_currency=catalog.quote or catalog.base,
+                base_currency=version.base,
+                quote_currency=version.quote or version.base,
             )
 
     def _resolve_polygon_symbol(self, symbol: str) -> _SymbolContext | None:

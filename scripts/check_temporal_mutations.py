@@ -28,16 +28,6 @@ WHITELIST_FILES: Final[set[str]] = {
     "repository.py",
 }
 
-CATALOG_MUTATION_RE: Final[re.Pattern[str]] = re.compile(
-    r"existing\.(base|quote|asset_type|timestamp)\s*="
-)
-
-WHITELIST_PATH_LINE_PATTERNS: Final[dict[str, list[re.Pattern[str]]]] = {
-    "application/updaters/symbols/base.py": [
-        CATALOG_MUTATION_RE,
-    ],
-}
-
 Violation = tuple[int, str, str]
 
 FORBIDDEN_ATTR_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
@@ -51,9 +41,9 @@ FORBIDDEN_ATTR_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
     (re.compile(r"\.\bcan_market_data\s*=(?!=)"), "SymbolExchangeCapability.can_market_data"),
     (re.compile(r"\.\bsource\s*=(?!=)"), "SymbolExchangeCapability.source"),
     (re.compile(r"\.\breason\s*=(?!=)"), "Signal.reason / SymbolExchangeCapability.reason"),
-    (re.compile(r"\.\bbase\s*=(?!=)"), "Instrument.base / SymbolCatalog.base"),
-    (re.compile(r"\.\bquote\s*=(?!=)"), "Instrument.quote / SymbolCatalog.quote"),
-    (re.compile(r"\.\basset_type\s*=(?!=)"), "SymbolCatalog.asset_type"),
+    (re.compile(r"\.\bbase\s*=(?!=)"), "Instrument.base / SymbolVersion.base"),
+    (re.compile(r"\.\bquote\s*=(?!=)"), "Instrument.quote / SymbolVersion.quote"),
+    (re.compile(r"\.\basset_type\s*=(?!=)"), "SymbolVersion.asset_type"),
 ]
 
 DELETE_PATTERN: Final[re.Pattern[str]] = re.compile(r"session\.delete\(")
@@ -134,25 +124,18 @@ def iter_python_files(root: Path) -> list[Path]:
 def _is_whitelisted_line(line: str, filepath: Path | None = None) -> bool:
     """Return True when the line matches a whitelisted pattern.
 
-    Checks global whitelist patterns first, then path-specific patterns
-    when ``filepath`` is provided and matches a key in
-    ``WHITELIST_PATH_LINE_PATTERNS``.
+    Checks global whitelist patterns only. The ``filepath`` parameter
+    is reserved for future path-specific whitelist extensions.
 
     Args:
         line: Source code line to check.
-        filepath: Optional file path for path-specific whitelist lookup.
+        filepath: Optional file path (reserved for future use).
 
     Returns:
         True when the line is safe to ignore.
     """
-    if any(pattern.search(line) for pattern in WHITELIST_LINE_PATTERNS):
-        return True
-    if filepath is not None:
-        posix = _path_suffix(filepath)
-        for suffix, patterns in WHITELIST_PATH_LINE_PATTERNS.items():
-            if posix.endswith(suffix) and any(p.search(line) for p in patterns):
-                return True
-    return False
+    _ = filepath
+    return any(pattern.search(line) for pattern in WHITELIST_LINE_PATTERNS)
 
 
 def _is_known_to_max_select_whitelisted(line: str) -> bool:

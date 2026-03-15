@@ -14,9 +14,10 @@ from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdate
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 
@@ -65,13 +66,14 @@ async def test_update_database_creates_and_updates_mappings(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="EUR-PLN", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="EUR-PLN",
                 base="EUR",
                 quote="PLN",
                 asset_type="forex",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
@@ -116,10 +118,10 @@ async def test_update_database_creates_and_updates_mappings(
     with repository.get_session() as session:
         assert isinstance(session, Session)
         eur_catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "EUR-PLN")
+            select(SymbolVersion).where(SymbolVersion.native_symbol == "EUR-PLN")
         ).scalar_one()
         usd_catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "USD-PLN")
+            select(SymbolVersion).where(SymbolVersion.native_symbol == "USD-PLN")
         ).scalar_one()
         eur_ws_alias = session.execute(
             select(SymbolAlias).where(
@@ -162,7 +164,7 @@ async def test_update_database_creates_and_updates_mappings(
     assert usd_catalog.base == "USD"
     assert usd_catalog.quote == "PLN"
     assert usd_catalog.asset_type == "forex"
-    assert usd_catalog.created_at == usd_catalog.timestamp
+    assert usd_catalog.known_to == KNOWN_TO_MAX
 
 
 @pytest.mark.asyncio()
@@ -179,13 +181,14 @@ async def test_update_database_skips_when_mapping_unchanged(
     original_timestamp = datetime(2023, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="EUR-PLN", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="EUR-PLN",
                 base="EUR",
                 quote="PLN",
                 asset_type="forex",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )

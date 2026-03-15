@@ -18,9 +18,10 @@ from urllib3.util.retry import RequestHistory
 from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.config.settings import AppSettings
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
@@ -726,13 +727,14 @@ async def test_update_existing_symbols_when_insert_disabled(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
@@ -760,7 +762,7 @@ async def test_update_existing_symbols_when_insert_disabled(
             )
         ).scalar_one()
         eur_catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "EUR-USD")
+            select(SymbolVersion).where(SymbolVersion.native_symbol == "EUR-USD")
         ).scalar_one_or_none()
     assert btc_alias.exchange_symbol == "X:BTCUSD"
     assert btc_alias.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
@@ -781,13 +783,14 @@ async def test_update_existing_alias_exchange_symbol(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
@@ -838,13 +841,14 @@ async def test_existing_alias_unchanged_when_same_symbol(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
@@ -910,7 +914,7 @@ async def test_insert_new_symbols_when_enabled(tmp_path: Path) -> None:
     with repository.get_session() as session:
         assert isinstance(session, Session)
         stock_catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "AAPL")
+            select(SymbolVersion).where(SymbolVersion.native_symbol == "AAPL")
         ).scalar_one()
         stock_alias = session.execute(
             select(SymbolAlias).where(
@@ -920,7 +924,7 @@ async def test_insert_new_symbols_when_enabled(tmp_path: Path) -> None:
             )
         ).scalar_one()
         index_catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "SPX")
+            select(SymbolVersion).where(SymbolVersion.native_symbol == "SPX")
         ).scalar_one()
         index_alias = session.execute(
             select(SymbolAlias).where(
@@ -1005,7 +1009,7 @@ async def test_update_database_skips_entries_without_ticker(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog_count = session.execute(select(SymbolCatalog)).scalars().all()
+        catalog_count = session.execute(select(SymbolVersion)).scalars().all()
         alias_count = session.execute(select(SymbolAlias)).scalars().all()
     assert len(catalog_count) == 0
     assert len(alias_count) == 0
@@ -1028,7 +1032,7 @@ async def test_update_database_skips_unmatchable_symbols(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog_count = session.execute(select(SymbolCatalog)).scalars().all()
+        catalog_count = session.execute(select(SymbolVersion)).scalars().all()
         alias_count = session.execute(select(SymbolAlias)).scalars().all()
     assert len(catalog_count) == 0
     assert len(alias_count) == 0
@@ -1055,7 +1059,7 @@ async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog_count = len(session.execute(select(SymbolCatalog)).scalars().all())
+        catalog_count = len(session.execute(select(SymbolVersion)).scalars().all())
         alias_count = len(session.execute(select(SymbolAlias)).scalars().all())
     assert catalog_count == 110
     assert alias_count == 110
@@ -1202,13 +1206,14 @@ async def test_update_database_creates_capability_rows(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )

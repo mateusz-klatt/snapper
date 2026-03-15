@@ -2,7 +2,7 @@
 
 Creates all core tables for the Snapper trading system including
 instruments, candles, trades, orders, users, and market snapshots.
-Seeds symbol catalog with aliases and exchange capabilities.
+Seeds symbols, symbol versions, aliases, and exchange capabilities.
 """
 
 from collections.abc import Sequence
@@ -15,7 +15,7 @@ from alembic import op
 from sqlalchemy import text
 
 _INSTRUMENT_FK = "instruments.id"
-_FK_SYMBOL_CATALOG = "symbol_catalog.native_symbol"
+_FK_SYMBOLS = "symbols.native_symbol"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 _KNOWN_TO_ACTIVE = "known_to = '9999-12-31T23:59:59+00:00'"
@@ -100,41 +100,55 @@ def upgrade() -> None:
     """Create initial database schema and seed reference data.
 
     Creates all tables for instruments, candles, trades, orders, executions,
-    positions, signals, users, settings, symbol catalog, symbol aliases,
+    positions, signals, users, settings, symbols, symbol versions, symbol aliases,
     process runs, instrument specs, and market snapshots.
-    Seeds symbol catalog entries, aliases, and exchange capabilities.
+    Seeds symbols, symbol versions, aliases, and exchange capabilities.
     """
     op.create_table(
-        "symbol_catalog",
+        "symbols",
+        sa.Column("native_symbol", sa.String(32), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("native_symbol"),
+    )
+    op.create_table(
+        "symbol_versions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("native_symbol", sa.String(32), nullable=False),
         sa.Column("base", sa.String(16), nullable=False),
         sa.Column("quote", sa.String(16), nullable=True),
         sa.Column("asset_type", sa.String(16), server_default="crypto", nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOLS]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("native_symbol", name="uq_symbol_catalog_native_symbol"),
         sa.CheckConstraint(
             "asset_type IN ('crypto', 'forex', 'equity', 'index')",
-            name="ck_symbol_catalog_asset_type",
+            name="ck_symbol_version_asset_type",
         ),
         sa.CheckConstraint(
             "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
-            name="ck_symbol_catalog_quote_required_for_pairs",
+            name="ck_symbol_version_quote_required_for_pairs",
         ),
     )
     op.create_index(
-        "ix_symbol_catalog_public_id",
-        "symbol_catalog",
+        "uq_symbol_version_active",
+        "symbol_versions",
+        ["native_symbol"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "ix_symbol_versions_public_id",
+        "symbol_versions",
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_sc_base_quote", "symbol_catalog", ["base", "quote"])
+    op.create_index("ix_symbol_versions_native_symbol", "symbol_versions", ["native_symbol"])
+    op.create_index("ix_sv_base_quote", "symbol_versions", ["base", "quote"])
     op.create_table(
         "symbol_aliases",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -146,7 +160,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOL_CATALOG]),
+        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOLS]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
             _CK_EXCHANGE_LOWER,
@@ -195,7 +209,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOL_CATALOG]),
+        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOLS]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
             _CK_EXCHANGE_LOWER,
@@ -243,7 +257,7 @@ def upgrade() -> None:
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=True),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["symbol"], [_FK_SYMBOL_CATALOG]),
+        sa.ForeignKeyConstraint(["symbol"], [_FK_SYMBOLS]),
         sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
     )
     op.create_index(
@@ -655,9 +669,19 @@ def upgrade() -> None:
     for entry in SYMBOL_CATALOG:
         conn.execute(
             text("""
-                INSERT INTO symbol_catalog
-                (public_id, native_symbol, base, quote, asset_type, created_at, timestamp, known_to)
-                VALUES (:public_id, :native_symbol, :base, :quote, :asset_type, :created_at, :timestamp, :known_to)
+                INSERT INTO symbols (native_symbol, created_at)
+                VALUES (:native_symbol, :created_at)
+                """),
+            {
+                "native_symbol": entry[0],
+                "created_at": now,
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO symbol_versions
+                (public_id, native_symbol, base, quote, asset_type, timestamp, known_to)
+                VALUES (:public_id, :native_symbol, :base, :quote, :asset_type, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
@@ -665,7 +689,6 @@ def upgrade() -> None:
                 "base": entry[1],
                 "quote": entry[2],
                 "asset_type": entry[3],
-                "created_at": now,
                 "timestamp": now,
                 "known_to": _KNOWN_TO_MAX,
             },
@@ -730,4 +753,5 @@ def downgrade() -> None:
     op.drop_table("instruments")
     op.drop_table("symbol_exchange_capabilities")
     op.drop_table("symbol_aliases")
-    op.drop_table("symbol_catalog")
+    op.drop_table("symbol_versions")
+    op.drop_table("symbols")

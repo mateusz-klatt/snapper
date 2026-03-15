@@ -16,7 +16,7 @@ from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
 from snapper.core.types import AssetType
-from snapper.data.models import SymbolCatalog
+from snapper.data.models import Symbol
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
 
@@ -146,10 +146,10 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         now: datetime,
         stats: dict[str, int],
     ) -> None:
-        """Insert or update Polygon catalog and alias rows.
+        """Insert or update Polygon symbol identity and alias rows.
 
         When ``insert_new`` is False, only updates aliases for symbols that
-        already have a catalog entry. New symbols are skipped.
+        already have a symbol identity row. New symbols are skipped.
 
         Args:
             session: SQLAlchemy session.
@@ -160,10 +160,10 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             now: Current timestamp for created_at/updated_at.
             stats: Mutable stats dict to increment counters.
         """
-        existing_catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == native_symbol)
+        existing_symbol = session.execute(
+            select(Symbol).where(Symbol.native_symbol == native_symbol)
         ).scalar_one_or_none()
-        if existing_catalog is None:
+        if existing_symbol is None:
             if not self.insert_new:
                 stats["skipped"] += 1
                 return

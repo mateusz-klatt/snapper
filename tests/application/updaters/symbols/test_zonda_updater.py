@@ -1,7 +1,7 @@
 """Tests for Zonda symbol updater service.
 
-Validates that the Zonda updater correctly creates SymbolCatalog and
-SymbolAlias rows via _upsert_catalog / _upsert_alias.
+Validates that the Zonda updater correctly creates Symbol, SymbolVersion,
+and SymbolAlias rows via _upsert_catalog / _upsert_alias.
 """
 
 from collections.abc import AsyncIterator
@@ -27,9 +27,10 @@ from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.indicators.ta_lib_adapter import macd
 from snapper.indicators.ta_lib_adapter import rsi
@@ -228,13 +229,14 @@ async def test_update_database_handles_inserts_and_updates(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
@@ -275,7 +277,7 @@ async def test_update_database_handles_inserts_and_updates(
             )
         ).scalar_one()
         eth_catalog = session.execute(
-            select(SymbolCatalog).where(SymbolCatalog.native_symbol == "ETH-USD")
+            select(SymbolVersion).where(SymbolVersion.native_symbol == "ETH-USD")
         ).scalar_one()
         eth_ws = session.execute(
             select(SymbolAlias).where(
@@ -306,13 +308,14 @@ async def test_update_database_skips_unchanged_mapping(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
@@ -418,6 +421,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
             )
         ),
         add=Mock(),
+        flush=Mock(),
         commit=Mock(),
     )
 
@@ -447,7 +451,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
         }
     ]
     await svc._update_database(symbols)
-    assert fake_session.add.call_count == 4
+    assert fake_session.add.call_count == 5
 
 
 def test_get_default_kwargs_and_setting_key() -> None:
@@ -496,13 +500,14 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
     svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
     seed_time = datetime.now(UTC)
     with session_local() as session:
+        session.add(Symbol(native_symbol="BTC-USD", created_at=seed_time))
+
         session.add(
-            SymbolCatalog(
+            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=seed_time,
                 timestamp=seed_time,
             )
         )
@@ -611,6 +616,9 @@ async def test_update_database_handles_commit_error(monkeypatch: pytest.MonkeyPa
 
         def add(self, _obj: Any) -> None:
             """Accept any add call without action."""
+
+        def flush(self) -> None:
+            """Accept any flush call without action."""
 
         def commit(self) -> None:
             """Raise RuntimeError to simulate commit failure."""
