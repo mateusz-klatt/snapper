@@ -19,6 +19,7 @@ from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
+from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
@@ -1662,3 +1663,185 @@ def test_close_and_insert_sync_closes_existing_and_inserts_new(
     assert active[0].public_id == original_public_id
     assert active[0].source == "updated"
     assert active[0].can_trade is False
+
+
+def _assert_contiguous_intervals(versions: list[Any]) -> None:
+    """Assert temporal versions form contiguous non-overlapping half-open intervals.
+
+    Sorts by timestamp and verifies prev.known_to == next.timestamp for each
+    consecutive pair. Also verifies the last version has known_to == KNOWN_TO_MAX.
+
+    Args:
+        versions: List of ORM model instances with timestamp and known_to fields.
+    """
+    sorted_versions = sorted(versions, key=lambda v: v.timestamp)
+    for i in range(len(sorted_versions) - 1):
+        assert sorted_versions[i].known_to == sorted_versions[i + 1].timestamp
+    if sorted_versions:
+        assert sorted_versions[-1].known_to == KNOWN_TO_MAX
+
+
+def test_real_updater_catalog_reingest_same_payload_is_noop(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify real _upsert_catalog with same payload creates no new version.
+
+    Given: A Symbol + SymbolVersion (base=BTC, quote=USD, asset_type=crypto)
+        created via the real _upsert_catalog method at t1,
+    When: _upsert_catalog is called again at t2 with identical payload,
+    Then: Still only 1 SymbolVersion row exists and its timestamp equals t1.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        SymbolUpdaterService._upsert_catalog(session, "BTC-USD", "BTC", "USD", "crypto", t1)
+        session.commit()
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        before = (
+            session.execute(select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD"))
+            .scalars()
+            .all()
+        )
+    assert len(before) == 1
+    original_ts = before[0].timestamp
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        SymbolUpdaterService._upsert_catalog(session, "BTC-USD", "BTC", "USD", "crypto", t2)
+        session.commit()
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        after = (
+            session.execute(select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD"))
+            .scalars()
+            .all()
+        )
+    assert len(after) == 1
+    assert after[0].timestamp.replace(tzinfo=None) == original_ts.replace(tzinfo=None)
+
+
+def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify real _upsert_alias with same exchange_symbol preserves public_id.
+
+    Given: A Symbol + SymbolAlias (exchange_symbol='XBT/USD') created via
+        the real _upsert_alias method at t1,
+    When: _upsert_alias is called again at t2 with the same exchange_symbol,
+    Then: The result is 'unchanged', the same public_id and timestamp are
+        preserved, and there is still only 1 SymbolAlias row.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
+
+    _seed_catalog(updater, "BTC-USD", t1)
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result1 = SymbolUpdaterService._upsert_alias(
+            session, "BTC-USD", "kraken", "ws", "XBT/USD", t1
+        )
+        session.commit()
+    assert result1 == "created"
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        before = (
+            session.execute(
+                select(SymbolAlias).where(
+                    SymbolAlias.native_symbol == "BTC-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ws",
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(before) == 1
+    original_public_id = before[0].public_id
+    original_ts = before[0].timestamp
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result2 = SymbolUpdaterService._upsert_alias(
+            session, "BTC-USD", "kraken", "ws", "XBT/USD", t2
+        )
+        session.commit()
+    assert result2 == "unchanged"
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        after = (
+            session.execute(
+                select(SymbolAlias).where(
+                    SymbolAlias.native_symbol == "BTC-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ws",
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(after) == 1
+    assert after[0].public_id == original_public_id
+    assert after[0].timestamp.replace(tzinfo=None) == original_ts.replace(tzinfo=None)
+
+
+def test_real_updater_capability_change_closes_old_inserts_new(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify real _upsert_capability with changed can_trade closes old and inserts new.
+
+    Given: A Symbol + SymbolExchangeCapability (can_trade=False) created via
+        the real _upsert_capability method at t1,
+    When: _upsert_capability is called at t2 with can_trade=True,
+    Then: Two rows exist with the same public_id and contiguous intervals.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
+
+    _seed_catalog(updater, "BTC-USD", t1)
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result1 = SymbolUpdaterService._upsert_capability(
+            session, "BTC-USD", "kraken", True, False, "seed", None, t1
+        )
+        session.commit()
+    assert result1 == "created"
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        result2 = SymbolUpdaterService._upsert_capability(
+            session, "BTC-USD", "kraken", True, True, "kraken_updater", "Promoted", t2
+        )
+        session.commit()
+    assert result2 == "updated"
+
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        all_caps = (
+            session.execute(
+                select(SymbolExchangeCapability).where(
+                    SymbolExchangeCapability.native_symbol == "BTC-USD",
+                    SymbolExchangeCapability.exchange == "kraken",
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(all_caps) == 2
+    public_ids = {c.public_id for c in all_caps}
+    assert len(public_ids) == 1
+    _assert_contiguous_intervals(all_caps)

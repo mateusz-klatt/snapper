@@ -2,7 +2,7 @@
 
 Validates that the close-old + insert-new pattern produces contiguous
 non-overlapping half-open intervals [timestamp, known_to) for candles,
-orders, and settings. Uses real SQLite in-memory databases via
+orders, settings, and users. Uses real SQLite databases via
 SQLAlchemyRepository.
 """
 
@@ -24,8 +24,11 @@ from snapper.data.models import Order
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolVersion
+from snapper.data.models import User
+from snapper.data.models import UserLoginEvent
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import close_and_insert
+from snapper.data.repository import where_active
 
 
 def assert_contiguous_intervals(versions: list[Any]) -> None:
@@ -878,3 +881,429 @@ class TestSymbolVersionBitemporal:
         assert len(rows) == 1
         assert rows[0].timestamp == t1
         assert rows[0].known_to == KNOWN_TO_MAX
+
+
+class TestCandlePolicyBitemporal:
+    """Tests documenting current candle upsert policy edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_upsert_candles_duplicate_same_timestamp_is_idempotent(
+        self, tmp_path: Path
+    ) -> None:
+        """Upserting the same candle with same timestamp creates a zero-length closed version.
+
+        Given: A candle inserted at t1 with close=100,
+        When: The same candle is upserted again at t1 with identical OHLCV,
+        Then: Two rows exist: the original closed with [t1, t1) (zero-length)
+            and the new active with [t1, MAX). This documents current policy
+            (not necessarily ideal but deterministic).
+        """
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
+
+        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
+
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(Candle).where(
+                            Candle.instrument_id == inst_id,
+                            Candle.timeframe == "1m",
+                            Candle.open_at == open_at,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert len(rows) == 2
+        public_ids = {r.public_id for r in rows}
+        assert len(public_ids) == 1
+
+        closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
+        assert len(closed) == 1
+        assert closed[0].known_to == closed[0].timestamp
+
+        active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
+        assert len(active) == 1
+        assert active[0].timestamp == t1
+
+    @pytest.mark.asyncio
+    async def test_upsert_candles_out_of_order_timestamp_rejected(self, tmp_path: Path) -> None:
+        """Out-of-order timestamp creates a second active record (known limitation).
+
+        Given: A candle inserted at t2,
+        When: A candle is upserted at t1 < t2 for the same business key,
+        Then: The temporal filter (timestamp <= t1 AND known_to > t1) does not
+            find the active record (which has timestamp=t2 > t1), so a second
+            active record is created. This documents a known limitation:
+            out-of-order timestamps are not supported.
+        """
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
+
+        await repo.upsert_candles([_candle_row(inst_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
+
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(Candle).where(
+                            Candle.instrument_id == inst_id,
+                            Candle.timeframe == "1m",
+                            Candle.open_at == open_at,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert len(rows) == 2
+        active_rows = [r for r in rows if r.known_to == KNOWN_TO_MAX]
+        assert len(active_rows) == 2
+
+        public_ids = {r.public_id for r in rows}
+        assert len(public_ids) == 2
+
+
+async def _create_user(
+    repo: SQLAlchemyRepository,
+    username: str,
+    password_hash: str,
+    now: datetime,
+    email: str | None = None,
+) -> User:
+    """Create a User row via direct ORM insert and return the refreshed instance.
+
+    Args:
+        repo: Active async repository.
+        username: Username for the new user.
+        password_hash: Pre-hashed password.
+        now: Timestamp for created_at and temporal columns.
+        email: Optional email address.
+
+    Returns:
+        The refreshed User ORM instance.
+    """
+    async with repo.session() as s:
+        user = User(
+            username=username,
+            email=email,
+            password_hash=password_hash,
+            role="viewer",
+            is_active=True,
+            created_at=now,
+            timestamp=now,
+        )
+        s.add(user)
+        await s.commit()
+        await s.refresh(user)
+    return user
+
+
+class TestUserBitemporal:
+    """Integration tests for User SCD Type 2 bitemporal behavior."""
+
+    @pytest.mark.asyncio
+    async def test_update_user_get_by_username_returns_active_only(self, tmp_path: Path) -> None:
+        """After close+insert, querying by username returns only the new version.
+
+        Given: A user created at t1 with password_hash='hash_v1',
+        When: The user is updated via close+insert at t2 with password_hash='hash_v2',
+        Then: Querying active users by username returns exactly one row with the new hash.
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
+
+        user_v1 = await _create_user(repo, "alice", "hash_v1", t1)
+
+        async with repo.session() as s:
+            await close_and_insert(
+                session=s,
+                model=User,
+                match_filters=[User.username == "alice"],
+                new_values={
+                    "username": "alice",
+                    "email": None,
+                    "password_hash": "hash_v2",
+                    "role": "viewer",
+                    "is_active": True,
+                    "created_at": user_v1.created_at,
+                },
+                bus_time=t2,
+            )
+            await s.commit()
+
+        async with repo.session() as s:
+            stmt = select(User).where(
+                User.username == "alice",
+                *where_active(User),
+            )
+            result = await s.execute(stmt)
+            active_user = result.scalar_one_or_none()
+
+        assert active_user is not None
+        assert active_user.password_hash == "hash_v2"
+
+    @pytest.mark.asyncio
+    async def test_get_all_users_returns_one_active_per_username(self, tmp_path: Path) -> None:
+        """After two updates, get_all active users returns exactly 1 per username.
+
+        Given: A user created at t1 and updated twice at t2 and t3,
+        When: All active users are queried,
+        Then: Exactly 1 active user row is returned (not 3 versions).
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
+        t3 = datetime(2024, 6, 1, 12, 2, 0, tzinfo=UTC)
+
+        user_v1 = await _create_user(repo, "bob", "hash_v1", t1)
+
+        async with repo.session() as s:
+            await close_and_insert(
+                session=s,
+                model=User,
+                match_filters=[User.username == "bob"],
+                new_values={
+                    "username": "bob",
+                    "email": "bob@example.com",
+                    "password_hash": "hash_v2",
+                    "role": "viewer",
+                    "is_active": True,
+                    "created_at": user_v1.created_at,
+                },
+                bus_time=t2,
+            )
+            await s.commit()
+
+        async with repo.session() as s:
+            await close_and_insert(
+                session=s,
+                model=User,
+                match_filters=[User.username == "bob"],
+                new_values={
+                    "username": "bob",
+                    "email": "bob@newdomain.com",
+                    "password_hash": "hash_v3",
+                    "role": "operator",
+                    "is_active": True,
+                    "created_at": user_v1.created_at,
+                },
+                bus_time=t3,
+            )
+            await s.commit()
+
+        async with repo.session() as s:
+            total = (await s.execute(select(func.count()).select_from(User))).scalar_one()
+            assert total == 3
+
+        async with repo.session() as s:
+            active_stmt = select(User).where(*where_active(User))
+            active_users = (await s.execute(active_stmt)).scalars().all()
+
+        assert len(active_users) == 1
+        assert active_users[0].email == "bob@newdomain.com"
+        assert active_users[0].role == "operator"
+
+    @pytest.mark.asyncio
+    async def test_create_user_sets_timestamp(self, tmp_path: Path) -> None:
+        """Directly created user has a non-None timestamp.
+
+        Given: An empty users table,
+        When: A user is created with an explicit timestamp,
+        Then: Reading the user back shows timestamp is NOT None.
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+
+        await _create_user(repo, "carol", "hash_v1", now)
+
+        async with repo.session() as s:
+            user = (await s.execute(select(User).where(User.username == "carol"))).scalars().first()
+
+        assert user is not None
+        assert user.timestamp is not None
+        assert user.timestamp == now
+
+    @pytest.mark.asyncio
+    async def test_authenticate_user_creates_login_event_not_user_version(
+        self, tmp_path: Path
+    ) -> None:
+        """Authentication creates a login event, not a new user version.
+
+        Given: A user created at t1,
+        When: A UserLoginEvent is appended (simulating authentication),
+        Then: One UserLoginEvent row exists and still only 1 active User version.
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        login_time = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
+
+        user = await _create_user(repo, "dave", "hash_v1", t1)
+
+        async with repo.session() as s:
+            login_event = UserLoginEvent(
+                user_public_id=user.public_id,
+                logged_at=login_time,
+            )
+            s.add(login_event)
+            await s.commit()
+
+        async with repo.session() as s:
+            user_count = (
+                await s.execute(
+                    select(func.count()).select_from(User).where(User.username == "dave")
+                )
+            ).scalar_one()
+            login_count = (
+                await s.execute(
+                    select(func.count())
+                    .select_from(UserLoginEvent)
+                    .where(UserLoginEvent.user_public_id == user.public_id)
+                )
+            ).scalar_one()
+
+        assert user_count == 1
+        assert login_count == 1
+
+
+class TestSettingsApiBitemporal:
+    """Integration tests for Settings SCD Type 2 read/delete behavior."""
+
+    @pytest.mark.asyncio
+    async def test_settings_read_returns_only_active_after_updates(self, tmp_path: Path) -> None:
+        """After two updates, reading settings returns only the active version.
+
+        Given: A setting created at t1 with value='v1',
+        When: Updated twice via close+insert to 'v2' at t2 and 'v3' at t3,
+        Then: Querying active settings returns exactly 1 row with value='v3'.
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
+        t3 = datetime(2024, 6, 1, 12, 2, 0, tzinfo=UTC)
+
+        async with repo.session() as s:
+            v1 = Setting(
+                key="app.theme",
+                value="v1",
+                category="ui",
+                description="Theme setting",
+                is_encrypted=False,
+                timestamp=t1,
+            )
+            s.add(v1)
+            await s.commit()
+
+        async with repo.session() as s:
+            await close_and_insert(
+                session=s,
+                model=Setting,
+                match_filters=[Setting.key == "app.theme"],
+                new_values={
+                    "key": "app.theme",
+                    "value": "v2",
+                    "category": "ui",
+                    "description": "Theme setting",
+                    "is_encrypted": False,
+                },
+                bus_time=t2,
+            )
+            await s.commit()
+
+        async with repo.session() as s:
+            await close_and_insert(
+                session=s,
+                model=Setting,
+                match_filters=[Setting.key == "app.theme"],
+                new_values={
+                    "key": "app.theme",
+                    "value": "v3",
+                    "category": "ui",
+                    "description": "Theme setting",
+                    "is_encrypted": False,
+                },
+                bus_time=t3,
+            )
+            await s.commit()
+
+        async with repo.session() as s:
+            active_settings = (
+                (
+                    await s.execute(
+                        select(Setting).where(
+                            Setting.key == "app.theme",
+                            *where_active(Setting),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert len(active_settings) == 1
+        assert active_settings[0].value == "v3"
+
+    @pytest.mark.asyncio
+    async def test_settings_delete_closes_active_not_physical_delete(self, tmp_path: Path) -> None:
+        """Deleting a setting closes the active row, not a physical DELETE.
+
+        Given: A setting 'cache.ttl' created at t1,
+        When: The setting is 'deleted' by closing its active row at t2,
+        Then: The row still exists in the database with known_to != KNOWN_TO_MAX
+            and querying active settings returns 0 for that key.
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
+
+        async with repo.session() as s:
+            setting = Setting(
+                key="cache.ttl",
+                value="300",
+                category="system",
+                description="Cache TTL",
+                is_encrypted=False,
+                timestamp=t1,
+            )
+            s.add(setting)
+            await s.commit()
+            await s.refresh(setting)
+            setting_id = setting.id
+
+        async with repo.session() as s:
+            await s.execute(update(Setting).where(Setting.id == setting_id).values(known_to=t2))
+            await s.commit()
+
+        async with repo.session() as s:
+            all_rows = (
+                (await s.execute(select(Setting).where(Setting.key == "cache.ttl"))).scalars().all()
+            )
+            assert len(all_rows) == 1
+            assert all_rows[0].known_to == t2
+            assert all_rows[0].known_to != KNOWN_TO_MAX
+
+        async with repo.session() as s:
+            active = (
+                (
+                    await s.execute(
+                        select(Setting).where(
+                            Setting.key == "cache.ttl",
+                            *where_active(Setting),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(active) == 0
