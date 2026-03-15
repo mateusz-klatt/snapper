@@ -51,17 +51,18 @@ class TestShouldSkipPath:
         python_file = tmp_path / "__pycache__" / "module.pyc"
         assert checker.should_skip_path(python_file) is True
 
-    def test_skips_whitelisted_path(self, tmp_path: Path) -> None:
-        """Verify should_skip_path returns True for whitelisted path suffixes.
+    def test_does_not_skip_symbol_updater_base(self, tmp_path: Path) -> None:
+        """Verify should_skip_path returns False for symbol updater base.
 
-        Given: A file matching a WHITELIST_PATHS suffix,
+        Given: A file path for the symbol updater base module (scanned at
+               line level via WHITELIST_PATH_LINE_PATTERNS instead),
         When: should_skip_path is called,
-        Then: It returns True.
+        Then: It returns False.
         """
         python_file = (
             tmp_path / "src" / "snapper" / "application" / "updaters" / "symbols" / "base.py"
         )
-        assert checker.should_skip_path(python_file) is True
+        assert checker.should_skip_path(python_file) is False
 
     def test_does_not_skip_normal_file(self, tmp_path: Path) -> None:
         """Verify should_skip_path returns False for normal source files.
@@ -653,3 +654,263 @@ class TestMain:
 
         assert result == 0
         assert mock_run.call_args.args[1] is False
+
+
+class TestPathSpecificWhitelist:
+    """Test suite for path-specific line whitelist functionality."""
+
+    def test_catalog_mutation_whitelisted_in_base_py(self, tmp_path: Path) -> None:
+        """Verify SymbolCatalog mutations are whitelisted in the updater base file.
+
+        Given: A file at updaters/symbols/base.py with existing.base = assignment,
+        When: check_file is called,
+        Then: No violation reported for catalog mutations.
+        """
+        base_dir = tmp_path / "application" / "updaters" / "symbols"
+        base_dir.mkdir(parents=True)
+        base_file = base_dir / "base.py"
+        base_file.write_text(
+            "existing.base = base\n"
+            "existing.quote = quote\n"
+            "existing.asset_type = asset_type\n"
+            "existing.timestamp = now\n"
+        )
+
+        findings = checker.check_file(base_file)
+
+        assert findings == []
+
+    def test_catalog_mutation_flagged_in_other_file(self, tmp_path: Path) -> None:
+        """Verify SymbolCatalog mutations are flagged in non-whitelisted files.
+
+        Given: A file not matching updaters/symbols/base.py with .base = assignment,
+        When: check_file is called,
+        Then: Violation reported.
+        """
+        other_file = tmp_path / "other_service.py"
+        other_file.write_text("existing.base = base\n")
+
+        findings = checker.check_file(other_file)
+
+        assert len(findings) == 1
+        assert "base" in findings[0][1]
+
+    def test_non_catalog_mutation_flagged_in_base_py(self, tmp_path: Path) -> None:
+        """Verify non-catalog mutations are still flagged in updater base file.
+
+        Given: A file at updaters/symbols/base.py with .value = assignment,
+        When: check_file is called,
+        Then: Violation reported for Setting.value.
+        """
+        base_dir = tmp_path / "application" / "updaters" / "symbols"
+        base_dir.mkdir(parents=True)
+        base_file = base_dir / "base.py"
+        base_file.write_text("setting.value = new_val\n")
+
+        findings = checker.check_file(base_file)
+
+        assert len(findings) == 1
+        assert findings[0][1] == "Setting.value"
+
+
+class TestKnownToMaxSelectDetection:
+    """Test suite for KNOWN_TO_MAX SELECT/WHERE detection."""
+
+    def test_detects_equality_comparison(self, tmp_path: Path) -> None:
+        """Verify check_file detects KNOWN_TO_MAX equality in SELECT context.
+
+        Given: A file with == KNOWN_TO_MAX comparison,
+        When: check_file is called,
+        Then: Violation reported for KNOWN_TO_MAX in SELECT/WHERE.
+        """
+        python_file = tmp_path / "query.py"
+        python_file.write_text("User.known_to == KNOWN_TO_MAX,\n")
+
+        findings = checker.check_file(python_file)
+
+        known_to_findings = [f for f in findings if "KNOWN_TO_MAX" in f[1]]
+        assert len(known_to_findings) == 1
+        assert known_to_findings[0][1] == "KNOWN_TO_MAX in SELECT/WHERE"
+
+    def test_detects_inequality_comparison(self, tmp_path: Path) -> None:
+        """Verify check_file detects KNOWN_TO_MAX inequality comparison.
+
+        Given: A file with != KNOWN_TO_MAX comparison,
+        When: check_file is called,
+        Then: Violation reported for KNOWN_TO_MAX in SELECT/WHERE.
+        """
+        python_file = tmp_path / "query.py"
+        python_file.write_text("cap.known_to != KNOWN_TO_MAX\n")
+
+        findings = checker.check_file(python_file)
+
+        known_to_findings = [f for f in findings if "KNOWN_TO_MAX" in f[1]]
+        assert len(known_to_findings) == 1
+        assert known_to_findings[0][1] == "KNOWN_TO_MAX in SELECT/WHERE"
+
+    def test_whitelists_dict_insert_default(self, tmp_path: Path) -> None:
+        """Verify dict assignment with KNOWN_TO_MAX is not flagged.
+
+        Given: A file with dict-style known_to assignment for INSERT,
+        When: check_file is called,
+        Then: No KNOWN_TO_MAX violation reported.
+        """
+        python_file = tmp_path / "repo.py"
+        python_file.write_text('r["known_to"] = KNOWN_TO_MAX\n')
+
+        findings = checker.check_file(python_file)
+
+        known_to_findings = [f for f in findings if "KNOWN_TO_MAX" in f[1]]
+        assert known_to_findings == []
+
+    def test_whitelists_new_values_insert_default(self, tmp_path: Path) -> None:
+        """Verify new_values dict assignment with KNOWN_TO_MAX is not flagged.
+
+        Given: A file with new_values known_to assignment for INSERT,
+        When: check_file is called,
+        Then: No KNOWN_TO_MAX violation reported.
+        """
+        python_file = tmp_path / "repo.py"
+        python_file.write_text('new_values["known_to"] = KNOWN_TO_MAX\n')
+
+        findings = checker.check_file(python_file)
+
+        known_to_findings = [f for f in findings if "KNOWN_TO_MAX" in f[1]]
+        assert known_to_findings == []
+
+    def test_detects_reversed_equality(self, tmp_path: Path) -> None:
+        """Verify detection works with KNOWN_TO_MAX on the left side.
+
+        Given: A file with KNOWN_TO_MAX == comparison (reversed order),
+        When: check_file is called,
+        Then: Violation reported.
+        """
+        python_file = tmp_path / "query.py"
+        python_file.write_text("KNOWN_TO_MAX == cap.known_to\n")
+
+        findings = checker.check_file(python_file)
+
+        known_to_findings = [f for f in findings if "KNOWN_TO_MAX" in f[1]]
+        assert len(known_to_findings) == 1
+
+
+class TestIsKnownToMaxSelectWhitelisted:
+    """Test suite for _is_known_to_max_select_whitelisted."""
+
+    def test_dict_assignment_whitelisted(self) -> None:
+        """Verify dict-style known_to INSERT default is whitelisted.
+
+        Given: A line assigning KNOWN_TO_MAX to dict key,
+        When: _is_known_to_max_select_whitelisted is called,
+        Then: Returns True.
+        """
+        assert checker._is_known_to_max_select_whitelisted('r["known_to"] = KNOWN_TO_MAX')
+
+    def test_new_values_assignment_whitelisted(self) -> None:
+        """Verify new_values INSERT default is whitelisted.
+
+        Given: A line assigning KNOWN_TO_MAX to new_values dict,
+        When: _is_known_to_max_select_whitelisted is called,
+        Then: Returns True.
+        """
+        assert checker._is_known_to_max_select_whitelisted('new_values["known_to"] = KNOWN_TO_MAX')
+
+    def test_select_comparison_not_whitelisted(self) -> None:
+        """Verify SELECT equality comparison is not whitelisted.
+
+        Given: A line with == KNOWN_TO_MAX in a WHERE clause,
+        When: _is_known_to_max_select_whitelisted is called,
+        Then: Returns False.
+        """
+        assert not checker._is_known_to_max_select_whitelisted("User.known_to == KNOWN_TO_MAX,")
+
+
+class TestCheckLine:
+    """Test suite for _check_line helper function."""
+
+    def test_skips_whitelisted_line(self, tmp_path: Path) -> None:
+        """Verify _check_line skips globally whitelisted patterns.
+
+        Given: A line with a function definition containing a forbidden word,
+        When: _check_line is called,
+        Then: No violation added.
+        """
+        violations: list[checker.Violation] = []
+        filepath = tmp_path / "test.py"
+        checker._check_line(1, "    def set_value(self) -> None:", filepath, violations)
+        assert violations == []
+
+    def test_detects_mutation(self, tmp_path: Path) -> None:
+        """Verify _check_line detects forbidden mutations.
+
+        Given: A line with a forbidden attribute assignment,
+        When: _check_line is called,
+        Then: Violation added to the list.
+        """
+        violations: list[checker.Violation] = []
+        filepath = tmp_path / "test.py"
+        checker._check_line(5, "setting.value = new_val", filepath, violations)
+        assert len(violations) == 1
+        assert violations[0][0] == 5
+
+    def test_detects_delete(self, tmp_path: Path) -> None:
+        """Verify _check_line detects session.delete calls.
+
+        Given: A line with session.delete(),
+        When: _check_line is called,
+        Then: Violation added for session.delete().
+        """
+        violations: list[checker.Violation] = []
+        filepath = tmp_path / "test.py"
+        checker._check_line(3, "session.delete(obj)", filepath, violations)
+        assert len(violations) == 1
+        assert violations[0][1] == "session.delete()"
+
+    def test_detects_known_to_max_select(self, tmp_path: Path) -> None:
+        """Verify _check_line detects KNOWN_TO_MAX in SELECT context.
+
+        Given: A line with == KNOWN_TO_MAX comparison,
+        When: _check_line is called,
+        Then: Violation added for KNOWN_TO_MAX in SELECT/WHERE.
+        """
+        violations: list[checker.Violation] = []
+        filepath = tmp_path / "test.py"
+        checker._check_line(7, "User.known_to == KNOWN_TO_MAX,", filepath, violations)
+        known_to_violations = [v for v in violations if "KNOWN_TO_MAX" in v[1]]
+        assert len(known_to_violations) == 1
+
+
+class TestPathSuffix:
+    """Test suite for _path_suffix helper."""
+
+    def test_returns_posix_path(self, tmp_path: Path) -> None:
+        """Verify _path_suffix returns POSIX-formatted path string.
+
+        Given: A Path object,
+        When: _path_suffix is called,
+        Then: Returns the POSIX string representation.
+        """
+        filepath = tmp_path / "src" / "snapper" / "base.py"
+        result = checker._path_suffix(filepath)
+        assert result.endswith("src/snapper/base.py")
+
+
+class TestSuccessMessage:
+    """Test suite for updated success message."""
+
+    def test_success_message_text(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify the success message uses updated wording.
+
+        Given: A clean project tree with no violations,
+        When: run_scan is called,
+        Then: Success message reads 'No forbidden temporal mutations found.'
+        """
+        src_dir = tmp_path / "src" / "snapper"
+        src_dir.mkdir(parents=True)
+        (src_dir / "clean.py").write_text('"""Clean module."""\n')
+
+        checker.run_scan(tmp_path, strict_mode=False)
+
+        captured = capsys.readouterr()
+        assert "No forbidden temporal mutations found." in captured.out
+        assert "Bitemporal integrity enforced" not in captured.out

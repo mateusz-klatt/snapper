@@ -15,7 +15,6 @@ from sqlalchemy import select
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import get_settings
-from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
 from snapper.data.repository import close_and_insert
@@ -243,7 +242,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == user_id,
-                User.known_to == KNOWN_TO_MAX,
+                *where_active(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -281,7 +280,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == user_id,
-                User.known_to == KNOWN_TO_MAX,
+                *where_active(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -359,7 +358,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == user_id,
-                User.known_to == KNOWN_TO_MAX,
+                *where_active(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -396,7 +395,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == username,
-                User.known_to == KNOWN_TO_MAX,
+                *where_active(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()

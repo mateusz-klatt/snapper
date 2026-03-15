@@ -200,6 +200,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 SymbolAlias.native_symbol == native_symbol,
                 SymbolAlias.exchange == exchange,
                 SymbolAlias.channel == channel,
+                SymbolAlias.timestamp <= now,
                 SymbolAlias.known_to > now,
             )
         ).scalar_one_or_none()
@@ -266,6 +267,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == native_symbol,
                 SymbolExchangeCapability.exchange == exchange,
+                SymbolExchangeCapability.timestamp <= now,
                 SymbolExchangeCapability.known_to > now,
             )
         ).scalar_one_or_none()
@@ -337,6 +339,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         stmt = select(SymbolExchangeCapability).where(
             SymbolExchangeCapability.exchange == exchange,
+            SymbolExchangeCapability.timestamp <= now,
             SymbolExchangeCapability.known_to > now,
             or_(
                 SymbolExchangeCapability.can_trade.is_(True),
@@ -396,6 +399,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         existing_count_stmt = select(SymbolExchangeCapability).where(
             SymbolExchangeCapability.exchange == exchange,
+            SymbolExchangeCapability.timestamp <= now,
             SymbolExchangeCapability.known_to > now,
             or_(
                 SymbolExchangeCapability.can_trade.is_(True),

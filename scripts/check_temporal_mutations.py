@@ -5,6 +5,10 @@ The bitemporal rule allows only one UPDATE pattern on temporal tables: setting
 use the close-and-insert pattern.  Physical DELETE is also forbidden.  This
 script enforces those constraints by regex-scanning source files and flagging
 violations.
+
+A secondary check detects ``KNOWN_TO_MAX`` used in SELECT/WHERE contexts.
+Active-row queries should use the ``timestamp <= t, known_to > t`` range
+pattern instead of comparing ``known_to`` to the sentinel value.
 """
 
 import re
@@ -24,8 +28,14 @@ WHITELIST_FILES: Final[set[str]] = {
     "repository.py",
 }
 
-WHITELIST_PATHS: Final[set[str]] = {
-    "application/updaters/symbols/base.py",
+CATALOG_MUTATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"existing\.(base|quote|asset_type|timestamp)\s*="
+)
+
+WHITELIST_PATH_LINE_PATTERNS: Final[dict[str, list[re.Pattern[str]]]] = {
+    "application/updaters/symbols/base.py": [
+        CATALOG_MUTATION_RE,
+    ],
 }
 
 Violation = tuple[int, str, str]
@@ -48,6 +58,19 @@ FORBIDDEN_ATTR_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
 
 DELETE_PATTERN: Final[re.Pattern[str]] = re.compile(r"session\.delete\(")
 
+KNOWN_TO_MAX_SELECT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[!=]=\s*KNOWN_TO_MAX|KNOWN_TO_MAX\s*[!=]="
+)
+
+KNOWN_TO_MAX_INSERT_WHITELIST: Final[list[re.Pattern[str]]] = [
+    re.compile(r'\["known_to"\]\s*=\s*KNOWN_TO_MAX'),
+    re.compile(r'"known_to":\s*KNOWN_TO_MAX'),
+    re.compile(r'\["known_to"\]\s*=\s*_KNOWN_TO_MAX'),
+    re.compile(r'"known_to":\s*_KNOWN_TO_MAX'),
+    re.compile(r"known_to.*default.*KNOWN_TO_MAX"),
+    re.compile(r"KNOWN_TO_MAX.*default"),
+]
+
 WHITELIST_LINE_PATTERNS: Final[list[re.Pattern[str]]] = [
     re.compile(r"Mapped\["),
     re.compile(r"mapped_column\("),
@@ -61,27 +84,30 @@ WHITELIST_LINE_PATTERNS: Final[list[re.Pattern[str]]] = [
 ]
 
 
+def _path_suffix(path: Path) -> str:
+    """Return the POSIX suffix fragment for path-specific whitelist matching.
+
+    Args:
+        path: File path to extract suffix from.
+
+    Returns:
+        Slash-separated suffix string suitable for dict lookup.
+    """
+    return path.as_posix()
+
+
 def should_skip_path(path: Path) -> bool:
     """Return True when the path is in a skipped directory or whitelisted file.
-
-    SymbolCatalog uses in-place UPDATE because ``native_symbol`` has a global
-    unique constraint and serves as an FK target for SymbolAlias and
-    SymbolExchangeCapability, so close-and-insert would violate uniqueness.
-    The updater base module is whitelisted for this reason.
 
     Args:
         path: Candidate file path.
 
     Returns:
-        True when any part of the path matches a skipped directory name or the
-        file name or relative suffix is in the whitelist.
+        True when the file name is in WHITELIST_FILES or any part of the path
+        matches a SKIP_DIRS entry.
     """
     if path.name in WHITELIST_FILES:
         return True
-    path_str = path.as_posix()
-    for suffix in WHITELIST_PATHS:
-        if path_str.endswith(suffix):
-            return True
     return any(part in SKIP_DIRS for part in path.parts)
 
 
@@ -105,20 +131,77 @@ def iter_python_files(root: Path) -> list[Path]:
     return sorted(python_files)
 
 
-def _is_whitelisted_line(line: str) -> bool:
+def _is_whitelisted_line(line: str, filepath: Path | None = None) -> bool:
     """Return True when the line matches a whitelisted pattern.
+
+    Checks global whitelist patterns first, then path-specific patterns
+    when ``filepath`` is provided and matches a key in
+    ``WHITELIST_PATH_LINE_PATTERNS``.
+
+    Args:
+        line: Source code line to check.
+        filepath: Optional file path for path-specific whitelist lookup.
+
+    Returns:
+        True when the line is safe to ignore.
+    """
+    if any(pattern.search(line) for pattern in WHITELIST_LINE_PATTERNS):
+        return True
+    if filepath is not None:
+        posix = _path_suffix(filepath)
+        for suffix, patterns in WHITELIST_PATH_LINE_PATTERNS.items():
+            if posix.endswith(suffix) and any(p.search(line) for p in patterns):
+                return True
+    return False
+
+
+def _is_known_to_max_select_whitelisted(line: str) -> bool:
+    """Return True when a KNOWN_TO_MAX usage is in an INSERT/default context.
 
     Args:
         line: Source code line to check.
 
     Returns:
-        True when the line is safe to ignore.
+        True when the line is a safe INSERT-default usage of KNOWN_TO_MAX.
     """
-    return any(pattern.search(line) for pattern in WHITELIST_LINE_PATTERNS)
+    return any(p.search(line) for p in KNOWN_TO_MAX_INSERT_WHITELIST)
+
+
+def _check_line(
+    line_num: int,
+    line: str,
+    filepath: Path,
+    violations: list[Violation],
+) -> None:
+    """Check a single source line for forbidden temporal patterns.
+
+    The KNOWN_TO_MAX SELECT check runs independently of the attribute
+    mutation whitelist because the ``known_to`` whitelist pattern is
+    meant for close-operation assignments, not SELECT comparisons.
+
+    Args:
+        line_num: 1-based line number in the file.
+        line: Raw source line text.
+        filepath: Path to the file being checked.
+        violations: Accumulator list for discovered violations.
+    """
+    if KNOWN_TO_MAX_SELECT_PATTERN.search(line) and not _is_known_to_max_select_whitelisted(line):
+        violations.append((line_num, "KNOWN_TO_MAX in SELECT/WHERE", line.strip()))
+    if _is_whitelisted_line(line, filepath):
+        return
+    for pattern, description in FORBIDDEN_ATTR_PATTERNS:
+        if pattern.search(line):
+            violations.append((line_num, description, line.strip()))
+            break
+    if DELETE_PATTERN.search(line):
+        violations.append((line_num, "session.delete()", line.strip()))
 
 
 def check_file(filepath: Path) -> list[Violation]:
     """Check a single Python file for forbidden temporal mutation patterns.
+
+    Also detects ``KNOWN_TO_MAX`` used in SELECT/WHERE contexts (equality
+    or inequality comparisons) that should use the temporal range pattern.
 
     Args:
         filepath: Path to the Python file.
@@ -132,14 +215,7 @@ def check_file(filepath: Path) -> list[Violation]:
         return []
     violations: list[Violation] = []
     for line_num, line in enumerate(lines, start=1):
-        if _is_whitelisted_line(line):
-            continue
-        for pattern, description in FORBIDDEN_ATTR_PATTERNS:
-            if pattern.search(line):
-                violations.append((line_num, description, line.strip()))
-                break
-        if DELETE_PATTERN.search(line):
-            violations.append((line_num, "session.delete()", line.strip()))
+        _check_line(line_num, line, filepath, violations)
     return violations
 
 
@@ -220,7 +296,7 @@ def run_scan(
             print("\nSTRICT MODE: Failing due to violations found.")
             return 1
     else:
-        print("\nNo temporal mutation violations. Bitemporal integrity enforced!")
+        print("\nNo forbidden temporal mutations found.")
     return 0
 
 
