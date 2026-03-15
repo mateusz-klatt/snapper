@@ -495,6 +495,7 @@ class SQLAlchemyRepository(Repository):
                         update(Candle).where(Candle.id == existing.id).values(known_to=now)
                     )
                     r["public_id"] = existing.public_id
+                r["timestamp"] = now
                 s.add(Candle(**r))
                 count += 1
             await s.commit()
@@ -1070,6 +1071,7 @@ class MSSQLRepository(Repository):
                 if existing:
                     s.execute(update(Candle).where(Candle.id == existing.id).values(known_to=now))
                     r["public_id"] = existing.public_id
+                r["timestamp"] = now
                 s.add(Candle(**r))
                 count += 1
             s.commit()

@@ -502,7 +502,12 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
-        "ix_users_username", "users", ["username"], unique=True, sqlite_where=text(_KNOWN_TO_ACTIVE)
+        "ix_users_username",
+        "users",
+        ["username"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_table(
         "settings",
@@ -527,7 +532,12 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
-        "uq_settings_key", "settings", ["key"], unique=True, sqlite_where=text(_KNOWN_TO_ACTIVE)
+        "uq_settings_key",
+        "settings",
+        ["key"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_table(
         "process_runs",
