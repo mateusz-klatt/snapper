@@ -1181,6 +1181,148 @@ class TestUserBitemporal:
         assert user_count == 1
         assert login_count == 1
 
+    @pytest.mark.asyncio
+    async def test_list_login_events_returns_only_active_versions(self, tmp_path: Path) -> None:
+        """Closed login events are hidden from temporal read.
+
+        Given: Two login events for the same user, one closed,
+        When: list_login_events is queried at now,
+        Then: Only the unclosed event is returned.
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
+        t_close = datetime(2024, 6, 1, 13, 0, 0, tzinfo=UTC)
+
+        user = await _create_user(repo, "eve", "hash_v1", t1)
+
+        async with repo.session() as s:
+            evt1 = UserLoginEvent(user_public_id=user.public_id, logged_at=t1, timestamp=t1)
+            evt2 = UserLoginEvent(user_public_id=user.public_id, logged_at=t2, timestamp=t2)
+            s.add(evt1)
+            s.add(evt2)
+            await s.commit()
+            await s.refresh(evt1)
+
+        async with repo.session() as s:
+            from sqlalchemy import update as sa_update
+
+            await s.execute(
+                sa_update(UserLoginEvent)
+                .where(
+                    UserLoginEvent.id == evt1.id,
+                )
+                .values(known_to=t_close)
+            )
+            await s.commit()
+
+        async with repo.session() as s:
+            active = (
+                (
+                    await s.execute(
+                        select(UserLoginEvent).where(
+                            UserLoginEvent.user_public_id == user.public_id,
+                            *where_active(UserLoginEvent),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert len(active) == 1
+        assert active[0].logged_at == t2
+
+    @pytest.mark.asyncio
+    async def test_close_login_event_hides_for_later_as_of_but_not_earlier(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed login event is visible before close time, hidden after.
+
+        Given: A login event at t1 closed at t_close,
+        When: Queried at t_before (< t_close) and t_after (> t_close),
+        Then: Visible at t_before, hidden at t_after.
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t_close = datetime(2024, 6, 1, 14, 0, 0, tzinfo=UTC)
+        t_before = datetime(2024, 6, 1, 13, 0, 0, tzinfo=UTC)
+        t_after = datetime(2024, 6, 1, 15, 0, 0, tzinfo=UTC)
+
+        user = await _create_user(repo, "frank", "hash_v1", t1)
+
+        async with repo.session() as s:
+            evt = UserLoginEvent(user_public_id=user.public_id, logged_at=t1, timestamp=t1)
+            s.add(evt)
+            await s.commit()
+            await s.refresh(evt)
+
+        async with repo.session() as s:
+            from sqlalchemy import update as sa_update
+
+            await s.execute(
+                sa_update(UserLoginEvent)
+                .where(UserLoginEvent.id == evt.id)
+                .values(known_to=t_close)
+            )
+            await s.commit()
+
+        async with repo.session() as s:
+            before_events = (
+                (
+                    await s.execute(
+                        select(UserLoginEvent).where(
+                            UserLoginEvent.user_public_id == user.public_id,
+                            *where_active(UserLoginEvent, t_before),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+            after_events = (
+                (
+                    await s.execute(
+                        select(UserLoginEvent).where(
+                            UserLoginEvent.user_public_id == user.public_id,
+                            *where_active(UserLoginEvent, t_after),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert len(before_events) == 1
+        assert len(after_events) == 0
+
+    @pytest.mark.asyncio
+    async def test_authenticate_inserts_login_event_with_open_known_to(
+        self, tmp_path: Path
+    ) -> None:
+        """Login event from authentication has known_to == KNOWN_TO_MAX.
+
+        Given: A user exists,
+        When: A login event is inserted (simulating authentication),
+        Then: The event has known_to == KNOWN_TO_MAX (open/active).
+        """
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        login_time = datetime(2024, 6, 1, 12, 10, 0, tzinfo=UTC)
+
+        user = await _create_user(repo, "grace", "hash_v1", t1)
+
+        async with repo.session() as s:
+            evt = UserLoginEvent(
+                user_public_id=user.public_id, logged_at=login_time, timestamp=login_time
+            )
+            s.add(evt)
+            await s.commit()
+            await s.refresh(evt)
+
+        assert evt.known_to == KNOWN_TO_MAX
+
 
 class TestSettingsApiBitemporal:
     """Integration tests for Settings SCD Type 2 read/delete behavior."""

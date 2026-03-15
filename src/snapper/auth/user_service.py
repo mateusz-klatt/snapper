@@ -3,7 +3,8 @@
 This module provides user management operations including
 authentication, CRUD operations, and password management.
 All User mutations use SCD Type 2 close+insert via close_and_insert.
-Login events are recorded in an append-only UserLoginEvent table.
+Login events are temporal: inserted on login, closeable for corrections,
+queryable via where_active for point-in-time audit.
 """
 
 from datetime import UTC
@@ -419,6 +420,68 @@ class UserService:
                 bus_time=now,
             )
             await session.commit()
+
+    async def list_login_events(
+        self,
+        user_public_id: str,
+        at: datetime | None = None,
+    ) -> list[UserLoginEvent]:
+        """List active login events for a user at a point in time.
+
+        Args:
+            user_public_id: User's public UUID.
+            at: Point-in-time for temporal query. Defaults to now.
+
+        Returns:
+            List of active login events ordered by logged_at descending.
+        """
+        async with self.repository.session() as session:
+            result = await session.execute(
+                select(UserLoginEvent)
+                .where(
+                    UserLoginEvent.user_public_id == user_public_id,
+                    *where_active(UserLoginEvent, at),
+                )
+                .order_by(UserLoginEvent.logged_at.desc())
+            )
+            return list(result.scalars().all())
+
+    async def close_login_event(self, public_id: str, bus_time: datetime | None = None) -> bool:
+        """Close a login event (soft delete).
+
+        Sets known_to on the active login event, hiding it from current
+        queries while preserving it for historical audit via as_of.
+
+        Args:
+            public_id: Public UUID of the login event to close.
+            bus_time: Processing time for the close. Defaults to now.
+
+        Returns:
+            True if event was found and closed, False if not found.
+        """
+        t = bus_time or datetime.now(UTC)
+        async with self.repository.session() as session:
+            from sqlalchemy import update
+
+            existing = (
+                (
+                    await session.execute(
+                        select(UserLoginEvent).where(
+                            UserLoginEvent.public_id == public_id,
+                            *where_active(UserLoginEvent, t),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if not existing:
+                return False
+            await session.execute(
+                update(UserLoginEvent).where(UserLoginEvent.id == existing.id).values(known_to=t)
+            )
+            await session.commit()
+            return True
 
     @classmethod
     def get_instance(cls) -> UserService:

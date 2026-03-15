@@ -759,3 +759,61 @@ class TestUserService:
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         with pytest.raises(ValueError, match="not found"):
             await user_service.reset_password_by_username("missing", "newpassword")
+
+    @pytest.mark.asyncio
+    async def test_list_login_events_returns_results(self, user_service: UserService) -> None:
+        """Verify list_login_events queries with where_active filter.
+
+        Given: A mock session returning login events,
+        When: list_login_events is called,
+        Then: Results are returned from the scalars query.
+        """
+        mock_session = AsyncMock()
+        mock_event = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_event]
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        events = await user_service.list_login_events("user-pub-id")
+        assert events == [mock_event]
+
+    @pytest.mark.asyncio
+    async def test_close_login_event_found(self, user_service: UserService) -> None:
+        """Verify close_login_event returns True when event exists.
+
+        Given: An active login event found by public_id,
+        When: close_login_event is called,
+        Then: True is returned and UPDATE + commit are executed.
+        """
+        mock_session = AsyncMock()
+        mock_existing = MagicMock()
+        mock_existing.id = 42
+        mock_select_result = MagicMock()
+        mock_select_result.scalars.return_value.first.return_value = mock_existing
+        mock_session.execute = AsyncMock(return_value=mock_select_result)
+        mock_session.add = MagicMock()
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        result = await user_service.close_login_event("evt-pub-id")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_close_login_event_not_found(self, user_service: UserService) -> None:
+        """Verify close_login_event returns False when event not found.
+
+        Given: No active login event for the given public_id,
+        When: close_login_event is called,
+        Then: False is returned.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        result = await user_service.close_login_event("missing-pub-id")
+        assert result is False

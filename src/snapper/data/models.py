@@ -385,7 +385,12 @@ class User(TemporalMixin, Base):
 
 
 class UserLoginEvent(TemporalMixin, Base):
-    """Append-only log of user login events."""
+    """Temporal log of user login events.
+
+    Each login creates a new event. Events can be closed (known_to < MAX)
+    to hide them from current queries while preserving audit history.
+    Point-in-time queries via as_of show the login state at any moment.
+    """
 
     __tablename__ = "user_login_events"
     __table_args__ = (
