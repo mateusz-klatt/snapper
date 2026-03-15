@@ -343,19 +343,20 @@ class SQLAlchemyRepository(Repository):
     async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
         """Load the latest candle public_id per (instrument_id, timeframe)."""
         async with self.session() as s:
+            now = datetime.now(UTC)
             latest = (
                 select(
                     Candle.instrument_id,
                     Candle.timeframe,
                     func.max(Candle.open_at).label("max_open_at"),
                 )
-                .where(Candle.known_to == KNOWN_TO_MAX)
+                .where(Candle.timestamp <= now, Candle.known_to > now)
                 .group_by(Candle.instrument_id, Candle.timeframe)
                 .subquery()
             )
             q = await s.execute(
                 select(Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id)
-                .where(Candle.known_to == KNOWN_TO_MAX)
+                .where(Candle.timestamp <= now, Candle.known_to > now)
                 .join(
                     latest,
                     and_(
@@ -478,7 +479,8 @@ class SQLAlchemyRepository(Repository):
                                 Candle.instrument_id == r["instrument_id"],
                                 Candle.timeframe == r["timeframe"],
                                 Candle.open_at == r["open_at"],
-                                Candle.known_to == KNOWN_TO_MAX,
+                                Candle.timestamp <= now,
+                                Candle.known_to > now,
                             )
                         )
                     )
@@ -960,19 +962,20 @@ class MSSQLRepository(Repository):
         """Load the latest candle public_id per (instrument_id, timeframe) via sync thread."""
 
         def _do(s: SyncSession) -> dict[tuple[int, str], tuple[datetime, str]]:
+            now = datetime.now(UTC)
             latest = (
                 select(
                     Candle.instrument_id,
                     Candle.timeframe,
                     func.max(Candle.open_at).label("max_open_at"),
                 )
-                .where(Candle.known_to == KNOWN_TO_MAX)
+                .where(Candle.timestamp <= now, Candle.known_to > now)
                 .group_by(Candle.instrument_id, Candle.timeframe)
                 .subquery()
             )
             q = s.execute(
                 select(Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id)
-                .where(Candle.known_to == KNOWN_TO_MAX)
+                .where(Candle.timestamp <= now, Candle.known_to > now)
                 .join(
                     latest,
                     and_(
@@ -1045,7 +1048,8 @@ class MSSQLRepository(Repository):
                             Candle.instrument_id == r["instrument_id"],
                             Candle.timeframe == r["timeframe"],
                             Candle.open_at == r["open_at"],
-                            Candle.known_to == KNOWN_TO_MAX,
+                            Candle.timestamp <= now,
+                            Candle.known_to > now,
                         )
                     )
                     .scalars()

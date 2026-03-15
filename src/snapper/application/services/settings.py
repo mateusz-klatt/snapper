@@ -22,7 +22,6 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy import update
 
-from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
@@ -258,7 +257,8 @@ class SettingsService:
                     await session.execute(
                         select(Setting).where(
                             Setting.key == key,
-                            Setting.known_to == KNOWN_TO_MAX,
+                            Setting.timestamp <= now,
+                            Setting.known_to > now,
                         )
                     )
                 )
