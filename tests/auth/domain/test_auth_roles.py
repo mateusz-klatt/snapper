@@ -672,3 +672,85 @@ class TestUserService:
         password = "secure_password_123"
         hashed = user_service.hash_password(password)
         assert user_service._verify_password("wrong_password", hashed) is False
+
+    @pytest.mark.asyncio
+    async def test_admin_reset_password_success(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test admin_reset_password succeeds for existing user.
+
+        Given: A user exists in the database.
+        When: admin_reset_password is called with new password.
+        Then: close_and_insert is called and session is committed.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with patch("snapper.auth.user_service.close_and_insert", new_callable=AsyncMock):
+            await user_service.admin_reset_password("testuser", "newpassword123")
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_admin_reset_password_user_not_found(self, user_service: UserService) -> None:
+        """Test admin_reset_password raises ValueError for missing user.
+
+        Given: No user with the given username exists.
+        When: admin_reset_password is called.
+        Then: ValueError is raised.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with pytest.raises(ValueError, match="not found"):
+            await user_service.admin_reset_password("missing", "newpassword")
+
+    @pytest.mark.asyncio
+    async def test_reset_password_by_username_success(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test reset_password_by_username succeeds for existing user.
+
+        Given: A user exists in the database.
+        When: reset_password_by_username is called with new password.
+        Then: close_and_insert is called and session is committed.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with patch("snapper.auth.user_service.close_and_insert", new_callable=AsyncMock):
+            await user_service.reset_password_by_username("testuser", "newpassword123")
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_reset_password_by_username_user_not_found(
+        self, user_service: UserService
+    ) -> None:
+        """Test reset_password_by_username raises ValueError for missing user.
+
+        Given: No user with the given username exists.
+        When: reset_password_by_username is called.
+        Then: ValueError is raised.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        with pytest.raises(ValueError, match="not found"):
+            await user_service.reset_password_by_username("missing", "newpassword")

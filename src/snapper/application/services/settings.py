@@ -24,6 +24,7 @@ from sqlalchemy import select
 from snapper.data.models import Setting
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import force_encrypt_if_cleartext
@@ -144,10 +145,7 @@ class SettingsService:
         """
         repository = get_repository(self.db_url)
         async with repository.session() as session:
-            now = datetime.now(UTC)
-            result = await session.execute(
-                select(Setting).where(Setting.timestamp <= now, Setting.known_to > now)
-            )
+            result = await session.execute(select(Setting).where(*where_active(Setting)))
             settings = result.scalars().all()
             self._cache = {}
             for setting in settings:
@@ -343,7 +341,9 @@ class SettingsService:
         """
         repository = get_repository(self.db_url)
         async with repository.session() as session:
-            result = await session.execute(select(Setting).where(Setting.category == category))
+            result = await session.execute(
+                select(Setting).where(Setting.category == category, *where_active(Setting))
+            )
             settings = result.scalars().all()
             decrypted_settings = {}
             for setting in settings:

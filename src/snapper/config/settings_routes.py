@@ -47,6 +47,7 @@ from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import get_settings
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -68,7 +69,7 @@ async def get_all_settings(
     settings = get_settings()
     repository = get_repository(settings.db_url)
     async with repository.session() as session:
-        query = select(Setting)
+        query = select(Setting).where(*where_active(Setting))
         if category:
             query = query.where(Setting.category == category)
         result = await session.execute(query)
@@ -101,7 +102,9 @@ async def get_setting_categories(
     settings = get_settings()
     repository = get_repository(settings.db_url)
     async with repository.session() as session:
-        result = await session.execute(select(Setting.category).distinct())
+        result = await session.execute(
+            select(Setting.category).where(*where_active(Setting)).distinct()
+        )
         categories = [row[0] for row in result.fetchall()]
         return SettingCategoriesResponse(categories=sorted(categories))
 
@@ -140,7 +143,9 @@ async def update_setting(
     )
     repository = get_repository(settings.db_url)
     async with repository.session() as session:
-        result = await session.execute(select(Setting).where(Setting.key == key))
+        result = await session.execute(
+            select(Setting).where(Setting.key == key, *where_active(Setting))
+        )
         setting = result.scalar_one_or_none()
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")
@@ -175,7 +180,9 @@ async def delete_setting(
     settings = get_settings()
     repository = get_repository(settings.db_url)
     async with repository.session() as session:
-        result = await session.execute(select(Setting).where(Setting.key == key))
+        result = await session.execute(
+            select(Setting).where(Setting.key == key, *where_active(Setting))
+        )
         setting = result.scalar_one_or_none()
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")

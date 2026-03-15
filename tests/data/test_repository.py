@@ -42,6 +42,7 @@ from snapper.data.repository import SQLiteRepository
 from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 
 
 class _DummyAsyncSession:
@@ -3109,3 +3110,41 @@ class _MinimalRepository(Repository):
         end: datetime,
     ) -> list[dict[str, Any]]:
         return []
+
+
+class TestWhereActive:
+    """Tests for the where_active temporal filter helper."""
+
+    def test_where_active_returns_two_clauses(self) -> None:
+        """where_active returns a tuple of exactly two filter clauses.
+
+        Given: A model with timestamp and known_to columns,
+        When: where_active is called,
+        Then: Returns a tuple of two SQLAlchemy filter expressions.
+        """
+        clauses = where_active(MarketSnapshot)
+        assert len(clauses) == 2
+
+    def test_where_active_uses_now_by_default(self) -> None:
+        """where_active uses current time when no explicit time is given.
+
+        Given: A model with temporal columns,
+        When: where_active is called without an 'at' argument,
+        Then: The filter clauses reference the current UTC time.
+        """
+        clauses = where_active(MarketSnapshot)
+        ts_clause, known_to_clause = clauses
+        assert ts_clause is not None
+        assert known_to_clause is not None
+
+    def test_where_active_with_explicit_time(self) -> None:
+        """where_active uses the provided time for filtering.
+
+        Given: A model and a specific point-in-time,
+        When: where_active is called with at=some_time,
+        Then: The clauses filter using that specific time.
+        """
+        fixed_time = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+        ts_clause, known_to_clause = where_active(MarketSnapshot, at=fixed_time)
+        assert "timestamp" in str(ts_clause)
+        assert "known_to" in str(known_to_clause)

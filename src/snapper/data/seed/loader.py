@@ -161,7 +161,7 @@ def _known_to_value(conn: Connection) -> datetime | str:
         KNOWN_TO_MAX datetime for non-SQLite engines, ISO string for SQLite.
     """
     if conn.dialect.name == "sqlite":
-        return KNOWN_TO_MAX.isoformat(timespec="seconds")
+        return str(KNOWN_TO_MAX)
     return KNOWN_TO_MAX
 
 
@@ -179,7 +179,7 @@ def _timestamp_value(conn: Connection) -> datetime | str:
     """
     now = datetime.now(tz=UTC)
     if conn.dialect.name == "sqlite":
-        return now.isoformat(timespec="seconds")
+        return str(now)
     return now
 
 

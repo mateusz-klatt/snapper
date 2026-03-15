@@ -9,7 +9,6 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from types import SimpleNamespace
-from types import TracebackType
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
@@ -2954,6 +2953,10 @@ class StubUserService:
         self.change_password_calls.append((user_id, old_password, new_password))
         return self.change_password_success
 
+    async def admin_reset_password(self, user_id: str, new_password: str) -> None:
+        """Reset user password via admin action."""
+        self.change_password_calls.append((user_id, "admin_reset", new_password))
+
 
 AuthAppFixture = tuple[Any, StubUserService, StubTokenManager, StubCSRFManager]
 
@@ -3504,34 +3507,14 @@ async def test_admin_reset_password_handles_repository_error(
 ) -> None:
     """Admin reset password handles repository error.
 
-    Given: Repository that raises RuntimeError,
+    Given: Service admin_reset_password raises RuntimeError,
     When: Resetting password,
     Then: Raises HTTPException with 500 status.
     """
 
-    class BrokenSession:
-        async def __aenter__(self) -> Any:
-            raise RuntimeError("db down")
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            return None
-
-    class BrokenRepository:
-        def session(self) -> BrokenSession:
-            return BrokenSession()
-
     class BrokenUserService(StubUserService):
-        def __init__(self) -> None:
-            super().__init__()
-            self.repository = BrokenRepository()
-
-        def hash_password(self, password: str) -> str:
-            return "hash"
+        async def admin_reset_password(self, user_id: str, new_password: str) -> None:
+            raise RuntimeError("db down")
 
     stub_service = BrokenUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
@@ -3551,85 +3534,19 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
     """Admin reset password succeeds.
 
     Given: Valid admin and target user,
-    When: Resetting password,
-    Then: Updates hash and commits.
+    When: Resetting password via service,
+    Then: Delegates to admin_reset_password and returns success.
     """
 
-    class FakeDBUser:
-        def __init__(self) -> None:
-            self.id = 1
-            self.username = "target"
-            self.password_hash = "old"
-            self.email = "target@example.com"
-            self.role = "viewer"
-            self.is_active = True
-            self.created_at = datetime(2026, 1, 1, tzinfo=UTC)
-            self.public_id = "fake-public-id"
-            self.timestamp = datetime(2026, 1, 1, tzinfo=UTC)
-            self.known_to = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
-
-    class FakeResult:
-        def __init__(self, user: FakeDBUser | None) -> None:
-            self._user = user
-
-        def scalar_one_or_none(self) -> FakeDBUser | None:
-            return self._user
-
-        def scalars(self) -> FakeResult:
-            return self
-
-        def first(self) -> FakeDBUser | None:
-            return self._user
-
-    class FakeSession:
-        """Fake async session supporting close_and_insert pattern."""
-
-        def __init__(self, user: FakeDBUser) -> None:
-            self._user = user
-            self.executed = False
-            self.committed = False
-            self.added: list[Any] = []
-
-        async def __aenter__(self) -> FakeSession:
-            return self
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            return None
-
-        async def execute(self, _stmt: Any) -> FakeResult:
-            self.executed = True
-            return FakeResult(self._user)
-
-        async def commit(self) -> None:
-            self.committed = True
-
-        def add(self, obj: Any) -> None:
-            self.added.append(obj)
-
-    class FakeRepository:
-        def __init__(self, user: FakeDBUser) -> None:
-            self._session = FakeSession(user)
-
-        def session(self) -> FakeSession:
-            return self._session
-
     class ResetUserService(StubUserService):
-        def __init__(self, user: FakeDBUser) -> None:
+        def __init__(self) -> None:
             super().__init__()
-            self.repository = FakeRepository(user)
-            self.hashed_passwords: list[str] = []
+            self.reset_calls: list[tuple[str, str]] = []
 
-        def hash_password(self, password: str) -> str:
-            self.hashed_passwords.append(password)
-            return "hashed"
+        async def admin_reset_password(self, user_id: str, new_password: str) -> None:
+            self.reset_calls.append((user_id, new_password))
 
-    fake_db_user = FakeDBUser()
-    stub_service = ResetUserService(fake_db_user)
+    stub_service = ResetUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.admin_reset_user_password(
         request=MagicMock(spec=Request),
@@ -3638,55 +3555,24 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
         current_user=UserProfile(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.message == "Password reset successfully for user target"
-    assert stub_service.hashed_passwords == ["super-secret"]
-    assert stub_service.repository.session().committed is True
+    assert result.message == "Password reset successfully for user user-1"
+    assert stub_service.reset_calls == [("user-1", "super-secret")]
 
 
 @pytest.mark.asyncio()
 async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
     """Admin reset password fails when user not found.
 
-    Given: Non-existent user_id,
+    Given: Service admin_reset_password raises ValueError,
     When: Resetting password,
     Then: Raises HTTPException with 404 status.
     """
 
-    class EmptyResult:
-        def scalar_one_or_none(self) -> None:
-            return None
+    class NotFoundUserService(StubUserService):
+        async def admin_reset_password(self, user_id: str, new_password: str) -> None:
+            raise ValueError(f"User '{user_id}' not found")
 
-    class EmptySession:
-        async def __aenter__(self) -> EmptySession:
-            return self
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            return None
-
-        async def execute(self, _stmt: Any) -> EmptyResult:
-            return EmptyResult()
-
-        async def commit(self) -> None:
-            return None
-
-    class EmptyRepository:
-        def session(self) -> EmptySession:
-            return EmptySession()
-
-    class EmptyUserService(StubUserService):
-        def __init__(self) -> None:
-            super().__init__()
-            self.repository = EmptyRepository()
-
-        def hash_password(self, password: str) -> str:
-            return "hash"
-
-    stub_service = EmptyUserService()
+    stub_service = NotFoundUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     with pytest.raises(HTTPException) as exc:
         await routes.admin_reset_user_password(

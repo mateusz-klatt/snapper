@@ -4,8 +4,6 @@ This module provides FastAPI routes for user authentication
 including login, logout, token refresh, and user management.
 """
 
-from datetime import UTC
-from datetime import datetime
 from typing import Annotated
 from typing import Literal
 
@@ -16,7 +14,6 @@ from fastapi import Request
 from fastapi import Response
 from fastapi import status
 from loguru import logger
-from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.base import MessageResponse
@@ -37,9 +34,6 @@ from snapper.auth.schemas.responses import UserListResponse
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
-from snapper.data.models import KNOWN_TO_MAX
-from snapper.data.models import User
-from snapper.data.repository import close_and_insert
 from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
@@ -504,40 +498,13 @@ async def admin_reset_user_password(
     """
     user_service = get_user_service()
     try:
-        async with user_service.repository.session() as session:
-            stmt = select(User).where(
-                User.username == user_id,
-                User.known_to == KNOWN_TO_MAX,
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
-            if not db_user:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="User not found",
-                )
-            now = datetime.now(UTC)
-            new_values: dict[str, object] = {
-                "username": db_user.username,
-                "email": db_user.email,
-                "password_hash": user_service.hash_password(password_data.new_password),
-                "role": db_user.role,
-                "is_active": db_user.is_active,
-                "created_at": db_user.created_at,
-            }
-            await close_and_insert(
-                session=session,
-                model=User,
-                match_filters=[User.username == user_id],
-                new_values=new_values,
-                bus_time=now,
-            )
-            await session.commit()
-            return MessageResponse(
-                message=f"Password reset successfully for user {db_user.username}"
-            )
-    except HTTPException:
-        raise
+        await user_service.admin_reset_password(user_id, password_data.new_password)
+        return MessageResponse(message=f"Password reset successfully for user {user_id}")
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        ) from e
     except Exception as e:
         logger.error("Failed to reset password for user {}: {}", user_id, str(e))
         raise HTTPException(

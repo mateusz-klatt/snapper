@@ -1864,34 +1864,17 @@ class TestAdminCommands:
 
         Given: User service with existing user,
         When: reset_password is called with new password,
-        Then: Password is hashed and saved.
+        Then: Delegates to reset_password_by_username.
         """
         with patch("snapper.cli.app.UserService") as mock_service_class:
             mock_service = MagicMock()
-            mock_service.hash_password = MagicMock(return_value="hashed_password")
-            mock_session = MagicMock()
-            mock_session.__aenter__ = MagicMock(return_value=mock_session)
-            mock_session.__aexit__ = MagicMock(return_value=None)
-
-            async def mock_execute(stmt: Any) -> Any:
-                mock_result = MagicMock()
-                mock_user = MagicMock()
-                mock_user.username = "testuser"
-                mock_result.scalar_one_or_none = MagicMock(return_value=mock_user)
-                return mock_result
-
-            async def mock_commit() -> None:
-                """Intentionally empty mock implementation."""
-                pass
-
-            mock_session.execute = mock_execute
-            mock_session.commit = mock_commit
-            mock_repo = MagicMock()
-            mock_repo.session = MagicMock(return_value=mock_session)
-            mock_service.repository = mock_repo
+            mock_service.reset_password_by_username = AsyncMock()
             mock_service_class.return_value = mock_service
             reset_password(username="testuser", new_password="newpass123")
             mock_service_class.assert_called_once()
+            mock_service.reset_password_by_username.assert_called_once_with(
+                "testuser", "newpass123"
+            )
 
     def test_reset_password_with_prompt(self) -> None:
         """Test reset_password prompts for password twice.
@@ -1906,27 +1889,7 @@ class TestAdminCommands:
         ):
             mock_prompt.side_effect = ["newpass123", "newpass123"]
             mock_service = MagicMock()
-            mock_service.hash_password = MagicMock(return_value="hashed_password")
-            mock_session = MagicMock()
-            mock_session.__aenter__ = MagicMock(return_value=mock_session)
-            mock_session.__aexit__ = MagicMock(return_value=None)
-
-            async def mock_execute(stmt: Any) -> Any:
-                mock_result = MagicMock()
-                mock_user = MagicMock()
-                mock_user.username = "testuser"
-                mock_result.scalar_one_or_none = MagicMock(return_value=mock_user)
-                return mock_result
-
-            async def mock_commit() -> None:
-                """Intentionally empty mock implementation."""
-                pass
-
-            mock_session.execute = mock_execute
-            mock_session.commit = mock_commit
-            mock_repo = MagicMock()
-            mock_repo.session = MagicMock(return_value=mock_session)
-            mock_service.repository = mock_repo
+            mock_service.reset_password_by_username = AsyncMock()
             mock_service_class.return_value = mock_service
             reset_password(username="testuser", new_password="")
             assert mock_prompt.call_count == 2
@@ -3055,21 +3018,9 @@ def test_reset_password_updates_user_password(
 
     Given: User service with existing user,
     When: reset-password command is invoked,
-    Then: Password is hashed and committed.
+    Then: Delegates to reset_password_by_username and shows success.
     """
-    mock_db_user = MagicMock()
-    mock_db_user.username = "testuser"
-    mock_db_user.password_hash = "old_hash"
-    mock_session = AsyncMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none = MagicMock(return_value=mock_db_user)
-    mock_session.execute = AsyncMock(return_value=mock_result)
-    mock_session.commit = AsyncMock()
-    mock_repository = MagicMock()
-    mock_repository.session = MagicMock(return_value=mock_session)
-    mock_user_service.repository = mock_repository
+    mock_user_service.reset_password_by_username = AsyncMock()
     with patch("snapper.cli.app.UserService", return_value=mock_user_service):
         result = cli_runner.invoke(
             app,
@@ -3078,7 +3029,7 @@ def test_reset_password_updates_user_password(
     assert result.exit_code == 0
     assert "Password reset for user 'testuser'" in result.stdout
     assert "New password: newpass123" in result.stdout
-    mock_session.commit.assert_called_once()
+    mock_user_service.reset_password_by_username.assert_called_once_with("testuser", "newpass123")
 
 
 def test_reset_password_fails_for_nonexistent_user(
@@ -3086,19 +3037,13 @@ def test_reset_password_fails_for_nonexistent_user(
 ) -> None:
     """Test reset-password fails for nonexistent user.
 
-    Given: User service returning None for user,
+    Given: User service raising ValueError for missing user,
     When: reset-password command is invoked,
     Then: Shows user not found message.
     """
-    mock_session = AsyncMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none = MagicMock(return_value=None)
-    mock_session.execute = AsyncMock(return_value=mock_result)
-    mock_repository = MagicMock()
-    mock_repository.session = MagicMock(return_value=mock_session)
-    mock_user_service.repository = mock_repository
+    mock_user_service.reset_password_by_username = AsyncMock(
+        side_effect=ValueError("User 'nonexistent' not found")
+    )
     with patch("snapper.cli.app.UserService", return_value=mock_user_service):
         result = cli_runner.invoke(
             app,
@@ -3106,6 +3051,25 @@ def test_reset_password_fails_for_nonexistent_user(
         )
     assert result.exit_code == 0
     assert "User 'nonexistent' not found" in result.stdout
+
+
+def test_reset_password_handles_generic_exception(
+    cli_runner: CliRunner, mock_user_service: MagicMock
+) -> None:
+    """Test reset-password handles unexpected exceptions.
+
+    Given: User service raising RuntimeError,
+    When: reset-password command is invoked,
+    Then: Shows failure message.
+    """
+    mock_user_service.reset_password_by_username = AsyncMock(side_effect=RuntimeError("db down"))
+    with patch("snapper.cli.app.UserService", return_value=mock_user_service):
+        result = cli_runner.invoke(
+            app,
+            ["reset-password", "testuser", "--new-password", "newpass123"],
+        )
+    assert result.exit_code == 0
+    assert "Failed to reset password: db down" in result.stdout
 
 
 @pytest.fixture()

@@ -92,7 +92,22 @@ __all__ = [
     "get_repository",
     "dispose_repositories",
     "clear_repository_cache",
+    "where_active",
 ]
+
+
+def where_active(model: type[Any], at: datetime | None = None) -> tuple[Any, Any]:
+    """Return temporal filter clauses for active records.
+
+    Args:
+        model: SQLAlchemy model class with timestamp and known_to columns.
+        at: Point-in-time to query. Defaults to now.
+
+    Returns:
+        Tuple of two filter clauses: (timestamp <= t, known_to > t).
+    """
+    t = at or datetime.now(UTC)
+    return model.timestamp <= t, model.known_to > t
 
 
 _INSTRUMENT_COLUMNS = frozenset(c.key for c in Instrument.__table__.columns if c.key != "id")

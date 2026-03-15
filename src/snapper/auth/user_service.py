@@ -20,6 +20,7 @@ from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 
 
 class UserService:
@@ -102,7 +103,9 @@ class UserService:
             UserProfile if authenticated, None otherwise.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == username, User.is_active)
+            stmt = select(User).where(
+                User.username == username, User.is_active, *where_active(User)
+            )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -122,13 +125,13 @@ class UserService:
         """Get active user by ID.
 
         Args:
-            user_id: User's unique identifier.
+            user_id: User's unique identifier (username).
 
         Returns:
             UserProfile if found and active, None otherwise.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == user_id, User.is_active)
+            stmt = select(User).where(User.username == user_id, User.is_active, *where_active(User))
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -145,7 +148,9 @@ class UserService:
             UserProfile if found and active, None otherwise.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == username, User.is_active)
+            stmt = select(User).where(
+                User.username == username, User.is_active, *where_active(User)
+            )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -162,7 +167,8 @@ class UserService:
             List of UserProfile instances.
         """
         async with self.repository.session() as session:
-            stmt = select(User) if include_inactive else select(User).where(User.is_active)
+            base = select(User).where(*where_active(User))
+            stmt = base if include_inactive else base.where(User.is_active)
             result = await session.execute(stmt)
             db_users = result.scalars().all()
             return [self._db_user_to_auth_user(db_user) for db_user in db_users]
@@ -191,19 +197,21 @@ class UserService:
             ValueError: If username already exists.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == username)
+            stmt = select(User).where(User.username == username, *where_active(User))
             result = await session.execute(stmt)
             existing_user = result.scalar_one_or_none()
             if existing_user:
                 raise ValueError(f"User with username '{username}' already exists")
             password_hash = self.hash_password(password)
+            now = datetime.now(UTC)
             db_user = User(
                 username=username,
                 email=email,
                 password_hash=password_hash,
                 role=role.value,
                 is_active=is_active,
-                created_at=datetime.now(UTC),
+                created_at=now,
+                timestamp=now,
             )
             session.add(db_user)
             await session.commit()
@@ -312,7 +320,7 @@ class UserService:
             True if changed, False if user not found or wrong password.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == user_id, User.is_active)
+            stmt = select(User).where(User.username == user_id, User.is_active, *where_active(User))
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -337,6 +345,80 @@ class UserService:
             )
             await session.commit()
             return True
+
+    async def admin_reset_password(self, user_id: str, new_password: str) -> None:
+        """Reset user password via admin action (close+insert).
+
+        Args:
+            user_id: Username of the target user.
+            new_password: New plain-text password.
+
+        Raises:
+            ValueError: If user not found.
+        """
+        async with self.repository.session() as session:
+            stmt = select(User).where(
+                User.username == user_id,
+                User.known_to == KNOWN_TO_MAX,
+            )
+            result = await session.execute(stmt)
+            db_user = result.scalar_one_or_none()
+            if not db_user:
+                raise ValueError(f"User '{user_id}' not found")
+            now = datetime.now(UTC)
+            new_values: dict[str, object] = {
+                "username": db_user.username,
+                "email": db_user.email,
+                "password_hash": self.hash_password(new_password),
+                "role": db_user.role,
+                "is_active": db_user.is_active,
+                "created_at": db_user.created_at,
+            }
+            await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.username == user_id],
+                new_values=new_values,
+                bus_time=now,
+            )
+            await session.commit()
+
+    async def reset_password_by_username(self, username: str, new_password: str) -> None:
+        """Reset user password by username (for CLI).
+
+        Args:
+            username: Username of the target user.
+            new_password: New plain-text password.
+
+        Raises:
+            ValueError: If user not found.
+        """
+        async with self.repository.session() as session:
+            stmt = select(User).where(
+                User.username == username,
+                User.known_to == KNOWN_TO_MAX,
+            )
+            result = await session.execute(stmt)
+            db_user = result.scalar_one_or_none()
+            if not db_user:
+                raise ValueError(f"User '{username}' not found")
+            now = datetime.now(UTC)
+            new_values: dict[str, object] = {
+                "username": db_user.username,
+                "email": db_user.email,
+                "password_hash": self.hash_password(new_password),
+                "role": db_user.role,
+                "is_active": db_user.is_active,
+                "created_at": db_user.created_at,
+            }
+            await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.username == username],
+                new_values=new_values,
+                bus_time=now,
+            )
+            await session.commit()
 
     @classmethod
     def get_instance(cls) -> UserService:

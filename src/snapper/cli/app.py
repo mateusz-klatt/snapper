@@ -51,7 +51,6 @@ import typer
 import uvicorn
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -67,10 +66,9 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
-from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
-from snapper.data.models import User
 from snapper.data.repository import close_and_insert
+from snapper.data.repository import where_active
 from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
@@ -552,36 +550,12 @@ def reset_password(
     async def reset_user_password() -> None:
         user_service = UserService()
         try:
-            async with user_service.repository.session() as session:
-                stmt = select(User).where(
-                    User.username == username,
-                    User.known_to == KNOWN_TO_MAX,
-                )
-                result = await session.execute(stmt)
-                db_user = result.scalar_one_or_none()
-                if not db_user:
-                    typer.echo(f"User '{username}' not found!")
-                    return
-                now = datetime.now(UTC)
-                new_values: dict[str, object] = {
-                    "username": db_user.username,
-                    "email": db_user.email,
-                    "password_hash": user_service.hash_password(new_password),
-                    "role": db_user.role,
-                    "is_active": db_user.is_active,
-                    "created_at": db_user.created_at,
-                }
-                await close_and_insert(
-                    session=session,
-                    model=User,
-                    match_filters=[User.username == username],
-                    new_values=new_values,
-                    bus_time=now,
-                )
-                await session.commit()
-                typer.echo(f"Password reset for user '{username}'")
-                typer.echo(f"Username: {username}")
-                typer.echo(f"New password: {new_password}")
+            await user_service.reset_password_by_username(username, new_password)
+            typer.echo(f"Password reset for user '{username}'")
+            typer.echo(f"Username: {username}")
+            typer.echo(f"New password: {new_password}")
+        except ValueError as e:
+            typer.echo(str(e))
         except Exception as e:
             typer.echo(f"Failed to reset password: {e}")
 
@@ -852,7 +826,9 @@ async def _run_encryption_rotation(
         engine = create_async_engine(bootstrap.db_url, poolclass=poolclass)
         session_factory = async_sessionmaker(engine)
         async with session_factory() as session:
-            result = await session.execute(sa.select(Setting).where(Setting.is_encrypted))
+            result = await session.execute(
+                sa.select(Setting).where(Setting.is_encrypted, *where_active(Setting))
+            )
             encrypted_settings = result.scalars().all()
             typer.echo(f"Found {len(encrypted_settings)} encrypted settings to rotate")
             if not encrypted_settings:

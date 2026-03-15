@@ -27,6 +27,7 @@ from snapper.data.models import Setting
 from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 
 
 class ProcessRegistrySyncer:
@@ -290,7 +291,9 @@ class ProcessRegistrySyncer:
         for name, entry in registry.items():
             config_key = f"process_{name}"
             async with repository.session() as session:
-                result = await session.execute(select(Setting).where(Setting.key == config_key))
+                result = await session.execute(
+                    select(Setting).where(Setting.key == config_key, *where_active(Setting))
+                )
                 existing = result.scalar_one_or_none()
             if existing is None:
                 await self._sync_new_process(name, entry)
@@ -352,7 +355,9 @@ class ProcessRegistrySyncer:
         if note is not None:
             config_dict["note"] = note
         async with repository.session() as session:
-            existing = await session.execute(select(Setting).where(Setting.key == config_key))
+            existing = await session.execute(
+                select(Setting).where(Setting.key == config_key, *where_active(Setting))
+            )
             if existing.scalar_one_or_none() is not None:
                 raise ValueError(f"Process '{name}' is already configured")
             setting = Setting(

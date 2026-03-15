@@ -52,6 +52,7 @@ from snapper.data.models import Setting
 from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 
 
 class ProcessLauncherService:
@@ -858,7 +859,9 @@ class ProcessLauncherService:
         config_key = f"process_{name}"
         config_dict: dict[str, Any] = {}
         async with repository.session() as session:
-            result = await session.execute(select(Setting).where(Setting.key == config_key))
+            result = await session.execute(
+                select(Setting).where(Setting.key == config_key, *where_active(Setting))
+            )
             setting = result.scalar_one_or_none()
             if not setting:
                 return ProcessStartResult(
@@ -919,7 +922,9 @@ class ProcessLauncherService:
         repository = get_repository(self.settings.db_url)
         config_key = f"process_{name}"
         async with repository.session() as session:
-            result = await session.execute(select(Setting).where(Setting.key == config_key))
+            result = await session.execute(
+                select(Setting).where(Setting.key == config_key, *where_active(Setting))
+            )
             setting = result.scalar_one_or_none()
             if setting:
                 config_dict = json.loads(setting.value)

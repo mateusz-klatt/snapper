@@ -33,6 +33,7 @@ from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import close_and_insert_sync
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
@@ -429,7 +430,9 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             assert self.repository is not None, "Repository not initialized"
             with self.repository.get_session() as session:
-                stmt = select(Setting).where(Setting.key == self._get_setting_key())
+                stmt = select(Setting).where(
+                    Setting.key == self._get_setting_key(), *where_active(Setting)
+                )
                 setting = session.execute(stmt).scalar_one_or_none()
                 if setting is None or setting.value == "null" or not setting.value:
                     return None
