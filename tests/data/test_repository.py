@@ -2239,6 +2239,7 @@ class TestSQLAlchemyRepositoryDialects:
         Then: SELECT finds no match, row is added via session.add.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         scalars_mock = Mock()
         scalars_mock.first.return_value = None
         select_result = Mock()
@@ -2279,6 +2280,7 @@ class TestSQLAlchemyRepositoryDialects:
         Then: Each row triggers a SELECT (no match) then session.add.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         scalars_mock = Mock()
         scalars_mock.first.return_value = None
         select_result = Mock()
@@ -2332,6 +2334,7 @@ class TestSQLAlchemyRepositoryDialects:
         Then: SELECT finds existing, UPDATE closes old, session.add inserts new.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         existing_candle = SimpleNamespace(id=42, public_id="old-uuid")
         scalars_mock = Mock()
         scalars_mock.first.return_value = existing_candle

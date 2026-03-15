@@ -3683,6 +3683,7 @@ class TestProcessFactoryDatabasePersistence:
         """
         mock_repo = MagicMock()
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
         mock_process_run = MagicMock(spec=ProcessRun)
@@ -3882,6 +3883,7 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
     select_result = MagicMock()
     select_result.scalar_one_or_none.return_value = setting
     session = AsyncMock()
+    session.add = MagicMock()
     session.execute.return_value = select_result
     session.commit = AsyncMock()
     mock_repo = MagicMock()
@@ -3958,6 +3960,7 @@ async def test_sync_registry_to_database_adds_missing_tags(
     first_session = AsyncMock()
     first_session.execute.return_value = first_result
     update_session = AsyncMock()
+    update_session.add = MagicMock()
     update_session.execute.return_value = update_result
     update_session.commit = AsyncMock()
     mock_repo = MagicMock()
@@ -4015,6 +4018,7 @@ class TestProcessFactoryConfigLoading:
         mock_get_registry.return_value = mock_registry
         mock_repo = MagicMock()
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
         mock_setting = MagicMock()
@@ -4559,6 +4563,7 @@ class TestProcessFactoryRegistrySync:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = existing_setting
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_session.execute.return_value = mock_result
         mock_session.commit = AsyncMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session

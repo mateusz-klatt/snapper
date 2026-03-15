@@ -3103,6 +3103,7 @@ def mock_engine() -> AsyncMock:
 def mock_session() -> AsyncMock:
     """Provide a mock async database session with context manager."""
     session = AsyncMock()
+    session.add = MagicMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock()
     session.execute = AsyncMock()

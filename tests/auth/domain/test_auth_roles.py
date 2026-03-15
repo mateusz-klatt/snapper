@@ -203,6 +203,7 @@ class TestUserService:
         Then: The authenticated user profile is returned and a login event is recorded.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_db_user
         mock_session.execute.return_value = mock_result
@@ -458,6 +459,7 @@ class TestUserService:
         Then: close_and_insert is called, committed, and refreshed.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -504,6 +506,7 @@ class TestUserService:
         Then: close_and_insert is called with is_active=False.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -524,6 +527,7 @@ class TestUserService:
         Then: True is returned and close_and_insert is called.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -565,6 +569,7 @@ class TestUserService:
         Then: True is returned and close_and_insert is called.
         """
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()

@@ -251,6 +251,7 @@ class TestStartProcessByNameNoSetting:
                 return None
 
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none = get_scalar_result
         mock_session.execute = AsyncMock(return_value=mock_result)
@@ -334,6 +335,7 @@ class TestSyncRegistryTagsNotIterable:
         mock_setting = MagicMock()
         mock_setting.value = json.dumps(existing_config)
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_setting
         mock_session.execute = AsyncMock(return_value=mock_result)
@@ -1257,6 +1259,7 @@ class TestStopProcessByName:
         with patch("snapper.application.process_manager.launcher.get_repository") as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
+            mock_session.add = MagicMock()
             mock_result = MagicMock()
             mock_setting = MagicMock()
             mock_setting.value = json.dumps({"enabled": True})
@@ -1291,6 +1294,7 @@ class TestStopProcessByName:
         ):
             mock_repo = MagicMock()
             mock_session = AsyncMock()
+            mock_session.add = MagicMock()
             mock_result = MagicMock()
             mock_setting = MagicMock()
             mock_setting.value = json.dumps({"enabled": True})
