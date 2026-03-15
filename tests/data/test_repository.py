@@ -338,6 +338,45 @@ async def test_upsert_candles_preserves_caller_supplied_known_to(
 
 
 @pytest.mark.asyncio
+async def test_upsert_candles_generates_timestamp_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify upsert_candles generates timestamp when not provided.
+
+    Given: A row without a 'timestamp' key,
+    When: upsert_candles is called,
+    Then: The row gets a generated UTC timestamp.
+    """
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    before = datetime.now(UTC)
+    rows = [
+        {
+            "instrument_id": 1,
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+        },
+    ]
+    await repo.upsert_candles(rows)
+    assert isinstance(rows[0]["timestamp"], datetime)
+    assert rows[0]["timestamp"] >= before
+
+
+@pytest.mark.asyncio
 async def test_upsert_trades_other_dialect_preserves_existing_public_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

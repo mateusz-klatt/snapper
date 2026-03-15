@@ -464,15 +464,17 @@ class SQLAlchemyRepository(Repository):
         """
         if not rows:
             return 0
-        now = datetime.now(UTC)
         for r in rows:
             if "public_id" not in r:
                 r["public_id"] = str(uuid7())
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
+            if "timestamp" not in r:
+                r["timestamp"] = datetime.now(UTC)
         async with self.session() as s:
             count = 0
             for r in rows:
+                bus_time = r["timestamp"]
                 existing = (
                     (
                         await s.execute(
@@ -481,8 +483,8 @@ class SQLAlchemyRepository(Repository):
                                 Candle.instrument_id == r["instrument_id"],
                                 Candle.timeframe == r["timeframe"],
                                 Candle.open_at == r["open_at"],
-                                Candle.timestamp <= now,
-                                Candle.known_to > now,
+                                Candle.timestamp <= bus_time,
+                                Candle.known_to > bus_time,
                             )
                             .with_for_update()
                         )
@@ -492,10 +494,9 @@ class SQLAlchemyRepository(Repository):
                 )
                 if existing:
                     await s.execute(
-                        update(Candle).where(Candle.id == existing.id).values(known_to=now)
+                        update(Candle).where(Candle.id == existing.id).values(known_to=bus_time)
                     )
                     r["public_id"] = existing.public_id
-                r["timestamp"] = now
                 s.add(Candle(**r))
                 count += 1
             await s.commit()
@@ -1045,33 +1046,36 @@ class MSSQLRepository(Repository):
         """Close-old + insert-new (SCD Type 2) for candle rows via sync thread."""
         if not rows:
             return 0
-        now = datetime.now(UTC)
         for r in rows:
             if "public_id" not in r:
                 r["public_id"] = str(uuid7())
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
+            if "timestamp" not in r:
+                r["timestamp"] = datetime.now(UTC)
 
         def _do(s: SyncSession) -> int:
             count = 0
             for r in rows:
+                bus_time = r["timestamp"]
                 existing = (
                     s.execute(
                         select(Candle).where(
                             Candle.instrument_id == r["instrument_id"],
                             Candle.timeframe == r["timeframe"],
                             Candle.open_at == r["open_at"],
-                            Candle.timestamp <= now,
-                            Candle.known_to > now,
+                            Candle.timestamp <= bus_time,
+                            Candle.known_to > bus_time,
                         )
                     )
                     .scalars()
                     .first()
                 )
                 if existing:
-                    s.execute(update(Candle).where(Candle.id == existing.id).values(known_to=now))
+                    s.execute(
+                        update(Candle).where(Candle.id == existing.id).values(known_to=bus_time)
+                    )
                     r["public_id"] = existing.public_id
-                r["timestamp"] = now
                 s.add(Candle(**r))
                 count += 1
             s.commit()

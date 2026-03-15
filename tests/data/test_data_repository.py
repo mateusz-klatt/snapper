@@ -482,6 +482,23 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
         ]
     )
     assert inserted_c in (0, 1)
+    inserted_no_ts = await ms_repo.upsert_candles(
+        [
+            {
+                "instrument_id": 1,
+                "open_at": datetime(2024, 1, 2, tzinfo=UTC),
+                "timeframe": "1m",
+                "open": 2.0,
+                "high": 3.0,
+                "low": 1.5,
+                "close": 2.5,
+                "volume": 500.0,
+                "vwap": None,
+                "trades": 5,
+            }
+        ]
+    )
+    assert inserted_no_ts in (0, 1)
     inserted_t = await ms_repo.upsert_trades(
         [
             {
