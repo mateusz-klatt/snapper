@@ -18,6 +18,7 @@ _INSTRUMENT_FK = "instruments.id"
 _FK_SYMBOL_CATALOG = "symbol_catalog.native_symbol"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+_KNOWN_TO_ACTIVE = "known_to = '9999-12-31T23:59:59+00:00'"
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -125,7 +126,13 @@ def upgrade() -> None:
             name="ck_symbol_catalog_quote_required_for_pairs",
         ),
     )
-    op.create_index("ix_symbol_catalog_public_id", "symbol_catalog", ["public_id"], unique=True)
+    op.create_index(
+        "ix_symbol_catalog_public_id",
+        "symbol_catalog",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_sc_base_quote", "symbol_catalog", ["base", "quote"])
     op.create_table(
         "symbol_aliases",
@@ -148,20 +155,28 @@ def upgrade() -> None:
             "channel IN ('ws', 'rest', 'ccxt')",
             name="ck_symbol_alias_channel",
         ),
-        sa.UniqueConstraint(
-            "native_symbol",
-            "exchange",
-            "channel",
-            name="uq_alias_native_exchange_channel",
-        ),
-        sa.UniqueConstraint(
-            "exchange",
-            "channel",
-            "exchange_symbol",
-            name="uq_alias_exchange_channel_symbol",
-        ),
     )
-    op.create_index("ix_symbol_aliases_public_id", "symbol_aliases", ["public_id"], unique=True)
+    op.create_index(
+        "ix_symbol_aliases_public_id",
+        "symbol_aliases",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_alias_native_exchange_channel",
+        "symbol_aliases",
+        ["native_symbol", "exchange", "channel"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_alias_exchange_channel_symbol",
+        "symbol_aliases",
+        ["exchange", "channel", "exchange_symbol"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_symbol_aliases_native_symbol", "symbol_aliases", ["native_symbol"])
     op.create_table(
         "symbol_exchange_capabilities",
@@ -178,13 +193,25 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOL_CATALOG]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("native_symbol", "exchange", name="uq_sec_symbol_exchange"),
         sa.CheckConstraint(
             _CK_EXCHANGE_LOWER,
             name="ck_sec_exchange_lower",
         ),
     )
-    op.create_index("ix_sec_public_id", "symbol_exchange_capabilities", ["public_id"], unique=True)
+    op.create_index(
+        "ix_sec_public_id",
+        "symbol_exchange_capabilities",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_sec_symbol_exchange",
+        "symbol_exchange_capabilities",
+        ["native_symbol", "exchange"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_sec_exchange", "symbol_exchange_capabilities", ["exchange"])
     op.create_index("ix_sec_native_symbol", "symbol_exchange_capabilities", ["native_symbol"])
     op.create_index(
@@ -211,10 +238,22 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.ForeignKeyConstraint(["symbol"], [_FK_SYMBOL_CATALOG]),
-        sa.UniqueConstraint("symbol", "exchange", name="uq_instrument_symbol_exchange"),
         sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
     )
-    op.create_index("ix_instruments_public_id", "instruments", ["public_id"], unique=True)
+    op.create_index(
+        "ix_instruments_public_id",
+        "instruments",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_instrument_symbol_exchange",
+        "instruments",
+        ["symbol", "exchange"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_instruments_symbol", "instruments", ["symbol"])
     op.create_index("ix_instruments_exchange", "instruments", ["exchange"])
     op.create_table(
@@ -235,9 +274,21 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("instrument_id", "timeframe", "open_at", name="uq_candle_itf_open"),
     )
-    op.create_index("ix_candles_public_id", "candles", ["public_id"], unique=True)
+    op.create_index(
+        "ix_candles_public_id",
+        "candles",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_candle_itf_open",
+        "candles",
+        ["instrument_id", "timeframe", "open_at"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_candles_instrument_id", "candles", ["instrument_id"])
     op.create_index("ix_candle_instrument_open", "candles", ["instrument_id", "open_at"])
     op.create_table(
@@ -255,7 +306,13 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("trade_id", name="uq_trade_trade_id"),
     )
-    op.create_index("ix_trades_public_id", "trades", ["public_id"], unique=True)
+    op.create_index(
+        "ix_trades_public_id",
+        "trades",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_trades_instrument_id", "trades", ["instrument_id"])
     op.create_index("ix_trades_timestamp", "trades", ["timestamp"])
     op.create_index("ix_trade_instrument_ts", "trades", ["instrument_id", "timestamp"])
@@ -282,7 +339,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_orders_public_id", "orders", ["public_id"], unique=True)
+    op.create_index(
+        "ix_orders_public_id",
+        "orders",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_orders_instrument_id", "orders", ["instrument_id"])
     op.create_index("ix_orders_client_order_id", "orders", ["client_order_id"])
     op.create_index("ix_orders_exchange_order_id", "orders", ["exchange_order_id"])
@@ -291,14 +354,14 @@ def upgrade() -> None:
         "orders",
         ["instrument_id", "client_order_id"],
         unique=True,
-        sqlite_where=text("client_order_id IS NOT NULL"),
+        sqlite_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_orders_exchange_oid",
         "orders",
         ["instrument_id", "exchange_order_id"],
         unique=True,
-        sqlite_where=text("exchange_order_id IS NOT NULL"),
+        sqlite_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
     )
     op.create_table(
         "executions",
@@ -319,7 +382,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["order_id"], ["orders.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_executions_public_id", "executions", ["public_id"], unique=True)
+    op.create_index(
+        "ix_executions_public_id",
+        "executions",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_executions_order_id", "executions", ["order_id"])
     op.create_index(
         "uq_executions_order_exec",
@@ -348,9 +417,21 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("instrument_id", name="uq_positions_instrument_id"),
     )
-    op.create_index("ix_positions_public_id", "positions", ["public_id"], unique=True)
+    op.create_index(
+        "ix_positions_public_id",
+        "positions",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_positions_instrument_id",
+        "positions",
+        ["instrument_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_positions_instrument_id", "positions", ["instrument_id"])
     op.create_table(
         "signals",
@@ -368,7 +449,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_signals_public_id", "signals", ["public_id"], unique=True)
+    op.create_index(
+        "ix_signals_public_id",
+        "signals",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_signals_instrument_id", "signals", ["instrument_id"])
     op.create_index("ix_signals_fired_at", "signals", ["fired_at"])
     op.create_table(
@@ -386,8 +473,16 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_users_public_id", "users", ["public_id"], unique=True)
-    op.create_index("ix_users_username", "users", ["username"], unique=True)
+    op.create_index(
+        "ix_users_public_id",
+        "users",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "ix_users_username", "users", ["username"], unique=True, sqlite_where=text(_KNOWN_TO_ACTIVE)
+    )
     op.create_table(
         "settings",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -401,9 +496,17 @@ def upgrade() -> None:
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("key", name="uq_settings_key"),
     )
-    op.create_index("ix_settings_public_id", "settings", ["public_id"], unique=True)
+    op.create_index(
+        "ix_settings_public_id",
+        "settings",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_settings_key", "settings", ["key"], unique=True, sqlite_where=text(_KNOWN_TO_ACTIVE)
+    )
     op.create_table(
         "process_runs",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -422,7 +525,13 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_process_runs_public_id", "process_runs", ["public_id"], unique=True)
+    op.create_index(
+        "ix_process_runs_public_id",
+        "process_runs",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_process_runs_process_name", "process_runs", ["process_name"])
     op.create_index("ix_process_runs_status", "process_runs", ["status"])
     op.create_index("ix_process_runs_started_at", "process_runs", ["started_at"])
@@ -445,9 +554,21 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("instrument_id", name="uq_instrument_spec_instrument"),
     )
-    op.create_index("ix_instrument_specs_public_id", "instrument_specs", ["public_id"], unique=True)
+    op.create_index(
+        "ix_instrument_specs_public_id",
+        "instrument_specs",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "uq_instrument_spec_instrument",
+        "instrument_specs",
+        ["instrument_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_instrument_specs_instrument_id", "instrument_specs", ["instrument_id"])
     op.create_table(
         "market_snapshots",
@@ -471,7 +592,13 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_market_snapshots_public_id", "market_snapshots", ["public_id"], unique=True)
+    op.create_index(
+        "ix_market_snapshots_public_id",
+        "market_snapshots",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_index("ix_market_snapshots_symbol", "market_snapshots", ["symbol"])
     op.create_index("ix_market_snapshots_timestamp", "market_snapshots", ["timestamp"])
     op.create_index("ix_market_snapshots_symbol_ts", "market_snapshots", ["symbol", "timestamp"])

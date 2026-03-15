@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Any
-from typing import cast
 
 import zmq
 import zmq.asyncio
@@ -23,6 +22,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy import update
 
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
@@ -252,30 +252,44 @@ class SettingsService:
             encrypted_value, is_encrypted = encrypt_if_sensitive(key, str_value)
         repository = get_repository(self.db_url)
         async with repository.session() as session:
-            result = await session.execute(
-                update(Setting)
-                .where(Setting.key == key)
-                .values(
+            now = datetime.now(UTC)
+            existing = (
+                (
+                    await session.execute(
+                        select(Setting).where(
+                            Setting.key == key,
+                            Setting.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing:
+                await session.execute(
+                    update(Setting).where(Setting.id == existing.id).values(known_to=now)
+                )
+                new_setting = Setting(
+                    public_id=existing.public_id,
+                    key=key,
                     value=encrypted_value,
                     category=category,
                     description=description,
                     is_encrypted=is_encrypted,
-                    timestamp=datetime.now(UTC),
+                    timestamp=now,
                     updated_by=updated_by,
                 )
-            )
-            rowcount = cast(Any, result).rowcount
-            if rowcount == 0:
+            else:
                 new_setting = Setting(
                     key=key,
                     value=encrypted_value,
                     category=category,
                     description=description,
                     is_encrypted=is_encrypted,
-                    timestamp=datetime.now(UTC),
+                    timestamp=now,
                     updated_by=updated_by,
                 )
-                session.add(new_setting)
+            session.add(new_setting)
             await session.commit()
         self._cache[key] = value
         await self._broadcast_change(key, encrypted_value, category, updated_by)

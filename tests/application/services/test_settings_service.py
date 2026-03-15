@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
@@ -23,6 +24,7 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
@@ -116,6 +118,10 @@ class MockScalars:
     def all(self) -> list[MagicMock]:
         """Return all data items."""
         return self.data
+
+    def first(self) -> MagicMock | None:
+        """Return first data item or None."""
+        return self.data[0] if self.data else None
 
 
 class MockSession:
@@ -387,6 +393,46 @@ class TestSettingsService:
             await service.initialize()
             await service.update_setting("test_key", "test_value")
             assert service.get_setting("test_key") == "test_value"
+
+    @pytest.mark.asyncio
+    async def test_update_setting_closes_old_row_and_inserts_new(self, init_db: None) -> None:
+        """Verify SCD Type 2 close-old + insert-new on setting update.
+
+        Given: Existing setting persisted in database,
+        When: update_setting called again for the same key,
+        Then: Old row closed (known_to set to now), new active row inserted
+              with same public_id, and cache reflects new value.
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        repo = get_repository("sqlite+aiosqlite:///:memory:")
+        await repo.create_all()
+        with (
+            patch.object(service, "_setup_zmq_publisher", new_callable=AsyncMock),
+            patch.object(service, "_broadcast_change", new_callable=AsyncMock),
+            patch("snapper.application.services.settings.get_repository", return_value=repo),
+        ):
+            await service.initialize()
+            await service.update_setting("scd_key", "original")
+            assert service.get_setting("scd_key") == "original"
+            await service.update_setting("scd_key", "updated")
+            assert service.get_setting("scd_key") == "updated"
+        async with repo.session() as session:
+            rows = (
+                (await session.execute(select(Setting).where(Setting.key == "scd_key")))
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 2
+            closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
+            active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
+            assert len(closed) == 1
+            assert len(active) == 1
+            assert closed[0].value == "original"
+            assert active[0].value == "updated"
+            assert closed[0].public_id == active[0].public_id
 
     @pytest.mark.asyncio
     async def test_get_all_settings_after_updates(self, init_db: None) -> None:
@@ -771,9 +817,9 @@ async def test_update_setting_with_force_encrypt_cleartext_false() -> None:
         zmq_broker_xpub="tcp://127.0.0.1:7501",
     )
     mock_session = MagicMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 1
-    mock_session.execute = AsyncMock(return_value=mock_result)
+    select_result = MockResult([])
+    mock_session.execute = AsyncMock(return_value=select_result)
+    mock_session.add = MagicMock()
     mock_session.commit = AsyncMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock()

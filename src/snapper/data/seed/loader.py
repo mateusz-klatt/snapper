@@ -256,8 +256,8 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
             text(
                 "INSERT INTO settings"
                 " (public_id, key, value, category, description, is_encrypted, timestamp, known_to)"
-                " VALUES (:public_id, :key, :value, :category, :description, :is_encrypted, :timestamp, :known_to)"
-                " ON CONFLICT(key) DO NOTHING"
+                " SELECT :public_id, :key, :value, :category, :description, :is_encrypted, :timestamp, :known_to"
+                " WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = :key)"
             ),
             {
                 "public_id": str(uuid7()),

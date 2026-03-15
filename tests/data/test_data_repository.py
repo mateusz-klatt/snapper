@@ -398,7 +398,9 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
             call_num = self._execute_count
 
             class Q:
-                def scalar_one_or_none(self: Any) -> Any:
+                """Stub query result supporting scalars/first/one/all chains."""
+
+                def scalar_one_or_none(self) -> Any:
                     if call_num >= 2:
                         scalar_one_called["value"] = True
 
@@ -406,6 +408,12 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
                             id = 1
 
                         return One()
+                    return None
+
+                def scalars(self) -> Q:
+                    return self
+
+                def first(self) -> Any:
                     return None
 
                 def all(self) -> list[Any]:
@@ -508,6 +516,8 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
     executed_stmts: list[str] = []
 
     class ExtendedDummySession:
+        """Stub session supporting order SCD Type 2 close+insert flow."""
+
         def __init__(self) -> None:
             self._last_added: Any | None = None
 
@@ -520,24 +530,46 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
         def execute(self, stmt: Any, *_args: Any, **_kwargs: Any) -> Any:
             executed_stmts.append(str(type(stmt).__name__))
 
-            class Q:
-                def scalar_one_or_none(self) -> Any:
-                    class Inst:
-                        id = 1
+            class OldOrder:
+                """Stub old order row for SCD Type 2 close+insert."""
 
-                    return Inst()
+                id = 1
+                public_id = "order-pub-id"
+                instrument_id = 1
+                client_order_id = "c-1"
+                exchange_order_id = None
+                created_at = datetime(2024, 1, 1, tzinfo=UTC)
+                updated_at = None
+                timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+                side = "buy"
+                order_type = "limit"
+                price = 100.0
+                size = 1.0
+                filled_size = 0.0
+                average_price = None
+                status = "new"
+                time_in_force = None
+                error = None
+
+            class Q:
+                """Stub query result for execute calls."""
+
+                def scalar_one_or_none(self) -> Any:
+                    return OldOrder()
 
                 def scalars(self) -> Q:
                     return self
 
-                def first(self) -> Any:
-                    class Inst:
-                        id = 1
+                def one(self) -> Any:
+                    return OldOrder()
 
-                    return Inst()
+                def first(self) -> Any:
+                    return OldOrder()
 
                 def all(self) -> list[Any]:
                     class Row:
+                        """Stub candle row."""
+
                         open_at = datetime(2024, 1, 1, tzinfo=UTC)
                         timeframe = "1m"
                         open = 1.0

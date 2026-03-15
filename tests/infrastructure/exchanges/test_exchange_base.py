@@ -359,38 +359,40 @@ async def test_log_order_to_db_handles_exception() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_log_order_update_to_db_returns_early_when_no_repository() -> None:
-    """Log order update returns early without repository.
+async def test_log_order_update_to_db_returns_none_when_no_repository() -> None:
+    """Log order update returns None without repository.
 
     Given: Client without repository configured,
     When: _log_order_update_to_db is called,
-    Then: Returns immediately without error.
+    Then: Returns None without error.
     """
     client = DummyExchangeClient(repository=None)
-    await client._log_order_update_to_db(
+    result = await client._log_order_update_to_db(
         db_order_id=42,
         status=OrderStatusEnum.FILLED,
         exchange_order_id="order_123",
     )
+    assert result is None
 
 
 @pytest.mark.asyncio()
-async def test_log_order_update_to_db_logs_successfully() -> None:
-    """Log order update persists status change.
+async def test_log_order_update_to_db_returns_new_order_id() -> None:
+    """Log order update returns new order version id.
 
-    Given: Client with mock repository,
+    Given: Client with mock repository returning new order id,
     When: _log_order_update_to_db is called with status,
-    Then: Repository update_order is called with correct args.
+    Then: Repository update_order is called and new id returned.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.update_order = AsyncMock()
+    mock_repo.update_order = AsyncMock(return_value=99)
     client = DummyExchangeClient(repository=mock_repo)
-    await client._log_order_update_to_db(
+    result = await client._log_order_update_to_db(
         db_order_id=42,
         status=OrderStatusEnum.FILLED,
         exchange_order_id="order_123",
         error=None,
     )
+    assert result == 99
     mock_repo.update_order.assert_called_once()
     call_args = mock_repo.update_order.call_args[1]
     assert call_args["order_id"] == 42
@@ -405,15 +407,16 @@ async def test_log_order_update_to_db_handles_exception() -> None:
 
     Given: Client with repository that raises exception,
     When: _log_order_update_to_db is called,
-    Then: Exception is suppressed.
+    Then: Exception is suppressed and None returned.
     """
     mock_repo = MagicMock(spec=Repository)
     mock_repo.update_order = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
-    await client._log_order_update_to_db(
+    result = await client._log_order_update_to_db(
         db_order_id=42,
         status=OrderStatusEnum.FILLED,
     )
+    assert result is None
 
 
 @pytest.mark.asyncio()

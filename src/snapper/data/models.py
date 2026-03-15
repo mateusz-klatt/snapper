@@ -99,6 +99,7 @@ __all__ = [
 _INSTRUMENT_FK = "instruments.id"
 _FK_SYMBOL_CATALOG = "symbol_catalog.native_symbol"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
+_KNOWN_TO_ACTIVE = text("known_to = '9999-12-31T23:59:59+00:00'")
 
 
 class Base(DeclarativeBase):
@@ -110,14 +111,19 @@ class Instrument(Base):
 
     __tablename__ = "instruments"
     __table_args__ = (
-        UniqueConstraint("symbol", "exchange", name="uq_instrument_symbol_exchange"),
+        Index(
+            "uq_instrument_symbol_exchange",
+            "symbol",
+            "exchange",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index("ix_instruments_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
         Index("ix_instruments_exchange", "exchange"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOL_CATALOG), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
@@ -133,13 +139,19 @@ class Candle(Base):
 
     __tablename__ = "candles"
     __table_args__ = (
-        UniqueConstraint("instrument_id", "timeframe", "open_at", name="uq_candle_itf_open"),
+        Index(
+            "uq_candle_itf_open",
+            "instrument_id",
+            "timeframe",
+            "open_at",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
         Index("ix_candle_instrument_open", "instrument_id", "open_at"),
+        Index("ix_candles_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     open_at: Mapped[datetime] = mapped_column(TZDateTime())
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
@@ -162,11 +174,10 @@ class Trade(Base):
     __table_args__ = (
         UniqueConstraint("trade_id", name="uq_trade_trade_id"),
         Index("ix_trade_instrument_ts", "instrument_id", "timestamp"),
+        Index("ix_trades_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     price: Mapped[float] = mapped_column(Float)
@@ -187,20 +198,23 @@ class Order(Base):
             "instrument_id",
             "client_order_id",
             unique=True,
-            sqlite_where=text("client_order_id IS NOT NULL"),
+            sqlite_where=text(
+                "client_order_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
         ),
         Index(
             "uq_orders_exchange_oid",
             "instrument_id",
             "exchange_order_id",
             unique=True,
-            sqlite_where=text("exchange_order_id IS NOT NULL"),
+            sqlite_where=text(
+                "exchange_order_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
         ),
+        Index("ix_orders_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -238,11 +252,10 @@ class Execution(Base):
             unique=True,
             sqlite_where=text("trade_id IS NOT NULL"),
         ),
+        Index("ix_executions_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
     exec_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -262,11 +275,17 @@ class Position(Base):
     """SQLAlchemy model for open trading positions."""
 
     __tablename__ = "positions"
-    __table_args__ = (UniqueConstraint("instrument_id", name="uq_positions_instrument_id"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
+    __table_args__ = (
+        Index(
+            "uq_positions_instrument_id",
+            "instrument_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index("ix_positions_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
@@ -280,10 +299,11 @@ class Signal(Base):
     """SQLAlchemy model for trading signal events."""
 
     __tablename__ = "signals"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
+    __table_args__ = (
+        Index("ix_signals_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     fired_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
@@ -300,11 +320,13 @@ class User(Base):
     """SQLAlchemy model for user accounts and authentication."""
 
     __tablename__ = "users"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
+    __table_args__ = (
+        Index("ix_users_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index("uq_users_username", "username", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
-    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
+    username: Mapped[str] = mapped_column(String(64))
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(32))
@@ -319,11 +341,13 @@ class Setting(Base):
     """SQLAlchemy model for application configuration settings."""
 
     __tablename__ = "settings"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
+    __table_args__ = (
+        Index("ix_settings_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index("uq_settings_key", "key", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
-    key: Mapped[str] = mapped_column(String(64), unique=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
+    key: Mapped[str] = mapped_column(String(64))
     value: Mapped[str] = mapped_column(String(1024))
     category: Mapped[str] = mapped_column(String(32))
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)
@@ -353,11 +377,15 @@ class SymbolCatalog(Base):
             name="ck_symbol_catalog_quote_required_for_pairs",
         ),
         Index("ix_sc_base_quote", "base", "quote"),
+        Index(
+            "ix_symbol_catalog_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(String(32), unique=True)
     base: Mapped[str] = mapped_column(String(16), nullable=False)
     quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -385,23 +413,31 @@ class SymbolAlias(Base):
             "channel IN ('ws', 'rest', 'ccxt')",
             name="ck_symbol_alias_channel",
         ),
-        UniqueConstraint(
+        Index(
+            "uq_alias_native_exchange_channel",
             "native_symbol",
             "exchange",
             "channel",
-            name="uq_alias_native_exchange_channel",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
         ),
-        UniqueConstraint(
+        Index(
+            "uq_alias_exchange_channel_symbol",
             "exchange",
             "channel",
             "exchange_symbol",
-            name="uq_alias_exchange_channel_symbol",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index(
+            "ix_symbol_aliases_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(
         String(32),
         ForeignKey(_FK_SYMBOL_CATALOG),
@@ -439,7 +475,13 @@ class SymbolExchangeCapability(Base):
 
     __tablename__ = "symbol_exchange_capabilities"
     __table_args__ = (
-        UniqueConstraint("native_symbol", "exchange", name="uq_sec_symbol_exchange"),
+        Index(
+            "uq_sec_symbol_exchange",
+            "native_symbol",
+            "exchange",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
         CheckConstraint(
             _CK_EXCHANGE_LOWER,
             name="ck_sec_exchange_lower",
@@ -457,11 +499,15 @@ class SymbolExchangeCapability(Base):
             "can_market_data",
             sqlite_where=text("can_market_data = 1"),
         ),
+        Index(
+            "ix_symbol_exchange_capabilities_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(
         String(32),
         ForeignKey(_FK_SYMBOL_CATALOG),
@@ -483,10 +529,11 @@ class ProcessRun(Base):
     """SQLAlchemy model for background process execution records."""
 
     __tablename__ = "process_runs"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
+    __table_args__ = (
+        Index("ix_process_runs_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
     )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     process_name: Mapped[str] = mapped_column(String(64), index=True)
     role: Mapped[str] = mapped_column(String(16))
     lifecycle: Mapped[str] = mapped_column(String(16))
@@ -505,11 +552,22 @@ class InstrumentSpec(Base):
     """SQLAlchemy model for instrument trading specifications."""
 
     __tablename__ = "instrument_specs"
-    __table_args__ = (UniqueConstraint("instrument_id", name="uq_instrument_spec_instrument"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
+    __table_args__ = (
+        Index(
+            "uq_instrument_spec_instrument",
+            "instrument_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index(
+            "ix_instrument_specs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
     )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(
         ForeignKey(_INSTRUMENT_FK), nullable=False, index=True
     )
@@ -554,11 +612,15 @@ class MarketSnapshot(Base):
     __table_args__ = (
         Index("ix_market_snapshots_symbol_ts", "symbol", "timestamp"),
         Index("ix_market_snapshots_exchange_symbol_ts", "exchange", "symbol", "timestamp"),
+        Index(
+            "ix_market_snapshots_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(
-        UUIDColumn(), unique=True, index=True, default=_public_id
-    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     exchange: Mapped[str] = mapped_column(
         String(20),
         nullable=False,

@@ -378,22 +378,27 @@ class ExchangeClientBase(ABC):
         status: OrderStatusEnum,
         exchange_order_id: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Update an existing order record in the database.
+    ) -> int | None:
+        """Close old order version and insert new one in the database (SCD Type 2).
 
         This internal method is called when an order status changes
-        (e.g., filled, canceled, rejected).
+        (e.g., filled, canceled, rejected). Returns the new version's
+        integer id so callers can link executions to the latest row.
 
         Args:
-            db_order_id: Database order ID to update.
+            db_order_id: Database order ID to close and version.
             status: New order status.
             exchange_order_id: Exchange order ID if it changed.
             error: Error message if order was rejected.
+
+        Returns:
+            New order version's integer id, or None if repository is
+            not configured or operation fails.
         """
         if self.repository is None:
-            return
+            return None
         try:
-            await self.repository.update_order(
+            return await self.repository.update_order(
                 order_id=db_order_id,
                 status=status.value,
                 updated_at=datetime.now(tz=UTC),
@@ -402,6 +407,7 @@ class ExchangeClientBase(ABC):
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log order update to database: {e}")
+            return None
 
     async def _log_execution_to_db(
         self,

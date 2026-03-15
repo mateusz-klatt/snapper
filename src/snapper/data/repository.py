@@ -69,6 +69,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
 from snapper.core.types import AllExchange
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Candle
 from snapper.data.models import Execution
@@ -196,8 +197,11 @@ class Repository(ABC):
         error: str | None = None,
         filled_size: float | None = None,
         average_price: float | None = None,
-    ) -> None:
-        """Update order status and metadata."""
+    ) -> int:
+        """Close old order version and insert new one (SCD Type 2).
+
+        Returns the new version's integer id.
+        """
         ...
 
     @abstractmethod
@@ -345,13 +349,14 @@ class SQLAlchemyRepository(Repository):
                     Candle.timeframe,
                     func.max(Candle.open_at).label("max_open_at"),
                 )
+                .where(Candle.known_to == KNOWN_TO_MAX)
                 .group_by(Candle.instrument_id, Candle.timeframe)
                 .subquery()
             )
             q = await s.execute(
-                select(
-                    Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id
-                ).join(
+                select(Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id)
+                .where(Candle.known_to == KNOWN_TO_MAX)
+                .join(
                     latest,
                     and_(
                         Candle.instrument_id == latest.c.instrument_id,
@@ -446,80 +451,49 @@ class SQLAlchemyRepository(Repository):
                 return inserted
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        """Insert or update candles using dialect-specific ON CONFLICT DO UPDATE.
+        """Close-old + insert-new (SCD Type 2) for candle rows.
 
         When a candle with the same (instrument_id, timeframe, open_at) already
-        exists, the OHLCV columns and wall-clock timestamp are replaced with the
-        incoming values.  This is essential for live-updating partial candles
-        (e.g. Kraken publishes intra-interval updates that must overwrite earlier
-        snapshots).
+        exists as an active row (known_to == KNOWN_TO_MAX), the old row is closed
+        by setting its known_to to now, and a new row is inserted carrying the
+        same public_id.  This preserves full history of intra-interval updates.
 
         Rows without ``public_id`` get a generated UUID7 automatically.
-        On conflict the existing ``public_id`` is preserved (not overwritten).
         """
         if not rows:
             return 0
+        now = datetime.now(UTC)
         for r in rows:
             if "public_id" not in r:
                 r["public_id"] = str(uuid7())
-        index_elements = ["instrument_id", "timeframe", "open_at"]
-        update_cols = {
-            "timestamp": "timestamp",
-            "open": "open",
-            "high": "high",
-            "low": "low",
-            "close": "close",
-            "volume": "volume",
-            "vwap": "vwap",
-            "trades": "trades",
-        }
-        name = self.dialect_name
-        if name == "sqlite":
-            async with self.session() as s:
-                stmt = sqlite_insert(Candle).values(rows)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=index_elements,
-                    set_={col: getattr(stmt.excluded, src) for col, src in update_cols.items()},
-                )
-                res = await s.execute(stmt)
-                await s.commit()
-                return int(cast(Any, res).rowcount or 0)
-        elif name.startswith("postgres"):
-            async with self.session() as s:
-                stmt_pg = pg_insert(Candle).values(rows)
-                stmt_pg = stmt_pg.on_conflict_do_update(
-                    index_elements=index_elements,
-                    set_={col: getattr(stmt_pg.excluded, src) for col, src in update_cols.items()},
-                )
-                res = await s.execute(stmt_pg)
-                await s.commit()
-                return int(cast(Any, res).rowcount or 0)
-        else:
-            async with self.session() as s:
-                count = 0
-                for r in rows:
-                    existing = (
+            if "known_to" not in r:
+                r["known_to"] = KNOWN_TO_MAX
+        async with self.session() as s:
+            count = 0
+            for r in rows:
+                existing = (
+                    (
                         await s.execute(
                             select(Candle).where(
-                                and_(
-                                    Candle.instrument_id == r["instrument_id"],
-                                    Candle.timeframe == r["timeframe"],
-                                    Candle.open_at == r["open_at"],
-                                )
+                                Candle.instrument_id == r["instrument_id"],
+                                Candle.timeframe == r["timeframe"],
+                                Candle.open_at == r["open_at"],
+                                Candle.known_to == KNOWN_TO_MAX,
                             )
                         )
-                    ).scalar_one_or_none()
-                    if existing:
-                        await s.execute(
-                            update(Candle)
-                            .where(Candle.id == existing.id)
-                            .values({col: r[col] for col in update_cols if col in r})
-                        )
-                    else:
-                        await s.execute(insert(Candle).values(**r))
-                    count += 1
-                await s.commit()
-                return count
+                    )
+                    .scalars()
+                    .first()
+                )
+                if existing:
+                    await s.execute(
+                        update(Candle).where(Candle.id == existing.id).values(known_to=now)
+                    )
+                    r["public_id"] = existing.public_id
+                s.add(Candle(**r))
+                count += 1
+            await s.commit()
+        return count
 
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         """Insert trades with dialect-specific conflict handling."""
@@ -573,24 +547,36 @@ class SQLAlchemyRepository(Repository):
         error: str | None = None,
         filled_size: float | None = None,
         average_price: float | None = None,
-    ) -> None:
-        """Update order status, timestamp, and optional fields."""
+    ) -> int:
+        """Close old order version and insert new one (SCD Type 2)."""
         async with self.session() as s:
-            values: dict[str, Any] = {
-                "status": status,
-                "updated_at": updated_at,
-                "exchange_order_id": (
-                    exchange_order_id if exchange_order_id is not None else Order.exchange_order_id
+            now = datetime.now(UTC)
+            old_order = (await s.execute(select(Order).where(Order.id == order_id))).scalars().one()
+            await s.execute(update(Order).where(Order.id == order_id).values(known_to=now))
+            new_order = Order(
+                public_id=old_order.public_id,
+                instrument_id=old_order.instrument_id,
+                client_order_id=old_order.client_order_id,
+                exchange_order_id=exchange_order_id or old_order.exchange_order_id,
+                created_at=old_order.created_at,
+                updated_at=updated_at,
+                timestamp=now,
+                side=old_order.side,
+                order_type=old_order.order_type,
+                price=old_order.price,
+                size=old_order.size,
+                filled_size=filled_size if filled_size is not None else old_order.filled_size,
+                average_price=(
+                    average_price if average_price is not None else old_order.average_price
                 ),
-                "error": error if error is not None else Order.error,
-            }
-            if filled_size is not None:
-                values["filled_size"] = filled_size
-            if average_price is not None:
-                values["average_price"] = average_price
-            stmt = update(Order).where(Order.id == order_id).values(**values)
-            await s.execute(stmt)
+                status=status,
+                time_in_force=old_order.time_in_force,
+                error=error,
+            )
+            s.add(new_order)
             await s.commit()
+            await s.refresh(new_order)
+            return new_order.id
 
     async def insert_execution(
         self,
@@ -980,13 +966,14 @@ class MSSQLRepository(Repository):
                     Candle.timeframe,
                     func.max(Candle.open_at).label("max_open_at"),
                 )
+                .where(Candle.known_to == KNOWN_TO_MAX)
                 .group_by(Candle.instrument_id, Candle.timeframe)
                 .subquery()
             )
             q = s.execute(
-                select(
-                    Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id
-                ).join(
+                select(Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id)
+                .where(Candle.known_to == KNOWN_TO_MAX)
+                .join(
                     latest,
                     and_(
                         Candle.instrument_id == latest.c.instrument_id,
@@ -1039,38 +1026,35 @@ class MSSQLRepository(Repository):
         return await self._run_sync(_do)
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        """Insert or update candles via sync thread.
-
-        Uses SELECT + UPDATE/INSERT per row so partial candle updates
-        overwrite stale data rather than being silently dropped.
-        """
+        """Close-old + insert-new (SCD Type 2) for candle rows via sync thread."""
         if not rows:
             return 0
+        now = datetime.now(UTC)
         for r in rows:
             if "public_id" not in r:
                 r["public_id"] = str(uuid7())
-        update_cols = ["open", "high", "low", "close", "volume", "vwap", "trades"]
+            if "known_to" not in r:
+                r["known_to"] = KNOWN_TO_MAX
 
         def _do(s: SyncSession) -> int:
             count = 0
             for r in rows:
-                existing = s.execute(
-                    select(Candle).where(
-                        and_(
+                existing = (
+                    s.execute(
+                        select(Candle).where(
                             Candle.instrument_id == r["instrument_id"],
                             Candle.timeframe == r["timeframe"],
-                            Candle.timestamp == r["timestamp"],
+                            Candle.open_at == r["open_at"],
+                            Candle.known_to == KNOWN_TO_MAX,
                         )
                     )
-                ).scalar_one_or_none()
+                    .scalars()
+                    .first()
+                )
                 if existing:
-                    s.execute(
-                        update(Candle)
-                        .where(Candle.id == existing.id)
-                        .values({col: r[col] for col in update_cols if col in r})
-                    )
-                else:
-                    s.execute(insert(Candle).values(**r))
+                    s.execute(update(Candle).where(Candle.id == existing.id).values(known_to=now))
+                    r["public_id"] = existing.public_id
+                s.add(Candle(**r))
                 count += 1
             s.commit()
             return count
@@ -1132,27 +1116,39 @@ class MSSQLRepository(Repository):
         error: str | None = None,
         filled_size: float | None = None,
         average_price: float | None = None,
-    ) -> None:
-        """Update order status via sync thread."""
+    ) -> int:
+        """Close old order version and insert new one (SCD Type 2) via sync thread."""
 
-        def _do(s: SyncSession) -> None:
-            values: dict[str, Any] = {
-                "status": status,
-                "updated_at": updated_at,
-                "exchange_order_id": (
-                    exchange_order_id if exchange_order_id is not None else Order.exchange_order_id
+        def _do(s: SyncSession) -> int:
+            now = datetime.now(UTC)
+            old_order = s.execute(select(Order).where(Order.id == order_id)).scalars().one()
+            s.execute(update(Order).where(Order.id == order_id).values(known_to=now))
+            new_order = Order(
+                public_id=old_order.public_id,
+                instrument_id=old_order.instrument_id,
+                client_order_id=old_order.client_order_id,
+                exchange_order_id=exchange_order_id or old_order.exchange_order_id,
+                created_at=old_order.created_at,
+                updated_at=updated_at,
+                timestamp=now,
+                side=old_order.side,
+                order_type=old_order.order_type,
+                price=old_order.price,
+                size=old_order.size,
+                filled_size=filled_size if filled_size is not None else old_order.filled_size,
+                average_price=(
+                    average_price if average_price is not None else old_order.average_price
                 ),
-                "error": error if error is not None else Order.error,
-            }
-            if filled_size is not None:
-                values["filled_size"] = filled_size
-            if average_price is not None:
-                values["average_price"] = average_price
-            stmt = update(Order).where(Order.id == order_id).values(**values)
-            s.execute(stmt)
+                status=status,
+                time_in_force=old_order.time_in_force,
+                error=error,
+            )
+            s.add(new_order)
             s.commit()
+            s.refresh(new_order)
+            return new_order.id
 
-        await self._run_sync(_do)
+        return await self._run_sync(_do)
 
     async def insert_execution(
         self,

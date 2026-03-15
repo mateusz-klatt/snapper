@@ -30,6 +30,7 @@ import snapper.data.repository
 import snapper.data.repository as repo
 import snapper.data.repository as repository
 from snapper.data import repository as repo_module
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import SymbolCatalog
 from snapper.data.repository import CloudRepository
@@ -148,28 +149,30 @@ class _DummyInsert:
 
 
 @pytest.mark.asyncio
-async def test_upsert_candles_other_dialect_updates_existing(
+async def test_upsert_candles_closes_old_and_inserts_new(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test upsert_candles updates existing rows in other dialects.
+    """Test upsert_candles closes old row and inserts new (SCD Type 2).
 
     Given: Session where SELECT returns an existing candle,
     When: upsert_candles is called,
-    Then: UPDATE is executed and count reflects the affected row.
+    Then: Old row is closed (known_to set) and new row is added.
     """
     ts = datetime(2024, 1, 1, tzinfo=UTC)
-    existing_candle = SimpleNamespace(id=42)
+    existing_candle = SimpleNamespace(id=42, public_id="existing-uuid")
     call_count = 0
+    added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return SimpleNamespace(scalar_one_or_none=lambda: existing_candle)
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing_candle))
         return SimpleNamespace(rowcount=1)
 
     session = _DummyAsyncSession()
     session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
@@ -189,6 +192,8 @@ async def test_upsert_candles_other_dialect_updates_existing(
     inserted = await repo.upsert_candles(rows)
     assert inserted == 1
     assert session.commit_called is True
+    assert len(added_objects) == 1
+    assert rows[0]["public_id"] == "existing-uuid"
 
 
 @pytest.mark.asyncio
@@ -212,27 +217,24 @@ async def test_upsert_trades_other_dialect_skips_duplicates(
 
 
 @pytest.mark.asyncio
-async def test_upsert_candles_other_dialect_inserts_new_rows(
+async def test_upsert_candles_inserts_new_when_no_existing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify upsert_candles inserts new rows when no existing match.
 
-    Given: Session where SELECT returns None (no existing candle),
-    When: upsert_candles is called via the fallback dialect path,
-    Then: INSERT is executed and count reflects the affected row.
+    Given: Session where SELECT returns None (no active candle),
+    When: upsert_candles is called,
+    Then: New row is added via session.add and count is 1.
     """
     ts = datetime(2024, 1, 1, tzinfo=UTC)
-    call_count = 0
+    added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return SimpleNamespace(scalar_one_or_none=lambda: None)
-        return SimpleNamespace(rowcount=1)
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     session = _DummyAsyncSession()
     session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
@@ -252,30 +254,28 @@ async def test_upsert_candles_other_dialect_inserts_new_rows(
     inserted = await repo.upsert_candles(rows)
     assert inserted == 1
     assert session.commit_called is True
+    assert len(added_objects) == 1
 
 
 @pytest.mark.asyncio
-async def test_upsert_candles_other_dialect_preserves_existing_public_id(
+async def test_upsert_candles_preserves_caller_supplied_public_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify upsert_candles preserves a caller-supplied public_id.
 
-    Given: A row that already contains a 'public_id' key,
-    When: upsert_candles is called via the fallback dialect path,
+    Given: A row that already contains a 'public_id' key and no existing match,
+    When: upsert_candles is called,
     Then: The existing public_id is passed through, not overwritten.
     """
     ts = datetime(2024, 1, 1, tzinfo=UTC)
-    captured_values: list[dict[str, Any]] = []
+    added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        if hasattr(stmt, "values_kwargs") and stmt.values_kwargs is not None:
-            captured_values.append(stmt.values_kwargs)
-        if not captured_values:
-            return SimpleNamespace(scalar_one_or_none=lambda: None)
-        return SimpleNamespace(rowcount=1)
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     session = _DummyAsyncSession()
     session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
@@ -295,6 +295,46 @@ async def test_upsert_candles_other_dialect_preserves_existing_public_id(
     ]
     await repo.upsert_candles(rows)
     assert rows[0]["public_id"] == "my-custom-uuid"
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_preserves_caller_supplied_known_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify upsert_candles preserves a caller-supplied known_to.
+
+    Given: A row that already contains a 'known_to' key,
+    When: upsert_candles is called,
+    Then: The existing known_to is passed through, not overwritten.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    rows = [
+        {
+            "instrument_id": 1,
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+            "known_to": KNOWN_TO_MAX,
+        },
+    ]
+    await repo.upsert_candles(rows)
+    assert rows[0]["known_to"] == KNOWN_TO_MAX
 
 
 @pytest.mark.asyncio
@@ -532,22 +572,22 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         size=0.75,
         status="new",
     )
-    await repo.update_order(
+    order_v2 = await repo.update_order(
         order_id=order_id,
         status="partially_filled",
         updated_at=base_ts + timedelta(minutes=1),
         filled_size=0.5,
         average_price=10.55,
     )
-    await repo.update_order(
-        order_id=order_id,
+    order_v3 = await repo.update_order(
+        order_id=order_v2,
         status="filled",
         updated_at=base_ts + timedelta(minutes=2),
         exchange_order_id="ex-1",
         error=None,
     )
     execution_id = await repo.insert_execution(
-        order_id=order_id,
+        order_id=order_v3,
         timestamp=base_ts + timedelta(minutes=2, seconds=30),
         side="buy",
         status="filled",
@@ -805,9 +845,9 @@ class DummyRepository(Repository):
         updated_at: datetime,
         exchange_order_id: str | None = None,
         err: str | None = None,
-    ) -> None:
-        """Update order - no-op."""
-        pass
+    ) -> int:
+        """Update order - no-op returning 0."""
+        return 0
 
     async def insert_execution(
         self,
@@ -1173,12 +1213,14 @@ async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-async def test_mssql_upsert_candles_updates_existing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify MSSQL upsert_candles updates an existing candle row.
+async def test_mssql_upsert_candles_closes_old_and_inserts_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify MSSQL upsert_candles closes old and inserts new (SCD Type 2).
 
     Given: A session where SELECT returns an existing candle,
     When: upsert_candles is called,
-    Then: UPDATE is executed and count reflects the affected row.
+    Then: Old row is closed via UPDATE, new row added via session.add.
     """
 
     class DummyEngine:
@@ -1194,8 +1236,11 @@ async def test_mssql_upsert_candles_updates_existing(monkeypatch: pytest.MonkeyP
             self.url = self._URL()
 
     class UpsertSession:
+        """Session returning existing candle for SELECT, counting execute calls."""
+
         def __init__(self) -> None:
             self.execute_calls = 0
+            self.added: list[Any] = []
 
         def __enter__(self) -> UpsertSession:
             return self
@@ -1205,9 +1250,16 @@ async def test_mssql_upsert_candles_updates_existing(monkeypatch: pytest.MonkeyP
 
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self.execute_calls += 1
-            if self.execute_calls % 2 == 1:
-                return SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(id=42))
+            if self.execute_calls == 1:
+                return SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(
+                        first=lambda: SimpleNamespace(id=42, public_id="existing-uuid")
+                    )
+                )
             return SimpleNamespace(rowcount=1)
+
+        def add(self, obj: Any) -> None:
+            self.added.append(obj)
 
         def commit(self) -> None:
             return None
@@ -1252,6 +1304,8 @@ async def test_mssql_upsert_candles_updates_existing(monkeypatch: pytest.MonkeyP
     result = await repo.upsert_candles(rows)
     assert result == 1
     assert created_sessions[0].execute_calls == 2
+    assert len(created_sessions[0].added) == 1
+    assert rows[0]["public_id"] == "existing-uuid"
 
 
 @pytest.mark.asyncio
@@ -1355,9 +1409,9 @@ async def test_mssql_upsert_candles_inserts_new_rows(
 ) -> None:
     """Verify MSSQL upsert_candles inserts rows when no existing match.
 
-    Given: A session where SELECT returns None (no existing candle),
+    Given: A session where SELECT returns None (no active candle),
     When: upsert_candles is called with 2 rows,
-    Then: INSERT is executed for each and count == 2.
+    Then: Both rows are added via session.add and count == 2.
     """
 
     class DummyEngine:
@@ -1377,6 +1431,7 @@ async def test_mssql_upsert_candles_inserts_new_rows(
 
         def __init__(self) -> None:
             self.execute_calls = 0
+            self.added: list[Any] = []
 
         def __enter__(self) -> InsertSession:
             return self
@@ -1386,9 +1441,10 @@ async def test_mssql_upsert_candles_inserts_new_rows(
 
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self.execute_calls += 1
-            if self.execute_calls % 2 == 1:
-                return SimpleNamespace(scalar_one_or_none=lambda: None)
-            return SimpleNamespace(rowcount=1)
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+        def add(self, obj: Any) -> None:
+            self.added.append(obj)
 
         def commit(self) -> None:
             return None
@@ -1445,7 +1501,8 @@ async def test_mssql_upsert_candles_inserts_new_rows(
     ]
     result = await repo.upsert_candles(rows)
     assert result == 2
-    assert created_sessions[0].execute_calls == 4
+    assert created_sessions[0].execute_calls == 2
+    assert len(created_sessions[0].added) == 2
 
 
 @pytest.mark.asyncio
@@ -1454,7 +1511,7 @@ async def test_mssql_upsert_candles_preserves_existing_public_id(
 ) -> None:
     """Verify MSSQL upsert_candles preserves caller-supplied public_id.
 
-    Given: A row that already contains a 'public_id' key,
+    Given: A row that already contains a 'public_id' key and no existing match,
     When: upsert_candles is called,
     Then: The existing public_id is passed through, not overwritten.
     """
@@ -1472,10 +1529,11 @@ async def test_mssql_upsert_candles_preserves_existing_public_id(
             self.url = self._URL()
 
     class InsertSession:
-        """Session where SELECT returns None so INSERT path runs."""
+        """Session where SELECT returns None so new row is added."""
 
         def __init__(self) -> None:
             self.execute_calls = 0
+            self.added: list[Any] = []
 
         def __enter__(self) -> InsertSession:
             return self
@@ -1485,9 +1543,10 @@ async def test_mssql_upsert_candles_preserves_existing_public_id(
 
         def execute(self, *_args: Any, **_kwargs: Any) -> Any:
             self.execute_calls += 1
-            if self.execute_calls % 2 == 1:
-                return SimpleNamespace(scalar_one_or_none=lambda: None)
-            return SimpleNamespace(rowcount=1)
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+        def add(self, obj: Any) -> None:
+            self.added.append(obj)
 
         def commit(self) -> None:
             return None
@@ -1529,6 +1588,89 @@ async def test_mssql_upsert_candles_preserves_existing_public_id(
     result = await repo.upsert_candles(rows)
     assert result == 1
     assert rows[0]["public_id"] == "my-custom-uuid"
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_candles_preserves_caller_supplied_known_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify MSSQL upsert_candles preserves caller-supplied known_to.
+
+    Given: A row that already contains a 'known_to' key,
+    When: upsert_candles is called,
+    Then: The existing known_to is passed through, not overwritten.
+    """
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class InsertSession:
+        """Session where SELECT returns None so new row is added."""
+
+        def __init__(self) -> None:
+            self.added: list[Any] = []
+
+        def __enter__(self) -> InsertSession:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+        def add(self, obj: Any) -> None:
+            self.added.append(obj)
+
+        def commit(self) -> None:
+            return None
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], InsertSession]:
+        def factory() -> InsertSession:
+            return InsertSession()
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_id": 1,
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 1.5,
+            "low": 0.5,
+            "close": 1.2,
+            "volume": 10.0,
+            "vwap": None,
+            "trades": 5,
+            "known_to": KNOWN_TO_MAX,
+        },
+    ]
+    result = await repo.upsert_candles(rows)
+    assert result == 1
+    assert rows[0]["known_to"] == KNOWN_TO_MAX
 
 
 @pytest.mark.asyncio
@@ -2047,16 +2189,18 @@ class TestSQLAlchemyRepositoryDialects:
     async def test_upsert_candles_postgres_dialect(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_candles uses PostgreSQL ON CONFLICT syntax.
+        """Verify upsert_candles uses unified close+insert on PostgreSQL.
 
-        Given: PostgreSQL repository,
+        Given: PostgreSQL repository with no existing active candle,
         When: upsert_candles is called,
-        Then: Uses bulk insert with rowcount.
+        Then: SELECT finds no match, row is added via session.add.
         """
         mock_session = AsyncMock()
-        mock_result = Mock()
-        mock_result.rowcount = 5
-        mock_session.execute.return_value = mock_result
+        scalars_mock = Mock()
+        scalars_mock.first.return_value = None
+        select_result = Mock()
+        select_result.scalars.return_value = scalars_mock
+        mock_session.execute.return_value = select_result
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -2076,30 +2220,27 @@ class TestSQLAlchemyRepositoryDialects:
                 }
             ]
             result = await mock_postgres_repo.upsert_candles(rows)
-            assert result == 5
+            assert result == 1
             mock_session.execute.assert_called_once()
+            mock_session.add.assert_called_once()
             mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_upsert_candles_other_dialect(
+    async def test_upsert_candles_inserts_new_rows(
         self, mock_other_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_candles uses SELECT + INSERT for non-PostgreSQL.
+        """Verify upsert_candles inserts new rows when no active match.
 
-        Given: MySQL repository with no existing candles,
+        Given: Repository with no existing active candles,
         When: upsert_candles is called with two rows,
-        Then: Each row triggers a SELECT (returning None) then INSERT.
+        Then: Each row triggers a SELECT (no match) then session.add.
         """
         mock_session = AsyncMock()
+        scalars_mock = Mock()
+        scalars_mock.first.return_value = None
         select_result = Mock()
-        select_result.scalar_one_or_none.return_value = None
-        insert_result = Mock(rowcount=1)
-        mock_session.execute.side_effect = [
-            select_result,
-            insert_result,
-            select_result,
-            insert_result,
-        ]
+        select_result.scalars.return_value = scalars_mock
+        mock_session.execute.return_value = select_result
         with patch.object(mock_other_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -2133,23 +2274,26 @@ class TestSQLAlchemyRepositoryDialects:
             ]
             result = await mock_other_repo.upsert_candles(rows)
             assert result == 2
-            assert mock_session.execute.call_count == 4
+            assert mock_session.execute.call_count == 2
+            assert mock_session.add.call_count == 2
             mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_upsert_candles_other_dialect_updates_existing(
+    async def test_upsert_candles_closes_old_and_inserts_new(
         self, mock_other_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_candles updates existing candle in non-PostgreSQL.
+        """Verify upsert_candles closes old and inserts new (SCD Type 2).
 
-        Given: MySQL repository with an existing candle,
+        Given: Repository with an existing active candle,
         When: upsert_candles is called with matching key,
-        Then: SELECT finds existing row and UPDATE is executed.
+        Then: SELECT finds existing, UPDATE closes old, session.add inserts new.
         """
         mock_session = AsyncMock()
-        existing_candle = SimpleNamespace(id=42)
+        existing_candle = SimpleNamespace(id=42, public_id="old-uuid")
+        scalars_mock = Mock()
+        scalars_mock.first.return_value = existing_candle
         select_result = Mock()
-        select_result.scalar_one_or_none.return_value = existing_candle
+        select_result.scalars.return_value = scalars_mock
         update_result = Mock(rowcount=1)
         mock_session.execute.side_effect = [
             select_result,
@@ -2176,6 +2320,7 @@ class TestSQLAlchemyRepositoryDialects:
             result = await mock_other_repo.upsert_candles(rows)
             assert result == 1
             assert mock_session.execute.call_count == 2
+            mock_session.add.assert_called_once()
             mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
@@ -2876,9 +3021,9 @@ class _MinimalRepository(Repository):
         updated_at: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Intentionally empty async stub for testing."""
-        pass
+    ) -> int:
+        """Update order - no-op returning 0."""
+        return 0
 
     async def insert_execution(
         self,
