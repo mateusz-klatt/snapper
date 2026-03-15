@@ -25,12 +25,15 @@ Example:
         {"value": "new-api-key", "category": "exchanges"}
 """
 
+from datetime import UTC
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy import update
 
 from snapper.api.schemas.base import MessageResponse
 from snapper.api.schemas.health import SettingCategoriesResponse
@@ -176,6 +179,7 @@ async def delete_setting(
         setting = result.scalar_one_or_none()
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")
-        await session.delete(setting)
+        now = datetime.now(UTC)
+        await session.execute(update(Setting).where(Setting.id == setting.id).values(known_to=now))
         await session.commit()
     return MessageResponse(message=f"Setting '{key}' deleted successfully")

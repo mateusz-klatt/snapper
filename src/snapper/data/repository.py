@@ -87,6 +87,7 @@ __all__ = [
     "CloudRepository",
     "MSSQLRepository",
     "DatabaseRepository",
+    "close_and_insert",
     "get_repository",
     "dispose_repositories",
     "clear_repository_cache",
@@ -109,6 +110,59 @@ def _filter_instrument_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         Filtered dict containing only valid Instrument column keys.
     """
     return {k: v for k, v in kwargs.items() if k in _INSTRUMENT_COLUMNS}
+
+
+async def close_and_insert(
+    session: AsyncSession,
+    model: type[Any],
+    match_filters: list[Any],
+    new_values: dict[str, Any],
+    bus_time: datetime,
+) -> Any:
+    """Close the active version and insert a new one (SCD Type 2).
+
+    Finds the active row matching the given filters at bus_time,
+    closes it by setting known_to=bus_time, then inserts a new row
+    carrying the same public_id. If no active row exists, inserts fresh.
+
+    The model must have ``id``, ``public_id``, ``timestamp``, and
+    ``known_to`` columns (all temporal ORM models in this project do).
+
+    Args:
+        session: Active async session (caller manages transaction).
+        model: SQLAlchemy model class with temporal columns.
+        match_filters: List of SQLAlchemy filter expressions for the natural key.
+        new_values: Column values for the new row (excluding id, public_id, known_to).
+        bus_time: Processing timestamp used for close and open.
+
+    Returns:
+        The newly inserted model instance.
+    """
+    existing = (
+        (
+            await session.execute(
+                select(model)
+                .where(
+                    model.timestamp <= bus_time,
+                    model.known_to > bus_time,
+                    *match_filters,
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if existing:
+        await session.execute(
+            update(model).where(model.id == existing.id).values(known_to=bus_time)
+        )
+        new_values["public_id"] = existing.public_id
+    new_values["timestamp"] = bus_time
+    new_values["known_to"] = KNOWN_TO_MAX
+    new_row = model(**new_values)
+    session.add(new_row)
+    return new_row
 
 
 class Repository(ABC):

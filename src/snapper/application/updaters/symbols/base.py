@@ -30,6 +30,8 @@ from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import close_and_insert
+from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
@@ -388,31 +390,29 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.warning(f"Error getting last update timestamp: {e}")
             return None
 
-    def _set_last_update_timestamp(self, timestamp: datetime) -> None:
+    async def _set_last_update_timestamp(self, timestamp: datetime) -> None:
         """Store the timestamp of the current symbol mapping update to database.
 
         Args:
             timestamp: Datetime to record as the last update time.
         """
         try:
-            assert self.repository is not None, "Repository not initialized"
-            with self.repository.get_session() as session:
-                stmt = select(Setting).where(Setting.key == self._get_setting_key())
-                setting = session.execute(stmt).scalar_one_or_none()
+            repository = get_repository(self.settings.db_url)
+            async with repository.session() as session:
                 iso_timestamp = timestamp.isoformat()
-                if setting is None:
-                    setting = Setting(
-                        key=self._get_setting_key(),
-                        value=iso_timestamp,
-                        category="system",
-                        description=f"Timestamp of last {self._get_setting_key()} update",
-                        timestamp=timestamp,
-                    )
-                    session.add(setting)
-                else:
-                    setting.value = iso_timestamp
-                    setting.timestamp = timestamp
-                session.commit()
+                await close_and_insert(
+                    session=session,
+                    model=Setting,
+                    match_filters=[Setting.key == self._get_setting_key()],
+                    new_values={
+                        "key": self._get_setting_key(),
+                        "value": iso_timestamp,
+                        "category": "system",
+                        "description": f"Timestamp of last {self._get_setting_key()} update",
+                    },
+                    bus_time=timestamp,
+                )
+                await session.commit()
                 logger.info(f"Updated timestamp: {self._get_setting_key()} = {iso_timestamp}")
         except Exception as e:
             logger.error(f"Error setting last update timestamp: {e}")
@@ -489,7 +489,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 symbols = await self._fetch_symbols(client)
                 await self._update_database(symbols)
                 await self.broadcast_cache_invalidation()
-                self._set_last_update_timestamp(datetime.now(UTC))
+                await self._set_last_update_timestamp(datetime.now(UTC))
                 logger.info("Symbol mapping update completed successfully")
             finally:
                 await client.disconnect()

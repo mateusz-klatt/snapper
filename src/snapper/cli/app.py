@@ -69,6 +69,7 @@ from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.data.models import Setting
 from snapper.data.models import User
+from snapper.data.repository import close_and_insert
 from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
@@ -723,11 +724,12 @@ def _verify_encryption_services(
         raise ValueError("Encryption verification failed - check your passwords")
 
 
-def _rotate_single_setting(
+async def _rotate_single_setting(
     setting: Any,
     old_encryption: SettingsEncryptionService,
     new_encryption: SettingsEncryptionService,
     dry_run: bool,
+    session: Any,
 ) -> bool:
     """Re-encrypt a single setting from old to new encryption.
 
@@ -736,6 +738,7 @@ def _rotate_single_setting(
         old_encryption: Current encryption service.
         new_encryption: New encryption service.
         dry_run: If True, skip writing back the new value.
+        session: Active async database session.
 
     Returns:
         True if the setting was rotated, False if skipped.
@@ -751,7 +754,21 @@ def _rotate_single_setting(
         new_encrypted_value = new_encryption.encrypt(decrypted_value)
         typer.echo(f"Rotating: {setting.key}")
         if not dry_run:
-            setting.value = new_encrypted_value
+            now = datetime.now(UTC)
+            await close_and_insert(
+                session=session,
+                model=Setting,
+                match_filters=[Setting.key == setting.key],
+                new_values={
+                    "key": setting.key,
+                    "value": new_encrypted_value,
+                    "category": setting.category,
+                    "description": setting.description,
+                    "is_encrypted": setting.is_encrypted,
+                    "updated_by": setting.updated_by,
+                },
+                bus_time=now,
+            )
         return not dry_run
     except Exception as e:
         typer.echo(f"Failed to rotate {setting.key}: {e}")
@@ -822,10 +839,12 @@ async def _run_encryption_rotation(
             if not encrypted_settings:
                 typer.echo("No encrypted settings found - nothing to rotate")
                 return
-            changes_made = sum(
-                _rotate_single_setting(s, old_encryption, new_encryption, dry_run)
-                for s in encrypted_settings
-            )
+            changes_made = 0
+            for s in encrypted_settings:
+                if await _rotate_single_setting(
+                    s, old_encryption, new_encryption, dry_run, session
+                ):
+                    changes_made += 1
             await _commit_rotation_results(
                 session,
                 changes_made,

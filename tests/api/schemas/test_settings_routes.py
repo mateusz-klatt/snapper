@@ -312,11 +312,11 @@ class TestSettingsRoutes:
 
     @pytest.mark.asyncio
     async def test_delete_setting_found(self) -> None:
-        """Verify delete_setting removes existing setting.
+        """Verify delete_setting temporally closes existing setting.
 
         Given: An existing setting in database,
         When: delete_setting is called with that key,
-        Then: Setting is deleted and success message is returned.
+        Then: Setting is closed via update (known_to=now) and success message is returned.
         """
         mock_user = self._make_user(UserRole.ADMIN)
         mock_settings = MagicMock()
@@ -325,6 +325,7 @@ class TestSettingsRoutes:
         mock_session = MockSession()
         mock_setting = MagicMock()
         mock_setting.key = "delete_key"
+        mock_setting.id = 42
         mock_session.execute.return_value = MockResult([mock_setting])
         mock_repository.session.return_value = mock_session
         with (
@@ -332,7 +333,7 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
             result = await delete_setting(key="delete_key", user=mock_user, _csrf=None)
-        mock_session.delete.assert_called_once_with(mock_setting)
+        assert mock_session.execute.await_count == 2
         mock_session.commit.assert_called_once()
         assert result.message == "Setting 'delete_key' deleted successfully"
 

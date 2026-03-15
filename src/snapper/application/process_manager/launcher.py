@@ -50,6 +50,7 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import Repository
+from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 
 
@@ -800,25 +801,31 @@ class ProcessLauncherService:
             config_dict: Original config dictionary for base values.
             config: Resolved ProcessConfigModel with final values.
         """
+        persisted_config = dict(config_dict)
+        persisted_config["lifecycle"] = config.lifecycle.value
+        persisted_config["mode"] = config.mode
+        persisted_config["args"] = config.args
+        persisted_config["kwargs"] = config.kwargs
+        persisted_config["role"] = config.role.value
+        if config.tags:
+            persisted_config["tags"] = list(config.tags)
+        elif "tags" in persisted_config:
+            persisted_config.pop("tags", None)
+        if config.parameters_schema is not None:
+            persisted_config["parameters_schema"] = config.parameters_schema
         async with repository.session() as session:
-            result = await session.execute(select(Setting).where(Setting.key == config_key))
-            setting = result.scalar_one_or_none()
-            if not setting:
-                return
-            persisted_config = dict(config_dict)
-            persisted_config["lifecycle"] = config.lifecycle.value
-            persisted_config["mode"] = config.mode
-            persisted_config["args"] = config.args
-            persisted_config["kwargs"] = config.kwargs
-            persisted_config["role"] = config.role.value
-            if config.tags:
-                persisted_config["tags"] = list(config.tags)
-            elif "tags" in persisted_config:
-                persisted_config.pop("tags", None)
-            if config.parameters_schema is not None:
-                persisted_config["parameters_schema"] = config.parameters_schema
-            setting.value = json.dumps(persisted_config)
-            setting.timestamp = datetime.now(UTC)
+            now = datetime.now(UTC)
+            await close_and_insert(
+                session=session,
+                model=Setting,
+                match_filters=[Setting.key == config_key],
+                new_values={
+                    "key": config_key,
+                    "value": json.dumps(persisted_config),
+                    "category": "process",
+                },
+                bus_time=now,
+            )
             await session.commit()
 
     async def start_process_by_name(
@@ -910,15 +917,28 @@ class ProcessLauncherService:
             name: Process name to disable.
         """
         repository = get_repository(self.settings.db_url)
+        config_key = f"process_{name}"
         async with repository.session() as session:
-            config_key = f"process_{name}"
             result = await session.execute(select(Setting).where(Setting.key == config_key))
             setting = result.scalar_one_or_none()
             if setting:
                 config_dict = json.loads(setting.value)
                 config_dict["enabled"] = False
-                setting.value = json.dumps(config_dict)
-                setting.timestamp = datetime.now(UTC)
+                now = datetime.now(UTC)
+                await close_and_insert(
+                    session=session,
+                    model=Setting,
+                    match_filters=[Setting.key == config_key],
+                    new_values={
+                        "key": config_key,
+                        "value": json.dumps(config_dict),
+                        "category": setting.category,
+                        "description": setting.description,
+                        "is_encrypted": setting.is_encrypted,
+                        "updated_by": setting.updated_by,
+                    },
+                    bus_time=now,
+                )
                 await session.commit()
 
     async def stop_process_by_name(self, name: str) -> ProcessStopResult:

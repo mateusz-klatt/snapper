@@ -851,7 +851,9 @@ class TestStartProcessByName:
         assert call_args.args == ["new_arg"]
         assert call_args.kwargs == {"override": "value"}
         mock_session.commit.assert_awaited_once()
-        updated_config = json.loads(mock_setting.value)
+        mock_session.add.assert_called_once()
+        new_row = mock_session.add.call_args[0][0]
+        updated_config = json.loads(new_row.value)
         assert updated_config["enabled"] is True
 
     @pytest.mark.asyncio
@@ -941,7 +943,9 @@ class TestStopProcessByName:
         mock_instance.stop.assert_awaited_once()
         assert "test_process" not in factory.started_processes
         mock_session.commit.assert_awaited_once()
-        updated_config = json.loads(mock_setting.value)
+        mock_session.add.assert_called_once()
+        new_row = mock_session.add.call_args[0][0]
+        updated_config = json.loads(new_row.value)
         assert updated_config["enabled"] is False
 
     @pytest.mark.asyncio
@@ -979,7 +983,9 @@ class TestStopProcessByName:
         assert "task_process" not in factory.process_tasks
         assert "task_process" not in factory.started_processes
         mock_session.commit.assert_awaited_once()
-        updated_config = json.loads(mock_setting.value)
+        mock_session.add.assert_called_once()
+        new_row = mock_session.add.call_args[0][0]
+        updated_config = json.loads(new_row.value)
         assert updated_config["enabled"] is False
 
     @pytest.mark.asyncio
@@ -1165,6 +1171,14 @@ class _DummyResult:
         if isinstance(self.setting, list):
             return self.setting
         return [self.setting]
+
+    def first(self) -> Setting | None:
+        """Return the first result or None."""
+        if self.setting is None:
+            return None
+        if isinstance(self.setting, list):
+            return self.setting[0] if self.setting else None
+        return self.setting
 
 
 class _DummySession:
@@ -1579,8 +1593,9 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
     assert result.status == "success"
     assert mock_start.called
     assert repo.last_session is not None and repo.last_session.commit_called is True
-    assert isinstance(repo.setting, Setting)
-    persisted = json.loads(repo.setting.value)
+    assert len(repo.last_session.added) > 0
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert persisted["enabled"] is True
     assert persisted["mode"] == "process"
     assert persisted["args"] == ["arg1"]
@@ -1619,7 +1634,9 @@ async def test_start_process_by_name_keeps_tags_when_present(
     )
     result = await factory.start_process_by_name("tagged")
     assert result.status == "success"
-    persisted = json.loads(setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert cast(list[str], persisted["tags"]) == ["keep"]
 
 
@@ -1734,7 +1751,9 @@ async def test_stop_process_by_name_when_instance_missing_disables_autostart(
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("ghost")
     assert result.status == "success"
-    persisted = json.loads(setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert persisted["enabled"] is False
     assert "ghost" not in factory.started_processes
 
@@ -2626,7 +2645,9 @@ async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
     )
     result = await factory.start_process_by_name("clean")
     assert result.status == "success"
-    persisted = json.loads(setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert "tags" not in persisted
     assert persisted["parameters_schema"] == {"p": 1}
 
@@ -2661,7 +2682,9 @@ async def test_start_process_by_name_skips_persisting_schema_when_absent(
     )
     result = await factory.start_process_by_name("plain")
     assert result.status == "success"
-    persisted = json.loads(setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert "parameters_schema" not in persisted
 
 
@@ -2696,7 +2719,9 @@ async def test_start_process_by_name_removes_stale_tags_without_schema(
     )
     result = await factory.start_process_by_name("drop_tags")
     assert result.status == "success"
-    persisted = json.loads(setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert "tags" not in persisted
 
 
@@ -2746,7 +2771,9 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
     )
     result = await factory.start_process_by_name("meta_drop")
     assert result.status == "success"
-    persisted = json.loads(setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert "tags" not in persisted
 
 
@@ -3060,8 +3087,9 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
         lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
-    updated_setting = cast(Setting, repo.setting)
-    updated = json.loads(updated_setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    updated = json.loads(new_row.value)
     assert updated["kwargs"] == {"filled": True}
     assert updated["lifecycle"] == ProcessLifecycleEnum.ONE_SHOT.value
     assert updated["tags"] == ["a"]
@@ -3118,11 +3146,11 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
         lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
-    updated_setting = cast(Setting, repo.setting)
-    updated = json.loads(updated_setting.value)
+    assert repo.last_session is not None and repo.last_session.commit_called is True
+    new_row = repo.last_session.added[-1]
+    updated = json.loads(new_row.value)
     assert updated["tags"] == ["sync"]
     assert updated["parameters_schema"] == {"p": 1}
-    assert repo.last_session is not None and repo.last_session.commit_called is True
 
 
 class _RegistryClassKwargsFailingUpdate:
@@ -3209,11 +3237,11 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
 async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify sync handles record deletion between fetch and update.
+    """Verify sync inserts fresh row when record deleted between fetch and update.
 
     Given: A config that exists on first fetch but is deleted before update,
     When: sync_registry_to_database is called,
-    Then: Neither session commits due to missing record on second fetch.
+    Then: close_and_insert inserts a fresh row and second session commits.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
@@ -3256,7 +3284,7 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     )
     await factory.sync_registry_to_database()
     assert repo.first_session is not None and repo.first_session.commit_called is False
-    assert repo.second_session is not None and repo.second_session.commit_called is False
+    assert repo.second_session is not None and repo.second_session.commit_called is True
 
 
 @pytest.mark.asyncio()
@@ -3409,8 +3437,9 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
         lambda: {"tagless": entry},
     )
     await factory.sync_registry_to_database()
-    updated_setting = cast(Setting, repo.setting)
-    persisted = json.loads(updated_setting.value)
+    assert repo.last_session is not None
+    new_row = repo.last_session.added[-1]
+    persisted = json.loads(new_row.value)
     assert persisted["tags"] == ["new"]
 
 
@@ -3862,7 +3891,9 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
     cast(Any, factory)._start_native_process_monitoring = MagicMock()
     response = await factory.start_process_by_name("test_process")
     assert response.status == "success"
-    persisted = json.loads(setting.value)
+    session.add.assert_called_once()
+    new_row = session.add.call_args[0][0]
+    persisted = json.loads(new_row.value)
     assert "tags" not in persisted
     assert persisted["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING.value
     assert persisted["mode"] == "thread"
@@ -3933,10 +3964,12 @@ async def test_sync_registry_to_database_adds_missing_tags(
     mock_repo.session.return_value.__aenter__.side_effect = [first_session, update_session]
     mock_get_repo.return_value = mock_repo
     await factory.sync_registry_to_database()
-    updated_config = json.loads(existing_setting.value)
+    update_session.add.assert_called_once()
+    new_row = update_session.add.call_args[0][0]
+    updated_config = json.loads(new_row.value)
     assert updated_config["tags"] == ["alpha", "beta"]
     assert updated_config["parameters_schema"] == {"type": "object"}
-    assert existing_setting.updated_by == "sync_registry"
+    assert new_row.updated_by == "sync_registry"
     update_session.commit.assert_awaited_once()
 
 
@@ -4523,26 +4556,17 @@ class TestProcessFactoryRegistrySync:
                 "role": "core",
             }
         )
-        update_setting = MagicMock()
-        call_count = 0
-
-        async def mock_execute(*args: Any, **kwargs: Any) -> Any:
-            nonlocal call_count
-            call_count += 1
-            result = MagicMock()
-            if call_count == 1:
-                result.scalar_one_or_none.return_value = existing_setting
-            else:
-                result.scalar_one_or_none.return_value = update_setting
-            return result
-
-        mock_session = MagicMock()
-        mock_session.execute = mock_execute
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = existing_setting
+        mock_session = AsyncMock()
+        mock_session.execute.return_value = mock_result
         mock_session.commit = AsyncMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
         await factory.sync_registry_to_database()
-        updated_config = json.loads(update_setting.value)
+        mock_session.add.assert_called_once()
+        new_row = mock_session.add.call_args[0][0]
+        updated_config = json.loads(new_row.value)
         assert updated_config["kwargs"] == {"param1": "value1", "param2": 42}
         assert updated_config["lifecycle"] == ProcessLifecycleEnum.ONE_SHOT.value
         assert updated_config["role"] == ProcessRoleEnum.BACKTEST.value

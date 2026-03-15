@@ -224,7 +224,7 @@ class TestStartProcessByNameNoSetting:
 
         Given: Process config exists initially but deleted before update.
         When: start_process_by_name is called.
-        Then: Process starts successfully, commit not called.
+        Then: Process starts successfully, close_and_insert inserts fresh row.
         """
         launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
         launcher.start_process = AsyncMock()
@@ -286,7 +286,7 @@ class TestStartProcessByNameNoSetting:
             result = await launcher.start_process_by_name("test_proc")
         assert result.status == "success"
         assert "executed successfully" in result.message
-        mock_session.commit.assert_not_called()
+        mock_session.commit.assert_called_once()
 
 
 class TestSyncRegistryTagsNotIterable:

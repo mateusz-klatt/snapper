@@ -25,6 +25,7 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import Repository
+from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 
 
@@ -256,17 +257,26 @@ class ProcessRegistrySyncer:
             return
         config_key = f"process_{name}"
         async with repository.session() as update_session:
-            result = await update_session.execute(select(Setting).where(Setting.key == config_key))
-            existing_record = result.scalar_one_or_none()
-            if existing_record:
-                existing_record.value = json.dumps(config_dict, indent=4)
-                existing_record.timestamp = datetime.now(UTC)
-                existing_record.updated_by = "sync_registry"
-                await update_session.commit()
-                logger.info(
-                    "Updated process '{}' metadata in database",
-                    name,
-                )
+            now = datetime.now(UTC)
+            await close_and_insert(
+                session=update_session,
+                model=Setting,
+                match_filters=[Setting.key == config_key],
+                new_values={
+                    "key": config_key,
+                    "value": json.dumps(config_dict, indent=4),
+                    "category": existing.category,
+                    "description": existing.description,
+                    "is_encrypted": existing.is_encrypted,
+                    "updated_by": "sync_registry",
+                },
+                bus_time=now,
+            )
+            await update_session.commit()
+            logger.info(
+                "Updated process '{}' metadata in database",
+                name,
+            )
 
     async def sync_registry_to_database(self) -> None:
         """Synchronize process registry with database configurations.

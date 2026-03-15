@@ -20,9 +20,9 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 from sqlalchemy import select
-from sqlalchemy import update
 
 from snapper.data.models import Setting
+from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
@@ -223,6 +223,35 @@ class SettingsService:
             return default
         return self._cache.get(key, default)
 
+    async def _close_and_insert_setting(
+        self,
+        key: str,
+        value: str,
+        category: str,
+        description: str | None,
+        is_encrypted: bool,
+        updated_by: str | None,
+    ) -> None:
+        """Close active setting and insert new version (SCD Type 2)."""
+        repository = get_repository(self.db_url)
+        async with repository.session() as session:
+            now = datetime.now(UTC)
+            await close_and_insert(
+                session=session,
+                model=Setting,
+                match_filters=[Setting.key == key],
+                new_values={
+                    "key": key,
+                    "value": value,
+                    "category": category,
+                    "description": description,
+                    "is_encrypted": is_encrypted,
+                    "updated_by": updated_by,
+                },
+                bus_time=now,
+            )
+            await session.commit()
+
     async def update_setting(
         self,
         key: str,
@@ -249,50 +278,14 @@ class SettingsService:
             encrypted_value, is_encrypted = force_encrypt_if_cleartext(key, str_value)
         else:
             encrypted_value, is_encrypted = encrypt_if_sensitive(key, str_value)
-        repository = get_repository(self.db_url)
-        async with repository.session() as session:
-            now = datetime.now(UTC)
-            existing = (
-                (
-                    await session.execute(
-                        select(Setting)
-                        .where(
-                            Setting.key == key,
-                            Setting.timestamp <= now,
-                            Setting.known_to > now,
-                        )
-                        .with_for_update()
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            if existing:
-                await session.execute(
-                    update(Setting).where(Setting.id == existing.id).values(known_to=now)
-                )
-                new_setting = Setting(
-                    public_id=existing.public_id,
-                    key=key,
-                    value=encrypted_value,
-                    category=category,
-                    description=description,
-                    is_encrypted=is_encrypted,
-                    timestamp=now,
-                    updated_by=updated_by,
-                )
-            else:
-                new_setting = Setting(
-                    key=key,
-                    value=encrypted_value,
-                    category=category,
-                    description=description,
-                    is_encrypted=is_encrypted,
-                    timestamp=now,
-                    updated_by=updated_by,
-                )
-            session.add(new_setting)
-            await session.commit()
+        await self._close_and_insert_setting(
+            key=key,
+            value=encrypted_value,
+            category=category,
+            description=description,
+            is_encrypted=is_encrypted,
+            updated_by=updated_by,
+        )
         self._cache[key] = value
         await self._broadcast_change(key, encrypted_value, category, updated_by)
         logger.info(

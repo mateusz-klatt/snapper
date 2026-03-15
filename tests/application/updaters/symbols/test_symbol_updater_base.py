@@ -20,6 +20,7 @@ from snapper.data.models import Setting
 from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import clear_repository_cache
 
 
 @dataclass
@@ -81,9 +82,9 @@ class DummySymbolUpdater(SymbolUpdaterService[Any]):
         """Expose _get_last_update_timestamp for testing."""
         return self._get_last_update_timestamp()
 
-    def set_last_update_timestamp_public(self, timestamp: datetime) -> None:
+    async def set_last_update_timestamp_public(self, timestamp: datetime) -> None:
         """Expose _set_last_update_timestamp for testing."""
-        self._set_last_update_timestamp(timestamp)
+        await self._set_last_update_timestamp(timestamp)
 
     async def fetch_symbols_public(self, client: DummyExchangeClient) -> list[dict[str, Any]]:
         """Expose _fetch_symbols for testing."""
@@ -153,8 +154,10 @@ def updater_factory(
 
     def factory(update_threshold_hours: int, force: bool = False) -> DummySymbolUpdater:
         db_path = tmp_path / f"symbols_{len(created_repositories)}.sqlite"
+        sync_url = f"sqlite:///{db_path}"
+        async_url = f"sqlite+aiosqlite:///{db_path}"
         settings = DummySettings(
-            db_url=f"sqlite:///{db_path}",
+            db_url=async_url,
             zmq_broker_xsub="inproc://xsub",
             zmq_broker_xpub="inproc://xpub",
             master_password="master",
@@ -164,7 +167,7 @@ def updater_factory(
             lambda settings=settings: settings,
         )
         updater = DummySymbolUpdater(update_threshold_hours, force=force)
-        repository = DatabaseRepository(settings.db_url)
+        repository = DatabaseRepository(sync_url)
         repository.create_all()
         updater.repository = repository
         created_updaters.append(updater)
@@ -176,6 +179,7 @@ def updater_factory(
             SymbolUpdaterService._cleanup_zmq(updater)
         for repository in created_repositories:
             repository.engine.dispose()
+        clear_repository_cache()
 
     request.addfinalizer(cleanup)
     return factory
@@ -194,7 +198,8 @@ def test_get_last_update_timestamp_returns_none_when_missing(
     assert updater.get_last_update_timestamp_public() is None
 
 
-def test_set_last_update_timestamp_creates_setting(
+@pytest.mark.asyncio
+async def test_set_last_update_timestamp_creates_setting(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify set_last_update_timestamp creates new setting.
@@ -205,7 +210,7 @@ def test_set_last_update_timestamp_creates_setting(
     """
     updater = updater_factory(3, False)
     timestamp = datetime(2024, 1, 2, tzinfo=UTC)
-    updater.set_last_update_timestamp_public(timestamp)
+    await updater.set_last_update_timestamp_public(timestamp)
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
@@ -255,7 +260,8 @@ def test_should_update_returns_true_when_force_enabled(
     assert updater.should_update() is True
 
 
-def test_should_update_returns_false_when_recently_updated(
+@pytest.mark.asyncio
+async def test_should_update_returns_false_when_recently_updated(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify should_update returns False when recently updated.
@@ -266,11 +272,12 @@ def test_should_update_returns_false_when_recently_updated(
     """
     updater = updater_factory(5, False)
     recent = datetime.now(UTC)
-    updater.set_last_update_timestamp_public(recent)
+    await updater.set_last_update_timestamp_public(recent)
     assert updater.should_update() is False
 
 
-def test_should_update_returns_true_when_threshold_elapsed(
+@pytest.mark.asyncio
+async def test_should_update_returns_true_when_threshold_elapsed(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
     """Verify should_update returns True when threshold elapsed.
@@ -281,7 +288,7 @@ def test_should_update_returns_true_when_threshold_elapsed(
     """
     updater = updater_factory(1, False)
     outdated = datetime.now(UTC) - timedelta(hours=2)
-    updater.set_last_update_timestamp_public(outdated)
+    await updater.set_last_update_timestamp_public(outdated)
     assert updater.should_update() is True
 
 
@@ -461,7 +468,7 @@ async def test_start_skips_update_when_not_needed(
         "snapper.application.updaters.symbols.base.DatabaseRepository",
         lambda *args: updater.repository,
     )
-    updater.set_last_update_timestamp_public(datetime.now(UTC))
+    await updater.set_last_update_timestamp_public(datetime.now(UTC))
     await updater.start()
     assert len(updater.updated_payloads) == 0
 
@@ -705,8 +712,8 @@ async def test_set_last_update_timestamp_updates_existing(
     updater = updater_factory(3, False)
     first_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     second_timestamp = datetime(2024, 1, 2, tzinfo=UTC)
-    updater.set_last_update_timestamp_public(first_timestamp)
-    updater.set_last_update_timestamp_public(second_timestamp)
+    await updater.set_last_update_timestamp_public(first_timestamp)
+    await updater.set_last_update_timestamp_public(second_timestamp)
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
@@ -715,28 +722,32 @@ async def test_set_last_update_timestamp_updates_existing(
                 select(Setting).where(Setting.key == "test_symbols_last_update")
             ).scalars()
         )
-    assert len(settings) == 1
-    assert settings[0].value == second_timestamp.isoformat()
+    active_settings = [s for s in settings if s.value == second_timestamp.isoformat()]
+    assert len(active_settings) == 1
 
 
-def test_set_last_update_timestamp_raises_on_repository_error(
+@pytest.mark.asyncio
+async def test_set_last_update_timestamp_raises_on_repository_error(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify set_last_update_timestamp propagates repository errors.
 
-    Given: Repository that raises ValueError on get_session,
+    Given: get_repository raises ValueError,
     When: set_last_update_timestamp called,
     Then: ValueError propagated.
     """
-
-    class BrokenRepository:
-        def get_session(self) -> None:
-            raise ValueError("failed")
-
     updater = updater_factory(3, False)
-    updater.repository = cast(DatabaseRepository, BrokenRepository())
+
+    def broken_get_repo(_url: str) -> None:
+        raise ValueError("failed")
+
+    monkeypatch.setattr(
+        "snapper.application.updaters.symbols.base.get_repository",
+        broken_get_repo,
+    )
     with pytest.raises(ValueError, match="failed"):
-        updater.set_last_update_timestamp_public(datetime.now(UTC))
+        await updater.set_last_update_timestamp_public(datetime.now(UTC))
 
 
 def test_get_last_update_timestamp_returns_none_for_null_value(
