@@ -33,7 +33,11 @@ class TestSignalService:
         await repo.create_all()
         async with repo.session() as s:
             for sym, base, quote in [("BTCUSD", "BTC", "USD"), ("ETHUSD", "ETH", "USD")]:
-                s.add(Symbol(native_symbol=sym, created_at=datetime.now(UTC)))
+                s.add(
+                    Symbol(
+                        native_symbol=sym, created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
+                    )
+                )
                 s.add(
                     SymbolVersion(
                         native_symbol=sym,
@@ -317,7 +321,13 @@ class TestSignalServiceCoverage:
         repo = SQLAlchemyRepository(url)
         await repo.create_all()
         async with repo.session() as s:
-            s.add(Symbol(native_symbol="BTC-USD", created_at=datetime.now(UTC)))
+            s.add(
+                Symbol(
+                    native_symbol="BTC-USD",
+                    created_at=datetime.now(UTC),
+                    timestamp=datetime.now(UTC),
+                )
+            )
             s.add(
                 SymbolVersion(
                     native_symbol="BTC-USD",
@@ -523,7 +533,11 @@ class TestSignalServiceCoverage:
         Then: Instrument created with base='GOLD' and quote='USD'.
         """
         async with test_repository.session() as s:
-            s.add(Symbol(native_symbol="GOLD", created_at=datetime.now(UTC)))
+            s.add(
+                Symbol(
+                    native_symbol="GOLD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
+                )
+            )
             s.add(
                 SymbolVersion(
                     native_symbol="GOLD",

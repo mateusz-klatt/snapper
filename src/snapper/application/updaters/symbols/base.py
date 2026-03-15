@@ -150,7 +150,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         ).scalar_one_or_none()
         created = existing_symbol is None
         if created:
-            session.add(Symbol(native_symbol=native_symbol, created_at=now))
+            session.add(Symbol(native_symbol=native_symbol, created_at=now, timestamp=now))
             session.flush()
 
         existing_version = session.execute(

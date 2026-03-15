@@ -391,9 +391,10 @@ class TestSymbolModel:
         Then: native_symbol is set as PK.
         """
         now = datetime.now(UTC)
-        sym = Symbol(native_symbol="BTC-USD", created_at=now)
+        sym = Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now)
         assert sym.native_symbol == "BTC-USD"
         assert sym.created_at == now
+        assert sym.timestamp == now
 
 
 class TestSymbolVersionModel:

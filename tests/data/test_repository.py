@@ -514,7 +514,11 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await repo.create_all()
     async with repo.session() as s:
-        s.add(Symbol(native_symbol="BTC-USD", created_at=datetime.now(UTC)))
+        s.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
+            )
+        )
         s.add(
             SymbolVersion(
                 native_symbol="BTC-USD",

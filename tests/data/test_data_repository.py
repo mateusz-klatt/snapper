@@ -1042,7 +1042,11 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
     async with repo.session() as s:
-        s.add(Symbol(native_symbol="BTC-USD", created_at=datetime.now(UTC)))
+        s.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
+            )
+        )
         s.add(
             SymbolVersion(
                 native_symbol="BTC-USD",
@@ -1054,7 +1058,13 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
         )
         await s.commit()
     inst_id = await repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.0001
+        symbol="BTC-USD",
+        base="BTC",
+        quote="USD",
+        exchange="kraken",
+        tick_size=0.1,
+        lot_size=0.0001,
+        timestamp=datetime.now(UTC),
     )
     assert inst_id > 0
     inserted = await repo.upsert_candles(
@@ -1126,7 +1136,11 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
     async with repo.session() as s:
-        s.add(Symbol(native_symbol="ETH-USD", created_at=datetime.now(UTC)))
+        s.add(
+            Symbol(
+                native_symbol="ETH-USD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
+            )
+        )
         s.add(
             SymbolVersion(
                 native_symbol="ETH-USD",

@@ -727,7 +727,11 @@ async def test_update_existing_symbols_when_insert_disabled(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(
@@ -783,7 +787,11 @@ async def test_update_existing_alias_exchange_symbol(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(
@@ -841,7 +849,11 @@ async def test_existing_alias_unchanged_when_same_symbol(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(
@@ -1206,7 +1218,11 @@ async def test_update_database_creates_capability_rows(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(

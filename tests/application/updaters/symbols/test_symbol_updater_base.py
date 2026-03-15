@@ -849,7 +849,9 @@ def test_upsert_catalog_updates_base_currency(
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_time))
+        session.add(
+            Symbol(native_symbol="BTC-USD", created_at=original_time, timestamp=original_time)
+        )
         session.add(
             SymbolVersion(
                 native_symbol="BTC-USD",
@@ -894,7 +896,9 @@ def test_upsert_catalog_updates_quote_currency(
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_time))
+        session.add(
+            Symbol(native_symbol="BTC-USD", created_at=original_time, timestamp=original_time)
+        )
         session.add(
             SymbolVersion(
                 native_symbol="BTC-USD",
@@ -939,7 +943,9 @@ def test_upsert_catalog_updates_asset_type(
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="EUR-USD", created_at=original_time))
+        session.add(
+            Symbol(native_symbol="EUR-USD", created_at=original_time, timestamp=original_time)
+        )
         session.add(
             SymbolVersion(
                 native_symbol="EUR-USD",
@@ -984,7 +990,9 @@ def test_upsert_catalog_preserves_timestamp_when_unchanged(
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_time))
+        session.add(
+            Symbol(native_symbol="BTC-USD", created_at=original_time, timestamp=original_time)
+        )
         session.add(
             SymbolVersion(
                 native_symbol="BTC-USD",
@@ -1019,7 +1027,7 @@ def _seed_catalog(updater: DummySymbolUpdater, native_symbol: str, now: datetime
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol=native_symbol, created_at=now))
+        session.add(Symbol(native_symbol=native_symbol, created_at=now, timestamp=now))
         session.add(
             SymbolVersion(
                 native_symbol=native_symbol,

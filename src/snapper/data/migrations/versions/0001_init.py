@@ -106,9 +106,22 @@ def upgrade() -> None:
     """
     op.create_table(
         "symbols",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("native_symbol", sa.String(32), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.PrimaryKeyConstraint("native_symbol"),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("native_symbol", name="uq_symbols_native_symbol"),
+    )
+    op.create_index(
+        "ix_symbols_public_id",
+        "symbols",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_table(
         "symbol_versions",
@@ -254,7 +267,7 @@ def upgrade() -> None:
         sa.Column("exchange", sa.String(20), nullable=False),
         sa.Column("base", sa.String(16), nullable=False),
         sa.Column("quote", sa.String(16), nullable=False),
-        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.ForeignKeyConstraint(["symbol"], [_FK_SYMBOLS]),
@@ -525,11 +538,22 @@ def upgrade() -> None:
     op.create_table(
         "user_login_events",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("user_public_id", sa.String(36), nullable=False),
         sa.Column("logged_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_user_login_events_user_public_id", "user_login_events", ["user_public_id"])
+    op.create_index(
+        "ix_user_login_events_public_id",
+        "user_login_events",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
+    )
     op.create_table(
         "settings",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -669,12 +693,15 @@ def upgrade() -> None:
     for entry in SYMBOL_CATALOG:
         conn.execute(
             text("""
-                INSERT INTO symbols (native_symbol, created_at)
-                VALUES (:native_symbol, :created_at)
+                INSERT INTO symbols (public_id, native_symbol, created_at, timestamp, known_to)
+                VALUES (:public_id, :native_symbol, :created_at, :timestamp, :known_to)
                 """),
             {
+                "public_id": str(uuid7()),
                 "native_symbol": entry[0],
                 "created_at": now,
+                "timestamp": now,
+                "known_to": _KNOWN_TO_MAX,
             },
         )
         conn.execute(

@@ -66,7 +66,11 @@ async def test_update_database_creates_and_updates_mappings(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="EUR-PLN", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="EUR-PLN", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(
@@ -181,7 +185,11 @@ async def test_update_database_skips_when_mapping_unchanged(
     original_timestamp = datetime(2023, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="EUR-PLN", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="EUR-PLN", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(

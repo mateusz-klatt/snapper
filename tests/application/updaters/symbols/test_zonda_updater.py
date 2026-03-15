@@ -229,7 +229,11 @@ async def test_update_database_handles_inserts_and_updates(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(
@@ -308,7 +312,11 @@ async def test_update_database_skips_unchanged_mapping(
     original_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol="BTC-USD", created_at=original_timestamp))
+        session.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
+            )
+        )
 
         session.add(
             SymbolVersion(
@@ -500,7 +508,7 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
     svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
     seed_time = datetime.now(UTC)
     with session_local() as session:
-        session.add(Symbol(native_symbol="BTC-USD", created_at=seed_time))
+        session.add(Symbol(native_symbol="BTC-USD", created_at=seed_time, timestamp=seed_time))
 
         session.add(
             SymbolVersion(

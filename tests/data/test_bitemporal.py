@@ -60,7 +60,11 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await repo.create_all()
     async with repo.session() as s:
-        s.add(Symbol(native_symbol="BTC-USD", created_at=datetime.now(UTC)))
+        s.add(
+            Symbol(
+                native_symbol="BTC-USD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
+            )
+        )
         s.add(
             SymbolVersion(
                 native_symbol="BTC-USD",
@@ -615,7 +619,7 @@ async def _upsert_catalog_pattern(
             .first()
         )
         if existing_symbol is None:
-            s.add(Symbol(native_symbol=native_symbol, created_at=now))
+            s.add(Symbol(native_symbol=native_symbol, created_at=now, timestamp=now))
             await s.flush()
 
         existing_version = (
@@ -1155,6 +1159,7 @@ class TestUserBitemporal:
             login_event = UserLoginEvent(
                 user_public_id=user.public_id,
                 logged_at=login_time,
+                timestamp=login_time,
             )
             s.add(login_event)
             await s.commit()

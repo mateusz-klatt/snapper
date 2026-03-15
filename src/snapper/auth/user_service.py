@@ -115,6 +115,7 @@ class UserService:
             login_event = UserLoginEvent(
                 user_public_id=db_user.public_id,
                 logged_at=now,
+                timestamp=now,
             )
             session.add(login_event)
             await session.commit()

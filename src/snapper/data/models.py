@@ -78,6 +78,7 @@ class UUIDColumn(TypeDecorator[str]):
 __all__ = [
     "KNOWN_TO_MAX",
     "Base",
+    "TemporalMixin",
     "Instrument",
     "Candle",
     "Trade",
@@ -108,7 +109,20 @@ class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
 
 
-class Instrument(Base):
+class TemporalMixin:
+    """Mixin providing standard temporal columns for all entity tables.
+
+    Every entity table inherits: autoincrement integer id, UUID7 public_id,
+    bus-time timestamp, and SCD2 known_to with KNOWN_TO_MAX default.
+    """
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
+
+
+class Instrument(TemporalMixin, Base):
     """SQLAlchemy model for tradeable financial instruments."""
 
     __tablename__ = "instruments"
@@ -131,19 +145,15 @@ class Instrument(Base):
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
         Index("ix_instruments_exchange", "exchange"),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOLS), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
-    timestamp: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     candles: Mapped[list[Candle]] = relationship(back_populates="instrument")
     trades: Mapped[list[Trade]] = relationship(back_populates="instrument")
 
 
-class Candle(Base):
+class Candle(TemporalMixin, Base):
     """SQLAlchemy model for OHLCV candlestick data."""
 
     __tablename__ = "candles"
@@ -166,11 +176,8 @@ class Candle(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     open_at: Mapped[datetime] = mapped_column(TZDateTime())
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     timeframe: Mapped[str] = mapped_column(String(8))
     open: Mapped[float] = mapped_column(Float)
     high: Mapped[float] = mapped_column(Float)
@@ -179,11 +186,10 @@ class Candle(Base):
     volume: Mapped[float] = mapped_column(Float)
     vwap: Mapped[float | None] = mapped_column(Float, nullable=True)
     trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     instrument: Mapped[Instrument] = relationship(back_populates="candles")
 
 
-class Trade(Base):
+class Trade(TemporalMixin, Base):
     """SQLAlchemy model for individual market trades."""
 
     __tablename__ = "trades"
@@ -198,19 +204,15 @@ class Trade(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
     trade_id: Mapped[str] = mapped_column(String(64))
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     instrument: Mapped[Instrument] = relationship(back_populates="trades")
 
 
-class Order(Base):
+class Order(TemporalMixin, Base):
     """SQLAlchemy model for trading order records."""
 
     __tablename__ = "orders"
@@ -247,14 +249,11 @@ class Order(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     updated_at: Mapped[datetime | None] = mapped_column(TZDateTime())
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     side: Mapped[str] = mapped_column(String(4))
     order_type: Mapped[str] = mapped_column(String(16))
     price: Mapped[float | None] = mapped_column(Float)
@@ -264,10 +263,9 @@ class Order(Base):
     filled_size: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str | None] = mapped_column(String(512))
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
 
-class Execution(Base):
+class Execution(TemporalMixin, Base):
     """SQLAlchemy model for order execution fills."""
 
     __tablename__ = "executions"
@@ -294,13 +292,10 @@ class Execution(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exec_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     side: Mapped[str] = mapped_column(String(4))
     status: Mapped[str] = mapped_column(String(16))
     price: Mapped[float] = mapped_column(Float)
@@ -308,11 +303,10 @@ class Execution(Base):
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     order: Mapped[Order] = relationship()
 
 
-class Position(Base):
+class Position(TemporalMixin, Base):
     """SQLAlchemy model for open trading positions."""
 
     __tablename__ = "positions"
@@ -332,18 +326,14 @@ class Position(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
     unrealized_pnl: Mapped[float] = mapped_column(Float)
     realized_pnl: Mapped[float] = mapped_column(Float)
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
 
-class Signal(Base):
+class Signal(TemporalMixin, Base):
     """SQLAlchemy model for trading signal events."""
 
     __tablename__ = "signals"
@@ -356,21 +346,17 @@ class Signal(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     fired_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(256))
     strategy_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     instrument: Mapped[Instrument] = relationship()
 
 
-class User(Base):
+class User(TemporalMixin, Base):
     """SQLAlchemy model for user accounts and authentication."""
 
     __tablename__ = "users"
@@ -390,28 +376,32 @@ class User(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     username: Mapped[str] = mapped_column(String(64))
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
 
-class UserLoginEvent(Base):
+class UserLoginEvent(TemporalMixin, Base):
     """Append-only log of user login events."""
 
     __tablename__ = "user_login_events"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    __table_args__ = (
+        Index(
+            "ix_user_login_events_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+    )
     user_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     logged_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
-class Setting(Base):
+class Setting(TemporalMixin, Base):
     """SQLAlchemy model for application configuration settings."""
 
     __tablename__ = "settings"
@@ -431,29 +421,34 @@ class Setting(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     key: Mapped[str] = mapped_column(String(64))
     value: Mapped[str] = mapped_column(String(1024))
     category: Mapped[str] = mapped_column(String(32))
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)
     is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
 
-class Symbol(Base):
-    """Stable identity table for native symbols. No versioning."""
+class Symbol(TemporalMixin, Base):
+    """Stable identity table for native symbols."""
 
     __tablename__ = "symbols"
-    native_symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    __table_args__ = (
+        Index(
+            "ix_symbols_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+    )
+    native_symbol: Mapped[str] = mapped_column(String(32), unique=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     aliases: Mapped[list[SymbolAlias]] = relationship(back_populates="symbol")
     versions: Mapped[list[SymbolVersion]] = relationship(back_populates="symbol")
 
 
-class SymbolVersion(Base):
+class SymbolVersion(TemporalMixin, Base):
     """Versioned attributes for a native symbol (SCD Type 2)."""
 
     __tablename__ = "symbol_versions"
@@ -482,18 +477,14 @@ class SymbolVersion(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOLS), index=True)
     base: Mapped[str] = mapped_column(String(16), nullable=False)
     quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
     asset_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="crypto")
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     symbol: Mapped[Symbol] = relationship(back_populates="versions")
 
 
-class SymbolAlias(Base):
+class SymbolAlias(TemporalMixin, Base):
     """SQLAlchemy model for exchange-specific symbol aliases.
 
     Normalized: one row per (native_symbol, exchange, channel) instead
@@ -536,8 +527,6 @@ class SymbolAlias(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(
         String(32),
         ForeignKey(_FK_SYMBOLS),
@@ -548,12 +537,10 @@ class SymbolAlias(Base):
     channel: Mapped[str] = mapped_column(String(10), nullable=False)
     exchange_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     symbol: Mapped[Symbol] = relationship(back_populates="aliases")
 
 
-class SymbolExchangeCapability(Base):
+class SymbolExchangeCapability(TemporalMixin, Base):
     """Exchange-specific symbol capabilities.
 
     Separates symbol translation (what format?) from capabilities (what can I
@@ -569,7 +556,6 @@ class SymbolExchangeCapability(Base):
         source: Origin of the capability information (e.g., updater name).
         reason: Human-readable explanation for the capability values.
         created_at: Row creation timestamp (UTC).
-        timestamp: Last modification timestamp (UTC).
         symbol: Relationship to Symbol.
     """
 
@@ -608,8 +594,6 @@ class SymbolExchangeCapability(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     native_symbol: Mapped[str] = mapped_column(
         String(32),
         ForeignKey(_FK_SYMBOLS),
@@ -622,12 +606,10 @@ class SymbolExchangeCapability(Base):
     source: Mapped[str | None] = mapped_column(String(50), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
     symbol: Mapped[Symbol] = relationship()
 
 
-class ProcessRun(Base):
+class ProcessRun(TemporalMixin, Base):
     """SQLAlchemy model for background process execution records."""
 
     __tablename__ = "process_runs"
@@ -640,8 +622,6 @@ class ProcessRun(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     process_name: Mapped[str] = mapped_column(String(64), index=True)
     role: Mapped[str] = mapped_column(String(16))
     lifecycle: Mapped[str] = mapped_column(String(16))
@@ -652,11 +632,9 @@ class ProcessRun(Base):
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
 
-class InstrumentSpec(Base):
+class InstrumentSpec(TemporalMixin, Base):
     """SQLAlchemy model for instrument trading specifications."""
 
     __tablename__ = "instrument_specs"
@@ -676,8 +654,6 @@ class InstrumentSpec(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     instrument_id: Mapped[int] = mapped_column(
         ForeignKey(_INSTRUMENT_FK), nullable=False, index=True
     )
@@ -711,11 +687,9 @@ class InstrumentSpec(Base):
     status: Mapped[str | None] = mapped_column(
         String(20), nullable=True, comment="Trading status (e.g., online, offline)"
     )
-    timestamp: Mapped[datetime] = mapped_column(TZDateTime())
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
 
-class MarketSnapshot(Base):
+class MarketSnapshot(TemporalMixin, Base):
     """SQLAlchemy model for real-time market data snapshots."""
 
     __tablename__ = "market_snapshots"
@@ -730,8 +704,6 @@ class MarketSnapshot(Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     exchange: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -771,7 +743,3 @@ class MarketSnapshot(Base):
     spread_pct: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="Spread as percentage of mid price"
     )
-    timestamp: Mapped[datetime] = mapped_column(
-        TZDateTime(), index=True, comment="Snapshot timestamp"
-    )
-    known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)

@@ -481,7 +481,7 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
         session_local = sessionmaker(bind=engine)
         now = datetime.now(UTC)
         with session_local() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -1805,7 +1805,7 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -1894,7 +1894,7 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -1983,7 +1983,7 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -2072,7 +2072,13 @@ class TestKrakenUpdateDatabaseBranches:
         """
         original_updated_at = datetime(2020, 1, 1, tzinfo=UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=original_updated_at))
+            session.add(
+                Symbol(
+                    native_symbol="BTC-USD",
+                    created_at=original_updated_at,
+                    timestamp=original_updated_at,
+                )
+            )
 
             session.add(
                 SymbolVersion(
@@ -2620,7 +2626,7 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -2666,7 +2672,7 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="FOO-USD", created_at=now))
+            session.add(Symbol(native_symbol="FOO-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -2708,7 +2714,7 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -2762,7 +2768,7 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(
@@ -2808,7 +2814,7 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now))
+            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
 
             session.add(
                 SymbolVersion(

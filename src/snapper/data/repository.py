@@ -118,6 +118,8 @@ def _filter_instrument_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     Callers may pass tick_size / lot_size which were moved to
     InstrumentSpec; silently drop them so Instrument(**kwargs) works.
+    Supplies a default ``timestamp`` of now(UTC) when not provided,
+    since the TemporalMixin makes timestamp NOT NULL.
 
     Args:
         kwargs: Raw keyword arguments from callers.
@@ -125,7 +127,10 @@ def _filter_instrument_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     Returns:
         Filtered dict containing only valid Instrument column keys.
     """
-    return {k: v for k, v in kwargs.items() if k in _INSTRUMENT_COLUMNS}
+    filtered = {k: v for k, v in kwargs.items() if k in _INSTRUMENT_COLUMNS}
+    if "timestamp" not in filtered:
+        filtered["timestamp"] = datetime.now(UTC)
+    return filtered
 
 
 async def close_and_insert(
