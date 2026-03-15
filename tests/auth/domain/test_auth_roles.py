@@ -16,6 +16,7 @@ from snapper.auth.routes import router
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
 
 
@@ -157,14 +158,16 @@ class TestUserService:
     def mock_db_user(self) -> User:
         """Create a mock database User object for testing."""
         db_user = MagicMock(spec=User)
-        db_user.id = "test_user"
+        db_user.id = 1
+        db_user.public_id = "fake-public-id"
         db_user.username = "testuser"
         db_user.email = "test@example.com"
         db_user.password_hash = "hashed_password"
         db_user.role = "viewer"
         db_user.is_active = True
         db_user.created_at = datetime.now(UTC)
-        db_user.last_login = None
+        db_user.timestamp = datetime.now(UTC)
+        db_user.known_to = KNOWN_TO_MAX
         return db_user
 
     @pytest.fixture
@@ -197,7 +200,7 @@ class TestUserService:
 
         Given: A user exists in the database and password verification succeeds.
         When: authenticate_user is called with correct username and password.
-        Then: The authenticated user profile is returned and last_login is updated.
+        Then: The authenticated user profile is returned and a login event is recorded.
         """
         mock_session = AsyncMock()
         mock_result = MagicMock()
@@ -382,13 +385,15 @@ class TestUserService:
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
         created_user = MagicMock(spec=User)
-        created_user.id = "newuser"
+        created_user.id = 2
+        created_user.public_id = "fake-new-public-id"
         created_user.username = "newuser"
         created_user.email = "new@example.com"
         created_user.role = "viewer"
         created_user.is_active = True
         created_user.created_at = datetime.now(UTC)
-        created_user.last_login = None
+        created_user.timestamp = datetime.now(UTC)
+        created_user.known_to = KNOWN_TO_MAX
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -446,16 +451,18 @@ class TestUserService:
 
     @pytest.mark.asyncio
     async def test_update_user_success(self, user_service: UserService, mock_db_user: User) -> None:
-        """Test successful user update with email and role changes.
+        """Test successful user update via close+insert.
 
         Given: A user exists with the given ID.
         When: update_user is called with new email and role.
-        Then: The user is updated, committed, and refreshed.
+        Then: close_and_insert is called, committed, and refreshed.
         """
         mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_db_user
-        mock_session.execute.return_value = mock_result
+        mock_select_result = MagicMock()
+        mock_select_result.scalar_one_or_none.return_value = mock_db_user
+        mock_ci_result = MagicMock()
+        mock_ci_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -490,16 +497,18 @@ class TestUserService:
     async def test_update_user_deactivate(
         self, user_service: UserService, mock_db_user: User
     ) -> None:
-        """Test user can be deactivated via update_user.
+        """Test user can be deactivated via close+insert.
 
         Given: A user exists with the given ID.
         When: update_user is called with is_active=False.
-        Then: The user is updated successfully.
+        Then: close_and_insert is called with is_active=False.
         """
         mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_db_user
-        mock_session.execute.return_value = mock_result
+        mock_select_result = MagicMock()
+        mock_select_result.scalar_one_or_none.return_value = mock_db_user
+        mock_ci_result = MagicMock()
+        mock_ci_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -508,16 +517,18 @@ class TestUserService:
 
     @pytest.mark.asyncio
     async def test_delete_user_success(self, user_service: UserService, mock_db_user: User) -> None:
-        """Test successful user deletion.
+        """Test successful user deletion via close+insert with is_active=False.
 
         Given: A user exists with the given ID.
         When: delete_user is called with the user ID.
-        Then: True is returned and changes are committed.
+        Then: True is returned and close_and_insert is called.
         """
         mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_db_user
-        mock_session.execute.return_value = mock_result
+        mock_select_result = MagicMock()
+        mock_select_result.scalar_one_or_none.return_value = mock_db_user
+        mock_ci_result = MagicMock()
+        mock_ci_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -547,16 +558,18 @@ class TestUserService:
     async def test_change_password_success(
         self, user_service: UserService, mock_db_user: User
     ) -> None:
-        """Test successful password change with correct old password.
+        """Test successful password change via close+insert.
 
         Given: A user exists and the old password is correct.
         When: change_password is called with correct old password.
-        Then: True is returned and new password hash is committed.
+        Then: True is returned and close_and_insert is called.
         """
         mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_db_user
-        mock_session.execute.return_value = mock_result
+        mock_select_result = MagicMock()
+        mock_select_result.scalar_one_or_none.return_value = mock_db_user
+        mock_ci_result = MagicMock()
+        mock_ci_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session

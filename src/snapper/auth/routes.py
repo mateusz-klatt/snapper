@@ -4,6 +4,8 @@ This module provides FastAPI routes for user authentication
 including login, logout, token refresh, and user management.
 """
 
+from datetime import UTC
+from datetime import datetime
 from typing import Annotated
 from typing import Literal
 
@@ -35,7 +37,9 @@ from snapper.auth.schemas.responses import UserListResponse
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
+from snapper.data.repository import close_and_insert
 from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
@@ -501,7 +505,10 @@ async def admin_reset_user_password(
     user_service = get_user_service()
     try:
         async with user_service.repository.session() as session:
-            stmt = select(User).where(User.username == user_id)
+            stmt = select(User).where(
+                User.username == user_id,
+                User.known_to == KNOWN_TO_MAX,
+            )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -509,7 +516,22 @@ async def admin_reset_user_password(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="User not found",
                 )
-            db_user.password_hash = user_service.hash_password(password_data.new_password)
+            now = datetime.now(UTC)
+            new_values: dict[str, object] = {
+                "username": db_user.username,
+                "email": db_user.email,
+                "password_hash": user_service.hash_password(password_data.new_password),
+                "role": db_user.role,
+                "is_active": db_user.is_active,
+                "created_at": db_user.created_at,
+            }
+            await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.username == user_id],
+                new_values=new_values,
+                bus_time=now,
+            )
             await session.commit()
             return MessageResponse(
                 message=f"Password reset successfully for user {db_user.username}"

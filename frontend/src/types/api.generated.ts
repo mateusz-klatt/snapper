@@ -2355,7 +2355,6 @@ export type Components = {
          *         role: User's role (VIEWER, OPERATOR, ADMIN).
          *         is_active: Whether user account is active.
          *         created_at: Account creation timestamp.
-         *         last_login: Last successful login timestamp.
          */
         UserProfile: {
             /** Username */
@@ -2373,8 +2372,6 @@ export type Components = {
              * Format: date-time
              */
             created_at?: string;
-            /** Last Login */
-            last_login?: string | null;
         };
         /**
          * UserRole

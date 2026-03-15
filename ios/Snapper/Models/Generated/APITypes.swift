@@ -911,7 +911,6 @@ struct UserProfile: Codable, Sendable {
     let role: UserRole
     let isActive: Bool?
     let createdAt: Date?
-    let lastLogin: Date?
 
     enum CodingKeys: String, CodingKey {
         case username
@@ -919,7 +918,6 @@ struct UserProfile: Codable, Sendable {
         case role
         case isActive = "is_active"
         case createdAt = "created_at"
-        case lastLogin = "last_login"
     }
 }
 

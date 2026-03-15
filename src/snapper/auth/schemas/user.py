@@ -25,7 +25,6 @@ class UserProfile(StrictApiSchema):
         role: User's role (VIEWER, OPERATOR, ADMIN).
         is_active: Whether user account is active.
         created_at: Account creation timestamp.
-        last_login: Last successful login timestamp.
     """
 
     username: str
@@ -33,4 +32,3 @@ class UserProfile(StrictApiSchema):
     role: UserRole
     is_active: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    last_login: datetime | None = None

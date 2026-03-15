@@ -10,8 +10,7 @@ final class ModelTests: XCTestCase {
             "email": "test@example.com",
             "role": "viewer",
             "is_active": true,
-            "created_at": "2025-01-01T00:00:00Z",
-            "last_login": null
+            "created_at": "2025-01-01T00:00:00Z"
         }
         """.data(using: .utf8)!
 
@@ -70,8 +69,7 @@ final class ModelTests: XCTestCase {
                 "email": "test@example.com",
                 "role": "admin",
                 "is_active": true,
-                "created_at": "2025-01-01T00:00:00Z",
-                "last_login": "2025-11-22T10:00:00Z"
+                "created_at": "2025-01-01T00:00:00Z"
             }
         }
         """.data(using: .utf8)!
@@ -135,8 +133,7 @@ final class ModelTests: XCTestCase {
                 "email": "test@example.com",
                 "role": "viewer",
                 "is_active": true,
-                "created_at": "2025-01-01T00:00:00Z",
-                "last_login": null
+                "created_at": "2025-01-01T00:00:00Z"
             }
         }
         """.data(using: .utf8)!

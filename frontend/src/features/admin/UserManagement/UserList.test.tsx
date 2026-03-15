@@ -198,7 +198,6 @@ describe('UserList', () => {
               role: 'viewer',
               is_active: true,
               created_at: '2024-01-01T00:00:00Z',
-              last_login: '2024-01-15T12:30:00Z',
             },
           ],
           total_count: 1,
@@ -461,7 +460,6 @@ describe('UserList', () => {
               role: 'viewer',
               is_active: true,
               created_at: '2024-06-15T10:30:00Z',
-              last_login: '2024-06-20T14:45:00Z',
             },
           ],
           total_count: 1,
@@ -485,29 +483,6 @@ describe('UserList', () => {
         expect(screen.getByText('Hide inactive')).toBeTruthy()
       })
     }
-  })
-  it('shows Never for users without last_login', async () => {
-    vi.mocked(api).mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'newuser',
-              email: 'new@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-              last_login: null,
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
-    renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
-    await waitFor(() => {
-      expect(screen.getByText('Never')).toBeTruthy()
-    })
   })
   it('shows correct message for no active users when filter is off', async () => {
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
@@ -603,7 +578,6 @@ describe('UserList', () => {
               email: 'nocreated@test.com',
               role: 'viewer',
               is_active: true,
-              last_login: null,
               created_at: null,
             },
           ],

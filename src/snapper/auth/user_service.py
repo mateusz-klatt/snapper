@@ -2,6 +2,8 @@
 
 This module provides user management operations including
 authentication, CRUD operations, and password management.
+All User mutations use SCD Type 2 close+insert via close_and_insert.
+Login events are recorded in an append-only UserLoginEvent table.
 """
 
 from datetime import UTC
@@ -13,7 +15,10 @@ from sqlalchemy import select
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import get_settings
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
+from snapper.data.models import UserLoginEvent
+from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 
 
@@ -82,13 +87,12 @@ class UserService:
             role=UserRole(db_user.role),
             is_active=db_user.is_active,
             created_at=db_user.created_at,
-            last_login=db_user.last_login,
         )
 
     async def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         """Authenticate user by username and password.
 
-        Updates last_login timestamp on success.
+        Records a login event in user_login_events on success.
 
         Args:
             username: User's username.
@@ -105,7 +109,12 @@ class UserService:
                 return None
             if not self._verify_password(password, db_user.password_hash):
                 return None
-            db_user.last_login = datetime.now(UTC)
+            now = datetime.now(UTC)
+            login_event = UserLoginEvent(
+                user_public_id=db_user.public_id,
+                logged_at=now,
+            )
+            session.add(login_event)
             await session.commit()
             return self._db_user_to_auth_user(db_user)
 
@@ -208,12 +217,14 @@ class UserService:
         role: UserRole | None = None,
         is_active: bool | None = None,
     ) -> UserProfile | None:
-        """Update user attributes.
+        """Update user attributes via SCD Type 2 close+insert.
 
-        Only provided (non-None) attributes are updated.
+        Only provided (non-None) attributes are changed.
+        The old row is closed and a new row is inserted carrying
+        the same public_id and username.
 
         Args:
-            user_id: User's ID.
+            user_id: User's username.
             email: New email address.
             role: New role.
             is_active: New active status.
@@ -222,47 +233,78 @@ class UserService:
             Updated UserProfile or None if not found.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == user_id)
+            stmt = select(User).where(
+                User.username == user_id,
+                User.known_to == KNOWN_TO_MAX,
+            )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
                 return None
-            if email is not None:
-                db_user.email = email
-            if role is not None:
-                db_user.role = role.value
-            if is_active is not None:
-                db_user.is_active = is_active
+            now = datetime.now(UTC)
+            new_values: dict[str, object] = {
+                "username": db_user.username,
+                "email": email if email is not None else db_user.email,
+                "password_hash": db_user.password_hash,
+                "role": role.value if role is not None else db_user.role,
+                "is_active": is_active if is_active is not None else db_user.is_active,
+                "created_at": db_user.created_at,
+            }
+            new_row = await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.username == user_id],
+                new_values=new_values,
+                bus_time=now,
+            )
             await session.commit()
-            await session.refresh(db_user)
-            return self._db_user_to_auth_user(db_user)
+            await session.refresh(new_row)
+            return self._db_user_to_auth_user(new_row)
 
     async def delete_user(self, user_id: str) -> bool:
-        """Soft-delete user by marking inactive.
+        """Soft-delete user via SCD Type 2 close+insert with is_active=False.
 
         Args:
-            user_id: User's ID.
+            user_id: User's username.
 
         Returns:
             True if deleted, False if not found.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == user_id)
+            stmt = select(User).where(
+                User.username == user_id,
+                User.known_to == KNOWN_TO_MAX,
+            )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
                 return False
-            db_user.is_active = False
+            now = datetime.now(UTC)
+            new_values: dict[str, object] = {
+                "username": db_user.username,
+                "email": db_user.email,
+                "password_hash": db_user.password_hash,
+                "role": db_user.role,
+                "is_active": False,
+                "created_at": db_user.created_at,
+            }
+            await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.username == user_id],
+                new_values=new_values,
+                bus_time=now,
+            )
             await session.commit()
             return True
 
     async def change_password(self, user_id: str, old_password: str, new_password: str) -> bool:
-        """Change user's password.
+        """Change user's password via SCD Type 2 close+insert.
 
-        Verifies old password before updating.
+        Verifies old password before creating new version.
 
         Args:
-            user_id: User's ID.
+            user_id: User's username.
             old_password: Current password for verification.
             new_password: New password to set.
 
@@ -277,7 +319,22 @@ class UserService:
                 return False
             if not self._verify_password(old_password, db_user.password_hash):
                 return False
-            db_user.password_hash = self.hash_password(new_password)
+            now = datetime.now(UTC)
+            new_values: dict[str, object] = {
+                "username": db_user.username,
+                "email": db_user.email,
+                "password_hash": self.hash_password(new_password),
+                "role": db_user.role,
+                "is_active": db_user.is_active,
+                "created_at": db_user.created_at,
+            }
+            await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.username == user_id],
+                new_values=new_values,
+                bus_time=now,
+            )
             await session.commit()
             return True
 

@@ -86,6 +86,7 @@ __all__ = [
     "Position",
     "Signal",
     "User",
+    "UserLoginEvent",
     "Setting",
     "SymbolCatalog",
     "SymbolAlias",
@@ -396,9 +397,17 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    last_login: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
+
+
+class UserLoginEvent(Base):
+    """Append-only log of user login events."""
+
+    __tablename__ = "user_login_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    logged_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
 class Setting(Base):

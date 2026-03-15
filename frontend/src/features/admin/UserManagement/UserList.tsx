@@ -220,9 +220,6 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                 <th className='px-3 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   Status
                 </th>
-                <th className='hidden lg:table-cell px-3 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
-                  Last Login
-                </th>
                 <th className='hidden xl:table-cell px-3 py-3 text-left text-xs font-medium text-muted-600 uppercase tracking-wider'>
                   Created At
                 </th>
@@ -258,9 +255,6 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                     >
                       {user.is_active ? 'Active' : 'Inactive'}
                     </span>
-                  </td>
-                  <td className='hidden lg:table-cell px-3 py-4 whitespace-nowrap text-sm text-muted-500'>
-                    {user.last_login ? formatDate(user.last_login) : 'Never'}
                   </td>
                   <td className='hidden xl:table-cell px-3 py-4 whitespace-nowrap text-sm text-muted-500'>
                     {user.created_at ? formatDate(user.created_at) : 'Unknown'}

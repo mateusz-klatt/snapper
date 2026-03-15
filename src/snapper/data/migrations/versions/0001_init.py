@@ -488,7 +488,6 @@ def upgrade() -> None:
         sa.Column("role", sa.String(32), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("last_login", sa.DateTime(timezone=True), nullable=True),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -509,6 +508,14 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
+    op.create_table(
+        "user_login_events",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("logged_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("ix_user_login_events_user_public_id", "user_login_events", ["user_public_id"])
     op.create_table(
         "settings",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -712,6 +719,7 @@ def downgrade() -> None:
     op.drop_table("instrument_specs")
     op.drop_table("process_runs")
     op.drop_table("settings")
+    op.drop_table("user_login_events")
     op.drop_table("users")
     op.drop_table("signals")
     op.drop_table("positions")

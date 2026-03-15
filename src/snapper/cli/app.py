@@ -67,6 +67,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.models import User
 from snapper.data.repository import close_and_insert
@@ -552,13 +553,31 @@ def reset_password(
         user_service = UserService()
         try:
             async with user_service.repository.session() as session:
-                stmt = select(User).where(User.username == username)
+                stmt = select(User).where(
+                    User.username == username,
+                    User.known_to == KNOWN_TO_MAX,
+                )
                 result = await session.execute(stmt)
                 db_user = result.scalar_one_or_none()
                 if not db_user:
                     typer.echo(f"User '{username}' not found!")
                     return
-                db_user.password_hash = user_service.hash_password(new_password)
+                now = datetime.now(UTC)
+                new_values: dict[str, object] = {
+                    "username": db_user.username,
+                    "email": db_user.email,
+                    "password_hash": user_service.hash_password(new_password),
+                    "role": db_user.role,
+                    "is_active": db_user.is_active,
+                    "created_at": db_user.created_at,
+                }
+                await close_and_insert(
+                    session=session,
+                    model=User,
+                    match_filters=[User.username == username],
+                    new_values=new_values,
+                    bus_time=now,
+                )
                 await session.commit()
                 typer.echo(f"Password reset for user '{username}'")
                 typer.echo(f"Username: {username}")

@@ -475,7 +475,6 @@ export const UserProfileSchema = z
     role: UserRoleSchema,
     is_active: z.boolean(),
     created_at: z.iso.datetime().optional(),
-    last_login: z.iso.datetime().nullable().optional(),
   })
   .strict()
 

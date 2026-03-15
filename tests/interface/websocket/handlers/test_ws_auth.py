@@ -3557,22 +3557,38 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
 
     class FakeDBUser:
         def __init__(self) -> None:
-            self.id = "user-1"
+            self.id = 1
             self.username = "target"
             self.password_hash = "old"
+            self.email = "target@example.com"
+            self.role = "viewer"
+            self.is_active = True
+            self.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+            self.public_id = "fake-public-id"
+            self.timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+            self.known_to = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
     class FakeResult:
-        def __init__(self, user: FakeDBUser) -> None:
+        def __init__(self, user: FakeDBUser | None) -> None:
             self._user = user
 
         def scalar_one_or_none(self) -> FakeDBUser | None:
             return self._user
 
+        def scalars(self) -> FakeResult:
+            return self
+
+        def first(self) -> FakeDBUser | None:
+            return self._user
+
     class FakeSession:
+        """Fake async session supporting close_and_insert pattern."""
+
         def __init__(self, user: FakeDBUser) -> None:
             self._user = user
             self.executed = False
             self.committed = False
+            self.added: list[Any] = []
 
         async def __aenter__(self) -> FakeSession:
             return self
@@ -3591,6 +3607,9 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
 
         async def commit(self) -> None:
             self.committed = True
+
+        def add(self, obj: Any) -> None:
+            self.added.append(obj)
 
     class FakeRepository:
         def __init__(self, user: FakeDBUser) -> None:
@@ -3621,7 +3640,6 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
     )
     assert result.message == "Password reset successfully for user target"
     assert stub_service.hashed_passwords == ["super-secret"]
-    assert fake_db_user.password_hash == "hashed"
     assert stub_service.repository.session().committed is True
 
 

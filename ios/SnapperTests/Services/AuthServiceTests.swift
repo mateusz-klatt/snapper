@@ -27,8 +27,7 @@ final class AuthServiceTests: XCTestCase {
                 "email": "test@example.com",
                 "role": "viewer",
                 "is_active": true,
-                "created_at": "2025-01-01T00:00:00Z",
-                "last_login": null
+                "created_at": "2025-01-01T00:00:00Z"
             }
         }
         """.data(using: .utf8)!
@@ -100,8 +99,7 @@ final class AuthServiceTests: XCTestCase {
             email: "test@example.com",
             role: role,
             isActive: true,
-            createdAt: nil,
-            lastLogin: nil
+            createdAt: nil
         )
     }
 
