@@ -3306,6 +3306,8 @@ export interface Operations {
                 timeframe: string;
                 /** @description Number of candles to return */
                 limit?: number;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
             };
             header?: never;
             path?: never;
@@ -3353,6 +3355,8 @@ export interface Operations {
                 hours?: number;
                 /** @description Number of signals to return */
                 limit?: number;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
             };
             header?: never;
             path?: never;
@@ -3463,6 +3467,8 @@ export interface Operations {
                 limit?: number;
                 /** @description Number of orders to skip */
                 offset?: number;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
             };
             header?: never;
             path?: never;
@@ -3502,6 +3508,8 @@ export interface Operations {
             query?: {
                 /** @description Number of executions to return */
                 limit?: number;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
             };
             header?: never;
             path?: never;
@@ -3538,7 +3546,10 @@ export interface Operations {
     };
     get_positions_api_positions_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3552,6 +3563,15 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["PositionData"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
             /** @description Internal server error */
