@@ -20,7 +20,6 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketSubscribeExchange
 from snapper.core.types import OrderExchange
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolExchangeCapability
 from snapper.infrastructure.symbols.functions import ccxt_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_exchanges
@@ -345,13 +344,16 @@ def sample_aliases() -> list[SymbolAlias]:
     """Provide sample BTC-USD symbol aliases for kraken ws/rest/ccxt."""
     return [
         SymbolAlias(
-            native_symbol="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
+            symbol_public_id="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
         ),
         SymbolAlias(
-            native_symbol="BTC-USD", exchange="kraken", channel="rest", exchange_symbol="XXBTZUSD"
+            symbol_public_id="BTC-USD",
+            exchange="kraken",
+            channel="rest",
+            exchange_symbol="XXBTZUSD",
         ),
         SymbolAlias(
-            native_symbol="BTC-USD", exchange="kraken", channel="ccxt", exchange_symbol="BTC/USD"
+            symbol_public_id="BTC-USD", exchange="kraken", channel="ccxt", exchange_symbol="BTC/USD"
         ),
     ]
 
@@ -616,31 +618,37 @@ class TestDatabaseSymbolMapperCore:
         """Create sample symbol aliases for testing."""
         return [
             SymbolAlias(
-                native_symbol="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
+                symbol_public_id="BTC-USD",
+                exchange="kraken",
+                channel="ws",
+                exchange_symbol="BTC/USD",
             ),
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id="BTC-USD",
                 exchange="kraken",
                 channel="rest",
                 exchange_symbol="XXBTZUSD",
             ),
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id="BTC-USD",
                 exchange="kraken",
                 channel="ccxt",
                 exchange_symbol="BTC/USD",
             ),
             SymbolAlias(
-                native_symbol="ETH-USD", exchange="kraken", channel="ws", exchange_symbol="ETH/USD"
+                symbol_public_id="ETH-USD",
+                exchange="kraken",
+                channel="ws",
+                exchange_symbol="ETH/USD",
             ),
             SymbolAlias(
-                native_symbol="ETH-USD",
+                symbol_public_id="ETH-USD",
                 exchange="kraken",
                 channel="rest",
                 exchange_symbol="XETHZUSD",
             ),
             SymbolAlias(
-                native_symbol="ETH-USD",
+                symbol_public_id="ETH-USD",
                 exchange="kraken",
                 channel="ccxt",
                 exchange_symbol="ETH/USD",
@@ -697,15 +705,23 @@ class TestDatabaseSymbolMapperCore:
         ):
             mock_session = MagicMock()
             mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            joined_rows = []
+            for alias in sample_aliases:
+                ns = (
+                    "BTC-USD"
+                    if alias.exchange_symbol in ("BTC/USD", "XXBTZUSD", "X:BTCUSD")
+                    else "ETH-USD"
+                )
+                joined_rows.append((ns, alias.exchange, alias.channel, alias.exchange_symbol))
             mock_result = MagicMock()
-            mock_result.scalars.return_value.all.return_value = sample_aliases
+            mock_result.all.return_value = joined_rows
             mock_session.execute.return_value = mock_result
             with patch.object(SymbolMapperService, "trigger_cache_invalidation"):
                 mapper = SymbolMapperService()
                 aliases = mapper.load_mappings_from_db()
                 assert len(aliases) == 6
-                assert aliases[0].native_symbol == "BTC-USD"
-                assert aliases[3].native_symbol == "ETH-USD"
+                assert aliases[0][0] == "BTC-USD"
+                assert aliases[3][0] == "ETH-USD"
 
     def test_cache_operations(
         self,
@@ -748,49 +764,18 @@ class TestDatabaseSymbolMapperCore:
         When: load_cache_if_needed is called,
         Then: All exchange format caches are populated via forward/reverse.
         """
-        aliases = [
-            SymbolAlias(
-                native_symbol="ETH-USD", exchange="kraken", channel="ws", exchange_symbol="ETH/USD"
-            ),
-            SymbolAlias(
-                native_symbol="ETH-USD",
-                exchange="kraken",
-                channel="rest",
-                exchange_symbol="XETHZUSD",
-            ),
-            SymbolAlias(
-                native_symbol="ETH-USD",
-                exchange="kraken",
-                channel="ccxt",
-                exchange_symbol="ETH/USD",
-            ),
-            SymbolAlias(
-                native_symbol="ETH-USD", exchange="zonda", channel="ws", exchange_symbol="ETH-USD"
-            ),
-            SymbolAlias(
-                native_symbol="ETH-USD",
-                exchange="walutomat",
-                channel="ws",
-                exchange_symbol="ETH_USD",
-            ),
-            SymbolAlias(
-                native_symbol="ETH-USD",
-                exchange="walutomat",
-                channel="rest",
-                exchange_symbol="ETHUSD",
-            ),
-            SymbolAlias(
-                native_symbol="ETH-USD",
-                exchange="polygon",
-                channel="rest",
-                exchange_symbol="X:ETHUSD",
-            ),
-            SymbolAlias(
-                native_symbol="AAPL", exchange="polygon", channel="rest", exchange_symbol="AAPL"
-            ),
+        alias_tuples = [
+            ("ETH-USD", "kraken", "ws", "ETH/USD"),
+            ("ETH-USD", "kraken", "rest", "XETHZUSD"),
+            ("ETH-USD", "kraken", "ccxt", "ETH/USD"),
+            ("ETH-USD", "zonda", "ws", "ETH-USD"),
+            ("ETH-USD", "walutomat", "ws", "ETH_USD"),
+            ("ETH-USD", "walutomat", "rest", "ETHUSD"),
+            ("ETH-USD", "polygon", "rest", "X:ETHUSD"),
+            ("AAPL", "polygon", "rest", "AAPL"),
         ]
         mapper = _make_mapper_with_empty_cache()
-        mock_loader = MagicMock(return_value=aliases)
+        mock_loader = MagicMock(return_value=alias_tuples)
         cast(Any, mapper).load_mappings_from_db = mock_loader
         mapper._cache_loaded = False
         assert mapper._cache_loaded is False
@@ -1894,20 +1879,8 @@ class TestPopulateCapabilitiesFromRows:
         Then: Mapper capabilities dict is populated with correct keys and values.
         """
         mapper = _make_mapper_with_empty_cache()
-        row1 = MagicMock(spec=SymbolExchangeCapability)
-        row1.native_symbol = "BTC-USD"
-        row1.exchange = "kraken"
-        row1.can_market_data = True
-        row1.can_trade = True
-        row1.source = "kraken_updater"
-        row1.reason = None
-        row2 = MagicMock(spec=SymbolExchangeCapability)
-        row2.native_symbol = "ETH-USD"
-        row2.exchange = "polygon"
-        row2.can_market_data = True
-        row2.can_trade = False
-        row2.source = "polygon_updater"
-        row2.reason = "data only"
+        row1 = ("BTC-USD", "kraken", True, True, "kraken_updater", None)
+        row2 = ("ETH-USD", "polygon", True, False, "polygon_updater", "data only")
         mapper._populate_capabilities_from_rows([row1, row2])
         assert ("BTC-USD", "kraken") in mapper.capabilities
         assert ("ETH-USD", "polygon") in mapper.capabilities
@@ -1928,21 +1901,15 @@ class TestLoadCacheIfNeededCapabilities:
         When: load_cache_if_needed is called,
         Then: Both alias maps and capabilities dict are populated.
         """
-        aliases = [
-            SymbolAlias(
-                native_symbol="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
-            ),
+        alias_tuples = [
+            ("BTC-USD", "kraken", "ws", "BTC/USD"),
         ]
-        cap_row = MagicMock(spec=SymbolExchangeCapability)
-        cap_row.native_symbol = "BTC-USD"
-        cap_row.exchange = "kraken"
-        cap_row.can_market_data = True
-        cap_row.can_trade = True
-        cap_row.source = "kraken_updater"
-        cap_row.reason = None
+        cap_tuples = [
+            ("BTC-USD", "kraken", True, True, "kraken_updater", None),
+        ]
         mapper = _make_mapper_with_empty_cache()
-        cast(Any, mapper).load_mappings_from_db = MagicMock(return_value=aliases)
-        cast(Any, mapper).load_capabilities_from_db = MagicMock(return_value=[cap_row])
+        cast(Any, mapper).load_mappings_from_db = MagicMock(return_value=alias_tuples)
+        cast(Any, mapper).load_capabilities_from_db = MagicMock(return_value=cap_tuples)
         mapper._cache_loaded = False
         _call_original_load_cache_if_needed(mapper)
         assert mapper.native_to_kraken_ws["BTC-USD"] == "BTC/USD"

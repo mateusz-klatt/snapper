@@ -90,7 +90,6 @@ __all__ = [
     "UserLoginEvent",
     "Setting",
     "Symbol",
-    "SymbolVersion",
     "SymbolAlias",
     "SymbolExchangeCapability",
     "ProcessRun",
@@ -100,7 +99,6 @@ __all__ = [
 
 
 _INSTRUMENT_FK = "instruments.id"
-_FK_SYMBOLS = "symbols.native_symbol"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_ACTIVE = text("known_to = '9999-12-31T23:59:59+00:00'")
 
@@ -145,7 +143,7 @@ class Instrument(TemporalMixin, Base):
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
         Index("ix_instruments_exchange", "exchange"),
     )
-    symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOLS), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
@@ -435,10 +433,26 @@ class Setting(TemporalMixin, Base):
 
 
 class Symbol(TemporalMixin, Base):
-    """Stable identity table for native symbols."""
+    """Temporal symbol table with versioned attributes (SCD Type 2).
+
+    Merges the former Symbol identity table and SymbolVersion versioned
+    attributes into a single temporal table.  Each row carries the full
+    payload (native_symbol, base, quote, asset_type) and participates in
+    the standard close-and-insert lifecycle via TemporalMixin.
+
+    The partial unique index on native_symbol ensures only one active row
+    per native symbol at any point in time.
+    """
 
     __tablename__ = "symbols"
     __table_args__ = (
+        Index(
+            "uq_symbols_active_native",
+            "native_symbol",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
         Index(
             "ix_symbols_public_id",
             "public_id",
@@ -446,54 +460,28 @@ class Symbol(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE,
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
-    )
-    native_symbol: Mapped[str] = mapped_column(String(32), unique=True)
-    created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    aliases: Mapped[list[SymbolAlias]] = relationship(back_populates="symbol")
-    versions: Mapped[list[SymbolVersion]] = relationship(back_populates="symbol")
-
-
-class SymbolVersion(TemporalMixin, Base):
-    """Versioned attributes for a native symbol (SCD Type 2)."""
-
-    __tablename__ = "symbol_versions"
-    __table_args__ = (
         CheckConstraint(
             "asset_type IN ('crypto', 'forex', 'equity', 'index')",
-            name="ck_symbol_version_asset_type",
+            name="ck_symbol_asset_type",
         ),
         CheckConstraint(
             "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
-            name="ck_symbol_version_quote_required_for_pairs",
-        ),
-        Index("ix_sv_base_quote", "base", "quote"),
-        Index(
-            "uq_symbol_version_active",
-            "native_symbol",
-            unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
-        ),
-        Index(
-            "ix_symbol_versions_public_id",
-            "public_id",
-            unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            name="ck_symbol_quote_required",
         ),
     )
-    native_symbol: Mapped[str] = mapped_column(String(32), ForeignKey(_FK_SYMBOLS), index=True)
-    base: Mapped[str] = mapped_column(String(16), nullable=False)
+    native_symbol: Mapped[str] = mapped_column(String(32))
+    base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    asset_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="crypto")
-    symbol: Mapped[Symbol] = relationship(back_populates="versions")
+    asset_type: Mapped[str] = mapped_column(String(16), server_default="crypto")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
 class SymbolAlias(TemporalMixin, Base):
     """SQLAlchemy model for exchange-specific symbol aliases.
 
-    Normalized: one row per (native_symbol, exchange, channel) instead
-    of one column per exchange. Replaces the old SymbolMapping table.
+    Normalized: one row per (symbol_public_id, exchange, channel) instead
+    of one column per exchange.  References Symbol via logical public_id
+    (no hard FK because Symbol is temporal with multiple rows per public_id).
     """
 
     __tablename__ = "symbol_aliases"
@@ -507,8 +495,8 @@ class SymbolAlias(TemporalMixin, Base):
             name="ck_symbol_alias_channel",
         ),
         Index(
-            "uq_alias_native_exchange_channel",
-            "native_symbol",
+            "uq_alias_spid_exchange_channel",
+            "symbol_public_id",
             "exchange",
             "channel",
             unique=True,
@@ -532,43 +520,36 @@ class SymbolAlias(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    native_symbol: Mapped[str] = mapped_column(
-        String(32),
-        ForeignKey(_FK_SYMBOLS),
-        nullable=False,
-        index=True,
-    )
+    symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exchange: Mapped[str] = mapped_column(String(20), nullable=False)
     channel: Mapped[str] = mapped_column(String(10), nullable=False)
     exchange_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    symbol: Mapped[Symbol] = relationship(back_populates="aliases")
 
 
 class SymbolExchangeCapability(TemporalMixin, Base):
     """Exchange-specific symbol capabilities.
 
     Separates symbol translation (what format?) from capabilities (what can I
-    do?). Each row declares whether a given native_symbol is tradeable and/or
-    has market data on a specific exchange. Paper exchange is handled as a
-    special case in code and has no rows in this table.
+    do?). Each row declares whether a given symbol is tradeable and/or has
+    market data on a specific exchange.  References Symbol via logical
+    public_id (no hard FK because Symbol is temporal).
 
     Attributes:
-        native_symbol: FK to symbols. Part of composite PK.
-        exchange: Exchange identifier (lowercase). Part of composite PK.
+        symbol_public_id: Logical key referencing Symbol.public_id.
+        exchange: Exchange identifier (lowercase).
         can_market_data: Whether exchange provides market data for this symbol.
         can_trade: Whether exchange supports trading this symbol.
         source: Origin of the capability information (e.g., updater name).
         reason: Human-readable explanation for the capability values.
         created_at: Row creation timestamp (UTC).
-        symbol: Relationship to Symbol.
     """
 
     __tablename__ = "symbol_exchange_capabilities"
     __table_args__ = (
         Index(
             "uq_sec_symbol_exchange",
-            "native_symbol",
+            "symbol_public_id",
             "exchange",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
@@ -599,19 +580,13 @@ class SymbolExchangeCapability(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    native_symbol: Mapped[str] = mapped_column(
-        String(32),
-        ForeignKey(_FK_SYMBOLS),
-        nullable=False,
-        index=True,
-    )
+    symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exchange: Mapped[str] = mapped_column(String(20), nullable=False)
     can_market_data: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     can_trade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source: Mapped[str | None] = mapped_column(String(50), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
-    symbol: Mapped[Symbol] = relationship()
 
 
 class ProcessRun(TemporalMixin, Base):

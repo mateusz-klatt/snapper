@@ -348,7 +348,7 @@ class TestCheckFile:
 
         Given: A file with .base = assignment,
         When: check_file is called,
-        Then: It returns a violation for Instrument.base / SymbolVersion.base.
+        Then: It returns a violation for Instrument.base / Symbol.base.
         """
         python_file = tmp_path / "inst_svc.py"
         python_file.write_text('instrument.base = "BTC"\n')
@@ -363,7 +363,7 @@ class TestCheckFile:
 
         Given: A file with .quote = assignment,
         When: check_file is called,
-        Then: It returns a violation for Instrument.quote / SymbolVersion.quote.
+        Then: It returns a violation for Instrument.quote / Symbol.quote.
         """
         python_file = tmp_path / "inst_svc.py"
         python_file.write_text('catalog.quote = "USD"\n')
@@ -374,11 +374,11 @@ class TestCheckFile:
         assert "quote" in findings[0][1]
 
     def test_detects_asset_type_mutation(self, tmp_path: Path) -> None:
-        """Verify check_file detects SymbolVersion.asset_type mutation.
+        """Verify check_file detects Symbol.asset_type mutation.
 
         Given: A file with .asset_type = assignment,
         When: check_file is called,
-        Then: It returns a violation for SymbolVersion.asset_type.
+        Then: It returns a violation for Symbol.asset_type.
         """
         python_file = tmp_path / "catalog_svc.py"
         python_file.write_text('catalog.asset_type = "equity"\n')
@@ -386,7 +386,7 @@ class TestCheckFile:
         findings = checker.check_file(python_file)
 
         assert len(findings) == 1
-        assert findings[0][1] == "SymbolVersion.asset_type"
+        assert findings[0][1] == "Symbol.asset_type"
 
     def test_detects_reason_mutation(self, tmp_path: Path) -> None:
         """Verify check_file detects reason attribute mutation.

@@ -23,7 +23,6 @@ from snapper.data.models import Candle
 from snapper.data.models import Order
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
-from snapper.data.models import SymbolVersion
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
 from snapper.data.repository import SQLAlchemyRepository
@@ -62,15 +61,11 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
     async with repo.session() as s:
         s.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
-            )
-        )
-        s.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
             )
         )
@@ -569,18 +564,18 @@ async def _create_repo_with_symbol(tmp_path: Path) -> SQLAlchemyRepository:
 
 
 def _payload_matches(
-    existing: SymbolVersion,
+    existing: Symbol,
     base: str,
     quote: str | None,
     asset_type: str,
 ) -> bool:
-    """Compare SymbolVersion payload fields for change detection.
+    """Compare Symbol payload fields for change detection.
 
-    Mirrors the updater logic in ``_upsert_catalog``: a new version is
+    Mirrors the updater logic in ``_upsert_symbol``: a new version is
     created only when base, quote, or asset_type differ from the active row.
 
     Args:
-        existing: Active SymbolVersion row from the database.
+        existing: Active Symbol row from the database.
         base: Candidate base currency.
         quote: Candidate quote currency (or None).
         asset_type: Candidate asset type.
@@ -591,7 +586,7 @@ def _payload_matches(
     return existing.base == base and existing.quote == quote and existing.asset_type == asset_type
 
 
-async def _upsert_catalog_pattern(
+async def _upsert_symbol_pattern(
     repo: SQLAlchemyRepository,
     native_symbol: str,
     base: str,
@@ -599,110 +594,95 @@ async def _upsert_catalog_pattern(
     asset_type: str,
     now: datetime,
 ) -> None:
-    """Replicate the updater's upsert-catalog pattern using async sessions.
+    """Replicate the updater's upsert-symbol pattern using async sessions.
 
-    Inserts or updates a Symbol identity row and a SymbolVersion versioned
-    row, skipping close+insert when the payload is unchanged.
+    Inserts or updates a Symbol temporal row (SCD Type 2), skipping
+    close+insert when the payload is unchanged.
 
     Args:
         repo: Active SQLAlchemy async repository.
-        native_symbol: Native symbol string (PK for Symbol).
+        native_symbol: Native symbol string.
         base: Base currency code.
         quote: Quote currency code, or None.
         asset_type: One of crypto, forex, equity, index.
         now: Bus timestamp for the operation.
     """
     async with repo.session() as s:
-        existing_symbol = (
-            (await s.execute(select(Symbol).where(Symbol.native_symbol == native_symbol)))
-            .scalars()
-            .first()
-        )
-        if existing_symbol is None:
-            s.add(Symbol(native_symbol=native_symbol, created_at=now, timestamp=now))
-            await s.flush()
-
-        existing_version = (
+        existing = (
             (
                 await s.execute(
-                    select(SymbolVersion).where(
-                        SymbolVersion.native_symbol == native_symbol,
-                        SymbolVersion.timestamp <= now,
-                        SymbolVersion.known_to > now,
+                    select(Symbol).where(
+                        Symbol.native_symbol == native_symbol,
+                        Symbol.timestamp <= now,
+                        Symbol.known_to > now,
                     )
                 )
             )
             .scalars()
             .first()
         )
-        if existing_version is None:
+        if existing is None:
             s.add(
-                SymbolVersion(
+                Symbol(
                     native_symbol=native_symbol,
                     base=base,
                     quote=quote,
                     asset_type=asset_type,
+                    created_at=now,
                     timestamp=now,
                 )
             )
         else:
-            if not _payload_matches(existing_version, base, quote, asset_type):
+            if not _payload_matches(existing, base, quote, asset_type):
                 await close_and_insert(
                     session=s,
-                    model=SymbolVersion,
-                    match_filters=[SymbolVersion.native_symbol == native_symbol],
+                    model=Symbol,
+                    match_filters=[Symbol.native_symbol == native_symbol],
                     new_values={
                         "native_symbol": native_symbol,
                         "base": base,
                         "quote": quote,
                         "asset_type": asset_type,
+                        "created_at": existing.created_at,
                     },
                     bus_time=now,
                 )
         await s.commit()
 
 
-class TestSymbolVersionBitemporal:
-    """Integration tests for SymbolVersion SCD2 behavior and idempotency."""
+class TestSymbolBitemporal:
+    """Integration tests for Symbol SCD2 behavior and idempotency."""
 
     @pytest.mark.asyncio
     async def test_symbol_version_reingest_same_payload_is_noop(self, tmp_path: Path) -> None:
         """Re-ingesting identical payload does not create a new version.
 
-        Given: A Symbol identity row and SymbolVersion with payload
+        Given: A Symbol identity row and Symbol with payload
             (base=BTC, quote=USD, asset_type=crypto),
         When: The updater pattern runs again with identical payload,
-        Then: Still only 1 SymbolVersion row exists and its timestamp
+        Then: Still only 1 Symbol row exists and its timestamp
             is unchanged.
         """
         repo = await _create_repo_with_symbol(tmp_path)
         t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
 
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
 
         async with repo.session() as s:
             before = (
-                (
-                    await s.execute(
-                        select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD")
-                    )
-                )
+                (await s.execute(select(Symbol).where(Symbol.native_symbol == "BTC-USD")))
                 .scalars()
                 .all()
             )
         assert len(before) == 1
         original_ts = before[0].timestamp
 
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t2)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t2)
 
         async with repo.session() as s:
             after = (
-                (
-                    await s.execute(
-                        select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD")
-                    )
-                )
+                (await s.execute(select(Symbol).where(Symbol.native_symbol == "BTC-USD")))
                 .scalars()
                 .all()
             )
@@ -713,25 +693,21 @@ class TestSymbolVersionBitemporal:
     async def test_symbol_version_change_closes_old_and_inserts_new(self, tmp_path: Path) -> None:
         """Changing payload closes the old version and inserts a new one.
 
-        Given: A SymbolVersion with asset_type=crypto,
+        Given: A Symbol with asset_type=crypto,
         When: The updater pattern runs with asset_type=forex (changed payload),
-        Then: Two SymbolVersion rows exist for the same native_symbol with
+        Then: Two Symbol rows exist for the same native_symbol with
             contiguous half-open intervals.
         """
         repo = await _create_repo_with_symbol(tmp_path)
         t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
 
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "forex", t2)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "forex", t2)
 
         async with repo.session() as s:
             rows = (
-                (
-                    await s.execute(
-                        select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD")
-                    )
-                )
+                (await s.execute(select(Symbol).where(Symbol.native_symbol == "BTC-USD")))
                 .scalars()
                 .all()
             )
@@ -747,7 +723,7 @@ class TestSymbolVersionBitemporal:
     async def test_symbol_version_preserves_public_id_across_versions(self, tmp_path: Path) -> None:
         """Both old and new versions share the same public_id.
 
-        Given: A SymbolVersion with asset_type=crypto,
+        Given: A Symbol with asset_type=crypto,
         When: The updater pattern runs with asset_type=forex (changed payload),
         Then: Both versions carry the same public_id value.
         """
@@ -755,16 +731,12 @@ class TestSymbolVersionBitemporal:
         t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
 
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "forex", t2)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "forex", t2)
 
         async with repo.session() as s:
             rows = (
-                (
-                    await s.execute(
-                        select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD")
-                    )
-                )
+                (await s.execute(select(Symbol).where(Symbol.native_symbol == "BTC-USD")))
                 .scalars()
                 .all()
             )
@@ -785,17 +757,17 @@ class TestSymbolVersionBitemporal:
         t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
 
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
-        await _upsert_catalog_pattern(repo, "BTC-USD", "XBT", "USD", "crypto", t2)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "XBT", "USD", "crypto", t2)
 
         async with repo.session() as s:
             at_t1 = (
                 (
                     await s.execute(
-                        select(SymbolVersion).where(
-                            SymbolVersion.native_symbol == "BTC-USD",
-                            SymbolVersion.timestamp <= t1,
-                            SymbolVersion.known_to > t1,
+                        select(Symbol).where(
+                            Symbol.native_symbol == "BTC-USD",
+                            Symbol.timestamp <= t1,
+                            Symbol.known_to > t1,
                         )
                     )
                 )
@@ -808,10 +780,10 @@ class TestSymbolVersionBitemporal:
             at_t2 = (
                 (
                     await s.execute(
-                        select(SymbolVersion).where(
-                            SymbolVersion.native_symbol == "BTC-USD",
-                            SymbolVersion.timestamp <= t2,
-                            SymbolVersion.known_to > t2,
+                        select(Symbol).where(
+                            Symbol.native_symbol == "BTC-USD",
+                            Symbol.timestamp <= t2,
+                            Symbol.known_to > t2,
                         )
                     )
                 )
@@ -825,9 +797,9 @@ class TestSymbolVersionBitemporal:
     async def test_symbol_version_bulk_rerun_does_not_explode_rows(self, tmp_path: Path) -> None:
         """Bulk re-run with identical payloads creates no extra versions.
 
-        Given: Five Symbol+SymbolVersion pairs inserted at t1,
+        Given: Five Symbol+Symbol pairs inserted at t1,
         When: The same five are re-ingested at t2 with identical payloads,
-        Then: Still exactly 5 SymbolVersion rows total (one per symbol).
+        Then: Still exactly 5 Symbol rows total (one per symbol).
         """
         repo = await _create_repo_with_symbol(tmp_path)
         t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
@@ -842,13 +814,13 @@ class TestSymbolVersionBitemporal:
         ]
 
         for native, base, quote in symbols:
-            await _upsert_catalog_pattern(repo, native, base, quote, "crypto", t1)
+            await _upsert_symbol_pattern(repo, native, base, quote, "crypto", t1)
 
         for native, base, quote in symbols:
-            await _upsert_catalog_pattern(repo, native, base, quote, "crypto", t2)
+            await _upsert_symbol_pattern(repo, native, base, quote, "crypto", t2)
 
         async with repo.session() as s:
-            count = (await s.execute(select(func.count()).select_from(SymbolVersion))).scalar_one()
+            count = (await s.execute(select(func.count()).select_from(Symbol))).scalar_one()
 
         assert count == 5
 
@@ -856,7 +828,7 @@ class TestSymbolVersionBitemporal:
     async def test_symbol_version_change_detection_ignores_timestamp(self, tmp_path: Path) -> None:
         """Different bus_time with same payload does not create a new version.
 
-        Given: A SymbolVersion created at t1,
+        Given: A Symbol created at t1,
         When: The updater pattern runs at t2 (different bus_time) with the
             same base, quote, and asset_type,
         Then: No new version is created because the timestamp is not part
@@ -867,17 +839,13 @@ class TestSymbolVersionBitemporal:
         t2 = datetime(2024, 7, 1, 12, 0, 0, tzinfo=UTC)
         t3 = datetime(2024, 7, 2, 8, 0, 0, tzinfo=UTC)
 
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t2)
-        await _upsert_catalog_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t3)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t1)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t2)
+        await _upsert_symbol_pattern(repo, "BTC-USD", "BTC", "USD", "crypto", t3)
 
         async with repo.session() as s:
             rows = (
-                (
-                    await s.execute(
-                        select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD")
-                    )
-                )
+                (await s.execute(select(Symbol).where(Symbol.native_symbol == "BTC-USD")))
                 .scalars()
                 .all()
             )

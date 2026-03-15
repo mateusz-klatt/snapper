@@ -188,8 +188,10 @@ def test_resolve_symbol_context_polygon_symbol(service: PolygonAggregatesBackfil
     When: _resolve_symbol_context called,
     Then: SymbolContext with correct native symbol returned.
     """
-    catalog = SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD")
-    alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
+    catalog = SimpleNamespace(
+        native_symbol="BTC-USD", base="BTC", quote="USD", public_id="sym-pub-1"
+    )
+    alias = SimpleNamespace(symbol_public_id="sym-pub-1", exchange_symbol="X:BTCUSD")
     cast(Any, service)._db_sync = _StubSyncRepo([[catalog], [alias]])
     mapper = cast(_StubSymbolMapper, cast(Any, service)._symbol_mapper)
     mapper.polygon_rest_to_native["X:BTCUSD"] = "BTC-USD"
@@ -207,8 +209,10 @@ def test_resolve_symbol_context_native_symbol(service: PolygonAggregatesBackfill
     When: _resolve_symbol_context called,
     Then: SymbolContext with correct polygon symbol returned.
     """
-    alias = SimpleNamespace(native_symbol="AAPL", exchange_symbol="AAPL")
-    catalog = SimpleNamespace(native_symbol="AAPL", base="AAPL", quote=None)
+    alias = SimpleNamespace(symbol_public_id="sym-pub-aapl", exchange_symbol="AAPL")
+    catalog = SimpleNamespace(
+        native_symbol="AAPL", base="AAPL", quote=None, public_id="sym-pub-aapl"
+    )
     cast(Any, service)._db_sync = _StubSyncRepo([[alias], [catalog]])
     mapper = cast(_StubSymbolMapper, cast(Any, service)._symbol_mapper)
     mapper.native_to_polygon_rest["AAPL"] = "AAPL"
@@ -756,8 +760,8 @@ def test_resolve_symbol_context_with_polygon_cache(monkeypatch: pytest.MonkeyPat
     """
     svc = PolygonAggregatesBackfillService()
     responses: list[Any] = [
-        SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD"),
-        SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD"),
+        SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD", public_id="sym-pub-btc"),
+        SimpleNamespace(symbol_public_id="sym-pub-btc", exchange_symbol="X:BTCUSD"),
     ]
 
     class Session:
@@ -797,8 +801,8 @@ def test_resolve_symbol_context_with_native_cache(monkeypatch: pytest.MonkeyPatc
     svc = PolygonAggregatesBackfillService()
     responses: list[Any] = [
         None,
-        SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD"),
-        SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD"),
+        SimpleNamespace(symbol_public_id="sym-pub-btc2", exchange_symbol="X:BTCUSD"),
+        SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD", public_id="sym-pub-btc2"),
     ]
 
     class Session:
@@ -1248,8 +1252,10 @@ async def test_730_day_limit_enforced() -> None:
     Then: from_ts date is at most 730 days ago.
     """
     service = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"], days_back=900)
-    stub_catalog = SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD")
-    stub_alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
+    stub_catalog = SimpleNamespace(
+        native_symbol="BTC-USD", base="BTC", quote="USD", public_id="sym-pub-btcusd"
+    )
+    stub_alias = SimpleNamespace(symbol_public_id="sym-pub-btcusd", exchange_symbol="X:BTCUSD")
     service._db_sync = _StubBackfillSyncRepo([[stub_catalog], [stub_alias]])
     stub_async_repo = _StubBackfillAsyncRepo()
     service._db_async = stub_async_repo
@@ -1728,8 +1734,10 @@ def test_resolve_symbol_context_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
 
     service._symbol_mapper = cast(Any, _Mapper())
     responses: list[Any] = [
-        SimpleNamespace(native_symbol="ETH-USD", base="ETH", quote="USD"),
-        SimpleNamespace(native_symbol="ETH-USD", exchange_symbol="X:ETHUSD"),
+        SimpleNamespace(
+            native_symbol="ETH-USD", base="ETH", quote="USD", public_id="sym-pub-ethusd"
+        ),
+        SimpleNamespace(symbol_public_id="sym-pub-ethusd", exchange_symbol="X:ETHUSD"),
     ]
 
     class _Session(_DummyRepo):
@@ -1793,8 +1801,8 @@ def test_resolve_symbol_context_stock_direct_lookup(monkeypatch: pytest.MonkeyPa
 
     service._symbol_mapper = cast(Any, _Mapper())
     responses: list[Any] = [
-        SimpleNamespace(native_symbol="AAPL", exchange_symbol="AAPL"),
-        SimpleNamespace(native_symbol="AAPL", base="USD", quote=None),
+        SimpleNamespace(symbol_public_id="sym-pub-aapl", exchange_symbol="AAPL"),
+        SimpleNamespace(native_symbol="AAPL", base="USD", quote=None, public_id="sym-pub-aapl"),
     ]
 
     class _Session:
@@ -1838,8 +1846,8 @@ def test_resolve_symbol_context_native_to_polygon_rest_cache(
     service._symbol_mapper = cast(Any, _Mapper())
     responses: list[Any] = [
         None,
-        SimpleNamespace(native_symbol="AAPL", exchange_symbol="NAS:AAPL"),
-        SimpleNamespace(native_symbol="AAPL", base="USD", quote=None),
+        SimpleNamespace(symbol_public_id="sym-pub-aapl", exchange_symbol="NAS:AAPL"),
+        SimpleNamespace(native_symbol="AAPL", base="USD", quote=None, public_id="sym-pub-aapl"),
     ]
 
     class _Session:
@@ -2007,8 +2015,10 @@ def test_resolve_symbol_context_polygon_path(
     """
     service, mapper = service_and_mapper
     mapper.polygon_rest_to_native["X:BTCUSD"] = "BTC-USD"
-    catalog = SimpleNamespace(native_symbol="BTC-USD", base="BTC", quote="USD")
-    alias = SimpleNamespace(native_symbol="BTC-USD", exchange_symbol="X:BTCUSD")
+    catalog = SimpleNamespace(
+        native_symbol="BTC-USD", base="BTC", quote="USD", public_id="sym-pub-btcusd"
+    )
+    alias = SimpleNamespace(symbol_public_id="sym-pub-btcusd", exchange_symbol="X:BTCUSD")
     catalog_result = MagicMock()
     catalog_result.scalar_one_or_none.return_value = catalog
     alias_result = MagicMock()
@@ -2044,10 +2054,12 @@ def test_resolve_symbol_context_native_fallback(
     mapper.native_to_polygon_rest["ETH-USD"] = "X:ETHUSD"
     none_result = MagicMock()
     none_result.scalar_one_or_none.return_value = None
-    alias = SimpleNamespace(native_symbol="ETH-USD", exchange_symbol="X:ETHUSD")
+    alias = SimpleNamespace(symbol_public_id="sym-pub-ethusd", exchange_symbol="X:ETHUSD")
     alias_result = MagicMock()
     alias_result.scalar_one_or_none.return_value = alias
-    catalog = SimpleNamespace(native_symbol="ETH-USD", base="ETH", quote=None)
+    catalog = SimpleNamespace(
+        native_symbol="ETH-USD", base="ETH", quote=None, public_id="sym-pub-ethusd"
+    )
     catalog_result = MagicMock()
     catalog_result.scalar_one_or_none.return_value = catalog
     session = MagicMock()
@@ -2267,7 +2279,7 @@ def test_lookup_context_by_polygon_symbol_alias_found_catalog_missing() -> None:
     Then None is returned.
     """
     service = PolygonAggregatesBackfillService()
-    alias_stub = SimpleNamespace(native_symbol="ORPHAN", exchange_symbol="X:ORPHAN")
+    alias_stub = SimpleNamespace(symbol_public_id="sym-pub-orphan", exchange_symbol="X:ORPHAN")
     responses: list[Any] = [alias_stub, None]
 
     class _Session:

@@ -1,7 +1,7 @@
 """Tests for Zonda symbol updater service.
 
-Validates that the Zonda updater correctly creates Symbol, SymbolVersion,
-and SymbolAlias rows via _upsert_catalog / _upsert_alias.
+Validates that the Zonda updater correctly creates Symbol, Symbol,
+and SymbolAlias rows via _upsert_symbol / _upsert_alias.
 """
 
 from collections.abc import AsyncIterator
@@ -30,7 +30,6 @@ from snapper.data.models import Base
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
-from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.indicators.ta_lib_adapter import macd
 from snapper.indicators.ta_lib_adapter import rsi
@@ -231,22 +230,23 @@ async def test_update_database_handles_inserts_and_updates(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
+        _spid_btc_usd = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid_btc_usd,
                 exchange="zonda",
                 channel="ws",
                 exchange_symbol="BTC-USD-OLD",
@@ -274,18 +274,28 @@ async def test_update_database_handles_inserts_and_updates(
         assert isinstance(session, Session)
         btc_ws = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ws",
                 SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         eth_catalog = session.execute(
-            select(SymbolVersion).where(SymbolVersion.native_symbol == "ETH-USD")
+            select(Symbol).where(Symbol.native_symbol == "ETH-USD")
         ).scalar_one()
         eth_ws = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "ETH-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "ETH-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ws",
             )
@@ -314,22 +324,23 @@ async def test_update_database_skips_unchanged_mapping(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
+        _spid_btc_usd = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid_btc_usd,
                 exchange="zonda",
                 channel="ws",
                 exchange_symbol="BTC-USD",
@@ -337,9 +348,14 @@ async def test_update_database_skips_unchanged_mapping(
                 timestamp=original_timestamp,
             )
         )
+        _spid_btc_usd = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid_btc_usd,
                 exchange="zonda",
                 channel="ccxt",
                 exchange_symbol="BTC/USD",
@@ -362,14 +378,24 @@ async def test_update_database_skips_unchanged_mapping(
         assert isinstance(session, Session)
         btc_ws = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ws",
             )
         ).scalar_one()
         btc_ccxt = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ccxt",
             )
@@ -459,7 +485,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
         }
     ]
     await svc._update_database(symbols)
-    assert fake_session.add.call_count == 5
+    assert fake_session.add.call_count == 4
 
 
 def test_get_default_kwargs_and_setting_key() -> None:
@@ -508,20 +534,22 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
     svc = ZondaSymbolUpdaterService(update_threshold_hours=24, force=True)
     seed_time = datetime.now(UTC)
     with session_local() as session:
-        session.add(Symbol(native_symbol="BTC-USD", created_at=seed_time, timestamp=seed_time))
-
         session.add(
-            SymbolVersion(
+            Symbol(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=seed_time,
                 timestamp=seed_time,
             )
         )
+        session.flush()
+        _spid_btc_usd = session.query(Symbol).filter_by(native_symbol="BTC-USD").one().public_id
+
         session.add(
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid_btc_usd,
                 exchange="zonda",
                 channel="ws",
                 exchange_symbol="OLD",
@@ -529,9 +557,14 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 timestamp=seed_time,
             )
         )
+        _spid_btc_usd = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid_btc_usd,
                 exchange="zonda",
                 channel="ccxt",
                 exchange_symbol="OLD/USDT",
@@ -569,7 +602,12 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
     with session_local() as session:
         btc_ws = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ws",
                 SymbolAlias.known_to == KNOWN_TO_MAX,
@@ -577,7 +615,12 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
         ).scalar_one()
         btc_ccxt = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ccxt",
                 SymbolAlias.known_to == KNOWN_TO_MAX,
@@ -585,7 +628,12 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
         ).scalar_one()
         eth_ws = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "ETH-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "ETH-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ws",
             )
@@ -686,7 +734,10 @@ async def test_update_database_creates_capability_rows(
         assert isinstance(session, Session)
         caps = session.execute(select(SymbolExchangeCapability)).scalars().all()
         assert len(caps) == 2
-        cap_map = {c.native_symbol: c for c in caps}
+        _sym_map = {
+            s.public_id: s.native_symbol for s in session.execute(select(Symbol)).scalars().all()
+        }
+        cap_map = {_sym_map.get(c.symbol_public_id, c.symbol_public_id): c for c in caps}
         for native_symbol in ("BTC-USD", "ETH-USD"):
             cap = cap_map[native_symbol]
             assert cap.exchange == "zonda"

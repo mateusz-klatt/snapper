@@ -41,9 +41,9 @@ FORBIDDEN_ATTR_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
     (re.compile(r"\.\bcan_market_data\s*=(?!=)"), "SymbolExchangeCapability.can_market_data"),
     (re.compile(r"\.\bsource\s*=(?!=)"), "SymbolExchangeCapability.source"),
     (re.compile(r"\.\breason\s*=(?!=)"), "Signal.reason / SymbolExchangeCapability.reason"),
-    (re.compile(r"\.\bbase\s*=(?!=)"), "Instrument.base / SymbolVersion.base"),
-    (re.compile(r"\.\bquote\s*=(?!=)"), "Instrument.quote / SymbolVersion.quote"),
-    (re.compile(r"\.\basset_type\s*=(?!=)"), "SymbolVersion.asset_type"),
+    (re.compile(r"\.\bbase\s*=(?!=)"), "Instrument.base / Symbol.base"),
+    (re.compile(r"\.\bquote\s*=(?!=)"), "Instrument.quote / Symbol.quote"),
+    (re.compile(r"\.\basset_type\s*=(?!=)"), "Symbol.asset_type"),
 ]
 
 DELETE_PATTERN: Final[re.Pattern[str]] = re.compile(r"session\.delete\(")

@@ -2,7 +2,7 @@
 
 Creates all core tables for the Snapper trading system including
 instruments, candles, trades, orders, users, and market snapshots.
-Seeds symbols, symbol versions, aliases, and exchange capabilities.
+Seeds symbols, aliases, and exchange capabilities.
 """
 
 from collections.abc import Sequence
@@ -15,7 +15,6 @@ from alembic import op
 from sqlalchemy import text
 
 _INSTRUMENT_FK = "instruments.id"
-_FK_SYMBOLS = "symbols.native_symbol"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 _KNOWN_TO_ACTIVE = "known_to = '9999-12-31T23:59:59+00:00'"
@@ -100,20 +99,38 @@ def upgrade() -> None:
     """Create initial database schema and seed reference data.
 
     Creates all tables for instruments, candles, trades, orders, executions,
-    positions, signals, users, settings, symbols, symbol versions, symbol aliases,
+    positions, signals, users, settings, symbols, symbol aliases,
     process runs, instrument specs, and market snapshots.
-    Seeds symbols, symbol versions, aliases, and exchange capabilities.
+    Seeds symbols, aliases, and exchange capabilities.
     """
     op.create_table(
         "symbols",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("native_symbol", sa.String(32), nullable=False),
+        sa.Column("base", sa.String(16), nullable=False),
+        sa.Column("quote", sa.String(16), nullable=True),
+        sa.Column("asset_type", sa.String(16), server_default="crypto", nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("native_symbol", name="uq_symbols_native_symbol"),
+        sa.CheckConstraint(
+            "asset_type IN ('crypto', 'forex', 'equity', 'index')",
+            name="ck_symbol_asset_type",
+        ),
+        sa.CheckConstraint(
+            "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
+            name="ck_symbol_quote_required",
+        ),
+    )
+    op.create_index(
+        "uq_symbols_active_native",
+        "symbols",
+        ["native_symbol"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "ix_symbols_public_id",
@@ -124,56 +141,16 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_table(
-        "symbol_versions",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("public_id", sa.String(36), nullable=False),
-        sa.Column("native_symbol", sa.String(32), nullable=False),
-        sa.Column("base", sa.String(16), nullable=False),
-        sa.Column("quote", sa.String(16), nullable=True),
-        sa.Column("asset_type", sa.String(16), server_default="crypto", nullable=False),
-        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOLS]),
-        sa.PrimaryKeyConstraint("id"),
-        sa.CheckConstraint(
-            "asset_type IN ('crypto', 'forex', 'equity', 'index')",
-            name="ck_symbol_version_asset_type",
-        ),
-        sa.CheckConstraint(
-            "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
-            name="ck_symbol_version_quote_required_for_pairs",
-        ),
-    )
-    op.create_index(
-        "uq_symbol_version_active",
-        "symbol_versions",
-        ["native_symbol"],
-        unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
-    )
-    op.create_index(
-        "ix_symbol_versions_public_id",
-        "symbol_versions",
-        ["public_id"],
-        unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
-    )
-    op.create_index("ix_symbol_versions_native_symbol", "symbol_versions", ["native_symbol"])
-    op.create_index("ix_sv_base_quote", "symbol_versions", ["base", "quote"])
-    op.create_table(
         "symbol_aliases",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
-        sa.Column("native_symbol", sa.String(32), nullable=False),
+        sa.Column("symbol_public_id", sa.String(36), nullable=False),
         sa.Column("exchange", sa.String(20), nullable=False),
         sa.Column("channel", sa.String(10), nullable=False),
         sa.Column("exchange_symbol", sa.String(40), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOLS]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
             _CK_EXCHANGE_LOWER,
@@ -193,9 +170,9 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
-        "uq_alias_native_exchange_channel",
+        "uq_alias_spid_exchange_channel",
         "symbol_aliases",
-        ["native_symbol", "exchange", "channel"],
+        ["symbol_public_id", "exchange", "channel"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
@@ -208,12 +185,12 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_symbol_aliases_native_symbol", "symbol_aliases", ["native_symbol"])
+    op.create_index("ix_symbol_aliases_symbol_public_id", "symbol_aliases", ["symbol_public_id"])
     op.create_table(
         "symbol_exchange_capabilities",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
-        sa.Column("native_symbol", sa.String(32), nullable=False),
+        sa.Column("symbol_public_id", sa.String(36), nullable=False),
         sa.Column("exchange", sa.String(20), nullable=False),
         sa.Column("can_market_data", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column("can_trade", sa.Boolean(), nullable=False, server_default="0"),
@@ -222,7 +199,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["native_symbol"], [_FK_SYMBOLS]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
             _CK_EXCHANGE_LOWER,
@@ -230,7 +206,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index(
-        "ix_sec_public_id",
+        "ix_symbol_exchange_capabilities_public_id",
         "symbol_exchange_capabilities",
         ["public_id"],
         unique=True,
@@ -240,13 +216,17 @@ def upgrade() -> None:
     op.create_index(
         "uq_sec_symbol_exchange",
         "symbol_exchange_capabilities",
-        ["native_symbol", "exchange"],
+        ["symbol_public_id", "exchange"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_sec_exchange", "symbol_exchange_capabilities", ["exchange"])
-    op.create_index("ix_sec_native_symbol", "symbol_exchange_capabilities", ["native_symbol"])
+    op.create_index(
+        "ix_symbol_exchange_capabilities_symbol_public_id",
+        "symbol_exchange_capabilities",
+        ["symbol_public_id"],
+    )
     op.create_index(
         "ix_sec_exchange_trade",
         "symbol_exchange_capabilities",
@@ -270,7 +250,6 @@ def upgrade() -> None:
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["symbol"], [_FK_SYMBOLS]),
         sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
     )
     op.create_index(
@@ -690,32 +669,24 @@ def upgrade() -> None:
     )
     conn = op.get_bind()
     now = datetime.now(tz=UTC)
+    symbol_public_ids: dict[str, str] = {}
     for entry in SYMBOL_CATALOG:
+        spid = str(uuid7())
+        symbol_public_ids[entry[0]] = spid
         conn.execute(
             text("""
-                INSERT INTO symbols (public_id, native_symbol, created_at, timestamp, known_to)
-                VALUES (:public_id, :native_symbol, :created_at, :timestamp, :known_to)
+                INSERT INTO symbols
+                (public_id, native_symbol, base, quote, asset_type, created_at, timestamp, known_to)
+                VALUES (:public_id, :native_symbol, :base, :quote, :asset_type,
+                        :created_at, :timestamp, :known_to)
                 """),
             {
-                "public_id": str(uuid7()),
-                "native_symbol": entry[0],
-                "created_at": now,
-                "timestamp": now,
-                "known_to": _KNOWN_TO_MAX,
-            },
-        )
-        conn.execute(
-            text("""
-                INSERT INTO symbol_versions
-                (public_id, native_symbol, base, quote, asset_type, timestamp, known_to)
-                VALUES (:public_id, :native_symbol, :base, :quote, :asset_type, :timestamp, :known_to)
-                """),
-            {
-                "public_id": str(uuid7()),
+                "public_id": spid,
                 "native_symbol": entry[0],
                 "base": entry[1],
                 "quote": entry[2],
                 "asset_type": entry[3],
+                "created_at": now,
                 "timestamp": now,
                 "known_to": _KNOWN_TO_MAX,
             },
@@ -724,12 +695,14 @@ def upgrade() -> None:
         conn.execute(
             text("""
                 INSERT INTO symbol_aliases
-                (public_id, native_symbol, exchange, channel, exchange_symbol, created_at, timestamp, known_to)
-                VALUES (:public_id, :native_symbol, :exchange, :channel, :exchange_symbol, :created_at, :timestamp, :known_to)
+                (public_id, symbol_public_id, exchange, channel, exchange_symbol,
+                 created_at, timestamp, known_to)
+                VALUES (:public_id, :symbol_public_id, :exchange, :channel, :exchange_symbol,
+                        :created_at, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
-                "native_symbol": alias[0],
+                "symbol_public_id": symbol_public_ids[alias[0]],
                 "exchange": alias[1],
                 "channel": alias[2],
                 "exchange_symbol": alias[3],
@@ -742,12 +715,14 @@ def upgrade() -> None:
         conn.execute(
             text("""
                 INSERT INTO symbol_exchange_capabilities
-                (public_id, native_symbol, exchange, can_market_data, can_trade, source, created_at, timestamp, known_to)
-                VALUES (:public_id, :native_symbol, :exchange, :can_market_data, :can_trade, :source, :created_at, :timestamp, :known_to)
+                (public_id, symbol_public_id, exchange, can_market_data, can_trade,
+                 source, created_at, timestamp, known_to)
+                VALUES (:public_id, :symbol_public_id, :exchange, :can_market_data, :can_trade,
+                        :source, :created_at, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
-                "native_symbol": cap[0],
+                "symbol_public_id": symbol_public_ids[cap[0]],
                 "exchange": cap[1],
                 "can_market_data": cap[2],
                 "can_trade": cap[3],
@@ -780,5 +755,4 @@ def downgrade() -> None:
     op.drop_table("instruments")
     op.drop_table("symbol_exchange_capabilities")
     op.drop_table("symbol_aliases")
-    op.drop_table("symbol_versions")
     op.drop_table("symbols")

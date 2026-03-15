@@ -613,31 +613,31 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return list(mappings.values())
 
     def _persist_ws_only_symbol(
-        self, session: Any, symbol_data: dict[str, Any], now: datetime
+        self, session: Any, symbol_data: dict[str, Any], symbol_public_id: str, now: datetime
     ) -> tuple[int, int]:
         """Persist a WS-only symbol: one WS alias + market-data-only capability.
 
         Args:
             session: SQLAlchemy session.
             symbol_data: Symbol data dict with ws_only flag.
+            symbol_public_id: Public ID of the symbol.
             now: Current UTC timestamp.
 
         Returns:
             Tuple of (created_count, updated_count) for alias operations.
         """
-        native_symbol = symbol_data["native_symbol"]
         created = 0
         updated = 0
         ws_symbol = symbol_data.get("kraken_websocket_symbol", "")
         if ws_symbol:
-            result = self._upsert_alias(session, native_symbol, "kraken", "ws", ws_symbol, now)
+            result = self._upsert_alias(session, symbol_public_id, "kraken", "ws", ws_symbol, now)
             if result == "created":
                 created += 1
             elif result == "updated":
                 updated += 1
         self._upsert_capability(
             session,
-            native_symbol,
+            symbol_public_id,
             "kraken",
             True,
             False,
@@ -648,19 +648,19 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return created, updated
 
     def _persist_rest_symbol(
-        self, session: Any, symbol_data: dict[str, Any], now: datetime
+        self, session: Any, symbol_data: dict[str, Any], symbol_public_id: str, now: datetime
     ) -> tuple[int, int]:
         """Persist a REST symbol: ws/rest/ccxt aliases + full capability.
 
         Args:
             session: SQLAlchemy session.
             symbol_data: Symbol data dict from REST resolution.
+            symbol_public_id: Public ID of the symbol.
             now: Current UTC timestamp.
 
         Returns:
             Tuple of (created_count, updated_count) for alias operations.
         """
-        native_symbol = symbol_data["native_symbol"]
         created = 0
         updated = 0
         alias_mappings: tuple[tuple[str, AliasChannel, str], ...] = (
@@ -674,7 +674,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 continue
             result = self._upsert_alias(
                 session,
-                native_symbol,
+                symbol_public_id,
                 exchange,
                 channel,
                 exchange_symbol,
@@ -686,7 +686,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 updated += 1
         self._upsert_capability(
             session,
-            native_symbol,
+            symbol_public_id,
             "kraken",
             True,
             True,
@@ -699,11 +699,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Persist symbol catalog and alias rows to the database.
 
-        Each REST symbol produces one catalog row, up to three alias rows
+        Each REST symbol produces one symbol row, up to three alias rows
         (kraken ws, kraken rest, kraken ccxt), and a capability row with
         ``can_trade=True``.
 
-        WS-only symbols (``ws_only=true``) produce one catalog row, one WS
+        WS-only symbols (``ws_only=true``) produce one symbol row, one WS
         alias, and a capability row with ``can_trade=False`` and a reason
         explaining they are not available via REST.
 
@@ -716,6 +716,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         ws_only_count = 0
         try:
             with self.repository.get_session() as session:
+                processed_symbol_public_ids: set[str] = set()
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
                     now = datetime.now(UTC)
@@ -724,7 +725,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                         if symbol_data.get("asset_class") == "tokenized_asset"
                         else "crypto"
                     )
-                    self._upsert_catalog(
+                    symbol_public_id = self._upsert_symbol(
                         session,
                         native_symbol,
                         symbol_data["base_currency"],
@@ -732,18 +733,22 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                         asset_type,
                         now,
                     )
+                    processed_symbol_public_ids.add(symbol_public_id)
                     is_ws_only = symbol_data.get("ws_only") == "true"
                     if is_ws_only:
-                        c, u = self._persist_ws_only_symbol(session, symbol_data, now)
+                        c, u = self._persist_ws_only_symbol(
+                            session, symbol_data, symbol_public_id, now
+                        )
                         ws_only_count += 1
                     else:
-                        c, u = self._persist_rest_symbol(session, symbol_data, now)
+                        c, u = self._persist_rest_symbol(
+                            session, symbol_data, symbol_public_id, now
+                        )
                     created_count += c
                     updated_count += u
-                processed_symbols = {s["native_symbol"] for s in symbols}
                 now = datetime.now(UTC)
                 deactivated = self._reconcile_capabilities(
-                    session, "kraken", processed_symbols, "kraken_updater", now
+                    session, "kraken", processed_symbol_public_ids, "kraken_updater", now
                 )
                 session.commit()
                 logger.info(

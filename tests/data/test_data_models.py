@@ -17,7 +17,6 @@ from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
-from snapper.data.models import SymbolVersion
 from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
 from snapper.data.models import UUIDColumn
@@ -384,59 +383,46 @@ class TestSymbolModel:
     """Tests for Symbol SQLAlchemy ORM model."""
 
     def test_symbol_creation(self) -> None:
-        """Test Symbol identity table creation.
+        """Test Symbol temporal table creation.
 
-        Given: A native symbol string,
+        Given: Symbol parameters with base, quote, asset_type,
         When: Symbol is created,
-        Then: native_symbol is set as PK.
+        Then: All fields match provided values.
         """
         now = datetime.now(UTC)
-        sym = Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now)
-        assert sym.native_symbol == "BTC-USD"
-        assert sym.created_at == now
-        assert sym.timestamp == now
-
-
-class TestSymbolVersionModel:
-    """Tests for SymbolVersion SQLAlchemy ORM model."""
-
-    def test_symbol_version_crypto_pair(self) -> None:
-        """Test SymbolVersion for a crypto currency pair.
-
-        Given: Crypto pair parameters with base, quote, and asset_type,
-        When: SymbolVersion is created,
-        Then: All fields match and quote is set.
-        """
-        now = datetime.now(UTC)
-        version = SymbolVersion(
+        sym = Symbol(
             native_symbol="BTC-USD",
             base="BTC",
             quote="USD",
             asset_type="crypto",
+            created_at=now,
             timestamp=now,
         )
-        assert version.native_symbol == "BTC-USD"
-        assert version.base == "BTC"
-        assert version.quote == "USD"
-        assert version.asset_type == "crypto"
+        assert sym.native_symbol == "BTC-USD"
+        assert sym.base == "BTC"
+        assert sym.quote == "USD"
+        assert sym.asset_type == "crypto"
+        assert sym.created_at == now
+        assert sym.timestamp == now
 
-    def test_symbol_version_equity_nullable_quote(self) -> None:
-        """Test SymbolVersion allows nullable quote for equity.
+    def test_symbol_equity_nullable_quote(self) -> None:
+        """Test Symbol allows nullable quote for equity.
 
         Given: Equity parameters without quote,
-        When: SymbolVersion is created,
+        When: Symbol is created,
         Then: Quote is None.
         """
         now = datetime.now(UTC)
-        version = SymbolVersion(
+        sym = Symbol(
             native_symbol="AAPL",
             base="AAPL",
             quote=None,
             asset_type="equity",
+            created_at=now,
             timestamp=now,
         )
-        assert version.quote is None
-        assert version.asset_type == "equity"
+        assert sym.quote is None
+        assert sym.asset_type == "equity"
 
 
 class TestSymbolAliasModel:
@@ -451,14 +437,14 @@ class TestSymbolAliasModel:
         """
         now = datetime.now(UTC)
         alias = SymbolAlias(
-            native_symbol="BTC-USD",
+            symbol_public_id="test-uuid-1234",
             exchange="kraken",
             channel="ws",
             exchange_symbol="BTC/USD",
             created_at=now,
             timestamp=now,
         )
-        assert alias.native_symbol == "BTC-USD"
+        assert alias.symbol_public_id == "test-uuid-1234"
         assert alias.exchange == "kraken"
         assert alias.channel == "ws"
         assert alias.exchange_symbol == "BTC/USD"
@@ -472,7 +458,7 @@ class TestSymbolAliasModel:
         """
         now = datetime.now(UTC)
         alias = SymbolAlias(
-            native_symbol="BTC-USD",
+            symbol_public_id="test-uuid-5678",
             exchange="polygon",
             channel="rest",
             exchange_symbol="X:BTCUSD",
@@ -505,7 +491,7 @@ class TestSymbolExchangeCapabilityModel:
         """
         now = datetime.now(UTC)
         cap = SymbolExchangeCapability(
-            native_symbol="BTC-USD",
+            symbol_public_id="test-uuid-cap-1",
             exchange="kraken",
             can_market_data=True,
             can_trade=True,
@@ -514,7 +500,7 @@ class TestSymbolExchangeCapabilityModel:
             created_at=now,
             timestamp=now,
         )
-        assert cap.native_symbol == "BTC-USD"
+        assert cap.symbol_public_id == "test-uuid-cap-1"
         assert cap.exchange == "kraken"
         assert cap.can_market_data is True
         assert cap.can_trade is True
@@ -532,7 +518,7 @@ class TestSymbolExchangeCapabilityModel:
         """
         now = datetime.now(UTC)
         cap = SymbolExchangeCapability(
-            native_symbol="BTC-USD",
+            symbol_public_id="test-uuid-cap-2",
             exchange="zonda",
             can_market_data=False,
             can_trade=False,
@@ -553,7 +539,7 @@ class TestSymbolExchangeCapabilityModel:
         """
         now = datetime.now(UTC)
         cap = SymbolExchangeCapability(
-            native_symbol="ETH-USD",
+            symbol_public_id="test-uuid-cap-3",
             exchange="kraken",
             can_market_data=True,
             can_trade=False,
@@ -574,7 +560,7 @@ class TestSymbolExchangeCapabilityModel:
         """
         now = datetime.now(UTC)
         cap = SymbolExchangeCapability(
-            native_symbol="SOL-USD",
+            symbol_public_id="test-uuid-cap-4",
             exchange="kraken",
             can_market_data=True,
             can_trade=True,

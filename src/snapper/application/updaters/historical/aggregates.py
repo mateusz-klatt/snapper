@@ -28,8 +28,8 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
@@ -208,11 +208,16 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """
         assert self._db_sync is not None
         with self._db_sync.get_session() as session:
+            now = datetime.now(UTC)
             stmt = (
                 select(SymbolAlias.exchange_symbol)
-                .where(SymbolAlias.exchange == "polygon")
-                .where(SymbolAlias.channel == "rest")
-                .where(SymbolAlias.exchange_symbol.is_not(None))
+                .where(
+                    SymbolAlias.exchange == "polygon",
+                    SymbolAlias.channel == "rest",
+                    SymbolAlias.exchange_symbol.is_not(None),
+                    SymbolAlias.timestamp <= now,
+                    SymbolAlias.known_to > now,
+                )
                 .order_by(SymbolAlias.exchange_symbol)
             )
             result = session.execute(stmt).scalars().all()
@@ -563,71 +568,85 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             chunk_end = chunk_start - timedelta(days=1)
 
     def _lookup_context_by_native(self, native_symbol: str) -> _SymbolContext | None:
-        """Look up symbol version and polygon alias for a native symbol.
+        """Look up active symbol and polygon alias for a native symbol.
 
-        Queries SymbolVersion for base/quote, then SymbolAlias for the
+        Queries Symbol for base/quote, then SymbolAlias for the
         polygon rest exchange_symbol.
 
         Args:
             native_symbol: Internal normalized symbol (e.g., "BTC-USD").
 
         Returns:
-            _SymbolContext or None if symbol version or polygon alias not found.
+            _SymbolContext or None if symbol or polygon alias not found.
         """
         assert self._db_sync is not None
         with self._db_sync.get_session() as session:
-            version = session.execute(
-                select(SymbolVersion).where(SymbolVersion.native_symbol == native_symbol)
+            now = datetime.now(UTC)
+            symbol = session.execute(
+                select(Symbol).where(
+                    Symbol.native_symbol == native_symbol,
+                    Symbol.timestamp <= now,
+                    Symbol.known_to > now,
+                )
             ).scalar_one_or_none()
-            if not version:
+            if not symbol:
                 return None
             alias = session.execute(
                 select(SymbolAlias)
-                .where(SymbolAlias.native_symbol == native_symbol)
+                .where(SymbolAlias.symbol_public_id == symbol.public_id)
                 .where(SymbolAlias.exchange == "polygon")
                 .where(SymbolAlias.channel == "rest")
+                .where(SymbolAlias.timestamp <= now)
+                .where(SymbolAlias.known_to > now)
             ).scalar_one_or_none()
             if not alias:
                 return None
             return _SymbolContext(
-                native_symbol=version.native_symbol,
+                native_symbol=symbol.native_symbol,
                 polygon_symbol=alias.exchange_symbol,
-                base_currency=version.base,
-                quote_currency=version.quote or version.base,
+                base_currency=symbol.base,
+                quote_currency=symbol.quote or symbol.base,
             )
 
     def _lookup_context_by_polygon_symbol(self, polygon_symbol: str) -> _SymbolContext | None:
-        """Look up alias and symbol version for a polygon exchange symbol.
+        """Look up alias and active symbol for a polygon exchange symbol.
 
-        Queries SymbolAlias for polygon rest alias, then SymbolVersion
-        for base/quote.
+        Queries SymbolAlias for polygon rest alias, then Symbol
+        for base/quote via symbol_public_id.
 
         Args:
             polygon_symbol: Polygon API symbol (e.g., "X:BTCUSD").
 
         Returns:
-            _SymbolContext or None if alias or symbol version not found.
+            _SymbolContext or None if alias or symbol not found.
         """
         assert self._db_sync is not None
         with self._db_sync.get_session() as session:
+            now = datetime.now(UTC)
             alias = session.execute(
                 select(SymbolAlias)
                 .where(SymbolAlias.exchange == "polygon")
                 .where(SymbolAlias.channel == "rest")
                 .where(SymbolAlias.exchange_symbol == polygon_symbol)
+                .where(SymbolAlias.timestamp <= now)
+                .where(SymbolAlias.known_to > now)
             ).scalar_one_or_none()
             if not alias:
                 return None
-            version = session.execute(
-                select(SymbolVersion).where(SymbolVersion.native_symbol == alias.native_symbol)
+            symbol = session.execute(
+                select(Symbol).where(
+                    Symbol.public_id == alias.symbol_public_id,
+                    Symbol.timestamp <= now,
+                    Symbol.known_to > now,
+                )
             ).scalar_one_or_none()
-            if not version:
+            if not symbol:
                 return None
             return _SymbolContext(
-                native_symbol=version.native_symbol,
+                native_symbol=symbol.native_symbol,
                 polygon_symbol=alias.exchange_symbol,
-                base_currency=version.base,
-                quote_currency=version.quote or version.base,
+                base_currency=symbol.base,
+                quote_currency=symbol.quote or symbol.base,
             )
 
     def _resolve_polygon_symbol(self, symbol: str) -> _SymbolContext | None:

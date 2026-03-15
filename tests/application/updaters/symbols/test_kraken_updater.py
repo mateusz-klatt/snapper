@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -25,7 +26,6 @@ from snapper.data.models import Base
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
-from snapper.data.models import SymbolVersion
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 
@@ -302,7 +302,7 @@ class TestKrakenSymbolUpdater:
         mock_repo.get_session.return_value = mock_session
         with patch.object(updater, "repository", mock_repo):
             await updater._update_database(symbols)
-        assert mock_session.add.call_count == 6
+        assert mock_session.add.call_count == 5
         mock_session.commit.assert_called_once()
 
 
@@ -481,20 +481,21 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
         session_local = sessionmaker(bind=engine)
         now = datetime.now(UTC)
         with session_local() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
+            btc_sym = Symbol(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+            )
+            session.add(btc_sym)
+            session.flush()
+            btc_pid = btc_sym.public_id
 
             session.add(
-                SymbolVersion(
-                    native_symbol="BTC-USD",
-                    base="BTC",
-                    quote="USD",
-                    asset_type="crypto",
-                    timestamp=now,
-                )
-            )
-            session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id=btc_pid,
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="OLD/WS",
@@ -504,7 +505,7 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id=btc_pid,
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="OLDREST",
@@ -514,7 +515,7 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id=btc_pid,
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="OLD/CCXT",
@@ -550,23 +551,29 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
         ]
         await svc._update_database(symbols)
         with session_local() as session:
-            btc_catalog = session.query(SymbolVersion).filter_by(native_symbol="BTC-USD").one()
-            eth_catalog = session.query(SymbolVersion).filter_by(native_symbol="ETH-USD").one()
+            btc_catalog = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
+            eth_catalog = session.query(Symbol).filter_by(native_symbol="ETH-USD").one()
             assert btc_catalog.base == "BTC"
             assert eth_catalog.base == "ETH"
             btc_rest = (
                 session.query(SymbolAlias)
-                .filter_by(
-                    native_symbol="BTC-USD",
-                    exchange="kraken",
-                    channel="rest",
-                    known_to=KNOWN_TO_MAX,
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(
+                    Symbol.native_symbol == "BTC-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "rest",
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
                 )
                 .one()
             )
             eth_ws = (
                 session.query(SymbolAlias)
-                .filter_by(native_symbol="ETH-USD", exchange="kraken", channel="ws")
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(
+                    Symbol.native_symbol == "ETH-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ws",
+                )
                 .one()
             )
             assert btc_rest.exchange_symbol == "XXBTZUSD"
@@ -1773,7 +1780,7 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
 
 
 class TestKrakenUpdateDatabaseBranches:
-    """Test cases for database update branch coverage using Symbol, SymbolVersion, and SymbolAlias."""
+    """Test cases for database update branch coverage using Symbol, Symbol, and SymbolAlias."""
 
     @pytest.fixture
     def updater(self) -> KrakenSymbolUpdaterService:
@@ -1805,20 +1812,20 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
-
             session.add(
-                SymbolVersion(
+                Symbol(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
+                    created_at=now,
                     timestamp=now,
                 )
             )
+
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="OLD/WS",
@@ -1828,7 +1835,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="XXBTZUSD",
@@ -1838,7 +1845,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="BTC/USD",
@@ -1870,11 +1877,12 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             ws_alias = (
                 session.query(SymbolAlias)
-                .filter_by(
-                    native_symbol="BTC-USD",
-                    exchange="kraken",
-                    channel="ws",
-                    known_to=KNOWN_TO_MAX,
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(
+                    Symbol.native_symbol == "BTC-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ws",
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
                 )
                 .one()
             )
@@ -1894,20 +1902,20 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
-
             session.add(
-                SymbolVersion(
+                Symbol(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
+                    created_at=now,
                     timestamp=now,
                 )
             )
+
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="BTC/USD",
@@ -1917,7 +1925,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="OLDREST",
@@ -1927,7 +1935,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="BTC/USD",
@@ -1959,11 +1967,12 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             rest_alias = (
                 session.query(SymbolAlias)
-                .filter_by(
-                    native_symbol="BTC-USD",
-                    exchange="kraken",
-                    channel="rest",
-                    known_to=KNOWN_TO_MAX,
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(
+                    Symbol.native_symbol == "BTC-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "rest",
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
                 )
                 .one()
             )
@@ -1983,20 +1992,20 @@ class TestKrakenUpdateDatabaseBranches:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
-
             session.add(
-                SymbolVersion(
+                Symbol(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
+                    created_at=now,
                     timestamp=now,
                 )
             )
+
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="BTC/USD",
@@ -2006,7 +2015,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="XXBTZUSD",
@@ -2016,7 +2025,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="OLD/CCXT",
@@ -2048,11 +2057,12 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             ccxt_alias = (
                 session.query(SymbolAlias)
-                .filter_by(
-                    native_symbol="BTC-USD",
-                    exchange="kraken",
-                    channel="ccxt",
-                    known_to=KNOWN_TO_MAX,
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(
+                    Symbol.native_symbol == "BTC-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ccxt",
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
                 )
                 .one()
             )
@@ -2075,23 +2085,17 @@ class TestKrakenUpdateDatabaseBranches:
             session.add(
                 Symbol(
                     native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
                     created_at=original_updated_at,
                     timestamp=original_updated_at,
                 )
             )
-
-            session.add(
-                SymbolVersion(
-                    native_symbol="BTC-USD",
-                    base="BTC",
-                    quote="USD",
-                    asset_type="crypto",
-                    timestamp=original_updated_at,
-                )
-            )
+            sym = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="BTC/USD",
@@ -2101,7 +2105,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="XXBTZUSD",
@@ -2111,7 +2115,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    native_symbol="BTC-USD",
+                    symbol_public_id="BTC-USD",
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="BTC/USD",
@@ -2143,7 +2147,12 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             ws_alias = (
                 session.query(SymbolAlias)
-                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="ws")
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(
+                    Symbol.native_symbol == "BTC-USD",
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ws",
+                )
                 .one()
             )
             assert ws_alias.timestamp == original_updated_at
@@ -2181,7 +2190,12 @@ class TestKrakenUpdateDatabaseBranches:
         ]
         await updater._update_database(symbols)
         with db_session_factory() as session:
-            all_aliases = session.query(SymbolAlias).filter_by(native_symbol="BTC-USD").all()
+            all_aliases = (
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTC-USD")
+                .all()
+            )
             channels = {a.channel for a in all_aliases}
             assert channels == {"ws", "rest"}
 
@@ -2229,7 +2243,11 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             caps = session.query(SymbolExchangeCapability).all()
             assert len(caps) == 2
-            cap_map = {c.native_symbol: c for c in caps}
+            _sym_map = {
+                s.public_id: s.native_symbol
+                for s in session.execute(select(Symbol)).scalars().all()
+            }
+            cap_map = {_sym_map.get(c.symbol_public_id, c.symbol_public_id): c for c in caps}
             for native_symbol in ("BTC-USD", "ETH-USD"):
                 cap = cap_map[native_symbol]
                 assert cap.exchange == "kraken"
@@ -2273,12 +2291,22 @@ class TestKrakenUpdateDatabaseBranches:
         ]
         await updater._update_database(symbols)
         with db_session_factory() as session:
-            aliases = session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD").all()
+            aliases = (
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTGOX-USD")
+                .all()
+            )
             assert len(aliases) == 1
             assert aliases[0].channel == "ws"
             assert aliases[0].exchange_symbol == "BTGOx/USD"
 
-            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="BTGOX-USD").one()
+            cap = (
+                session.query(SymbolExchangeCapability)
+                .join(Symbol, Symbol.public_id == SymbolExchangeCapability.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTGOX-USD")
+                .one()
+            )
             assert cap.exchange == "kraken"
             assert cap.can_market_data is True
             assert cap.can_trade is False
@@ -2329,17 +2357,33 @@ class TestKrakenUpdateDatabaseBranches:
         ]
         await updater._update_database(symbols)
         with db_session_factory() as session:
-            rest_aliases = session.query(SymbolAlias).filter_by(native_symbol="BTC-USD").all()
+            rest_aliases = (
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTC-USD")
+                .all()
+            )
             assert len(rest_aliases) == 3
             rest_cap = (
-                session.query(SymbolExchangeCapability).filter_by(native_symbol="BTC-USD").one()
+                session.query(SymbolExchangeCapability)
+                .join(Symbol, Symbol.public_id == SymbolExchangeCapability.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTC-USD")
+                .one()
             )
             assert rest_cap.can_trade is True
 
-            ws_aliases = session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD").all()
+            ws_aliases = (
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTGOX-USD")
+                .all()
+            )
             assert len(ws_aliases) == 1
             ws_cap = (
-                session.query(SymbolExchangeCapability).filter_by(native_symbol="BTGOX-USD").one()
+                session.query(SymbolExchangeCapability)
+                .join(Symbol, Symbol.public_id == SymbolExchangeCapability.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTGOX-USD")
+                .one()
             )
             assert ws_cap.can_trade is False
             assert ws_cap.reason == "WS-only, not in REST markets"
@@ -2626,35 +2670,46 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now, timestamp=now))
-
             session.add(
-                SymbolVersion(
+                Symbol(
                     native_symbol="BTGOX-USD",
-                    base="BTGOx",
+                    base="BTGOX",
                     quote="USD",
                     asset_type="crypto",
+                    created_at=now,
                     timestamp=now,
                 )
             )
+
             session.commit()
 
         with db_session_factory() as session:
+            sym = session.query(Symbol).filter_by(native_symbol="BTGOX-USD").one()
             symbol_data: dict[str, Any] = {
                 "native_symbol": "BTGOX-USD",
                 "kraken_websocket_symbol": "BTGOx/USD",
             }
-            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            created, updated = updater._persist_ws_only_symbol(
+                session, symbol_data, sym.public_id, now
+            )
             session.commit()
             assert created == 1
             assert updated == 0
 
         with db_session_factory() as session:
             alias = (
-                session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD", channel="ws").one()
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTGOX-USD", SymbolAlias.channel == "ws")
+                .one()
             )
             assert alias.exchange_symbol == "BTGOx/USD"
-            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="BTGOX-USD").one()
+            cap = (
+                session.query(SymbolExchangeCapability)
+                .join(Symbol, Symbol.public_id == SymbolExchangeCapability.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTGOX-USD")
+                .one()
+            )
             assert cap.can_trade is False
             assert cap.can_market_data is True
             assert cap.reason == "WS-only, not in REST markets"
@@ -2672,17 +2727,17 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="FOO-USD", created_at=now, timestamp=now))
-
             session.add(
-                SymbolVersion(
+                Symbol(
                     native_symbol="FOO-USD",
                     base="FOO",
                     quote="USD",
                     asset_type="crypto",
+                    created_at=now,
                     timestamp=now,
                 )
             )
+
             session.commit()
 
         with db_session_factory() as session:
@@ -2690,15 +2745,28 @@ class TestKrakenPersistHelpers:
                 "native_symbol": "FOO-USD",
                 "kraken_websocket_symbol": "",
             }
-            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            _sym = session.query(Symbol).filter_by(native_symbol=symbol_data["native_symbol"]).one()
+            created, updated = updater._persist_ws_only_symbol(
+                session, symbol_data, _sym.public_id, now
+            )
             session.commit()
             assert created == 0
             assert updated == 0
 
         with db_session_factory() as session:
-            aliases = session.query(SymbolAlias).filter_by(native_symbol="FOO-USD").all()
+            aliases = (
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "FOO-USD")
+                .all()
+            )
             assert len(aliases) == 0
-            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="FOO-USD").one()
+            cap = (
+                session.query(SymbolExchangeCapability)
+                .join(Symbol, Symbol.public_id == SymbolExchangeCapability.symbol_public_id)
+                .filter(Symbol.native_symbol == "FOO-USD")
+                .one()
+            )
             assert cap.can_trade is False
 
     def test_persist_ws_only_symbol_updates_existing_alias(
@@ -2714,20 +2782,19 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now, timestamp=now))
-
-            session.add(
-                SymbolVersion(
-                    native_symbol="BTGOX-USD",
-                    base="BTGOX",
-                    quote="USD",
-                    asset_type="crypto",
-                    timestamp=now,
-                )
+            sym = Symbol(
+                native_symbol="BTGOX-USD",
+                base="BTGOX",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
             )
+            session.add(sym)
+            session.flush()
             session.add(
                 SymbolAlias(
-                    native_symbol="BTGOX-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="OLD/USD",
@@ -2742,7 +2809,10 @@ class TestKrakenPersistHelpers:
                 "native_symbol": "BTGOX-USD",
                 "kraken_websocket_symbol": "BTGOx/USD",
             }
-            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            _sym = session.query(Symbol).filter_by(native_symbol=symbol_data["native_symbol"]).one()
+            created, updated = updater._persist_ws_only_symbol(
+                session, symbol_data, _sym.public_id, now
+            )
             session.commit()
             assert created == 0
             assert updated == 1
@@ -2750,7 +2820,12 @@ class TestKrakenPersistHelpers:
         with db_session_factory() as session:
             alias = (
                 session.query(SymbolAlias)
-                .filter_by(native_symbol="BTGOX-USD", channel="ws", known_to=KNOWN_TO_MAX)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(
+                    Symbol.native_symbol == "BTGOX-USD",
+                    SymbolAlias.channel == "ws",
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
+                )
                 .one()
             )
             assert alias.exchange_symbol == "BTGOx/USD"
@@ -2768,20 +2843,19 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTGOX-USD", created_at=now, timestamp=now))
-
-            session.add(
-                SymbolVersion(
-                    native_symbol="BTGOX-USD",
-                    base="BTGOX",
-                    quote="USD",
-                    asset_type="crypto",
-                    timestamp=now,
-                )
+            sym = Symbol(
+                native_symbol="BTGOX-USD",
+                base="BTGOX",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
             )
+            session.add(sym)
+            session.flush()
             session.add(
                 SymbolAlias(
-                    native_symbol="BTGOX-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="BTGOx/USD",
@@ -2796,7 +2870,10 @@ class TestKrakenPersistHelpers:
                 "native_symbol": "BTGOX-USD",
                 "kraken_websocket_symbol": "BTGOx/USD",
             }
-            created, updated = updater._persist_ws_only_symbol(session, symbol_data, now)
+            _sym = session.query(Symbol).filter_by(native_symbol=symbol_data["native_symbol"]).one()
+            created, updated = updater._persist_ws_only_symbol(
+                session, symbol_data, _sym.public_id, now
+            )
             session.commit()
             assert created == 0
             assert updated == 0
@@ -2814,17 +2891,17 @@ class TestKrakenPersistHelpers:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
-            session.add(Symbol(native_symbol="BTC-USD", created_at=now, timestamp=now))
-
             session.add(
-                SymbolVersion(
+                Symbol(
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
+                    created_at=now,
                     timestamp=now,
                 )
             )
+
             session.commit()
 
         with db_session_factory() as session:
@@ -2834,16 +2911,29 @@ class TestKrakenPersistHelpers:
                 "kraken_rest_symbol": "XXBTZUSD",
                 "ccxt_symbol": "BTC/USD",
             }
-            created, updated = updater._persist_rest_symbol(session, symbol_data, now)
+            _sym = session.query(Symbol).filter_by(native_symbol=symbol_data["native_symbol"]).one()
+            created, updated = updater._persist_rest_symbol(
+                session, symbol_data, _sym.public_id, now
+            )
             session.commit()
             assert created == 3
             assert updated == 0
 
         with db_session_factory() as session:
-            aliases = session.query(SymbolAlias).filter_by(native_symbol="BTC-USD").all()
+            aliases = (
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTC-USD")
+                .all()
+            )
             channels = {a.channel for a in aliases}
             assert channels == {"ws", "rest", "ccxt"}
-            cap = session.query(SymbolExchangeCapability).filter_by(native_symbol="BTC-USD").one()
+            cap = (
+                session.query(SymbolExchangeCapability)
+                .join(Symbol, Symbol.public_id == SymbolExchangeCapability.symbol_public_id)
+                .filter(Symbol.native_symbol == "BTC-USD")
+                .one()
+            )
             assert cap.can_trade is True
             assert cap.can_market_data is True
             assert cap.reason is None

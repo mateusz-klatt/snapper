@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
@@ -210,14 +211,15 @@ class SymbolMapperService:
             logger.error(f"SymbolMapperService warm-up failed: {e}")
             raise
 
-    def load_mappings_from_db(self) -> list[SymbolAlias]:
-        """Load all symbol aliases from the database.
+    def load_mappings_from_db(self) -> list[tuple[str, str, str, str]]:
+        """Load all symbol aliases joined with active Symbol native_symbol.
 
-        Queries the symbol_aliases table for all defined aliases. If the
-        table doesn't exist (before migrations), returns an empty list.
+        Queries the symbol_aliases table joined with symbols to resolve
+        symbol_public_id to native_symbol. If the table doesn't exist
+        (before migrations), returns an empty list.
 
         Returns:
-            List of SymbolAlias ORM objects from the database.
+            List of (native_symbol, exchange, channel, exchange_symbol) tuples.
 
         Raises:
             OperationalError: If database error occurs (except missing table).
@@ -225,16 +227,32 @@ class SymbolMapperService:
         try:
             with self.repository.get_session() as session:
                 now = datetime.now(UTC)
-                stmt = select(SymbolAlias).where(
-                    SymbolAlias.timestamp <= now, SymbolAlias.known_to > now
+                stmt = (
+                    select(
+                        Symbol.native_symbol,
+                        SymbolAlias.exchange,
+                        SymbolAlias.channel,
+                        SymbolAlias.exchange_symbol,
+                    )
+                    .join(
+                        Symbol,
+                        Symbol.public_id == SymbolAlias.symbol_public_id,
+                    )
+                    .where(
+                        SymbolAlias.timestamp <= now,
+                        SymbolAlias.known_to > now,
+                        Symbol.timestamp <= now,
+                        Symbol.known_to > now,
+                    )
                 )
-                result = session.execute(stmt)
-                aliases = result.scalars().all()
-                logger.info(f"Loaded {len(aliases)} symbol aliases from database")
-                return list(aliases)
+                rows = session.execute(stmt).all()
+                logger.info(f"Loaded {len(rows)} symbol aliases from database")
+                return [(r[0], r[1], r[2], r[3]) for r in rows]
         except OperationalError as exc:
             error_message = str(exc).lower()
-            if "no such table" in error_message and "symbol_aliases" in error_message:
+            if "no such table" in error_message and (
+                "symbol_aliases" in error_message or "symbols" in error_message
+            ):
                 logger.warning(
                     "Symbol aliases table missing; skipping cache warm-up until migrations finish."
                 )
@@ -243,22 +261,22 @@ class SymbolMapperService:
 
     def _populate_maps_from_aliases(
         self,
-        aliases: list[SymbolAlias],
+        alias_rows: list[tuple[str, str, str, str]],
     ) -> None:
-        """Populate all bidirectional mapping dicts from alias rows.
+        """Populate all bidirectional mapping dicts from alias tuples.
 
         Builds fresh forward and reverse dicts keyed by ``(exchange, channel)``
         and updates shortcut named attributes atomically.
 
         Args:
-            aliases: List of SymbolAlias ORM objects.
+            alias_rows: List of (native_symbol, exchange, channel, exchange_symbol).
         """
         fwd: dict[tuple[str, str], dict[str, str]] = {}
         rev: dict[tuple[str, str], dict[str, str]] = {}
-        for alias in aliases:
-            key = (alias.exchange, alias.channel)
-            fwd.setdefault(key, {})[alias.native_symbol] = alias.exchange_symbol
-            rev.setdefault(key, {})[alias.exchange_symbol] = alias.native_symbol
+        for native_symbol, exchange, channel, exchange_symbol in alias_rows:
+            key = (exchange, channel)
+            fwd.setdefault(key, {})[native_symbol] = exchange_symbol
+            rev.setdefault(key, {})[exchange_symbol] = native_symbol
         self.forward = fwd
         self.reverse = rev
         for exchange, channel, attr_name in _SHORTCUT_FORWARD:
@@ -266,14 +284,18 @@ class SymbolMapperService:
         for exchange, channel, attr_name in _SHORTCUT_REVERSE:
             setattr(self, attr_name, rev.get((exchange, channel), {}))
 
-    def load_capabilities_from_db(self) -> list[SymbolExchangeCapability]:
-        """Load all symbol exchange capabilities from the database.
+    def load_capabilities_from_db(
+        self,
+    ) -> list[tuple[str, str, bool, bool, str | None, str | None]]:
+        """Load all symbol exchange capabilities joined with active Symbol.
 
-        Queries the symbol_exchange_capabilities table. If the table
+        Queries the symbol_exchange_capabilities table joined with symbols
+        to resolve symbol_public_id to native_symbol. If the table
         does not exist (before migrations), returns an empty list.
 
         Returns:
-            List of SymbolExchangeCapability ORM objects.
+            List of (native_symbol, exchange, can_market_data, can_trade,
+            source, reason) tuples.
 
         Raises:
             OperationalError: If database error occurs (except missing table).
@@ -281,17 +303,34 @@ class SymbolMapperService:
         try:
             with self.repository.get_session() as session:
                 now = datetime.now(UTC)
-                stmt = select(SymbolExchangeCapability).where(
-                    SymbolExchangeCapability.timestamp <= now,
-                    SymbolExchangeCapability.known_to > now,
+                stmt = (
+                    select(
+                        Symbol.native_symbol,
+                        SymbolExchangeCapability.exchange,
+                        SymbolExchangeCapability.can_market_data,
+                        SymbolExchangeCapability.can_trade,
+                        SymbolExchangeCapability.source,
+                        SymbolExchangeCapability.reason,
+                    )
+                    .join(
+                        Symbol,
+                        Symbol.public_id == SymbolExchangeCapability.symbol_public_id,
+                    )
+                    .where(
+                        SymbolExchangeCapability.timestamp <= now,
+                        SymbolExchangeCapability.known_to > now,
+                        Symbol.timestamp <= now,
+                        Symbol.known_to > now,
+                    )
                 )
-                result = session.execute(stmt)
-                capabilities = result.scalars().all()
-                logger.info(f"Loaded {len(capabilities)} symbol capabilities from database")
-                return list(capabilities)
+                rows = session.execute(stmt).all()
+                logger.info(f"Loaded {len(rows)} symbol capabilities from database")
+                return [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows]
         except OperationalError as exc:
             error_message = str(exc).lower()
-            if "no such table" in error_message and "symbol_exchange_capabilities" in error_message:
+            if "no such table" in error_message and (
+                "symbol_exchange_capabilities" in error_message or "symbols" in error_message
+            ):
                 logger.warning(
                     "Symbol capabilities table missing; skipping until migrations finish."
                 )
@@ -300,20 +339,21 @@ class SymbolMapperService:
 
     def _populate_capabilities_from_rows(
         self,
-        rows: list[SymbolExchangeCapability],
+        rows: list[tuple[str, str, bool, bool, str | None, str | None]],
     ) -> None:
-        """Populate capabilities cache from database rows.
+        """Populate capabilities cache from joined result tuples.
 
         Args:
-            rows: List of SymbolExchangeCapability ORM objects.
+            rows: List of (native_symbol, exchange, can_market_data,
+                  can_trade, source, reason) tuples.
         """
         caps: dict[tuple[str, str], CapabilityInfo] = {}
-        for row in rows:
-            caps[(row.native_symbol, row.exchange)] = CapabilityInfo(
-                can_market_data=row.can_market_data,
-                can_trade=row.can_trade,
-                source=row.source,
-                reason=row.reason,
+        for native_symbol, exchange, can_market_data, can_trade, source, reason in rows:
+            caps[(native_symbol, exchange)] = CapabilityInfo(
+                can_market_data=can_market_data,
+                can_trade=can_trade,
+                source=source,
+                reason=reason,
             )
         self.capabilities = caps
 

@@ -74,10 +74,11 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
         created_count = 0
         updated_count = 0
         with self.repository.get_session() as session:
+            processed_symbol_public_ids: set[str] = set()
             for instrument in symbols:
                 native_symbol = instrument["native_symbol"]
                 now = datetime.now(UTC)
-                self._upsert_catalog(
+                symbol_public_id = self._upsert_symbol(
                     session,
                     native_symbol,
                     instrument["base"],
@@ -85,9 +86,10 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     "forex",
                     now,
                 )
+                processed_symbol_public_ids.add(symbol_public_id)
                 ws_result = self._upsert_alias(
                     session,
-                    native_symbol,
+                    symbol_public_id,
                     "walutomat",
                     "ws",
                     instrument["symbol"],
@@ -99,7 +101,7 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     updated_count += 1
                 rest_result = self._upsert_alias(
                     session,
-                    native_symbol,
+                    symbol_public_id,
                     "walutomat",
                     "rest",
                     instrument["walutomat_rest_symbol"],
@@ -111,7 +113,7 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     updated_count += 1
                 self._upsert_capability(
                     session,
-                    native_symbol,
+                    symbol_public_id,
                     "walutomat",
                     True,
                     True,
@@ -119,10 +121,9 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     None,
                     now,
                 )
-            processed_symbols = {s["native_symbol"] for s in symbols}
             now = datetime.now(UTC)
             deactivated = self._reconcile_capabilities(
-                session, "walutomat", processed_symbols, "walutomat_updater", now
+                session, "walutomat", processed_symbol_public_ids, "walutomat_updater", now
             )
             session.commit()
         logger.info(

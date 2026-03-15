@@ -20,7 +20,6 @@ from urllib3.util.retry import RequestHistory
 import snapper.data.repository
 from snapper.data.models import Base
 from snapper.data.models import Symbol
-from snapper.data.models import SymbolVersion
 from snapper.data.repository import MSSQLRepository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
@@ -1044,15 +1043,11 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
     async with repo.session() as s:
         s.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
-            )
-        )
-        s.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
             )
         )
@@ -1138,15 +1133,11 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
     async with repo.session() as s:
         s.add(
             Symbol(
-                native_symbol="ETH-USD", created_at=datetime.now(UTC), timestamp=datetime.now(UTC)
-            )
-        )
-        s.add(
-            SymbolVersion(
                 native_symbol="ETH-USD",
                 base="ETH",
                 quote="USD",
                 asset_type="crypto",
+                created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
             )
         )

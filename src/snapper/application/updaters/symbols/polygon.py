@@ -145,7 +145,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         quote: str | None,
         now: datetime,
         stats: dict[str, int],
-    ) -> None:
+    ) -> str | None:
         """Insert or update Polygon symbol identity and alias rows.
 
         When ``insert_new`` is False, only updates aliases for symbols that
@@ -159,26 +159,32 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             quote: Quote currency code or None.
             now: Current timestamp for created_at/updated_at.
             stats: Mutable stats dict to increment counters.
+
+        Returns:
+            The symbol public_id, or None if skipped.
         """
         existing_symbol = session.execute(
-            select(Symbol).where(Symbol.native_symbol == native_symbol)
-        ).scalar_one_or_none()
-        if existing_symbol is None:
-            if not self.insert_new:
-                stats["skipped"] += 1
-                return
-            asset_type = self._determine_polygon_asset_type(ticker)
-            self._upsert_catalog(
-                session,
-                native_symbol,
-                base,
-                quote,
-                asset_type,
-                now,
+            select(Symbol).where(
+                Symbol.native_symbol == native_symbol,
+                Symbol.timestamp <= now,
+                Symbol.known_to > now,
             )
-        alias_result = self._upsert_alias(
+        ).scalar_one_or_none()
+        if existing_symbol is None and not self.insert_new:
+            stats["skipped"] += 1
+            return None
+        asset_type = self._determine_polygon_asset_type(ticker)
+        symbol_public_id = self._upsert_symbol(
             session,
             native_symbol,
+            base,
+            quote,
+            asset_type,
+            now,
+        )
+        alias_result = self._upsert_alias(
+            session,
+            symbol_public_id,
             "polygon",
             "rest",
             ticker,
@@ -186,7 +192,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         )
         self._upsert_capability(
             session,
-            native_symbol,
+            symbol_public_id,
             "polygon",
             True,
             False,
@@ -198,6 +204,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             stats["inserted"] += 1
         elif alias_result == "updated":
             stats["updated"] += 1
+        return symbol_public_id
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Update database with fetched symbol data.
@@ -208,7 +215,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         assert self.repository is not None
         stats = {"updated": 0, "inserted": 0, "skipped": 0}
         now = datetime.now(UTC)
-        processed_symbols: set[str] = set()
+        processed_symbol_public_ids: set[str] = set()
         try:
             with self.repository.get_session() as session:
                 for symbol_data in symbols:
@@ -220,16 +227,17 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                         stats["skipped"] += 1
                         continue
                     base, quote = self._split_native_symbol(native_symbol, symbol_data)
-                    self._upsert_polygon_mapping(
+                    spid = self._upsert_polygon_mapping(
                         session, native_symbol, ticker, base, quote, now, stats
                     )
-                    processed_symbols.add(native_symbol)
+                    if spid is not None:
+                        processed_symbol_public_ids.add(spid)
                     total_processed = stats["updated"] + stats["inserted"]
                     if total_processed % self.BATCH_COMMIT_SIZE == 0 and total_processed > 0:
                         session.commit()
                         logger.info(f"Committed batch: {stats}")
                 deactivated = self._reconcile_capabilities(
-                    session, "polygon", processed_symbols, "polygon_updater", now
+                    session, "polygon", processed_symbol_public_ids, "polygon_updater", now
                 )
                 session.commit()
                 stats["deactivated"] = deactivated

@@ -134,10 +134,11 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
         updated_count = 0
         try:
             with self.repository.get_session() as session:
+                processed_symbol_public_ids: set[str] = set()
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
                     now = datetime.now(UTC)
-                    self._upsert_catalog(
+                    symbol_public_id = self._upsert_symbol(
                         session,
                         native_symbol,
                         symbol_data["base"],
@@ -145,9 +146,10 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         "crypto",
                         now,
                     )
+                    processed_symbol_public_ids.add(symbol_public_id)
                     ws_result = self._upsert_alias(
                         session,
-                        native_symbol,
+                        symbol_public_id,
                         "zonda",
                         "ws",
                         symbol_data["zonda_symbol"],
@@ -161,7 +163,7 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                     if ccxt_symbol:
                         self._upsert_alias(
                             session,
-                            native_symbol,
+                            symbol_public_id,
                             "zonda",
                             "ccxt",
                             ccxt_symbol,
@@ -169,7 +171,7 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         )
                     self._upsert_capability(
                         session,
-                        native_symbol,
+                        symbol_public_id,
                         "zonda",
                         True,
                         True,
@@ -177,10 +179,9 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         None,
                         now,
                     )
-                processed_symbols = {s["native_symbol"] for s in symbols}
                 now = datetime.now(UTC)
                 deactivated = self._reconcile_capabilities(
-                    session, "zonda", processed_symbols, "zonda_updater", now
+                    session, "zonda", processed_symbol_public_ids, "zonda_updater", now
                 )
                 session.commit()
                 logger.info(

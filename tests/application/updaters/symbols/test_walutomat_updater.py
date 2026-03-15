@@ -17,7 +17,6 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
-from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 
@@ -68,22 +67,23 @@ async def test_update_database_creates_and_updates_mappings(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="EUR-PLN", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="EUR-PLN",
                 base="EUR",
                 quote="PLN",
                 asset_type="forex",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
+        _spid_eur_pln = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="EUR-PLN",
+                symbol_public_id=_spid_eur_pln,
                 exchange="walutomat",
                 channel="ws",
                 exchange_symbol="EUR_PLN_OLD",
@@ -91,9 +91,14 @@ async def test_update_database_creates_and_updates_mappings(
                 timestamp=original_timestamp,
             )
         )
+        _spid_eur_pln = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="EUR-PLN",
+                symbol_public_id=_spid_eur_pln,
                 exchange="walutomat",
                 channel="rest",
                 exchange_symbol="EURNOT",
@@ -122,14 +127,19 @@ async def test_update_database_creates_and_updates_mappings(
     with repository.get_session() as session:
         assert isinstance(session, Session)
         eur_catalog = session.execute(
-            select(SymbolVersion).where(SymbolVersion.native_symbol == "EUR-PLN")
+            select(Symbol).where(Symbol.native_symbol == "EUR-PLN")
         ).scalar_one()
         usd_catalog = session.execute(
-            select(SymbolVersion).where(SymbolVersion.native_symbol == "USD-PLN")
+            select(Symbol).where(Symbol.native_symbol == "USD-PLN")
         ).scalar_one()
         eur_ws_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "EUR-PLN",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "ws",
                 SymbolAlias.known_to == KNOWN_TO_MAX,
@@ -137,7 +147,12 @@ async def test_update_database_creates_and_updates_mappings(
         ).scalar_one()
         eur_rest_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "EUR-PLN",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "rest",
                 SymbolAlias.known_to == KNOWN_TO_MAX,
@@ -145,14 +160,24 @@ async def test_update_database_creates_and_updates_mappings(
         ).scalar_one()
         usd_ws_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "USD-PLN",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "USD-PLN"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "ws",
             )
         ).scalar_one()
         usd_rest_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "USD-PLN",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "USD-PLN"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "rest",
             )
@@ -187,22 +212,23 @@ async def test_update_database_skips_when_mapping_unchanged(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="EUR-PLN", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="EUR-PLN",
                 base="EUR",
                 quote="PLN",
-                asset_type="forex",
+                asset_type="crypto",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
+        _spid_eur_pln = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="EUR-PLN",
+                symbol_public_id=_spid_eur_pln,
                 exchange="walutomat",
                 channel="ws",
                 exchange_symbol="EUR_PLN",
@@ -210,9 +236,14 @@ async def test_update_database_skips_when_mapping_unchanged(
                 timestamp=original_timestamp,
             )
         )
+        _spid_eur_pln = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="EUR-PLN",
+                symbol_public_id=_spid_eur_pln,
                 exchange="walutomat",
                 channel="rest",
                 exchange_symbol="EURPLN",
@@ -235,14 +266,24 @@ async def test_update_database_skips_when_mapping_unchanged(
         assert isinstance(session, Session)
         ws_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "EUR-PLN",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "ws",
             )
         ).scalar_one()
         rest_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "EUR-PLN",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "EUR-PLN"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "rest",
             )
@@ -323,7 +364,10 @@ async def test_update_database_creates_capability_rows(
         assert isinstance(session, Session)
         caps = session.execute(select(SymbolExchangeCapability)).scalars().all()
         assert len(caps) == 2
-        cap_map = {c.native_symbol: c for c in caps}
+        _sym_map = {
+            s.public_id: s.native_symbol for s in session.execute(select(Symbol)).scalars().all()
+        }
+        cap_map = {_sym_map.get(c.symbol_public_id, c.symbol_public_id): c for c in caps}
         for native_symbol in ("EUR-PLN", "USD-PLN"):
             cap = cap_map[native_symbol]
             assert cap.exchange == "walutomat"

@@ -21,7 +21,6 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
-from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
@@ -729,19 +728,15 @@ async def test_update_existing_symbols_when_insert_disabled(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
         session.commit()
     symbols: list[dict[str, Any]] = [
         {
@@ -760,13 +755,18 @@ async def test_update_existing_symbols_when_insert_disabled(
         assert isinstance(session, Session)
         btc_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "polygon",
                 SymbolAlias.channel == "rest",
             )
         ).scalar_one()
         eur_catalog = session.execute(
-            select(SymbolVersion).where(SymbolVersion.native_symbol == "EUR-USD")
+            select(Symbol).where(Symbol.native_symbol == "EUR-USD")
         ).scalar_one_or_none()
     assert btc_alias.exchange_symbol == "X:BTCUSD"
     assert btc_alias.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
@@ -789,22 +789,23 @@ async def test_update_existing_alias_exchange_symbol(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
+        _spid_btc_usd = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid_btc_usd,
                 exchange="polygon",
                 channel="rest",
                 exchange_symbol="X:BTCOLD",
@@ -825,7 +826,12 @@ async def test_update_existing_alias_exchange_symbol(
         assert isinstance(session, Session)
         btc_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "polygon",
                 SymbolAlias.channel == "rest",
                 SymbolAlias.known_to == KNOWN_TO_MAX,
@@ -851,22 +857,23 @@ async def test_existing_alias_unchanged_when_same_symbol(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
+        _spid_btc_usd = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+            )
+        ).scalar_one()
         session.add(
             SymbolAlias(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid_btc_usd,
                 exchange="polygon",
                 channel="rest",
                 exchange_symbol="X:BTCUSD",
@@ -887,7 +894,12 @@ async def test_existing_alias_unchanged_when_same_symbol(
         assert isinstance(session, Session)
         btc_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "BTC-USD",
+                SymbolAlias.symbol_public_id
+                == session.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.known_to == KNOWN_TO_MAX, Symbol.native_symbol == "BTC-USD"
+                    )
+                ).scalar_one(),
                 SymbolAlias.exchange == "polygon",
                 SymbolAlias.channel == "rest",
             )
@@ -926,23 +938,25 @@ async def test_insert_new_symbols_when_enabled(tmp_path: Path) -> None:
     with repository.get_session() as session:
         assert isinstance(session, Session)
         stock_catalog = session.execute(
-            select(SymbolVersion).where(SymbolVersion.native_symbol == "AAPL")
+            select(Symbol).where(Symbol.native_symbol == "AAPL", Symbol.known_to == KNOWN_TO_MAX)
         ).scalar_one()
         stock_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "AAPL",
+                SymbolAlias.symbol_public_id == stock_catalog.public_id,
                 SymbolAlias.exchange == "polygon",
                 SymbolAlias.channel == "rest",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         index_catalog = session.execute(
-            select(SymbolVersion).where(SymbolVersion.native_symbol == "SPX")
+            select(Symbol).where(Symbol.native_symbol == "SPX", Symbol.known_to == KNOWN_TO_MAX)
         ).scalar_one()
         index_alias = session.execute(
             select(SymbolAlias).where(
-                SymbolAlias.native_symbol == "SPX",
+                SymbolAlias.symbol_public_id == index_catalog.public_id,
                 SymbolAlias.exchange == "polygon",
                 SymbolAlias.channel == "rest",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert stock_alias.exchange_symbol == "AAPL"
@@ -1021,7 +1035,7 @@ async def test_update_database_skips_entries_without_ticker(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog_count = session.execute(select(SymbolVersion)).scalars().all()
+        catalog_count = session.execute(select(Symbol)).scalars().all()
         alias_count = session.execute(select(SymbolAlias)).scalars().all()
     assert len(catalog_count) == 0
     assert len(alias_count) == 0
@@ -1044,7 +1058,7 @@ async def test_update_database_skips_unmatchable_symbols(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog_count = session.execute(select(SymbolVersion)).scalars().all()
+        catalog_count = session.execute(select(Symbol)).scalars().all()
         alias_count = session.execute(select(SymbolAlias)).scalars().all()
     assert len(catalog_count) == 0
     assert len(alias_count) == 0
@@ -1071,7 +1085,7 @@ async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
-        catalog_count = len(session.execute(select(SymbolVersion)).scalars().all())
+        catalog_count = len(session.execute(select(Symbol)).scalars().all())
         alias_count = len(session.execute(select(SymbolAlias)).scalars().all())
     assert catalog_count == 110
     assert alias_count == 110
@@ -1220,19 +1234,15 @@ async def test_update_database_creates_capability_rows(
         assert isinstance(session, Session)
         session.add(
             Symbol(
-                native_symbol="BTC-USD", created_at=original_timestamp, timestamp=original_timestamp
-            )
-        )
-
-        session.add(
-            SymbolVersion(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_timestamp,
                 timestamp=original_timestamp,
             )
         )
+
         session.commit()
     symbols: list[dict[str, Any]] = [
         {
@@ -1244,10 +1254,16 @@ async def test_update_database_creates_capability_rows(
     await updater.update_database_public(symbols)
     with repository.get_session() as session:
         assert isinstance(session, Session)
+        symbol_public_id = session.execute(
+            select(Symbol.public_id).where(
+                Symbol.native_symbol == "BTC-USD",
+                Symbol.known_to == KNOWN_TO_MAX,
+            )
+        ).scalar_one()
         caps = session.execute(select(SymbolExchangeCapability)).scalars().all()
         assert len(caps) == 1
         cap = caps[0]
-        assert cap.native_symbol == "BTC-USD"
+        assert cap.symbol_public_id == symbol_public_id
         assert cap.exchange == "polygon"
         assert cap.can_market_data is True
         assert cap.can_trade is False

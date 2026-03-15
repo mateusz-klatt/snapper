@@ -19,12 +19,19 @@ from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
+from snapper.data.models import Symbol as _Sym
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
-from snapper.data.models import SymbolVersion
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import close_and_insert_sync
+
+
+def _lookup_spid(session: Session, native_symbol: str) -> str:
+    """Look up symbol public_id by native_symbol."""
+    return session.execute(
+        select(_Sym.public_id).where(_Sym.symbol_public_id == native_symbol)
+    ).scalar_one()
 
 
 @dataclass
@@ -806,42 +813,42 @@ def test_get_last_update_timestamp_returns_none_for_empty_value(
     assert updater.get_last_update_timestamp_public() is None
 
 
-def test_upsert_catalog_creates_new_entry(
+def test_upsert_symbol_creates_new_entry(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog creates new Symbol and SymbolVersion when none exists.
+    """Verify _upsert_symbol creates new Symbol and Symbol when none exists.
 
     Given: Empty database,
-    When: _upsert_catalog called with new native_symbol,
-    Then: New Symbol and SymbolVersion rows created and True returned.
+    When: _upsert_symbol called with new native_symbol,
+    Then: New Symbol and Symbol rows created and True returned.
     """
     updater = updater_factory(3, False)
     assert updater.repository is not None
     now = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result = SymbolUpdaterService._upsert_catalog(
+        result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", now
         )
         session.commit()
-    assert result is True
+    assert isinstance(result, str) and len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         version = session.execute(
-            select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD")
+            select(Symbol).where(Symbol.native_symbol == "BTC-USD")
         ).scalar_one()
     assert version.base == "BTC"
     assert version.quote == "USD"
     assert version.asset_type == "crypto"
 
 
-def test_upsert_catalog_updates_base_currency(
+def test_upsert_symbol_updates_base_currency(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog creates new version via close+insert when base changes.
+    """Verify _upsert_symbol creates new version via close+insert when base changes.
 
-    Given: Existing Symbol + SymbolVersion with base=BTC,
-    When: _upsert_catalog called with base=XBT,
+    Given: Existing Symbol + Symbol with base=BTC,
+    When: _upsert_symbol called with base=XBT,
     Then: Old version closed, new version inserted with base=XBT.
     """
     updater = updater_factory(3, False)
@@ -850,14 +857,12 @@ def test_upsert_catalog_updates_base_currency(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
-            Symbol(native_symbol="BTC-USD", created_at=original_time, timestamp=original_time)
-        )
-        session.add(
-            SymbolVersion(
+            Symbol(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -865,30 +870,30 @@ def test_upsert_catalog_updates_base_currency(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result = SymbolUpdaterService._upsert_catalog(
+        result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "XBT", "USD", "crypto", update_time
         )
         session.commit()
-    assert result is False
+    assert isinstance(result, str) and len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(
-            select(SymbolVersion).where(
-                SymbolVersion.native_symbol == "BTC-USD",
-                SymbolVersion.known_to == KNOWN_TO_MAX,
+            select(Symbol).where(
+                Symbol.native_symbol == "BTC-USD",
+                Symbol.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert active.base == "XBT"
     assert active.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
-def test_upsert_catalog_updates_quote_currency(
+def test_upsert_symbol_updates_quote_currency(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog creates new version via close+insert when quote changes.
+    """Verify _upsert_symbol creates new version via close+insert when quote changes.
 
-    Given: Existing Symbol + SymbolVersion with quote=USD,
-    When: _upsert_catalog called with quote=USDT,
+    Given: Existing Symbol + Symbol with quote=USD,
+    When: _upsert_symbol called with quote=USDT,
     Then: Old version closed, new version inserted with quote=USDT.
     """
     updater = updater_factory(3, False)
@@ -897,14 +902,12 @@ def test_upsert_catalog_updates_quote_currency(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
-            Symbol(native_symbol="BTC-USD", created_at=original_time, timestamp=original_time)
-        )
-        session.add(
-            SymbolVersion(
+            Symbol(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -912,30 +915,30 @@ def test_upsert_catalog_updates_quote_currency(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result = SymbolUpdaterService._upsert_catalog(
+        result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USDT", "crypto", update_time
         )
         session.commit()
-    assert result is False
+    assert isinstance(result, str) and len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(
-            select(SymbolVersion).where(
-                SymbolVersion.native_symbol == "BTC-USD",
-                SymbolVersion.known_to == KNOWN_TO_MAX,
+            select(Symbol).where(
+                Symbol.native_symbol == "BTC-USD",
+                Symbol.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert active.quote == "USDT"
     assert active.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
-def test_upsert_catalog_updates_asset_type(
+def test_upsert_symbol_updates_asset_type(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog creates new version via close+insert when asset_type changes.
+    """Verify _upsert_symbol creates new version via close+insert when asset_type changes.
 
-    Given: Existing Symbol + SymbolVersion with asset_type=crypto,
-    When: _upsert_catalog called with asset_type=forex,
+    Given: Existing Symbol + Symbol with asset_type=crypto,
+    When: _upsert_symbol called with asset_type=forex,
     Then: Old version closed, new version inserted with asset_type=forex.
     """
     updater = updater_factory(3, False)
@@ -944,14 +947,12 @@ def test_upsert_catalog_updates_asset_type(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
-            Symbol(native_symbol="EUR-USD", created_at=original_time, timestamp=original_time)
-        )
-        session.add(
-            SymbolVersion(
+            Symbol(
                 native_symbol="EUR-USD",
                 base="EUR",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -959,30 +960,30 @@ def test_upsert_catalog_updates_asset_type(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result = SymbolUpdaterService._upsert_catalog(
+        result = SymbolUpdaterService._upsert_symbol(
             session, "EUR-USD", "EUR", "USD", "forex", update_time
         )
         session.commit()
-    assert result is False
+    assert isinstance(result, str) and len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(
-            select(SymbolVersion).where(
-                SymbolVersion.native_symbol == "EUR-USD",
-                SymbolVersion.known_to == KNOWN_TO_MAX,
+            select(Symbol).where(
+                Symbol.native_symbol == "EUR-USD",
+                Symbol.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert active.asset_type == "forex"
     assert active.timestamp.replace(tzinfo=None) == update_time.replace(tzinfo=None)
 
 
-def test_upsert_catalog_preserves_timestamp_when_unchanged(
+def test_upsert_symbol_preserves_timestamp_when_unchanged(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify _upsert_catalog preserves version when no fields changed.
+    """Verify _upsert_symbol preserves version when no fields changed.
 
-    Given: Existing Symbol + SymbolVersion with identical values,
-    When: _upsert_catalog called with same values,
+    Given: Existing Symbol + Symbol with identical values,
+    When: _upsert_symbol called with same values,
     Then: No new version created, original timestamp preserved.
     """
     updater = updater_factory(3, False)
@@ -991,14 +992,12 @@ def test_upsert_catalog_preserves_timestamp_when_unchanged(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
-            Symbol(native_symbol="BTC-USD", created_at=original_time, timestamp=original_time)
-        )
-        session.add(
-            SymbolVersion(
+            Symbol(
                 native_symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
+                created_at=original_time,
                 timestamp=original_time,
             )
         )
@@ -1006,38 +1005,43 @@ def test_upsert_catalog_preserves_timestamp_when_unchanged(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result = SymbolUpdaterService._upsert_catalog(
+        result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", update_time
         )
         session.commit()
-    assert result is False
+    assert isinstance(result, str) and len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(
-            select(SymbolVersion).where(
-                SymbolVersion.native_symbol == "BTC-USD",
-                SymbolVersion.known_to == KNOWN_TO_MAX,
+            select(Symbol).where(
+                Symbol.native_symbol == "BTC-USD",
+                Symbol.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert active.timestamp.replace(tzinfo=None) == original_time.replace(tzinfo=None)
 
 
-def _seed_catalog(updater: DummySymbolUpdater, native_symbol: str, now: datetime) -> None:
-    """Insert Symbol + SymbolVersion rows required as FK parent for capability tests."""
+def _seed_catalog(updater: DummySymbolUpdater, native_symbol: str, now: datetime) -> str:
+    """Insert Symbol row and return its public_id for capability tests."""
     assert updater.repository is not None
+    parts = native_symbol.split("-", maxsplit=1)
+    base = parts[0]
+    quote = parts[1] if len(parts) > 1 else None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        session.add(Symbol(native_symbol=native_symbol, created_at=now, timestamp=now))
-        session.add(
-            SymbolVersion(
-                native_symbol=native_symbol,
-                base=native_symbol.split("-", maxsplit=1)[0],
-                quote=native_symbol.split("-")[1],
-                asset_type="crypto",
-                timestamp=now,
-            )
+        sym = Symbol(
+            native_symbol=native_symbol,
+            base=base,
+            quote=quote,
+            asset_type="crypto",
+            created_at=now,
+            timestamp=now,
         )
+        session.add(sym)
+        session.flush()
+        spid = sym.public_id
         session.commit()
+    return spid
 
 
 def test_upsert_capability_creates_new_entry(
@@ -1052,11 +1056,11 @@ def test_upsert_capability_creates_new_entry(
     updater = updater_factory(3, False)
     assert updater.repository is not None
     now = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", now)
+    _spid = _seed_catalog(updater, "BTC-USD", now)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, "BTC-USD", "kraken", True, True, "kraken_updater", "Ticker list", now
+            session, _spid, "kraken", True, True, "kraken_updater", "Ticker list", now
         )
         session.commit()
     assert result == "created"
@@ -1064,7 +1068,7 @@ def test_upsert_capability_creates_new_entry(
         assert isinstance(session, Session)
         cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
             )
         ).scalar_one()
@@ -1086,12 +1090,12 @@ def test_upsert_capability_updates_can_trade(
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", original_time)
+    _spid = _seed_catalog(updater, "BTC-USD", original_time)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
             SymbolExchangeCapability(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid,
                 exchange="kraken",
                 can_market_data=True,
                 can_trade=False,
@@ -1106,7 +1110,7 @@ def test_upsert_capability_updates_can_trade(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, "BTC-USD", "kraken", True, True, "seed", None, update_time
+            session, _spid, "kraken", True, True, "seed", None, update_time
         )
         session.commit()
     assert result == "updated"
@@ -1114,7 +1118,7 @@ def test_upsert_capability_updates_can_trade(
         assert isinstance(session, Session)
         cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
                 SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
@@ -1135,12 +1139,12 @@ def test_upsert_capability_updates_can_market_data(
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
-    _seed_catalog(updater, "ETH-USD", original_time)
+    _spid = _seed_catalog(updater, "ETH-USD", original_time)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
             SymbolExchangeCapability(
-                native_symbol="ETH-USD",
+                symbol_public_id=_spid,
                 exchange="kraken",
                 can_market_data=False,
                 can_trade=True,
@@ -1155,7 +1159,7 @@ def test_upsert_capability_updates_can_market_data(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, "ETH-USD", "kraken", True, True, "seed", None, update_time
+            session, _spid, "kraken", True, True, "seed", None, update_time
         )
         session.commit()
     assert result == "updated"
@@ -1163,7 +1167,7 @@ def test_upsert_capability_updates_can_market_data(
         assert isinstance(session, Session)
         cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "ETH-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
                 SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
@@ -1184,12 +1188,12 @@ def test_upsert_capability_updates_source(
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", original_time)
+    _spid = _seed_catalog(updater, "BTC-USD", original_time)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
             SymbolExchangeCapability(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid,
                 exchange="kraken",
                 can_market_data=True,
                 can_trade=True,
@@ -1204,7 +1208,7 @@ def test_upsert_capability_updates_source(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, "BTC-USD", "kraken", True, True, "kraken_updater", None, update_time
+            session, _spid, "kraken", True, True, "kraken_updater", None, update_time
         )
         session.commit()
     assert result == "updated"
@@ -1212,7 +1216,7 @@ def test_upsert_capability_updates_source(
         assert isinstance(session, Session)
         cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
                 SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
@@ -1233,12 +1237,12 @@ def test_upsert_capability_updates_reason(
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", original_time)
+    _spid = _seed_catalog(updater, "BTC-USD", original_time)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
             SymbolExchangeCapability(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid,
                 exchange="kraken",
                 can_market_data=True,
                 can_trade=True,
@@ -1253,7 +1257,7 @@ def test_upsert_capability_updates_reason(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, "BTC-USD", "kraken", True, True, "kraken_updater", "WS-only", update_time
+            session, _spid, "kraken", True, True, "kraken_updater", "WS-only", update_time
         )
         session.commit()
     assert result == "updated"
@@ -1261,7 +1265,7 @@ def test_upsert_capability_updates_reason(
         assert isinstance(session, Session)
         cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
                 SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
@@ -1282,12 +1286,12 @@ def test_upsert_capability_unchanged(
     updater = updater_factory(3, False)
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", original_time)
+    _spid = _seed_catalog(updater, "BTC-USD", original_time)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         session.add(
             SymbolExchangeCapability(
-                native_symbol="BTC-USD",
+                symbol_public_id=_spid,
                 exchange="kraken",
                 can_market_data=True,
                 can_trade=True,
@@ -1302,7 +1306,7 @@ def test_upsert_capability_unchanged(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, "BTC-USD", "kraken", True, True, "kraken_updater", "Ticker list", update_time
+            session, _spid, "kraken", True, True, "kraken_updater", "Ticker list", update_time
         )
         session.commit()
     assert result == "unchanged"
@@ -1310,7 +1314,7 @@ def test_upsert_capability_unchanged(
         assert isinstance(session, Session)
         cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
             )
         ).scalar_one()
@@ -1330,9 +1334,12 @@ def _seed_capability(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        sym = session.execute(
+            select(Symbol).where(Symbol.native_symbol == native_symbol)
+        ).scalar_one()
         session.add(
             SymbolExchangeCapability(
-                native_symbol=native_symbol,
+                symbol_public_id=sym.public_id,
                 exchange=exchange,
                 can_market_data=can_md,
                 can_trade=can_trade,
@@ -1356,8 +1363,8 @@ def test_deactivate_stale_capabilities_deactivates_removed(
     """
     updater = updater_factory(3, False)
     now = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", now)
-    _seed_catalog(updater, "ETH-USD", now)
+    btc_spid = _seed_catalog(updater, "BTC-USD", now)
+    eth_spid = _seed_catalog(updater, "ETH-USD", now)
     _seed_capability(updater, "BTC-USD", "kraken", True, True, "kraken_updater", now)
     _seed_capability(updater, "ETH-USD", "kraken", True, True, "kraken_updater", now)
     deactivation_time = datetime(2024, 6, 2, tzinfo=UTC)
@@ -1365,7 +1372,7 @@ def test_deactivate_stale_capabilities_deactivates_removed(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
-            session, "kraken", {"BTC-USD"}, "kraken_updater", deactivation_time
+            session, "kraken", {btc_spid}, "kraken_updater", deactivation_time
         )
         session.commit()
     assert count == 1
@@ -1373,14 +1380,14 @@ def test_deactivate_stale_capabilities_deactivates_removed(
         assert isinstance(session, Session)
         btc_cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == btc_spid,
                 SymbolExchangeCapability.exchange == "kraken",
                 SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         eth_cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "ETH-USD",
+                SymbolExchangeCapability.symbol_public_id == eth_spid,
                 SymbolExchangeCapability.exchange == "kraken",
                 SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
@@ -1403,15 +1410,15 @@ def test_deactivate_stale_capabilities_leaves_active_untouched(
     """
     updater = updater_factory(3, False)
     now = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", now)
-    _seed_catalog(updater, "ETH-USD", now)
+    btc_spid = _seed_catalog(updater, "BTC-USD", now)
+    eth_spid = _seed_catalog(updater, "ETH-USD", now)
     _seed_capability(updater, "BTC-USD", "kraken", True, True, "kraken_updater", now)
     _seed_capability(updater, "ETH-USD", "kraken", True, True, "kraken_updater", now)
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
-            session, "kraken", {"BTC-USD", "ETH-USD"}, "kraken_updater", now
+            session, "kraken", {btc_spid, eth_spid}, "kraken_updater", now
         )
         session.commit()
     assert count == 0
@@ -1428,7 +1435,7 @@ def test_deactivate_stale_skips_already_inactive(
     """
     updater = updater_factory(3, False)
     now = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", now)
+    btc_spid = _seed_catalog(updater, "BTC-USD", now)
     _seed_catalog(updater, "ETH-USD", now)
     _seed_capability(updater, "BTC-USD", "kraken", True, True, "kraken_updater", now)
     _seed_capability(updater, "ETH-USD", "kraken", False, False, "kraken_updater", now)
@@ -1436,7 +1443,7 @@ def test_deactivate_stale_skips_already_inactive(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
-            session, "kraken", {"BTC-USD"}, "kraken_updater", now
+            session, "kraken", {btc_spid}, "kraken_updater", now
         )
         session.commit()
     assert count == 0
@@ -1453,7 +1460,7 @@ def test_reconcile_capabilities_proceeds_above_threshold(
     """
     updater = updater_factory(3, False)
     now = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", now)
+    btc_spid = _seed_catalog(updater, "BTC-USD", now)
     _seed_catalog(updater, "ETH-USD", now)
     _seed_capability(updater, "BTC-USD", "kraken", True, True, "kraken_updater", now)
     _seed_capability(updater, "ETH-USD", "kraken", True, True, "kraken_updater", now)
@@ -1461,7 +1468,7 @@ def test_reconcile_capabilities_proceeds_above_threshold(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._reconcile_capabilities(
-            session, "kraken", {"BTC-USD"}, "kraken_updater", now, min_active_ratio=0.5
+            session, "kraken", {btc_spid}, "kraken_updater", now, min_active_ratio=0.5
         )
         session.commit()
     assert count == 1
@@ -1478,14 +1485,15 @@ def test_reconcile_capabilities_skips_below_threshold(
     """
     updater = updater_factory(3, False)
     now = datetime(2024, 6, 1, tzinfo=UTC)
+    spids: dict[str, str] = {}
     for sym in ("BTC-USD", "ETH-USD", "SOL-USD"):
-        _seed_catalog(updater, sym, now)
+        spids[sym] = _seed_catalog(updater, sym, now)
         _seed_capability(updater, sym, "kraken", True, True, "kraken_updater", now)
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._reconcile_capabilities(
-            session, "kraken", {"BTC-USD"}, "kraken_updater", now, min_active_ratio=0.5
+            session, "kraken", {spids["BTC-USD"]}, "kraken_updater", now, min_active_ratio=0.5
         )
         session.commit()
     assert count == 0
@@ -1535,7 +1543,7 @@ def test_deactivate_stale_different_exchange_not_touched(
     """
     updater = updater_factory(3, False)
     now = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", now)
+    _spid = _seed_catalog(updater, "BTC-USD", now)
     _seed_capability(updater, "BTC-USD", "kraken", True, True, "kraken_updater", now)
     _seed_capability(updater, "BTC-USD", "polygon", True, False, "polygon_updater", now)
     assert updater.repository is not None
@@ -1550,7 +1558,7 @@ def test_deactivate_stale_different_exchange_not_touched(
         assert isinstance(session, Session)
         polygon_cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "polygon",
             )
         ).scalar_one()
@@ -1569,18 +1577,18 @@ def test_close_and_insert_sync_creates_fresh_row_when_no_existing(
     updater = updater_factory(3, False)
     assert updater.repository is not None
     now = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", now)
+    _spid = _seed_catalog(updater, "BTC-USD", now)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         new_row = close_and_insert_sync(
             session=session,
             model=SymbolExchangeCapability,
             match_filters=[
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
             ],
             new_values={
-                "native_symbol": "BTC-USD",
+                "symbol_public_id": _spid,
                 "exchange": "kraken",
                 "can_market_data": True,
                 "can_trade": True,
@@ -1597,7 +1605,7 @@ def test_close_and_insert_sync_creates_fresh_row_when_no_existing(
         assert isinstance(session, Session)
         cap = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
             )
         ).scalar_one()
@@ -1618,13 +1626,13 @@ def test_close_and_insert_sync_closes_existing_and_inserts_new(
     assert updater.repository is not None
     original_time = datetime(2024, 1, 1, tzinfo=UTC)
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
-    _seed_catalog(updater, "BTC-USD", original_time)
+    _spid = _seed_catalog(updater, "BTC-USD", original_time)
     _seed_capability(updater, "BTC-USD", "kraken", True, True, "seed", original_time)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         original = session.execute(
             select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
             )
         ).scalar_one()
@@ -1635,11 +1643,11 @@ def test_close_and_insert_sync_closes_existing_and_inserts_new(
             session=session,
             model=SymbolExchangeCapability,
             match_filters=[
-                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.symbol_public_id == _spid,
                 SymbolExchangeCapability.exchange == "kraken",
             ],
             new_values={
-                "native_symbol": "BTC-USD",
+                "symbol_public_id": _spid,
                 "exchange": "kraken",
                 "can_market_data": False,
                 "can_trade": False,
@@ -1655,7 +1663,7 @@ def test_close_and_insert_sync_closes_existing_and_inserts_new(
         all_caps = (
             session.execute(
                 select(SymbolExchangeCapability).where(
-                    SymbolExchangeCapability.native_symbol == "BTC-USD",
+                    SymbolExchangeCapability.symbol_public_id == _spid,
                     SymbolExchangeCapability.exchange == "kraken",
                 )
             )
@@ -1692,12 +1700,12 @@ def _assert_contiguous_intervals(versions: list[Any]) -> None:
 def test_real_updater_catalog_reingest_same_payload_is_noop(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
-    """Verify real _upsert_catalog with same payload creates no new version.
+    """Verify real _upsert_symbol with same payload creates no new version.
 
-    Given: A Symbol + SymbolVersion (base=BTC, quote=USD, asset_type=crypto)
-        created via the real _upsert_catalog method at t1,
-    When: _upsert_catalog is called again at t2 with identical payload,
-    Then: Still only 1 SymbolVersion row exists and its timestamp equals t1.
+    Given: A Symbol + Symbol (base=BTC, quote=USD, asset_type=crypto)
+        created via the real _upsert_symbol method at t1,
+    When: _upsert_symbol is called again at t2 with identical payload,
+    Then: Still only 1 Symbol row exists and its timestamp equals t1.
     """
     updater = updater_factory(3, False)
     assert updater.repository is not None
@@ -1706,30 +1714,26 @@ def test_real_updater_catalog_reingest_same_payload_is_noop(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        SymbolUpdaterService._upsert_catalog(session, "BTC-USD", "BTC", "USD", "crypto", t1)
+        SymbolUpdaterService._upsert_symbol(session, "BTC-USD", "BTC", "USD", "crypto", t1)
         session.commit()
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         before = (
-            session.execute(select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD"))
-            .scalars()
-            .all()
+            session.execute(select(Symbol).where(Symbol.native_symbol == "BTC-USD")).scalars().all()
         )
     assert len(before) == 1
     original_ts = before[0].timestamp
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        SymbolUpdaterService._upsert_catalog(session, "BTC-USD", "BTC", "USD", "crypto", t2)
+        SymbolUpdaterService._upsert_symbol(session, "BTC-USD", "BTC", "USD", "crypto", t2)
         session.commit()
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         after = (
-            session.execute(select(SymbolVersion).where(SymbolVersion.native_symbol == "BTC-USD"))
-            .scalars()
-            .all()
+            session.execute(select(Symbol).where(Symbol.native_symbol == "BTC-USD")).scalars().all()
         )
     assert len(after) == 1
     assert after[0].timestamp.replace(tzinfo=None) == original_ts.replace(tzinfo=None)
@@ -1751,13 +1755,11 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
     t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
     t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
 
-    _seed_catalog(updater, "BTC-USD", t1)
+    _spid = _seed_catalog(updater, "BTC-USD", t1)
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result1 = SymbolUpdaterService._upsert_alias(
-            session, "BTC-USD", "kraken", "ws", "XBT/USD", t1
-        )
+        result1 = SymbolUpdaterService._upsert_alias(session, _spid, "kraken", "ws", "XBT/USD", t1)
         session.commit()
     assert result1 == "created"
 
@@ -1766,7 +1768,7 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
         before = (
             session.execute(
                 select(SymbolAlias).where(
-                    SymbolAlias.native_symbol == "BTC-USD",
+                    SymbolAlias.symbol_public_id == _spid,
                     SymbolAlias.exchange == "kraken",
                     SymbolAlias.channel == "ws",
                 )
@@ -1780,9 +1782,7 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result2 = SymbolUpdaterService._upsert_alias(
-            session, "BTC-USD", "kraken", "ws", "XBT/USD", t2
-        )
+        result2 = SymbolUpdaterService._upsert_alias(session, _spid, "kraken", "ws", "XBT/USD", t2)
         session.commit()
     assert result2 == "unchanged"
 
@@ -1791,7 +1791,7 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
         after = (
             session.execute(
                 select(SymbolAlias).where(
-                    SymbolAlias.native_symbol == "BTC-USD",
+                    SymbolAlias.symbol_public_id == _spid,
                     SymbolAlias.exchange == "kraken",
                     SymbolAlias.channel == "ws",
                 )
@@ -1819,12 +1819,12 @@ def test_real_updater_capability_change_closes_old_inserts_new(
     t1 = datetime(2024, 7, 1, 10, 0, 0, tzinfo=UTC)
     t2 = datetime(2024, 7, 1, 11, 0, 0, tzinfo=UTC)
 
-    _seed_catalog(updater, "BTC-USD", t1)
+    _spid = _seed_catalog(updater, "BTC-USD", t1)
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result1 = SymbolUpdaterService._upsert_capability(
-            session, "BTC-USD", "kraken", True, False, "seed", None, t1
+            session, _spid, "kraken", True, False, "seed", None, t1
         )
         session.commit()
     assert result1 == "created"
@@ -1832,7 +1832,7 @@ def test_real_updater_capability_change_closes_old_inserts_new(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result2 = SymbolUpdaterService._upsert_capability(
-            session, "BTC-USD", "kraken", True, True, "kraken_updater", "Promoted", t2
+            session, _spid, "kraken", True, True, "kraken_updater", "Promoted", t2
         )
         session.commit()
     assert result2 == "updated"
@@ -1842,7 +1842,7 @@ def test_real_updater_capability_change_closes_old_inserts_new(
         all_caps = (
             session.execute(
                 select(SymbolExchangeCapability).where(
-                    SymbolExchangeCapability.native_symbol == "BTC-USD",
+                    SymbolExchangeCapability.symbol_public_id == _spid,
                     SymbolExchangeCapability.exchange == "kraken",
                 )
             )

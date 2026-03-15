@@ -106,6 +106,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import Position
 from snapper.data.models import Signal
+from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
@@ -574,10 +575,19 @@ def _create_exchange_router() -> APIRouter:
         """Return distinct native symbols available on a given exchange."""
         try:
             async with repo.session() as session:
+                now = datetime.now(UTC)
                 result = await session.execute(
-                    select(distinct(SymbolAlias.native_symbol))
-                    .where(SymbolAlias.exchange == exchange)
-                    .order_by(SymbolAlias.native_symbol)
+                    select(distinct(Symbol.native_symbol))
+                    .select_from(SymbolAlias)
+                    .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                    .where(
+                        SymbolAlias.exchange == exchange,
+                        SymbolAlias.timestamp <= now,
+                        SymbolAlias.known_to > now,
+                        Symbol.timestamp <= now,
+                        Symbol.known_to > now,
+                    )
+                    .order_by(Symbol.native_symbol)
                 )
                 return list(result.scalars().all())
         except Exception as exc:
