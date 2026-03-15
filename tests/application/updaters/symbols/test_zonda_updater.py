@@ -25,6 +25,7 @@ from sqlalchemy.orm import sessionmaker
 from snapper.application.updaters.symbols.zonda import ZondaSymbolUpdaterService
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
@@ -270,6 +271,7 @@ async def test_update_database_handles_inserts_and_updates(
                 SymbolAlias.native_symbol == "BTC-USD",
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ws",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         eth_catalog = session.execute(
@@ -557,6 +559,7 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 SymbolAlias.native_symbol == "BTC-USD",
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ws",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         btc_ccxt = session.execute(
@@ -564,6 +567,7 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 SymbolAlias.native_symbol == "BTC-USD",
                 SymbolAlias.exchange == "zonda",
                 SymbolAlias.channel == "ccxt",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         eth_ws = session.execute(

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
@@ -125,6 +126,7 @@ async def test_update_database_creates_and_updates_mappings(
                 SymbolAlias.native_symbol == "EUR-PLN",
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "ws",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         eur_rest_alias = session.execute(
@@ -132,6 +134,7 @@ async def test_update_database_creates_and_updates_mappings(
                 SymbolAlias.native_symbol == "EUR-PLN",
                 SymbolAlias.exchange == "walutomat",
                 SymbolAlias.channel == "rest",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         usd_ws_alias = session.execute(

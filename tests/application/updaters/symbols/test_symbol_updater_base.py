@@ -16,11 +16,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import clear_repository_cache
+from snapper.data.repository import close_and_insert_sync
 
 
 @dataclass
@@ -1092,6 +1094,7 @@ def test_upsert_capability_updates_can_trade(
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == "BTC-USD",
                 SymbolExchangeCapability.exchange == "kraken",
+                SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert cap.can_trade is True
@@ -1140,6 +1143,7 @@ def test_upsert_capability_updates_can_market_data(
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == "ETH-USD",
                 SymbolExchangeCapability.exchange == "kraken",
+                SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert cap.can_market_data is True
@@ -1188,6 +1192,7 @@ def test_upsert_capability_updates_source(
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == "BTC-USD",
                 SymbolExchangeCapability.exchange == "kraken",
+                SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert cap.source == "kraken_updater"
@@ -1236,6 +1241,7 @@ def test_upsert_capability_updates_reason(
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == "BTC-USD",
                 SymbolExchangeCapability.exchange == "kraken",
+                SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert cap.reason == "WS-only"
@@ -1347,12 +1353,14 @@ def test_deactivate_stale_capabilities_deactivates_removed(
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == "BTC-USD",
                 SymbolExchangeCapability.exchange == "kraken",
+                SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
         eth_cap = session.execute(
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == "ETH-USD",
                 SymbolExchangeCapability.exchange == "kraken",
+                SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert btc_cap.can_trade is True
@@ -1525,3 +1533,119 @@ def test_deactivate_stale_different_exchange_not_touched(
             )
         ).scalar_one()
     assert polygon_cap.can_market_data is True
+
+
+def test_close_and_insert_sync_creates_fresh_row_when_no_existing(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify close_and_insert_sync creates a fresh row when no active row exists.
+
+    Given: Empty SymbolExchangeCapability table with catalog FK parent,
+    When: close_and_insert_sync called with new values,
+    Then: New row inserted with KNOWN_TO_MAX and provided timestamp.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    now = datetime(2024, 6, 1, tzinfo=UTC)
+    _seed_catalog(updater, "BTC-USD", now)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        new_row = close_and_insert_sync(
+            session=session,
+            model=SymbolExchangeCapability,
+            match_filters=[
+                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.exchange == "kraken",
+            ],
+            new_values={
+                "native_symbol": "BTC-USD",
+                "exchange": "kraken",
+                "can_market_data": True,
+                "can_trade": True,
+                "source": "test",
+                "reason": None,
+                "created_at": now,
+            },
+            bus_time=now,
+        )
+        session.commit()
+    assert new_row.known_to == KNOWN_TO_MAX
+    assert new_row.timestamp == now
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        cap = session.execute(
+            select(SymbolExchangeCapability).where(
+                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.exchange == "kraken",
+            )
+        ).scalar_one()
+    assert cap.can_trade is True
+    assert cap.source == "test"
+
+
+def test_close_and_insert_sync_closes_existing_and_inserts_new(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify close_and_insert_sync closes existing row and inserts replacement.
+
+    Given: Existing active SymbolExchangeCapability row,
+    When: close_and_insert_sync called with updated values,
+    Then: Old row closed (known_to=bus_time), new row active with same public_id.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    original_time = datetime(2024, 1, 1, tzinfo=UTC)
+    update_time = datetime(2024, 6, 1, tzinfo=UTC)
+    _seed_catalog(updater, "BTC-USD", original_time)
+    _seed_capability(updater, "BTC-USD", "kraken", True, True, "seed", original_time)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        original = session.execute(
+            select(SymbolExchangeCapability).where(
+                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.exchange == "kraken",
+            )
+        ).scalar_one()
+        original_public_id = original.public_id
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        close_and_insert_sync(
+            session=session,
+            model=SymbolExchangeCapability,
+            match_filters=[
+                SymbolExchangeCapability.native_symbol == "BTC-USD",
+                SymbolExchangeCapability.exchange == "kraken",
+            ],
+            new_values={
+                "native_symbol": "BTC-USD",
+                "exchange": "kraken",
+                "can_market_data": False,
+                "can_trade": False,
+                "source": "updated",
+                "reason": "test update",
+                "created_at": original_time,
+            },
+            bus_time=update_time,
+        )
+        session.commit()
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        all_caps = (
+            session.execute(
+                select(SymbolExchangeCapability).where(
+                    SymbolExchangeCapability.native_symbol == "BTC-USD",
+                    SymbolExchangeCapability.exchange == "kraken",
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(all_caps) == 2
+    closed = [c for c in all_caps if c.known_to != KNOWN_TO_MAX]
+    active = [c for c in all_caps if c.known_to == KNOWN_TO_MAX]
+    assert len(closed) == 1
+    assert len(active) == 1
+    assert closed[0].known_to == update_time
+    assert active[0].public_id == original_public_id
+    assert active[0].source == "updated"
+    assert active[0].can_trade is False

@@ -17,6 +17,7 @@ from urllib3.util.retry import RequestHistory
 
 from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.config.settings import AppSettings
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
@@ -816,6 +817,7 @@ async def test_update_existing_alias_exchange_symbol(
                 SymbolAlias.native_symbol == "BTC-USD",
                 SymbolAlias.exchange == "polygon",
                 SymbolAlias.channel == "rest",
+                SymbolAlias.known_to == KNOWN_TO_MAX,
             )
         ).scalar_one()
     assert btc_alias.exchange_symbol == "X:BTCUSD"

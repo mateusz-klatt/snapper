@@ -20,6 +20,7 @@ from sqlalchemy.orm import sessionmaker
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolCatalog
@@ -553,7 +554,12 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
             assert eth_catalog.base == "ETH"
             btc_rest = (
                 session.query(SymbolAlias)
-                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="rest")
+                .filter_by(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="rest",
+                    known_to=KNOWN_TO_MAX,
+                )
                 .one()
             )
             eth_ws = (
@@ -1858,7 +1864,12 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             ws_alias = (
                 session.query(SymbolAlias)
-                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="ws")
+                .filter_by(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ws",
+                    known_to=KNOWN_TO_MAX,
+                )
                 .one()
             )
             assert ws_alias.exchange_symbol == "BTC/USD"
@@ -1941,7 +1952,12 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             rest_alias = (
                 session.query(SymbolAlias)
-                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="rest")
+                .filter_by(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="rest",
+                    known_to=KNOWN_TO_MAX,
+                )
                 .one()
             )
             assert rest_alias.exchange_symbol == "XXBTZUSD"
@@ -2024,7 +2040,12 @@ class TestKrakenUpdateDatabaseBranches:
         with db_session_factory() as session:
             ccxt_alias = (
                 session.query(SymbolAlias)
-                .filter_by(native_symbol="BTC-USD", exchange="kraken", channel="ccxt")
+                .filter_by(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    channel="ccxt",
+                    known_to=KNOWN_TO_MAX,
+                )
                 .one()
             )
             assert ccxt_alias.exchange_symbol == "BTC/USD"
@@ -2710,7 +2731,9 @@ class TestKrakenPersistHelpers:
 
         with db_session_factory() as session:
             alias = (
-                session.query(SymbolAlias).filter_by(native_symbol="BTGOX-USD", channel="ws").one()
+                session.query(SymbolAlias)
+                .filter_by(native_symbol="BTGOX-USD", channel="ws", known_to=KNOWN_TO_MAX)
+                .one()
             )
             assert alias.exchange_symbol == "BTGOx/USD"
 

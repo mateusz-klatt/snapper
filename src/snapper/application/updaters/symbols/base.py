@@ -31,6 +31,7 @@ from snapper.data.models import SymbolCatalog
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
+from snapper.data.repository import close_and_insert_sync
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -175,7 +176,12 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_symbol: str,
         now: datetime,
     ) -> UpsertResult:
-        """Upsert a SymbolAlias row.
+        """Upsert a SymbolAlias row using SCD Type 2 close+insert.
+
+        SymbolCatalog uses in-place UPDATE because native_symbol has a
+        global unique constraint (it is an FK target).  SymbolAlias and
+        SymbolExchangeCapability use partial-unique constraints scoped
+        to active rows, so close+insert is safe.
 
         Args:
             session: SQLAlchemy session.
@@ -193,6 +199,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 SymbolAlias.native_symbol == native_symbol,
                 SymbolAlias.exchange == exchange,
                 SymbolAlias.channel == channel,
+                SymbolAlias.known_to > now,
             )
         ).scalar_one_or_none()
         if existing is None:
@@ -208,8 +215,23 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             return "created"
         if existing.exchange_symbol != exchange_symbol:
-            existing.exchange_symbol = exchange_symbol
-            existing.timestamp = now
+            close_and_insert_sync(
+                session=session,
+                model=SymbolAlias,
+                match_filters=[
+                    SymbolAlias.native_symbol == native_symbol,
+                    SymbolAlias.exchange == exchange,
+                    SymbolAlias.channel == channel,
+                ],
+                new_values={
+                    "native_symbol": native_symbol,
+                    "exchange": exchange,
+                    "channel": channel,
+                    "exchange_symbol": exchange_symbol,
+                    "created_at": existing.created_at,
+                },
+                bus_time=now,
+            )
             return "updated"
         return "unchanged"
 
@@ -224,7 +246,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         reason: str | None,
         now: datetime,
     ) -> UpsertResult:
-        """Upsert a SymbolExchangeCapability row.
+        """Upsert a SymbolExchangeCapability row using SCD Type 2 close+insert.
 
         Args:
             session: SQLAlchemy session.
@@ -243,6 +265,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             select(SymbolExchangeCapability).where(
                 SymbolExchangeCapability.native_symbol == native_symbol,
                 SymbolExchangeCapability.exchange == exchange,
+                SymbolExchangeCapability.known_to > now,
             )
         ).scalar_one_or_none()
         if existing is None:
@@ -259,21 +282,31 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 )
             )
             return "created"
-        changed = False
-        if existing.can_market_data != can_market_data:
-            existing.can_market_data = can_market_data
-            changed = True
-        if existing.can_trade != can_trade:
-            existing.can_trade = can_trade
-            changed = True
-        if existing.source != source:
-            existing.source = source
-            changed = True
-        if existing.reason != reason:
-            existing.reason = reason
-            changed = True
+        changed = (
+            existing.can_market_data != can_market_data
+            or existing.can_trade != can_trade
+            or existing.source != source
+            or existing.reason != reason
+        )
         if changed:
-            existing.timestamp = now
+            close_and_insert_sync(
+                session=session,
+                model=SymbolExchangeCapability,
+                match_filters=[
+                    SymbolExchangeCapability.native_symbol == native_symbol,
+                    SymbolExchangeCapability.exchange == exchange,
+                ],
+                new_values={
+                    "native_symbol": native_symbol,
+                    "exchange": exchange,
+                    "can_market_data": can_market_data,
+                    "can_trade": can_trade,
+                    "source": source,
+                    "reason": reason,
+                    "created_at": existing.created_at,
+                },
+                bus_time=now,
+            )
             return "updated"
         return "unchanged"
 
@@ -287,9 +320,9 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
     ) -> int:
         """Deactivate capabilities for symbols no longer seen on the exchange.
 
-        Sets ``can_trade=False`` and ``can_market_data=False`` for capability
-        rows belonging to ``exchange`` whose ``native_symbol`` is not in
-        ``active_symbols``.
+        Uses SCD Type 2 close+insert to set ``can_trade=False`` and
+        ``can_market_data=False`` for capability rows belonging to
+        ``exchange`` whose ``native_symbol`` is not in ``active_symbols``.
 
         Args:
             session: SQLAlchemy session.
@@ -303,6 +336,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         stmt = select(SymbolExchangeCapability).where(
             SymbolExchangeCapability.exchange == exchange,
+            SymbolExchangeCapability.known_to > now,
             or_(
                 SymbolExchangeCapability.can_trade.is_(True),
                 SymbolExchangeCapability.can_market_data.is_(True),
@@ -312,11 +346,24 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         deactivated = 0
         for cap in active_caps:
             if cap.native_symbol not in active_symbols:
-                cap.can_trade = False
-                cap.can_market_data = False
-                cap.source = source
-                cap.reason = "Delisted: not seen in updater run"
-                cap.timestamp = now
+                close_and_insert_sync(
+                    session=session,
+                    model=SymbolExchangeCapability,
+                    match_filters=[
+                        SymbolExchangeCapability.native_symbol == cap.native_symbol,
+                        SymbolExchangeCapability.exchange == exchange,
+                    ],
+                    new_values={
+                        "native_symbol": cap.native_symbol,
+                        "exchange": exchange,
+                        "can_market_data": False,
+                        "can_trade": False,
+                        "source": source,
+                        "reason": "Delisted: not seen in updater run",
+                        "created_at": cap.created_at,
+                    },
+                    bus_time=now,
+                )
                 deactivated += 1
         return deactivated
 
@@ -348,6 +395,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         existing_count_stmt = select(SymbolExchangeCapability).where(
             SymbolExchangeCapability.exchange == exchange,
+            SymbolExchangeCapability.known_to > now,
             or_(
                 SymbolExchangeCapability.can_trade.is_(True),
                 SymbolExchangeCapability.can_market_data.is_(True),
