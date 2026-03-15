@@ -12,6 +12,7 @@ from datetime import datetime
 
 import bcrypt
 from sqlalchemy import select
+from sqlalchemy import update
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.user import UserProfile
@@ -461,7 +462,6 @@ class UserService:
         """
         t = bus_time or datetime.now(UTC)
         async with self.repository.session() as session:
-            from sqlalchemy import update
 
             existing = (
                 (

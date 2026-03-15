@@ -1205,10 +1205,9 @@ class TestUserBitemporal:
             await s.refresh(evt1)
 
         async with repo.session() as s:
-            from sqlalchemy import update as sa_update
 
             await s.execute(
-                sa_update(UserLoginEvent)
+                update(UserLoginEvent)
                 .where(
                     UserLoginEvent.id == evt1.id,
                 )
@@ -1258,12 +1257,9 @@ class TestUserBitemporal:
             await s.refresh(evt)
 
         async with repo.session() as s:
-            from sqlalchemy import update as sa_update
 
             await s.execute(
-                sa_update(UserLoginEvent)
-                .where(UserLoginEvent.id == evt.id)
-                .values(known_to=t_close)
+                update(UserLoginEvent).where(UserLoginEvent.id == evt.id).values(known_to=t_close)
             )
             await s.commit()
 
