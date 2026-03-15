@@ -186,6 +186,7 @@ class ExchangeOrderSnapshot:
     timestamp: float
     fee: float | None = None
     db_order_id: int | None = None
+    db_order_public_id: str | None = None
 
 
 @dataclass

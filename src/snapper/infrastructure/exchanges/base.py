@@ -332,7 +332,7 @@ class ExchangeClientBase(ABC):
         self,
         request: ExchangeOrderRequest,
         order: ExchangeOrderSnapshot,
-    ) -> int | None:
+    ) -> tuple[int, str] | None:
         """Persist a new order to the database.
 
         This internal method is called after successfully creating an order
@@ -343,8 +343,8 @@ class ExchangeClientBase(ABC):
             order: Exchange response with order details.
 
         Returns:
-            Database order ID if successful, None if repository is not
-            configured or operation fails.
+            Tuple of (order_id, public_id) if successful, None if repository
+            is not configured or operation fails.
         """
         if self.repository is None:
             return None
@@ -355,7 +355,7 @@ class ExchangeClientBase(ABC):
             instrument_id = await self.repository.upsert_instrument(
                 symbol=request.symbol, exchange=self.exchange_name, base=base, quote=quote
             )
-            db_order_id = await self.repository.insert_order(
+            return await self.repository.insert_order(
                 instrument_id=instrument_id,
                 client_order_id=order.client_order_id,
                 exchange_order_id=order.id,
@@ -367,7 +367,6 @@ class ExchangeClientBase(ABC):
                 status=order.status.value,
                 time_in_force=None,
             )
-            return db_order_id
         except SQLAlchemyError as e:
             logger.error(f"Failed to log order to database: {e}")
             return None
@@ -412,6 +411,7 @@ class ExchangeClientBase(ABC):
     async def _log_execution_to_db(
         self,
         db_order_id: int,
+        order_public_id: str,
         execution: ExecutionUpdate,
     ) -> None:
         """Persist an execution (fill) to the database.
@@ -421,6 +421,7 @@ class ExchangeClientBase(ABC):
 
         Args:
             db_order_id: Database order ID that was executed.
+            order_public_id: Logical order identity (stable across versions).
             execution: Execution details including price, size, and fees.
         """
         if self.repository is None:
@@ -428,6 +429,7 @@ class ExchangeClientBase(ABC):
         try:
             await self.repository.insert_execution(
                 order_id=db_order_id,
+                order_public_id=order_public_id,
                 timestamp=execution.timestamp,
                 side=execution.side.value,
                 status=to_fill_status(execution),

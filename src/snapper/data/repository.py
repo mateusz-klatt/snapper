@@ -183,8 +183,8 @@ class Repository(ABC):
         size: float,
         status: str,
         time_in_force: str | None = None,
-    ) -> int:
-        """Insert new order record, returning order ID."""
+    ) -> tuple[int, str]:
+        """Insert new order record, returning (id, public_id) tuple."""
         ...
 
     @abstractmethod
@@ -208,6 +208,7 @@ class Repository(ABC):
     async def insert_execution(
         self,
         order_id: int,
+        order_public_id: str,
         timestamp: datetime,
         side: str,
         status: str,
@@ -475,13 +476,15 @@ class SQLAlchemyRepository(Repository):
                 existing = (
                     (
                         await s.execute(
-                            select(Candle).where(
+                            select(Candle)
+                            .where(
                                 Candle.instrument_id == r["instrument_id"],
                                 Candle.timeframe == r["timeframe"],
                                 Candle.open_at == r["open_at"],
                                 Candle.timestamp <= now,
                                 Candle.known_to > now,
                             )
+                            .with_for_update()
                         )
                     )
                     .scalars()
@@ -515,8 +518,8 @@ class SQLAlchemyRepository(Repository):
         size: float,
         status: str,
         time_in_force: str | None = None,
-    ) -> int:
-        """Insert new order record and return generated ID."""
+    ) -> tuple[int, str]:
+        """Insert new order record and return (id, public_id) tuple."""
         async with self.session() as s:
             order = Order(
                 instrument_id=instrument_id,
@@ -538,7 +541,7 @@ class SQLAlchemyRepository(Repository):
             s.add(order)
             await s.commit()
             await s.refresh(order)
-            return order.id
+            return (order.id, order.public_id)
 
     async def update_order(
         self,
@@ -553,7 +556,11 @@ class SQLAlchemyRepository(Repository):
         """Close old order version and insert new one (SCD Type 2)."""
         async with self.session() as s:
             now = datetime.now(UTC)
-            old_order = (await s.execute(select(Order).where(Order.id == order_id))).scalars().one()
+            old_order = (
+                (await s.execute(select(Order).where(Order.id == order_id).with_for_update()))
+                .scalars()
+                .one()
+            )
             await s.execute(update(Order).where(Order.id == order_id).values(known_to=now))
             new_order = Order(
                 public_id=old_order.public_id,
@@ -583,6 +590,7 @@ class SQLAlchemyRepository(Repository):
     async def insert_execution(
         self,
         order_id: int,
+        order_public_id: str,
         timestamp: datetime,
         side: str,
         status: str,
@@ -598,6 +606,7 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             execution = Execution(
                 order_id=order_id,
+                order_public_id=order_public_id,
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
@@ -622,7 +631,8 @@ class SQLAlchemyRepository(Repository):
         end: datetime,
         exchange: AllExchange,
     ) -> list[dict[str, Any]]:
-        """Retrieve candles for instrument within time range."""
+        """Retrieve active candles for instrument within time range."""
+        now = datetime.now(UTC)
         async with self.session() as s:
             q_inst = await s.execute(
                 select(Instrument).where(
@@ -650,6 +660,8 @@ class SQLAlchemyRepository(Repository):
                         Candle.timeframe == timeframe,
                         Candle.open_at >= start,
                         Candle.open_at <= end,
+                        Candle.timestamp <= now,
+                        Candle.known_to > now,
                     )
                 )
                 .order_by(Candle.open_at.asc())
@@ -1083,10 +1095,10 @@ class MSSQLRepository(Repository):
         size: float,
         status: str,
         time_in_force: str | None = None,
-    ) -> int:
+    ) -> tuple[int, str]:
         """Insert order record via sync thread."""
 
-        def _do(s: SyncSession) -> int:
+        def _do(s: SyncSession) -> tuple[int, str]:
             order = Order(
                 instrument_id=instrument_id,
                 client_order_id=client_order_id,
@@ -1107,7 +1119,7 @@ class MSSQLRepository(Repository):
             s.add(order)
             s.commit()
             s.refresh(order)
-            return order.id
+            return (order.id, order.public_id)
 
         return await self._run_sync(_do)
 
@@ -1157,6 +1169,7 @@ class MSSQLRepository(Repository):
     async def insert_execution(
         self,
         order_id: int,
+        order_public_id: str,
         timestamp: datetime,
         side: str,
         status: str,
@@ -1173,6 +1186,7 @@ class MSSQLRepository(Repository):
         def _do(s: SyncSession) -> int:
             execution = Execution(
                 order_id=order_id,
+                order_public_id=order_public_id,
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
@@ -1199,9 +1213,10 @@ class MSSQLRepository(Repository):
         end: datetime,
         exchange: AllExchange,
     ) -> list[dict[str, Any]]:
-        """Retrieve candles via sync thread."""
+        """Retrieve active candles via sync thread."""
 
         def _do(s: SyncSession) -> list[dict[str, Any]]:
+            now = datetime.now(UTC)
             q_inst = s.execute(
                 select(Instrument).where(
                     and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
@@ -1228,6 +1243,8 @@ class MSSQLRepository(Repository):
                         Candle.timeframe == timeframe,
                         Candle.open_at >= start,
                         Candle.open_at <= end,
+                        Candle.timestamp <= now,
+                        Candle.known_to > now,
                     )
                 )
                 .order_by(Candle.open_at.asc())

@@ -255,11 +255,13 @@ class SettingsService:
             existing = (
                 (
                     await session.execute(
-                        select(Setting).where(
+                        select(Setting)
+                        .where(
                             Setting.key == key,
                             Setting.timestamp <= now,
                             Setting.known_to > now,
                         )
+                        .with_for_update()
                     )
                 )
                 .scalars()

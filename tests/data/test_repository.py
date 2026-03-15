@@ -495,7 +495,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     instrument_id = await repo.upsert_instrument(**instrument_payload)
     duplicate_id = await repo.upsert_instrument(**instrument_payload)
     assert duplicate_id == instrument_id
-    base_ts = datetime.now(UTC)
+    base_ts = datetime.now(UTC) - timedelta(minutes=10)
     candle_rows = [
         {
             "instrument_id": instrument_id,
@@ -561,7 +561,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         exchange="kraken",
     )
     assert len(trade_results) == 2
-    order_id = await repo.insert_order(
+    order_id, order_public_id = await repo.insert_order(
         instrument_id=instrument_id,
         client_order_id="client-1",
         exchange_order_id=None,
@@ -588,6 +588,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     )
     execution_id = await repo.insert_execution(
         order_id=order_v3,
+        order_public_id=order_public_id,
         timestamp=base_ts + timedelta(minutes=2, seconds=30),
         side="buy",
         status="filled",
@@ -834,9 +835,9 @@ class DummyRepository(Repository):
         size: float,
         status: str,
         time_in_force: str | None = None,
-    ) -> int:
-        """Insert order - no-op returning 0."""
-        return 0
+    ) -> tuple[int, str]:
+        """Insert order - no-op returning (0, stub-public-id)."""
+        return (0, "stub-public-id")
 
     async def update_order(
         self,
@@ -852,6 +853,7 @@ class DummyRepository(Repository):
     async def insert_execution(
         self,
         order_id: int,
+        order_public_id: str,
         ts: datetime,
         price: float,
         size: float,
@@ -2935,6 +2937,7 @@ async def test_mssql_insert_order_uses_sync_session(
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
             self.id = ""
+            self.public_id = ""
 
     class _Session:
         def __init__(self) -> None:
@@ -2955,6 +2958,7 @@ async def test_mssql_insert_order_uses_sync_session(
             self.commit_called = True
             if self.added is not None:
                 self.added.id = "order-uuid-7777"
+                self.added.public_id = "order-pub-7777"
 
         def refresh(self, obj: _DummyOrder) -> None:
             self.refreshed = obj
@@ -2972,7 +2976,7 @@ async def test_mssql_insert_order_uses_sync_session(
         size=1.0,
         status="open",
     )
-    assert result == "order-uuid-7777"
+    assert result == ("order-uuid-7777", "order-pub-7777")
 
 
 class _MinimalRepository(Repository):
@@ -3011,8 +3015,8 @@ class _MinimalRepository(Repository):
         size: float,
         status: str,
         time_in_force: str | None = None,
-    ) -> int:
-        return 0
+    ) -> tuple[int, str]:
+        return (0, "stub-public-id")
 
     async def update_order(
         self,
@@ -3028,6 +3032,7 @@ class _MinimalRepository(Repository):
     async def insert_execution(
         self,
         order_id: int,
+        order_public_id: str,
         timestamp: datetime,
         price: float,
         size: float,

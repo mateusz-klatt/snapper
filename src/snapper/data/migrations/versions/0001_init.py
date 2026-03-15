@@ -132,6 +132,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_sc_base_quote", "symbol_catalog", ["base", "quote"])
     op.create_table(
@@ -162,6 +163,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_alias_native_exchange_channel",
@@ -169,6 +171,7 @@ def upgrade() -> None:
         ["native_symbol", "exchange", "channel"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_alias_exchange_channel_symbol",
@@ -176,6 +179,7 @@ def upgrade() -> None:
         ["exchange", "channel", "exchange_symbol"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_symbol_aliases_native_symbol", "symbol_aliases", ["native_symbol"])
     op.create_table(
@@ -204,6 +208,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_sec_symbol_exchange",
@@ -211,6 +216,7 @@ def upgrade() -> None:
         ["native_symbol", "exchange"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_sec_exchange", "symbol_exchange_capabilities", ["exchange"])
     op.create_index("ix_sec_native_symbol", "symbol_exchange_capabilities", ["native_symbol"])
@@ -246,6 +252,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_instrument_symbol_exchange",
@@ -253,6 +260,7 @@ def upgrade() -> None:
         ["symbol", "exchange"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_instruments_symbol", "instruments", ["symbol"])
     op.create_index("ix_instruments_exchange", "instruments", ["exchange"])
@@ -281,6 +289,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_candle_itf_open",
@@ -288,6 +297,7 @@ def upgrade() -> None:
         ["instrument_id", "timeframe", "open_at"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_candles_instrument_id", "candles", ["instrument_id"])
     op.create_index("ix_candle_instrument_open", "candles", ["instrument_id", "open_at"])
@@ -312,6 +322,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_trades_instrument_id", "trades", ["instrument_id"])
     op.create_index("ix_trades_timestamp", "trades", ["timestamp"])
@@ -345,6 +356,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_orders_instrument_id", "orders", ["instrument_id"])
     op.create_index("ix_orders_client_order_id", "orders", ["client_order_id"])
@@ -355,6 +367,7 @@ def upgrade() -> None:
         ["instrument_id", "client_order_id"],
         unique=True,
         sqlite_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
+        postgresql_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_orders_exchange_oid",
@@ -362,12 +375,14 @@ def upgrade() -> None:
         ["instrument_id", "exchange_order_id"],
         unique=True,
         sqlite_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
+        postgresql_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
     )
     op.create_table(
         "executions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("order_id", sa.Integer(), nullable=False),
+        sa.Column("order_public_id", sa.String(36), nullable=False),
         sa.Column("exec_id", sa.String(64), nullable=True),
         sa.Column("trade_id", sa.String(64), nullable=True),
         sa.Column("side", sa.String(4), nullable=False),
@@ -388,19 +403,21 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_executions_order_id", "executions", ["order_id"])
+    op.create_index("ix_executions_order_public_id", "executions", ["order_public_id"])
     op.create_index(
         "uq_executions_order_exec",
         "executions",
-        ["order_id", "exec_id"],
+        ["order_public_id", "exec_id"],
         unique=True,
         sqlite_where=text("exec_id IS NOT NULL"),
     )
     op.create_index(
         "uq_executions_order_trade",
         "executions",
-        ["order_id", "trade_id"],
+        ["order_public_id", "trade_id"],
         unique=True,
         sqlite_where=text("trade_id IS NOT NULL"),
     )
@@ -424,6 +441,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_positions_instrument_id",
@@ -431,6 +449,7 @@ def upgrade() -> None:
         ["instrument_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_positions_instrument_id", "positions", ["instrument_id"])
     op.create_table(
@@ -455,6 +474,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_signals_instrument_id", "signals", ["instrument_id"])
     op.create_index("ix_signals_fired_at", "signals", ["fired_at"])
@@ -479,6 +499,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "ix_users_username", "users", ["username"], unique=True, sqlite_where=text(_KNOWN_TO_ACTIVE)
@@ -503,6 +524,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_settings_key", "settings", ["key"], unique=True, sqlite_where=text(_KNOWN_TO_ACTIVE)
@@ -531,6 +553,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_process_runs_process_name", "process_runs", ["process_name"])
     op.create_index("ix_process_runs_status", "process_runs", ["status"])
@@ -561,6 +584,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
         "uq_instrument_spec_instrument",
@@ -568,6 +592,7 @@ def upgrade() -> None:
         ["instrument_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_instrument_specs_instrument_id", "instrument_specs", ["instrument_id"])
     op.create_table(
@@ -598,6 +623,7 @@ def upgrade() -> None:
         ["public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_market_snapshots_symbol", "market_snapshots", ["symbol"])
     op.create_index("ix_market_snapshots_timestamp", "market_snapshots", ["timestamp"])

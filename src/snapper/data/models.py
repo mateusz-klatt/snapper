@@ -117,8 +117,15 @@ class Instrument(Base):
             "exchange",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
-        Index("ix_instruments_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_instruments_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
         Index("ix_instruments_exchange", "exchange"),
     )
@@ -146,9 +153,16 @@ class Candle(Base):
             "open_at",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
         Index("ix_candle_instrument_open", "instrument_id", "open_at"),
-        Index("ix_candles_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_candles_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -174,7 +188,13 @@ class Trade(Base):
     __table_args__ = (
         UniqueConstraint("trade_id", name="uq_trade_trade_id"),
         Index("ix_trade_instrument_ts", "instrument_id", "timestamp"),
-        Index("ix_trades_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_trades_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -201,6 +221,9 @@ class Order(Base):
             sqlite_where=text(
                 "client_order_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
             ),
+            postgresql_where=text(
+                "client_order_id IS NOT NULL AND known_to = '9999-12-31 23:59:59+00'"
+            ),
         ),
         Index(
             "uq_orders_exchange_oid",
@@ -210,8 +233,17 @@ class Order(Base):
             sqlite_where=text(
                 "exchange_order_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
             ),
+            postgresql_where=text(
+                "exchange_order_id IS NOT NULL AND known_to = '9999-12-31 23:59:59+00'"
+            ),
         ),
-        Index("ix_orders_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_orders_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -240,23 +272,30 @@ class Execution(Base):
     __table_args__ = (
         Index(
             "uq_executions_order_exec",
-            "order_id",
+            "order_public_id",
             "exec_id",
             unique=True,
             sqlite_where=text("exec_id IS NOT NULL"),
         ),
         Index(
             "uq_executions_order_trade",
-            "order_id",
+            "order_public_id",
             "trade_id",
             unique=True,
             sqlite_where=text("trade_id IS NOT NULL"),
         ),
-        Index("ix_executions_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_executions_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
+    order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exec_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
@@ -281,8 +320,15 @@ class Position(Base):
             "instrument_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
-        Index("ix_positions_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_positions_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -300,7 +346,13 @@ class Signal(Base):
 
     __tablename__ = "signals"
     __table_args__ = (
-        Index("ix_signals_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_signals_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -321,8 +373,20 @@ class User(Base):
 
     __tablename__ = "users"
     __table_args__ = (
-        Index("ix_users_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
-        Index("uq_users_username", "username", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_users_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index(
+            "uq_users_username",
+            "username",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -342,8 +406,20 @@ class Setting(Base):
 
     __tablename__ = "settings"
     __table_args__ = (
-        Index("ix_settings_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
-        Index("uq_settings_key", "key", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_settings_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index(
+            "uq_settings_key",
+            "key",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -382,6 +458,7 @@ class SymbolCatalog(Base):
             "public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -420,6 +497,7 @@ class SymbolAlias(Base):
             "channel",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
         Index(
             "uq_alias_exchange_channel_symbol",
@@ -428,12 +506,14 @@ class SymbolAlias(Base):
             "exchange_symbol",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
         Index(
             "ix_symbol_aliases_public_id",
             "public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -481,6 +561,7 @@ class SymbolExchangeCapability(Base):
             "exchange",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
         CheckConstraint(
             _CK_EXCHANGE_LOWER,
@@ -504,6 +585,7 @@ class SymbolExchangeCapability(Base):
             "public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -530,7 +612,13 @@ class ProcessRun(Base):
 
     __tablename__ = "process_runs"
     __table_args__ = (
-        Index("ix_process_runs_public_id", "public_id", unique=True, sqlite_where=_KNOWN_TO_ACTIVE),
+        Index(
+            "ix_process_runs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
@@ -558,12 +646,14 @@ class InstrumentSpec(Base):
             "instrument_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
         Index(
             "ix_instrument_specs_public_id",
             "public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -617,6 +707,7 @@ class MarketSnapshot(Base):
             "public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

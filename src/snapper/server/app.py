@@ -659,7 +659,14 @@ def _create_orders_executions_router() -> APIRouter:
             async with repo.session() as session:
                 query = (
                     select(Execution, Order, Instrument)
-                    .join(Order, Execution.order_id == Order.id)
+                    .join(
+                        Order,
+                        and_(
+                            Execution.order_public_id == Order.public_id,
+                            Order.timestamp <= processing_date,
+                            Order.known_to > processing_date,
+                        ),
+                    )
                     .join(Instrument, Order.instrument_id == Instrument.id)
                     .where(Execution.timestamp <= processing_date)
                     .where(Execution.known_to > processing_date)

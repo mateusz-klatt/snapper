@@ -708,7 +708,7 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
     """
     client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()), fill_delay=0)
     with (
-        patch.object(client, "_log_order_to_db", AsyncMock(return_value=123)),
+        patch.object(client, "_log_order_to_db", AsyncMock(return_value=(123, "order-pub-abc"))),
         patch.object(client, "_log_order_update_to_db", AsyncMock()) as log_update,
         patch.object(client, "_log_execution_to_db", AsyncMock()) as log_exec,
     ):
@@ -723,6 +723,7 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
         order = await client.create_order(request)
         execution = await asyncio.wait_for(client._execution_queue.get(), timeout=0.5)
     assert order.db_order_id == 123
+    assert order.db_order_public_id == "order-pub-abc"
     log_update.assert_awaited_once()
     log_exec.assert_awaited_once()
     assert execution.order_status == OrderStatusEnum.CLOSED

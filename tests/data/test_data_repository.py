@@ -629,6 +629,7 @@ async def test_mssql_repository_order_execution_methods(monkeypatch: Any) -> Non
     assert "Update" in executed_stmts
     exec_id = await ms_repo.insert_execution(
         order_id=1,
+        order_public_id="order-pub-id",
         timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
         side="buy",
         status="filled",

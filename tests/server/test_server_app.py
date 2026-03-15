@@ -1278,6 +1278,7 @@ class MockExecution:
         self.id = 1
         self.public_id = "execution-uuid-1234"
         self.order_id = 1
+        self.order_public_id = "order-uuid-1234"
         self.exec_id = "exec-001"
         self.trade_id = "trade-001"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 1, tzinfo=dt.UTC)

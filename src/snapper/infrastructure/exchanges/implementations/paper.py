@@ -184,9 +184,10 @@ class PaperExchangeClient(ExchangeClientBase):
             fee=None,
         )
         self._orders[order_id] = order
-        db_order_id = await self._log_order_to_db(request, order)
-        if db_order_id is not None:
-            order.db_order_id = db_order_id
+        db_result = await self._log_order_to_db(request, order)
+        if db_result is not None:
+            order.db_order_id = db_result[0]
+            order.db_order_public_id = db_result[1]
         self._fill_simulator_task = asyncio.create_task(self._simulate_fill(order))
         return order
 
@@ -215,13 +216,14 @@ class PaperExchangeClient(ExchangeClientBase):
             order.status = OrderStatusEnum.CLOSED
             order.filled = order.amount
             order.remaining = 0.0
-            if order.db_order_id is not None:
+            if order.db_order_id is not None and order.db_order_public_id is not None:
                 new_order_id = await self._log_order_update_to_db(
                     db_order_id=order.db_order_id,
                     status=OrderStatusEnum.CLOSED,
                 )
                 await self._log_execution_to_db(
                     db_order_id=new_order_id if new_order_id is not None else order.db_order_id,
+                    order_public_id=order.db_order_public_id,
                     execution=execution,
                 )
             await self._execution_queue.put(execution)

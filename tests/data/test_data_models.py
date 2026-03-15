@@ -277,6 +277,7 @@ class TestExecutionModel:
         """
         execution = Execution(
             order_id=1,
+            order_public_id="order-pub-id-1",
             timestamp=datetime.now(UTC),
             side="buy",
             status="filled",
@@ -286,6 +287,7 @@ class TestExecutionModel:
             fee_asset="USD",
         )
         assert execution.order_id == 1
+        assert execution.order_public_id == "order-pub-id-1"
         assert execution.price == pytest.approx(50000.0)
         assert execution.size == pytest.approx(1.0)
         assert execution.fee == pytest.approx(5.0)
@@ -301,6 +303,7 @@ class TestExecutionModel:
         """
         execution = Execution(
             order_id=1,
+            order_public_id="order-pub-id-1",
             timestamp=datetime.now(UTC),
             side="buy",
             status="filled",
