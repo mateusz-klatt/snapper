@@ -22,6 +22,7 @@ import {
   StrategyListResponseSchema,
   MessageResponseSchema,
   HealthCheckResponseSchema,
+  UserListResponseSchema,
 } from './schemas/api.generated.zod'
 import type {
   SystemStatus,
@@ -44,6 +45,10 @@ import type {
   ProcessStopResponse,
   StrategyListResponse,
   ChangePasswordRequest,
+  UserListResponse,
+  CreateUserRequest,
+  UpdateUserRequest,
+  AdminResetPasswordRequest,
 } from '../types/api'
 
 interface RequestOptions {
@@ -458,6 +463,37 @@ class APIClient {
     )
 
     return validateResponse(data, MessageResponseSchema, '/auth/users/:id/change-password')
+  }
+  async listUsers(includeInactive: boolean): Promise<UserListResponse> {
+    const data = await this.getJSON(`/api/auth/users?include_inactive=${includeInactive}`)
+
+    return validateResponse(data, UserListResponseSchema, '/auth/users')
+  }
+  async createUser(body: CreateUserRequest): Promise<{ message: string }> {
+    const data = await this.postJSON('/api/auth/users', body)
+
+    return validateResponse(data, MessageResponseSchema, '/auth/users POST')
+  }
+  async updateUser(userId: string, body: UpdateUserRequest): Promise<{ message: string }> {
+    const data = await this.putJSON(`/api/auth/users/${encodeURIComponent(userId)}`, body)
+
+    return validateResponse(data, MessageResponseSchema, '/auth/users/:id PUT')
+  }
+  async deactivateUser(userId: string): Promise<{ message: string }> {
+    const data = await this.deleteJSON(`/api/auth/users/${encodeURIComponent(userId)}`)
+
+    return validateResponse(data, MessageResponseSchema, '/auth/users/:id DELETE')
+  }
+  async adminResetPassword(
+    userId: string,
+    body: AdminResetPasswordRequest
+  ): Promise<{ message: string }> {
+    const data = await this.postJSON(
+      `/api/auth/users/${encodeURIComponent(userId)}/admin-reset-password`,
+      body
+    )
+
+    return validateResponse(data, MessageResponseSchema, '/auth/users/:id/admin-reset-password')
   }
 }
 

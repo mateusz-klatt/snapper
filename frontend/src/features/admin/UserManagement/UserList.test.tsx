@@ -4,10 +4,16 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import UserList from './UserList'
-import { api } from '../../../lib/apiClient'
+import { apiClient } from '../../../lib/apiClient'
 
 vi.mock('../../../lib/apiClient', () => ({
-  api: vi.fn(),
+  apiClient: {
+    listUsers: vi.fn(),
+    deactivateUser: vi.fn(),
+  },
+}))
+vi.mock('../../../stores/auth', () => ({
+  useAuth: vi.fn(() => ({ isAuthenticated: true })),
 }))
 const createQueryClient = () =>
   new QueryClient({
@@ -29,14 +35,10 @@ describe('UserList', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [],
-          total_count: 0,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [],
+      total_count: 0,
+    })
   })
   it('renders user list', async () => {
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
@@ -75,106 +77,86 @@ describe('UserList', () => {
     })
   })
   it('displays users list', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'admin',
-              email: 'admin@example.com',
-              role: 'admin',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'admin',
+          email: 'admin@example.com',
+          role: 'admin',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('User Management')).toBeTruthy()
     })
   })
   it('displays user roles with badges', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'testuser',
-              email: 'test@example.com',
-              role: 'admin',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'testuser',
+          email: 'test@example.com',
+          role: 'admin',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('admin')[0]).toBeTruthy()
     })
   })
   it('displays inactive users badge', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'inactive_user',
-              email: 'inactive@example.com',
-              role: 'viewer',
-              is_active: false,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'inactive_user',
+          email: 'inactive@example.com',
+          role: 'viewer',
+          is_active: false,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('Inactive')[0]).toBeTruthy()
     })
   })
   it('calls onEditUser when edit button clicked', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'testuser',
-              email: 'test@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'testuser',
+          email: 'test@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('User Management')).toBeTruthy()
     })
   })
   it('shows error state', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockRejectedValue(new Error('HTTP 500: Internal Server Error'))
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText(/Error loading users/i)).toBeTruthy()
     })
   })
   it('shows unknown error message when error is not an Error instance', async () => {
-    vi.mocked(api).mockRejectedValue('boom')
+    vi.mocked(apiClient.listUsers).mockRejectedValue('boom')
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText(/Unknown error/i)).toBeTruthy()
@@ -187,44 +169,36 @@ describe('UserList', () => {
     })
   })
   it('formats dates correctly', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'testuser',
-              email: 'test@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'testuser',
+          email: 'test@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('testuser')[0]).toBeTruthy()
     })
   })
   it('cancels user deletion when cancel clicked in dialog', async () => {
-    vi.mocked(api).mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'canceluser',
-              email: 'cancel@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValueOnce({
+      users: [
+        {
+          username: 'canceluser',
+          email: 'cancel@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     const table = await screen.findByRole('table')
 
@@ -242,31 +216,22 @@ describe('UserList', () => {
       expect(screen.getByText('Deactivate User')).toBeTruthy()
     })
     await userEvent.click(screen.getByText('Cancel'))
-    expect(vi.mocked(api)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(apiClient.deactivateUser)).not.toHaveBeenCalled()
   })
   it('calls delete API when user confirms deletion', async () => {
-    vi.mocked(api).mockReset()
-    vi.mocked(api).mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'deleteuser',
-              email: 'del@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
-    vi.mocked(api).mockResolvedValueOnce({ ok: true } as Response)
-    vi.mocked(api).mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ users: [], total_count: 0 }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'deleteuser',
+          email: 'del@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
+    vi.mocked(apiClient.deactivateUser).mockResolvedValue({ message: 'deactivated' })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     const table = await screen.findByRole('table')
 
@@ -285,32 +250,25 @@ describe('UserList', () => {
     })
     await userEvent.click(screen.getByText('Deactivate'))
     await waitFor(() => {
-      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/deleteuser', { method: 'DELETE' })
+      expect(vi.mocked(apiClient.deactivateUser)).toHaveBeenCalledWith('deleteuser')
     })
   })
   it('handles delete API error', async () => {
-    vi.mocked(api).mockReset()
-    vi.mocked(api).mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'failuser',
-              email: 'fail@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
-    vi.mocked(api).mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'failuser',
+          email: 'fail@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
+    vi.mocked(apiClient.deactivateUser).mockRejectedValue(
+      new Error('HTTP 500: Internal Server Error')
+    )
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     const table = await screen.findByRole('table')
 
@@ -329,38 +287,30 @@ describe('UserList', () => {
     })
     await userEvent.click(screen.getByText('Deactivate'))
     await waitFor(() => {
-      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/failuser', { method: 'DELETE' })
+      expect(vi.mocked(apiClient.deactivateUser)).toHaveBeenCalledWith('failuser')
     })
   })
   it('falls back to empty users list when response has no users field', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({}),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({} as { users: []; total_count: 0 })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('No users found')).toBeTruthy()
     })
   })
   it('handles delete error with empty message', async () => {
-    vi.mocked(api).mockReset()
-    vi.mocked(api).mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'emptyerror',
-              email: 'empty@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
-    vi.mocked(api).mockRejectedValueOnce(new Error(''))
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'emptyerror',
+          email: 'empty@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
+    vi.mocked(apiClient.deactivateUser).mockRejectedValue(new Error(''))
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     const table = await screen.findByRole('table')
 
@@ -379,92 +329,76 @@ describe('UserList', () => {
     })
     await userEvent.click(screen.getByText('Deactivate'))
     await waitFor(() => {
-      expect(vi.mocked(api)).toHaveBeenCalledWith('/auth/users/emptyerror', { method: 'DELETE' })
+      expect(vi.mocked(apiClient.deactivateUser)).toHaveBeenCalledWith('emptyerror')
     })
   })
   it('displays operator role badge', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'operator_user',
-              email: 'operator@example.com',
-              role: 'operator',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'operator_user',
+          email: 'operator@example.com',
+          role: 'operator',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('operator')[0]).toBeTruthy()
     })
   })
   it('displays viewer role badge', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'viewer_user',
-              email: 'viewer@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'viewer_user',
+          email: 'viewer@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('viewer')[0]).toBeTruthy()
     })
   })
   it('displays unknown role badge with default styling', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'unknown_user',
-              email: 'unknown@example.com',
-              role: 'custom_role',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'unknown_user',
+          email: 'unknown@example.com',
+          role: 'custom_role',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('custom_role')[0]).toBeTruthy()
     })
   })
   it('formats dates correctly', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'dateuser',
-              email: 'date@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-06-15T10:30:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'dateuser',
+          email: 'date@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-06-15T10:30:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('dateuser')[0]).toBeTruthy()
@@ -505,51 +439,43 @@ describe('UserList', () => {
     }
   })
   it('displays user count badge', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'user1',
-              email: 'user1@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-            {
-              username: 'user2',
-              email: 'user2@example.com',
-              role: 'admin',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 2,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'user1',
+          email: 'user1@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+        {
+          username: 'user2',
+          email: 'user2@example.com',
+          role: 'admin',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 2,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('2 users')).toBeTruthy()
     })
   })
   it('calls edit when edit button clicked', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'editableuser',
-              email: 'edit@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'editableuser',
+          email: 'edit@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     const table = await screen.findByRole('table')
 
@@ -568,51 +494,43 @@ describe('UserList', () => {
     expect(mockOnEditUser).toHaveBeenCalled()
   })
   it('shows Unknown when user created_at is null', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'nocreated',
-              email: 'nocreated@test.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: null,
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'nocreated',
+          email: 'nocreated@test.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: null,
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('Unknown')).toBeTruthy()
     })
   })
   it('filters users by search term', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'alice',
-              email: 'alice@example.com',
-              role: 'admin',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-            {
-              username: 'bob',
-              email: 'bob@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 2,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'alice',
+          email: 'alice@example.com',
+          role: 'admin',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+        {
+          username: 'bob',
+          email: 'bob@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 2,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('alice')[0]).toBeTruthy()
@@ -627,22 +545,18 @@ describe('UserList', () => {
     })
   })
   it('shows no match message when search finds nothing', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'alice',
-              email: 'alice@example.com',
-              role: 'admin',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'alice',
+          email: 'alice@example.com',
+          role: 'admin',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('alice')[0]).toBeTruthy()
@@ -655,22 +569,18 @@ describe('UserList', () => {
     })
   })
   it('calls onEditUser from mobile card view', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'carduser',
-              email: 'card@example.com',
-              role: 'viewer',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'carduser',
+          email: 'card@example.com',
+          role: 'viewer',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('carduser')[0]).toBeTruthy()
@@ -687,22 +597,18 @@ describe('UserList', () => {
     expect(mockOnEditUser).toHaveBeenCalledWith(expect.objectContaining({ username: 'carduser' }))
   })
   it('opens deactivate dialog from mobile card view', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          users: [
-            {
-              username: 'carddelete',
-              email: 'carddelete@example.com',
-              role: 'operator',
-              is_active: true,
-              created_at: '2024-01-01T00:00:00Z',
-            },
-          ],
-          total_count: 1,
-        }),
-    } as Response)
+    vi.mocked(apiClient.listUsers).mockResolvedValue({
+      users: [
+        {
+          username: 'carddelete',
+          email: 'carddelete@example.com',
+          role: 'operator',
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      ],
+      total_count: 1,
+    })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getAllByText('carddelete')[0]).toBeTruthy()

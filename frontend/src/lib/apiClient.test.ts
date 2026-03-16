@@ -1112,6 +1112,106 @@ describe('domain API methods', () => {
     )
   })
 })
+describe('user management API methods', () => {
+  let apiClient: typeof import('./apiClient').apiClient
+  let mockFetch: ReturnType<typeof vi.fn>
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.mocked(getCookie).mockReturnValue('test-csrf')
+    mockFetch = vi.fn()
+    ;(globalThis as any).fetch = mockFetch
+    const mod = await import('./apiClient')
+
+    apiClient = mod.apiClient
+  })
+  it('listUsers fetches users', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        users: [
+          {
+            username: 'admin',
+            email: 'admin@test.com',
+            role: 'admin',
+            is_active: true,
+            created_at: '2024-01-01T00:00:00Z',
+          },
+        ],
+        total_count: 1,
+      }),
+    })
+    const result = await apiClient.listUsers(true)
+
+    expect(result.users).toHaveLength(1)
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/auth/users?include_inactive=true',
+      expect.objectContaining({ method: 'GET' })
+    )
+  })
+  it('createUser posts new user', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ message: 'User created' }),
+    })
+    const result = await apiClient.createUser({
+      username: 'new',
+      password: 'pass',
+      email: 'e@e.com',
+      role: 'viewer',
+      is_active: true,
+    })
+
+    expect(result.message).toBe('User created')
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/auth/users',
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+  it('updateUser puts user data', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ message: 'User updated' }),
+    })
+    const result = await apiClient.updateUser('admin', {
+      email: 'new@e.com',
+      role: 'admin',
+      is_active: true,
+    })
+
+    expect(result.message).toBe('User updated')
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/auth/users/admin',
+      expect.objectContaining({ method: 'PUT' })
+    )
+  })
+  it('deactivateUser deletes user', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ message: 'User deactivated' }),
+    })
+    const result = await apiClient.deactivateUser('testuser')
+
+    expect(result.message).toBe('User deactivated')
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/auth/users/testuser',
+      expect.objectContaining({ method: 'DELETE' })
+    )
+  })
+  it('adminResetPassword resets password', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ message: 'Password reset' }),
+    })
+    const result = await apiClient.adminResetPassword('admin', { new_password: 'newpass123' })
+
+    expect(result.message).toBe('Password reset')
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/auth/users/admin/admin-reset-password',
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+})
 describe('cacheWsTicketFromResponse', () => {
   let apiClient: typeof import('./apiClient').apiClient
   let mockFetch: ReturnType<typeof vi.fn>

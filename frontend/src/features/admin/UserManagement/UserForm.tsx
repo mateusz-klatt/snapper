@@ -1,17 +1,11 @@
 import React, { useState, useEffect } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, X, Eye, EyeOff } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { Button } from '../../../components/ui'
 import { Modal } from '../../../components/ui/Modal'
 import { ThemeSelect } from '../../../components/ThemeSelect'
-import { api } from '../../../lib/apiClient'
-import type {
-  UserProfile,
-  CreateUserRequest,
-  UpdateUserRequest,
-  AdminResetPasswordRequest,
-} from '../../../types/api'
+import { useCreateUser, useUpdateUser, useAdminResetPassword } from '../../../hooks/queries'
+import type { UserProfile } from '../../../types/api'
 
 interface UserFormProps {
   user?: UserProfile
@@ -53,74 +47,58 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
     setErrors({})
     setResetPassword(false)
   }, [user])
-  const queryClient = useQueryClient()
   const isEditing = !!user
-  const createUserMutation = useMutation({
-    mutationFn: async (data: CreateUserRequest) => {
-      const response = await api('/auth/users', {
-        method: 'POST',
-        body: JSON.stringify(data),
+  const createMutation = useCreateUser()
+  const updateMutation = useUpdateUser()
+  const resetPasswordMutation = useAdminResetPassword()
+  const createUserMutation = {
+    mutate: (data: {
+      username: string
+      password: string
+      email: string
+      role: string
+      is_active: boolean
+    }) => {
+      createMutation.mutate(data, {
+        onSuccess: () => {
+          toast.success('User has been created')
+          onClose()
+        },
+        onError: (err: Error) => toast.error(err.message || 'Error creating user'),
       })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      return await response.json()
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
-      toast.success('User has been created')
-      onClose()
+    isPending: createMutation.isPending,
+  }
+  const updateUserMutation = {
+    mutate: (data: { email: string; role: string; is_active: boolean }) => {
+      updateMutation.mutate(
+        { userId: formData.username, data },
+        {
+          onSuccess: () => {
+            toast.success('User has been updated')
+            onClose()
+          },
+          onError: (err: Error) => toast.error(err.message || 'Error updating user'),
+        }
+      )
     },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Error creating user')
+    isPending: updateMutation.isPending,
+  }
+  const adminResetPasswordMutation = {
+    mutate: (data: { new_password: string }) => {
+      resetPasswordMutation.mutate(
+        { userId: formData.username, data },
+        {
+          onSuccess: () => {
+            toast.success('User password has been reset')
+            onClose()
+          },
+          onError: (err: Error) => toast.error(err.message || 'Error resetting password'),
+        }
+      )
     },
-  })
-  const updateUserMutation = useMutation({
-    mutationFn: async (data: UpdateUserRequest) => {
-      const response = await api(`/auth/users/${formData.username}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      return await response.json()
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
-      toast.success('User has been updated')
-      onClose()
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Error updating user')
-    },
-  })
-  const adminResetPasswordMutation = useMutation({
-    mutationFn: async (data: AdminResetPasswordRequest) => {
-      const response = await api(`/auth/users/${formData.username}/admin-reset-password`, {
-        method: 'POST',
-        body: JSON.stringify(data),
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      return await response.json()
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
-      toast.success('User password has been reset')
-      onClose()
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Error resetting password')
-    },
-  })
+    isPending: resetPasswordMutation.isPending,
+  }
 
   const validateForm = (): boolean => {
     const newErrors: Record<string, string> = {}

@@ -1,11 +1,10 @@
 import React, { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Trash2, Edit, UserPlus, Eye, EyeOff, Shield, Users } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { Button, Badge } from '../../../components/ui'
 import { ConfirmDialog } from '../../../components/ui/ConfirmDialog'
-import { api } from '../../../lib/apiClient'
-import type { UserProfile, UserListResponse } from '../../../types/api'
+import { useUsers, useDeactivateUser } from '../../../hooks/queries'
+import type { UserProfile } from '../../../types/api'
 
 interface UserListProps {
   onCreateUser: () => void
@@ -16,39 +15,17 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
   const [includeInactive, setIncludeInactive] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null)
-  const queryClient = useQueryClient()
-  const {
-    data: userListData,
-    isLoading,
-    error,
-  } = useQuery<UserListResponse>({
-    queryKey: ['users', includeInactive],
-    queryFn: async () => {
-      const response = await api(`/auth/users?include_inactive=${includeInactive}`)
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      return await response.json()
+  const { data: userListData, isLoading, error } = useUsers(includeInactive)
+  const deactivateMutation = useDeactivateUser()
+  const deleteUserMutation = {
+    mutate: (userId: string) => {
+      deactivateMutation.mutate(userId, {
+        onSuccess: () => toast.success('User has been deactivated'),
+        onError: (err: Error) => toast.error(err.message || 'Error deactivating user'),
+      })
     },
-  })
-  const deleteUserMutation = useMutation({
-    mutationFn: async (userId: string) => {
-      const response = await api(`/auth/users/${userId}`, { method: 'DELETE' })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
-      toast.success('User has been deactivated')
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Error deactivating user')
-    },
-  })
+    isPending: deactivateMutation.isPending,
+  }
 
   const handleDeleteUser = (user: UserProfile) => {
     setUserToDelete(user)

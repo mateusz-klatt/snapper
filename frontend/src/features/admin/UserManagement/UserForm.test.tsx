@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
 import { toast } from 'react-hot-toast'
 import UserForm from './UserForm'
 import type { UserProfile } from '../../../types/api'
-import { api } from '../../../lib/apiClient'
+import { apiClient } from '../../../lib/apiClient'
 
 vi.mock('../../../components/ThemeSelect', () => ({
   ThemeSelect: ({
@@ -44,7 +44,14 @@ vi.mock('../../../components/ThemeSelect', () => ({
 }))
 
 vi.mock('../../../lib/apiClient', () => ({
-  api: vi.fn(),
+  apiClient: {
+    createUser: vi.fn(),
+    updateUser: vi.fn(),
+    adminResetPassword: vi.fn(),
+  },
+}))
+vi.mock('../../../stores/auth', () => ({
+  useAuth: vi.fn(() => ({ isAuthenticated: true })),
 }))
 vi.mock('react-hot-toast', () => ({
   toast: {
@@ -71,10 +78,9 @@ describe('UserForm', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(api).mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({}),
-    } as Response)
+    vi.mocked(apiClient.createUser).mockResolvedValue({ message: 'created' })
+    vi.mocked(apiClient.updateUser).mockResolvedValue({ message: 'updated' })
+    vi.mocked(apiClient.adminResetPassword).mockResolvedValue({ message: 'reset' })
   })
   it('renders user form when open', () => {
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} />)
@@ -148,20 +154,15 @@ describe('UserForm', () => {
 
     await userEvent.click(submitButton)
     await waitFor(() => {
-      expect(api).toHaveBeenCalledWith('/auth/users', {
-        method: 'POST',
-        body: expect.stringContaining('newuser'),
-      })
+      expect(apiClient.createUser).toHaveBeenCalledWith(
+        expect.objectContaining({ username: 'newuser' })
+      )
       expect(toast.success).toHaveBeenCalledWith('User has been created')
       expect(mockOnClose).toHaveBeenCalled()
     })
   })
   it('handles create user error', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: false,
-      status: 400,
-      statusText: 'Bad Request',
-    } as Response)
+    vi.mocked(apiClient.createUser).mockRejectedValue(new Error('HTTP 400: Bad Request'))
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} />)
     await userEvent.type(screen.getByLabelText(/username/i), 'newuser')
     await userEvent.type(screen.getByLabelText(/email/i), 'new@example.com')
@@ -191,10 +192,10 @@ describe('UserForm', () => {
 
     await userEvent.click(submitButton)
     await waitFor(() => {
-      expect(api).toHaveBeenCalledWith('/auth/users/testuser', {
-        method: 'PUT',
-        body: expect.stringContaining('updated@example.com'),
-      })
+      expect(apiClient.updateUser).toHaveBeenCalledWith(
+        'testuser',
+        expect.objectContaining({ email: 'updated@example.com' })
+      )
       expect(toast.success).toHaveBeenCalledWith('User has been updated')
       expect(mockOnClose).toHaveBeenCalled()
     })
@@ -232,10 +233,10 @@ describe('UserForm', () => {
 
     await userEvent.click(submitButton)
     await waitFor(() => {
-      expect(api).toHaveBeenCalledWith('/auth/users/testuser/admin-reset-password', {
-        method: 'POST',
-        body: expect.stringContaining('newpassword123'),
-      })
+      expect(apiClient.adminResetPassword).toHaveBeenCalledWith(
+        'testuser',
+        expect.objectContaining({ new_password: 'newpassword123' })
+      )
       expect(toast.success).toHaveBeenCalledWith('User password has been reset')
       expect(mockOnClose).toHaveBeenCalled()
     })
@@ -321,7 +322,7 @@ describe('UserForm', () => {
     expect(activeCheckbox).toBeChecked()
   })
   it('validates invalid email format', async () => {
-    vi.mocked(api).mockClear()
+    vi.mocked(apiClient.createUser).mockClear()
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} />)
     const usernameInput = screen.getByLabelText(/username/i)
     const emailInput = screen.getByLabelText(/email/i)
@@ -341,7 +342,7 @@ describe('UserForm', () => {
     await waitFor(() => {
       expect(screen.getByText(/invalid email format/i)).toBeTruthy()
     })
-    expect(api).not.toHaveBeenCalled()
+    expect(apiClient.createUser).not.toHaveBeenCalled()
   })
   it('validates password length when resetting in edit mode', async () => {
     const existingUser: UserProfile = {
@@ -388,11 +389,7 @@ describe('UserForm', () => {
     })
   })
   it('handles update user error', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-    } as Response)
+    vi.mocked(apiClient.updateUser).mockRejectedValue(new Error('HTTP 500: Internal Server Error'))
     const existingUser: UserProfile = {
       username: 'testuser',
       email: 'test@example.com',
@@ -414,11 +411,9 @@ describe('UserForm', () => {
     })
   })
   it('handles password reset error', async () => {
-    vi.mocked(api).mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-    } as Response)
+    vi.mocked(apiClient.adminResetPassword).mockRejectedValue(
+      new Error('HTTP 500: Internal Server Error')
+    )
     const existingUser: UserProfile = {
       username: 'testuser',
       email: 'test@example.com',
@@ -440,7 +435,7 @@ describe('UserForm', () => {
     })
   })
   it('uses fallback toast message on create error without message', async () => {
-    vi.mocked(api).mockRejectedValue(new Error(''))
+    vi.mocked(apiClient.createUser).mockRejectedValue(new Error(''))
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} />)
     await userEvent.type(screen.getByLabelText(/username/i), 'newuser')
     await userEvent.type(screen.getByLabelText(/email/i), 'new@example.com')
@@ -453,7 +448,7 @@ describe('UserForm', () => {
     })
   })
   it('uses fallback toast message on update error without message', async () => {
-    vi.mocked(api).mockRejectedValue(new Error(''))
+    vi.mocked(apiClient.updateUser).mockRejectedValue(new Error(''))
     const existingUser: UserProfile = {
       username: 'testuser',
       email: 'test@example.com',
@@ -471,7 +466,7 @@ describe('UserForm', () => {
     })
   })
   it('uses fallback toast message on reset error without message', async () => {
-    vi.mocked(api).mockRejectedValue(new Error(''))
+    vi.mocked(apiClient.adminResetPassword).mockRejectedValue(new Error(''))
     const existingUser: UserProfile = {
       username: 'testuser',
       email: 'test@example.com',

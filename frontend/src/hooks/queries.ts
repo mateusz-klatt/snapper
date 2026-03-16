@@ -19,6 +19,10 @@ import type {
   StrategyListResponse,
   SettingRead,
   SettingUpdate,
+  UserListResponse,
+  CreateUserRequest,
+  UpdateUserRequest,
+  AdminResetPasswordRequest,
 } from '../types/api'
 
 const queryKeys = {
@@ -43,6 +47,7 @@ const queryKeys = {
     ['signals', strategyId, limit, instrument, hours] as const,
   settings: (category?: string) => ['settings', category] as const,
   settingCategories: ['settings', 'categories'] as const,
+  users: (includeInactive: boolean) => ['users', includeInactive] as const,
 }
 
 export const useSystemStatus = () => {
@@ -396,6 +401,65 @@ export const useDeleteSetting = () => {
     mutationFn: key => apiClient.deleteSetting(key),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+  })
+}
+
+export const useUsers = (includeInactive: boolean) => {
+  const { isAuthenticated } = useAuth()
+
+  return useQuery<UserListResponse>({
+    queryKey: queryKeys.users(includeInactive),
+    queryFn: () => apiClient.listUsers(includeInactive),
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+}
+
+export const useCreateUser = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<{ message: string }, Error, CreateUserRequest>({
+    mutationFn: data => apiClient.createUser(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+    },
+  })
+}
+
+export const useUpdateUser = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<{ message: string }, Error, { userId: string; data: UpdateUserRequest }>({
+    mutationFn: ({ userId, data }) => apiClient.updateUser(userId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+    },
+  })
+}
+
+export const useDeactivateUser = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<{ message: string }, Error, string>({
+    mutationFn: userId => apiClient.deactivateUser(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+    },
+  })
+}
+
+export const useAdminResetPassword = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<
+    { message: string },
+    Error,
+    { userId: string; data: AdminResetPasswordRequest }
+  >({
+    mutationFn: ({ userId, data }) => apiClient.adminResetPassword(userId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
     },
   })
 }
