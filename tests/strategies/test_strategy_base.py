@@ -1472,6 +1472,17 @@ class TestLifecycle:
         assert strategy.publisher is None
         assert strategy.zmq_context is None
 
+    def test_del_tolerates_resources_without_close_method(
+        self, strategy_config: StrategyConfig
+    ) -> None:
+        """Verify __del__ tolerates resource-like objects without close methods."""
+        strategy = SimpleTestStrategy(strategy_config)
+        strategy.subscriber = cast(Any, object())
+        strategy.publisher = cast(Any, object())
+        strategy.__del__()
+        assert strategy.subscriber is None
+        assert strategy.publisher is None
+
     def test_del_closes_async_mock_resources_without_warning(
         self, strategy_config: StrategyConfig
     ) -> None:
