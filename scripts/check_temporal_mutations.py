@@ -57,8 +57,8 @@ KNOWN_TO_MAX_INSERT_WHITELIST: Final[list[re.Pattern[str]]] = [
     re.compile(r'"known_to":\s*KNOWN_TO_MAX'),
     re.compile(r'\["known_to"\]\s*=\s*_KNOWN_TO_MAX'),
     re.compile(r'"known_to":\s*_KNOWN_TO_MAX'),
-    re.compile(r"known_to[^#]*?default[^#]*?KNOWN_TO_MAX"),
-    re.compile(r"KNOWN_TO_MAX[^#]*?default"),
+    re.compile(r"known_to(?:[^#d]|d(?!efault))*default(?:[^#K]|K(?!NOWN_TO_MAX))*KNOWN_TO_MAX"),
+    re.compile(r"KNOWN_TO_MAX(?:[^#d]|d(?!efault))*default"),
 ]
 
 WHITELIST_LINE_PATTERNS: Final[list[re.Pattern[str]]] = [
