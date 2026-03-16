@@ -26,6 +26,8 @@ Example:
     "BTC-USD"
 """
 
+from datetime import datetime
+
 from sqlalchemy import select
 
 from snapper.core.types import MarketDataExchange
@@ -76,19 +78,24 @@ __all__ = [
 ]
 
 
-async def resolve_symbol_public_id(repo: Repository, native_symbol: str) -> str | None:
+async def resolve_symbol_public_id(
+    repo: Repository,
+    native_symbol: str,
+    as_of: datetime | None = None,
+) -> str | None:
     """Look up the active Symbol row by native_symbol and return its public_id.
 
     Args:
         repo: Async repository providing a session context manager.
         native_symbol: Canonical native symbol (e.g., ``BTC-USD``).
+        as_of: Point-in-time to query. Defaults to now.
 
     Returns:
         The ``public_id`` of the active Symbol row, or ``None`` when no
         active row matches.
     """
     async with repo.session() as session:
-        ts_filter, kt_filter = where_active(Symbol)
+        ts_filter, kt_filter = where_active(Symbol, as_of)
         result = await session.execute(
             select(Symbol.public_id).where(
                 Symbol.native_symbol == native_symbol,

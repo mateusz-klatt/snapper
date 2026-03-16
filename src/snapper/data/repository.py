@@ -266,7 +266,12 @@ class Repository(ABC):
 
     @abstractmethod
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument by (symbol_public_id, exchange), returning its ID."""
+        """Insert or update instrument by (symbol_public_id, exchange).
+
+        Temporal SCD2: compares payload (symbol, base, quote) against the
+        active version. Returns existing id when identical, close+inserts
+        when changed, or inserts fresh when not found.
+        """
         ...
 
     @abstractmethod
@@ -494,42 +499,71 @@ class SQLAlchemyRepository(Repository):
             }
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument by (symbol_public_id, exchange), returning its ID."""
+        """Insert or update instrument by (symbol_public_id, exchange).
+
+        Temporal SCD2: looks up active version, compares payload
+        (symbol, base, quote). If identical returns existing id.
+        If different, closes old version and inserts new one with
+        same public_id. If not found, inserts fresh.
+        """
         filtered = _filter_instrument_kwargs(kwargs)
         symbol_public_id = filtered["symbol_public_id"]
         exchange = filtered["exchange"]
+        bus_time = filtered.get("timestamp") or datetime.now(UTC)
+        filtered["timestamp"] = bus_time
         async with self.session() as s:
+            ts_filter, kt_filter = where_active(Instrument, bus_time)
             q = await s.execute(
                 select(Instrument).where(
-                    and_(
-                        Instrument.symbol_public_id == symbol_public_id,
-                        Instrument.exchange == exchange,
-                    )
+                    Instrument.symbol_public_id == symbol_public_id,
+                    Instrument.exchange == exchange,
+                    ts_filter,
+                    kt_filter,
                 )
             )
             inst = q.scalar_one_or_none()
             if inst is None:
-                inst = Instrument(**filtered)
-                s.add(inst)
+                new_inst = Instrument(**filtered)
+                s.add(new_inst)
                 try:
                     await s.commit()
                 except IntegrityError as exc:
                     await s.rollback()
+                    retry_ts, retry_kt = where_active(Instrument)
                     q2 = await s.execute(
                         select(Instrument).where(
-                            and_(
-                                Instrument.symbol_public_id == symbol_public_id,
-                                Instrument.exchange == exchange,
-                            )
+                            Instrument.symbol_public_id == symbol_public_id,
+                            Instrument.exchange == exchange,
+                            retry_ts,
+                            retry_kt,
                         )
                     )
                     inst = q2.scalar_one_or_none()
                     if inst is None:
                         raise exc
-                await s.refresh(inst)
+                    return int(inst.id)
+                await s.refresh(new_inst)
+                return int(new_inst.id)
+            payload_same = (
+                inst.symbol == filtered.get("symbol")
+                and inst.base == filtered.get("base")
+                and inst.quote == filtered.get("quote")
+            )
+            if payload_same:
                 return int(inst.id)
-            else:
-                return int(inst.id)
+            new_row = await close_and_insert(
+                s,
+                Instrument,
+                [
+                    Instrument.symbol_public_id == symbol_public_id,
+                    Instrument.exchange == exchange,
+                ],
+                filtered,
+                bus_time,
+            )
+            await s.commit()
+            await s.refresh(new_row)
+            return int(new_row.id)
 
     async def _upsert_batch(
         self, model: type[Base], rows: list[dict[str, Any]], index_elements: list[str]
@@ -762,9 +796,13 @@ class SQLAlchemyRepository(Repository):
         """Retrieve active candles for instrument within time range."""
         now = datetime.now(UTC)
         async with self.session() as s:
+            i_ts, i_kt = where_active(Instrument, now)
             q_inst = await s.execute(
                 select(Instrument).where(
-                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                    Instrument.symbol == instrument,
+                    Instrument.exchange == exchange,
+                    i_ts,
+                    i_kt,
                 )
             )
             inst = q_inst.scalars().first()
@@ -783,14 +821,12 @@ class SQLAlchemyRepository(Repository):
                     Candle.trades,
                 )
                 .where(
-                    and_(
-                        Candle.instrument_id == inst.id,
-                        Candle.timeframe == timeframe,
-                        Candle.open_at >= start,
-                        Candle.open_at <= end,
-                        Candle.timestamp <= now,
-                        Candle.known_to > now,
-                    )
+                    Candle.instrument_id == inst.id,
+                    Candle.timeframe == timeframe,
+                    Candle.open_at >= start,
+                    Candle.open_at <= end,
+                    Candle.timestamp <= now,
+                    Candle.known_to > now,
                 )
                 .order_by(Candle.open_at.asc())
             )
@@ -814,10 +850,15 @@ class SQLAlchemyRepository(Repository):
         self, instrument: str, start: datetime, end: datetime, exchange: AllExchange
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument within time range."""
+        now = datetime.now(UTC)
         async with self.session() as s:
+            i_ts, i_kt = where_active(Instrument, now)
             q_inst = await s.execute(
                 select(Instrument).where(
-                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                    Instrument.symbol == instrument,
+                    Instrument.exchange == exchange,
+                    i_ts,
+                    i_kt,
                 )
             )
             inst = q_inst.scalars().first()
@@ -832,11 +873,9 @@ class SQLAlchemyRepository(Repository):
                     Trade.trade_id,
                 )
                 .where(
-                    and_(
-                        Trade.instrument_id == inst.id,
-                        Trade.timestamp >= start,
-                        Trade.timestamp <= end,
-                    )
+                    Trade.instrument_id == inst.id,
+                    Trade.timestamp >= start,
+                    Trade.timestamp <= end,
                 )
                 .order_by(Trade.timestamp.asc())
             )
@@ -1132,43 +1171,69 @@ class MSSQLRepository(Repository):
         return await self._run_sync(_do)
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument by (symbol_public_id, exchange) via sync thread."""
+        """Insert or update instrument by (symbol_public_id, exchange) via sync thread.
+
+        Temporal SCD2: payload compare + close+insert when changed.
+        """
         filtered = _filter_instrument_kwargs(kwargs)
         symbol_public_id = filtered["symbol_public_id"]
         exchange = filtered["exchange"]
+        bus_time = filtered.get("timestamp") or datetime.now(UTC)
+        filtered["timestamp"] = bus_time
 
         def _do(s: SyncSession) -> int:
+            ts_filter, kt_filter = where_active(Instrument, bus_time)
             q = s.execute(
                 select(Instrument).where(
-                    and_(
-                        Instrument.symbol_public_id == symbol_public_id,
-                        Instrument.exchange == exchange,
-                    )
+                    Instrument.symbol_public_id == symbol_public_id,
+                    Instrument.exchange == exchange,
+                    ts_filter,
+                    kt_filter,
                 )
             )
             inst = q.scalar_one_or_none()
             if inst is None:
-                inst = Instrument(**filtered)
-                s.add(inst)
+                new_inst = Instrument(**filtered)
+                s.add(new_inst)
                 try:
                     s.commit()
                 except IntegrityError as exc:
                     s.rollback()
+                    retry_ts, retry_kt = where_active(Instrument)
                     q2 = s.execute(
                         select(Instrument).where(
-                            and_(
-                                Instrument.symbol_public_id == symbol_public_id,
-                                Instrument.exchange == exchange,
-                            )
+                            Instrument.symbol_public_id == symbol_public_id,
+                            Instrument.exchange == exchange,
+                            retry_ts,
+                            retry_kt,
                         )
                     )
                     inst = q2.scalar_one_or_none()
                     if inst is None:
                         raise exc
-                s.refresh(inst)
+                    return int(inst.id)
+                s.refresh(new_inst)
+                return int(new_inst.id)
+            payload_same = (
+                inst.symbol == filtered.get("symbol")
+                and inst.base == filtered.get("base")
+                and inst.quote == filtered.get("quote")
+            )
+            if payload_same:
                 return int(inst.id)
-            else:
-                return int(inst.id)
+            new_row = close_and_insert_sync(
+                s,
+                Instrument,
+                [
+                    Instrument.symbol_public_id == symbol_public_id,
+                    Instrument.exchange == exchange,
+                ],
+                filtered,
+                bus_time,
+            )
+            s.commit()
+            s.refresh(new_row)
+            return int(new_row.id)
 
         return await self._run_sync(_do)
 
@@ -1353,9 +1418,13 @@ class MSSQLRepository(Repository):
 
         def _do(s: SyncSession) -> list[dict[str, Any]]:
             now = datetime.now(UTC)
+            i_ts, i_kt = where_active(Instrument, now)
             q_inst = s.execute(
                 select(Instrument).where(
-                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                    Instrument.symbol == instrument,
+                    Instrument.exchange == exchange,
+                    i_ts,
+                    i_kt,
                 )
             )
             inst = q_inst.scalars().first()
@@ -1374,14 +1443,12 @@ class MSSQLRepository(Repository):
                     Candle.trades,
                 )
                 .where(
-                    and_(
-                        Candle.instrument_id == inst.id,
-                        Candle.timeframe == timeframe,
-                        Candle.open_at >= start,
-                        Candle.open_at <= end,
-                        Candle.timestamp <= now,
-                        Candle.known_to > now,
-                    )
+                    Candle.instrument_id == inst.id,
+                    Candle.timeframe == timeframe,
+                    Candle.open_at >= start,
+                    Candle.open_at <= end,
+                    Candle.timestamp <= now,
+                    Candle.known_to > now,
                 )
                 .order_by(Candle.open_at.asc())
             )
@@ -1409,9 +1476,13 @@ class MSSQLRepository(Repository):
         """Retrieve trades via sync thread."""
 
         def _do(s: SyncSession) -> list[dict[str, Any]]:
+            i_ts, i_kt = where_active(Instrument)
             q_inst = s.execute(
                 select(Instrument).where(
-                    and_(Instrument.symbol == instrument, Instrument.exchange == exchange)
+                    Instrument.symbol == instrument,
+                    Instrument.exchange == exchange,
+                    i_ts,
+                    i_kt,
                 )
             )
             inst = q_inst.scalars().first()
@@ -1426,11 +1497,9 @@ class MSSQLRepository(Repository):
                     Trade.trade_id,
                 )
                 .where(
-                    and_(
-                        Trade.instrument_id == inst.id,
-                        Trade.timestamp >= start,
-                        Trade.timestamp <= end,
-                    )
+                    Trade.instrument_id == inst.id,
+                    Trade.timestamp >= start,
+                    Trade.timestamp <= end,
                 )
                 .order_by(Trade.timestamp.asc())
             )

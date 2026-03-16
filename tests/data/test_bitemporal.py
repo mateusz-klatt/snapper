@@ -20,8 +20,12 @@ from sqlalchemy.exc import IntegrityError
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
+from snapper.data.models import Execution
+from snapper.data.models import Instrument
 from snapper.data.models import Order
+from snapper.data.models import Position
 from snapper.data.models import Setting
+from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
@@ -1422,3 +1426,648 @@ class TestSettingsApiBitemporal:
                 .all()
             )
             assert len(active) == 0
+
+
+class TestInstrumentBitemporal:
+    """Instrument SCD2 close+insert behaviour."""
+
+    @pytest.mark.asyncio
+    async def test_upsert_same_payload_is_noop(self, tmp_path: Path) -> None:
+        """Re-upserting identical payload returns same id, no new row."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        inst_id2 = await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            exchange="kraken",
+        )
+        assert inst_id2 == inst_id
+        async with repo.session() as s:
+            all_rows = (await s.execute(select(Instrument))).scalars().all()
+            assert len(all_rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_upsert_changed_payload_closes_old(self, tmp_path: Path) -> None:
+        """Changed symbol/base/quote triggers close+insert with same public_id."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        async with repo.session() as s:
+            old = (await s.execute(select(Instrument).where(Instrument.id == inst_id))).scalar_one()
+            old_public_id = old.public_id
+
+        new_id = await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BITCOIN-USD",
+            base="BITCOIN",
+            quote="USD",
+            exchange="kraken",
+        )
+        assert new_id != inst_id
+
+        async with repo.session() as s:
+            all_rows = (await s.execute(select(Instrument).order_by(Instrument.id))).scalars().all()
+            assert len(all_rows) == 2
+            closed = [r for r in all_rows if r.known_to != KNOWN_TO_MAX]
+            active = [r for r in all_rows if r.known_to == KNOWN_TO_MAX]
+            assert len(closed) == 1
+            assert len(active) == 1
+            assert closed[0].id == inst_id
+            assert active[0].id == new_id
+            assert active[0].public_id == old_public_id
+            assert active[0].symbol == "BITCOIN-USD"
+            assert active[0].base == "BITCOIN"
+            assert_contiguous_intervals(all_rows)
+
+    @pytest.mark.asyncio
+    async def test_upsert_preserves_public_id_across_versions(self, tmp_path: Path) -> None:
+        """Three successive payload changes keep the same public_id."""
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        async with repo.session() as s:
+            orig = (
+                await s.execute(select(Instrument).where(*where_active(Instrument)))
+            ).scalar_one()
+            original_pid = orig.public_id
+
+        for suffix in ["V2", "V3", "V4"]:
+            await repo.upsert_instrument(
+                symbol_public_id=spid,
+                symbol=f"BTC-{suffix}",
+                base="BTC",
+                quote=suffix,
+                exchange="kraken",
+            )
+
+        async with repo.session() as s:
+            all_rows = (await s.execute(select(Instrument))).scalars().all()
+            assert len(all_rows) == 4
+            active = [r for r in all_rows if r.known_to == KNOWN_TO_MAX]
+            assert len(active) == 1
+            assert active[0].public_id == original_pid
+            assert active[0].symbol == "BTC-V4"
+            assert_contiguous_intervals(all_rows)
+
+    @pytest.mark.asyncio
+    async def test_active_instrument_read_after_version(self, tmp_path: Path) -> None:
+        """where_active returns only the latest version."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        new_id = await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+
+        async with repo.session() as s:
+            active = (
+                (await s.execute(select(Instrument).where(*where_active(Instrument))))
+                .scalars()
+                .all()
+            )
+            assert len(active) == 1
+            assert active[0].id == new_id
+            assert active[0].symbol == "BTC-RENAMED"
+
+    @pytest.mark.asyncio
+    async def test_partial_unique_allows_closed_duplicates(self, tmp_path: Path) -> None:
+        """Closed rows with same (symbol_public_id, exchange) do not violate unique index."""
+        repo, _ = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        await repo.upsert_instrument(
+            symbol_public_id=spid, symbol="BTC-V2", base="BTC", quote="V2", exchange="kraken"
+        )
+        await repo.upsert_instrument(
+            symbol_public_id=spid, symbol="BTC-V3", base="BTC", quote="V3", exchange="kraken"
+        )
+
+        async with repo.session() as s:
+            all_rows = (await s.execute(select(Instrument))).scalars().all()
+            assert len(all_rows) == 3
+            active = [r for r in all_rows if r.known_to == KNOWN_TO_MAX]
+            assert len(active) == 1
+
+    @pytest.mark.asyncio
+    async def test_candles_use_active_instrument(self, tmp_path: Path) -> None:
+        """get_candles resolves the active instrument version, not closed ones."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        await repo.upsert_candles([_candle_row(inst_id, t1, datetime.now(UTC))])
+
+        candles = await repo.get_candles(
+            instrument="BTC-USD",
+            timeframe="1m",
+            start=t1 - timedelta(hours=1),
+            end=t1 + timedelta(hours=1),
+            exchange="kraken",
+        )
+        assert len(candles) == 1
+
+        new_id = await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+        assert new_id != inst_id
+
+        candles_old = await repo.get_candles(
+            instrument="BTC-USD",
+            timeframe="1m",
+            start=t1 - timedelta(hours=1),
+            end=t1 + timedelta(hours=1),
+            exchange="kraken",
+        )
+        assert len(candles_old) == 0
+
+        candles_new = await repo.get_candles(
+            instrument="BTC-RENAMED",
+            timeframe="1m",
+            start=t1 - timedelta(hours=1),
+            end=t1 + timedelta(hours=1),
+            exchange="kraken",
+        )
+        assert len(candles_new) == 0
+
+    @pytest.mark.asyncio
+    async def test_resolve_symbol_public_id_as_of(self, tmp_path: Path) -> None:
+        """resolve_symbol_public_id respects as_of parameter."""
+        db_path = tmp_path / "resolve_as_of.db"
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+        await repo.create_all()
+
+        t1 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
+        async with repo.session() as s:
+            sym = Symbol(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=t1,
+                timestamp=t1,
+            )
+            s.add(sym)
+            await s.commit()
+            await s.refresh(sym)
+            original_pid = sym.public_id
+
+        async with repo.session() as s:
+            await close_and_insert(
+                s,
+                Symbol,
+                [Symbol.native_symbol == "BTC-USD"],
+                {
+                    "native_symbol": "BTC-USD",
+                    "base": "BTC",
+                    "quote": "USDT",
+                    "asset_type": "crypto",
+                    "created_at": t1,
+                },
+                t2,
+            )
+            await s.commit()
+
+        pid_before = await resolve_symbol_public_id(repo, "BTC-USD", as_of=t1 + timedelta(days=1))
+        assert pid_before == original_pid
+
+        pid_after = await resolve_symbol_public_id(repo, "BTC-USD", as_of=t2 + timedelta(days=1))
+        assert pid_after == original_pid
+
+    @pytest.mark.asyncio
+    async def test_fact_records_survive_instrument_rename(self, tmp_path: Path) -> None:
+        """Signals/orders referencing old instrument_id remain visible after rename.
+
+        Fact tables (signals, orders) join Instrument by integer FK which
+        points to a specific version. After close+insert on Instrument the
+        old version is closed but the FK still resolves via plain join
+        without temporal filter on Instrument.
+        """
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        async with repo.session() as s:
+            signal = Signal(
+                instrument_id=inst_id,
+                fired_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
+                side="buy",
+                strength=0.9,
+                reason="test signal",
+                strategy_name="test",
+                price=100.0,
+            )
+            s.add(signal)
+            await s.commit()
+            await s.refresh(signal)
+            signal_id = signal.id
+
+        new_id = await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+        assert new_id != inst_id
+
+        async with repo.session() as s:
+            now = datetime.now(UTC)
+            result = await s.execute(
+                select(Signal, Instrument)
+                .join(Instrument)
+                .where(
+                    Signal.timestamp <= now,
+                    Signal.known_to > now,
+                )
+            )
+            rows = result.all()
+            assert len(rows) == 1
+            sig, inst = rows[0]
+            assert sig.id == signal_id
+            assert inst.id == inst_id
+            assert inst.symbol == "BTC-USD"
+
+
+class TestInstrumentRenameSemantics:
+    """Contract tests: fact records survive Instrument rename.
+
+    Instruments use SCD2 close+insert. Fact tables (orders, signals,
+    executions, positions) reference Instrument by integer FK which pins
+    to a specific version.  After rename the old version is closed, but
+    facts must remain visible via a plain FK join with no temporal filter
+    on Instrument.  The joined Instrument row shows the snapshot that was
+    current when the fact was created.
+    """
+
+    @pytest.mark.asyncio
+    async def test_orders_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
+        """Order created on instrument v1 is visible after instrument v2."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        order_id, order_pid = await repo.insert_order(
+            instrument_id=inst_id,
+            client_order_id="cli-rename",
+            exchange_order_id=None,
+            created_at=datetime.now(UTC),
+            side="buy",
+            order_type="limit",
+            price=50000.0,
+            size=1.0,
+            status="new",
+        )
+
+        new_inst_id = await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+        assert new_inst_id != inst_id
+
+        async with repo.session() as s:
+            now = datetime.now(UTC)
+            result = await s.execute(
+                select(Order, Instrument)
+                .join(Instrument)
+                .where(Order.timestamp <= now, Order.known_to > now)
+            )
+            rows = result.all()
+            assert len(rows) == 1
+            order, inst = rows[0]
+            assert order.id == order_id
+            assert order.public_id == order_pid
+            assert inst.id == inst_id
+            assert inst.symbol == "BTC-USD"
+
+    @pytest.mark.asyncio
+    async def test_executions_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
+        """Execution via order on instrument v1 is visible after instrument v2."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        order_id, order_pid = await repo.insert_order(
+            instrument_id=inst_id,
+            client_order_id="cli-exec-rename",
+            exchange_order_id="ex-exec-rename",
+            created_at=datetime.now(UTC),
+            side="buy",
+            order_type="limit",
+            price=50000.0,
+            size=1.0,
+            status="filled",
+        )
+
+        exec_id = await repo.insert_execution(
+            order_id=order_id,
+            order_public_id=order_pid,
+            timestamp=datetime.now(UTC),
+            side="buy",
+            status="filled",
+            price=50000.0,
+            size=1.0,
+            fee=5.0,
+            fee_asset="USD",
+            exec_id="E-RENAME",
+        )
+
+        await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+
+        async with repo.session() as s:
+            now = datetime.now(UTC)
+            result = await s.execute(
+                select(Execution, Order, Instrument)
+                .join(Order, Execution.order_id == Order.id)
+                .join(Instrument, Order.instrument_id == Instrument.id)
+                .where(Execution.timestamp <= now, Execution.known_to > now)
+            )
+            rows = result.all()
+            assert len(rows) == 1
+            execution, order, inst = rows[0]
+            assert execution.id == exec_id
+            assert order.public_id == order_pid
+            assert inst.id == inst_id
+            assert inst.symbol == "BTC-USD"
+
+    @pytest.mark.asyncio
+    async def test_positions_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
+        """Position on instrument v1 is visible after instrument v2."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        async with repo.session() as s:
+            pos = Position(
+                instrument_id=inst_id,
+                quantity=1.5,
+                average_price=50000.0,
+                unrealized_pnl=100.0,
+                realized_pnl=0.0,
+                timestamp=datetime.now(UTC),
+            )
+            s.add(pos)
+            await s.commit()
+            await s.refresh(pos)
+            pos_id = pos.id
+
+        await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+
+        async with repo.session() as s:
+            now = datetime.now(UTC)
+            result = await s.execute(
+                select(Position, Instrument)
+                .join(Instrument)
+                .where(Position.timestamp <= now, Position.known_to > now)
+            )
+            rows = result.all()
+            assert len(rows) == 1
+            position, inst = rows[0]
+            assert position.id == pos_id
+            assert position.quantity == 1.5
+            assert inst.id == inst_id
+            assert inst.symbol == "BTC-USD"
+
+    @pytest.mark.asyncio
+    async def test_store_signal_no_duplicate_instrument_versions(self, tmp_path: Path) -> None:
+        """Repeated upsert_instrument with same payload does not create versions."""
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        for _ in range(5):
+            returned_id = await repo.upsert_instrument(
+                symbol_public_id=spid,
+                symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                exchange="kraken",
+            )
+            assert returned_id == inst_id
+
+        async with repo.session() as s:
+            all_instruments = (await s.execute(select(Instrument))).scalars().all()
+            assert len(all_instruments) == 1
+
+    @pytest.mark.asyncio
+    async def test_historical_backfill_resolves_symbol_public_id_with_as_of(
+        self, tmp_path: Path
+    ) -> None:
+        """resolve_symbol_public_id(as_of) finds symbol at historical point.
+
+        Scenario: symbol created at t1, versioned at t2. Query at t1+delta
+        returns original, query at t2+delta returns updated version, both
+        with the same public_id (SCD2 preserves identity).
+        """
+        db_path = tmp_path / "backfill_resolve.db"
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+        await repo.create_all()
+
+        t1 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
+
+        async with repo.session() as s:
+            sym = Symbol(
+                native_symbol="ETH-USD",
+                base="ETH",
+                quote="USD",
+                asset_type="crypto",
+                created_at=t1,
+                timestamp=t1,
+            )
+            s.add(sym)
+            await s.commit()
+            await s.refresh(sym)
+            original_pid = sym.public_id
+
+        async with repo.session() as s:
+            await close_and_insert(
+                s,
+                Symbol,
+                [Symbol.native_symbol == "ETH-USD"],
+                {
+                    "native_symbol": "ETH-USD",
+                    "base": "ETH",
+                    "quote": "USDT",
+                    "asset_type": "crypto",
+                    "created_at": t1,
+                },
+                t2,
+            )
+            await s.commit()
+
+        pid_before = await resolve_symbol_public_id(repo, "ETH-USD", as_of=t1 + timedelta(days=30))
+        assert pid_before == original_pid
+
+        pid_after = await resolve_symbol_public_id(repo, "ETH-USD", as_of=t2 + timedelta(days=30))
+        assert pid_after == original_pid
+
+        pid_none = await resolve_symbol_public_id(repo, "ETH-USD", as_of=t1 - timedelta(days=1))
+        assert pid_none is None
+
+    @pytest.mark.asyncio
+    async def test_rename_does_not_hide_any_fact_type(self, tmp_path: Path) -> None:
+        """Cross-cutting: orders, signals, positions all survive instrument rename.
+
+        Creates one of each fact type on instrument v1, renames instrument
+        to v2, then verifies all three are still visible via FK join with
+        no temporal filter on Instrument.
+        """
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        now = datetime.now(UTC)
+
+        order_id, _ = await repo.insert_order(
+            instrument_id=inst_id,
+            client_order_id="cli-cross",
+            exchange_order_id=None,
+            created_at=now,
+            side="buy",
+            order_type="limit",
+            price=50000.0,
+            size=1.0,
+            status="new",
+        )
+
+        async with repo.session() as s:
+            signal = Signal(
+                instrument_id=inst_id,
+                fired_at=now,
+                timestamp=now,
+                side="buy",
+                strength=0.8,
+                reason="cross-test",
+                strategy_name="test",
+                price=50000.0,
+            )
+            pos = Position(
+                instrument_id=inst_id,
+                quantity=2.0,
+                average_price=50000.0,
+                unrealized_pnl=0.0,
+                realized_pnl=0.0,
+                timestamp=now,
+            )
+            s.add(signal)
+            s.add(pos)
+            await s.commit()
+
+        new_inst_id = await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+        assert new_inst_id != inst_id
+
+        async with repo.session() as s:
+            check_time = datetime.now(UTC)
+
+            orders = (
+                await s.execute(
+                    select(Order, Instrument)
+                    .join(Instrument)
+                    .where(Order.timestamp <= check_time, Order.known_to > check_time)
+                )
+            ).all()
+            assert len(orders) == 1
+            assert orders[0][1].symbol == "BTC-USD"
+
+            signals = (
+                await s.execute(
+                    select(Signal, Instrument)
+                    .join(Instrument)
+                    .where(Signal.timestamp <= check_time, Signal.known_to > check_time)
+                )
+            ).all()
+            assert len(signals) == 1
+            assert signals[0][1].symbol == "BTC-USD"
+
+            positions = (
+                await s.execute(
+                    select(Position, Instrument)
+                    .join(Instrument)
+                    .where(Position.timestamp <= check_time, Position.known_to > check_time)
+                )
+            ).all()
+            assert len(positions) == 1
+            assert positions[0][1].symbol == "BTC-USD"
+
+    @pytest.mark.asyncio
+    async def test_instrument_join_shows_version_snapshot(self, tmp_path: Path) -> None:
+        """Fact joined to closed instrument shows the snapshot from creation time.
+
+        The instrument was 'BTC-USD' when the order was created, so the join
+        should return 'BTC-USD' even though active instrument is now 'BTC-RENAMED'.
+        """
+        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+
+        await repo.insert_order(
+            instrument_id=inst_id,
+            client_order_id="cli-snapshot",
+            exchange_order_id=None,
+            created_at=datetime.now(UTC),
+            side="buy",
+            order_type="limit",
+            price=50000.0,
+            size=1.0,
+            status="new",
+        )
+
+        await repo.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTC-RENAMED",
+            base="BTC",
+            quote="RENAMED",
+            exchange="kraken",
+        )
+
+        async with repo.session() as s:
+            now = datetime.now(UTC)
+            result = await s.execute(
+                select(Order, Instrument)
+                .join(Instrument)
+                .where(Order.timestamp <= now, Order.known_to > now)
+            )
+            order, inst = result.one()
+            assert inst.symbol == "BTC-USD"
+
+            active_inst = (
+                await s.execute(select(Instrument).where(*where_active(Instrument)))
+            ).scalar_one()
+            assert active_inst.symbol == "BTC-RENAMED"

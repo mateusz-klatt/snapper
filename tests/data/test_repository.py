@@ -1226,6 +1226,9 @@ async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch)
     class ExistingInstrument:
         def __init__(self) -> None:
             self.id = 42
+            self.symbol = "BTC-USD"
+            self.base = "BTC"
+            self.quote = "USD"
 
     class ExistingInstrumentSession:
         def __enter__(self) -> ExistingInstrumentSession:
@@ -1269,6 +1272,184 @@ async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch)
         lot_size=0.001,
     )
     assert result == 42
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_instrument_fresh_insert(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_instrument fresh insert path returns new ID."""
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class NewInstrument:
+        def __init__(self) -> None:
+            self.id = 77
+
+    class FreshInsertSession:
+        def __init__(self) -> None:
+            self._obj: Any = None
+
+        def __enter__(self) -> FreshInsertSession:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            class NoneResult:
+                def scalar_one_or_none(self) -> None:
+                    return None
+
+            return NoneResult()
+
+        def add(self, obj: Any) -> None:
+            self._obj = obj
+
+        def commit(self) -> None:
+            return None
+
+        def refresh(self, obj: Any) -> None:
+            obj.id = 77
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], FreshInsertSession]:
+        def factory() -> FreshInsertSession:
+            return FreshInsertSession()
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    result = await repo.upsert_instrument(
+        symbol_public_id="fresh-spid",
+        symbol="ETH-USD",
+        base="ETH",
+        quote="USD",
+        exchange="kraken",
+    )
+    assert result == 77
+
+
+@pytest.mark.asyncio
+async def test_mssql_upsert_instrument_payload_changed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MSSQL upsert_instrument close+insert when payload differs."""
+
+    class DummyEngine:
+        class _URL:
+            @staticmethod
+            def get_dialect() -> Any:
+                class _Dialect:
+                    name = "mssql"
+
+                return _Dialect()
+
+        def __init__(self) -> None:
+            self.url = self._URL()
+
+    class OldInstrument:
+        def __init__(self) -> None:
+            self.id = 10
+            self.public_id = "old-pid"
+            self.symbol = "BTC-USD"
+            self.base = "BTC"
+            self.quote = "USD"
+            self.timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+            self.known_to = KNOWN_TO_MAX
+
+    class PayloadChangeSession:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.added: list[Any] = []
+            self.update_executed = False
+
+        def __enter__(self) -> PayloadChangeSession:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.execute_calls += 1
+            if self.execute_calls <= 2:
+
+                class OldResult:
+                    def scalars(self) -> Any:
+                        class _Scalars:
+                            def first(self) -> OldInstrument:
+                                return OldInstrument()
+
+                        return _Scalars()
+
+                    def scalar_one_or_none(self) -> OldInstrument:
+                        return OldInstrument()
+
+                return OldResult()
+            self.update_executed = True
+
+            class UpdateResult:
+                pass
+
+            return UpdateResult()
+
+        def add(self, obj: Any) -> None:
+            self.added.append(obj)
+
+        def commit(self) -> None:
+            return None
+
+        def refresh(self, obj: Any) -> None:
+            obj.id = 99
+
+    async def inline_to_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    sessions: list[PayloadChangeSession] = []
+
+    def make_session_factory(
+        _engine: Any, expire_on_commit: bool = False, class_: Any = None
+    ) -> Callable[[], PayloadChangeSession]:
+        def factory() -> PayloadChangeSession:
+            sess = PayloadChangeSession()
+            sessions.append(sess)
+            return sess
+
+        return factory
+
+    def fake_create_sync_engine(*_args: Any, **_kwargs: Any) -> DummyEngine:
+        return DummyEngine()
+
+    monkeypatch.setattr(snapper.data.repository, "create_sync_engine", fake_create_sync_engine)
+    monkeypatch.setattr(snapper.data.repository, "sync_sessionmaker", make_session_factory)
+    monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
+    repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
+    result = await repo.upsert_instrument(
+        symbol_public_id="change-spid",
+        symbol="BITCOIN-USD",
+        base="BITCOIN",
+        quote="USD",
+        exchange="kraken",
+    )
+    assert result == 99
+    assert len(sessions) == 1
+    assert sessions[0].update_executed
 
 
 @pytest.mark.asyncio
@@ -2464,9 +2645,9 @@ class TestSQLAlchemyRepositoryDialects:
     ) -> None:
         """Verify upsert_instrument handles duplicate key gracefully.
 
-        Given: Instrument already exists,
+        Given: No active instrument found, insert hits IntegrityError (race),
         When: upsert_instrument is called,
-        Then: Returns existing instrument ID.
+        Then: Retries lookup and returns existing instrument ID.
         """
         mock_session = AsyncMock()
         mock_result = Mock()
@@ -2494,7 +2675,6 @@ class TestSQLAlchemyRepositoryDialects:
             )
             assert result == 123
             mock_session.rollback.assert_called_once()
-            mock_session.refresh.assert_called_once_with(mock_instrument)
 
     @pytest.mark.asyncio
     async def test_upsert_instrument_integrity_error_reraise(
@@ -2534,9 +2714,9 @@ class TestSQLAlchemyRepositoryDialects:
     async def test_upsert_instrument_existing(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_instrument returns existing ID without insert.
+        """Verify upsert_instrument returns existing ID when payload matches.
 
-        Given: Instrument already exists,
+        Given: Active instrument with identical payload exists,
         When: upsert_instrument is called,
         Then: Returns existing ID, skips add.
         """
@@ -2544,6 +2724,9 @@ class TestSQLAlchemyRepositoryDialects:
         mock_result = Mock()
         mock_instrument = Mock()
         mock_instrument.id = 456
+        mock_instrument.symbol = "ETH-USD"
+        mock_instrument.base = "ETH"
+        mock_instrument.quote = "USD"
         mock_result.scalar_one_or_none.return_value = mock_instrument
         mock_session.execute.return_value = mock_result
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:

@@ -9,7 +9,6 @@ from datetime import timedelta
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import and_
 from sqlalchemy import desc
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,6 +17,7 @@ from snapper.config.settings import get_settings
 from snapper.data.models import Instrument
 from snapper.data.models import Signal
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.strategies.base import StrategySignal
 
@@ -50,12 +50,13 @@ class SignalReadService:
         """
         try:
             async with self.repo.session() as session:
+                i_ts, i_kt = where_active(Instrument)
                 inst_query = await session.execute(
                     select(Instrument).where(
-                        and_(
-                            Instrument.symbol == signal.instrument,
-                            Instrument.exchange == exchange,
-                        )
+                        Instrument.symbol == signal.instrument,
+                        Instrument.exchange == exchange,
+                        i_ts,
+                        i_kt,
                     )
                 )
                 inst = inst_query.scalars().first()

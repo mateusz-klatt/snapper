@@ -467,10 +467,10 @@ def _create_candles_signals_router() -> APIRouter:
             async with repo.session() as session:
                 inst_query = await session.execute(
                     select(Instrument).where(
-                        and_(
-                            Instrument.symbol == instrument,
-                            Instrument.exchange == exchange,
-                        )
+                        Instrument.symbol == instrument,
+                        Instrument.exchange == exchange,
+                        Instrument.timestamp <= processing_date,
+                        Instrument.known_to > processing_date,
                     )
                 )
                 inst = inst_query.scalars().first()
