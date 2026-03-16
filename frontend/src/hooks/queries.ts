@@ -1,8 +1,7 @@
-import React, { useEffect, useCallback } from 'react'
+import React, { useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from '../lib/apiClient'
 import { useAuth } from '../stores/auth'
-import { useTradeStore } from '../stores/trade'
 import {
   safeOrderFromAPI,
   safeExecutionFromAPI,
@@ -100,72 +99,52 @@ export const useExchangeInstruments = (exchange: string | null) => {
 
 export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: number }) => {
   const { isAuthenticated } = useAuth()
-  const updateOrders = useTradeStore(state => state.updateOrders)
   const selectOrders = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getOrders>>) =>
       data.map(safeOrderFromAPI).filter((o): o is NonNullable<typeof o> => o !== null),
     []
   )
-  const query = useQuery({
+
+  return useQuery({
     queryKey: queryKeys.orders(filters),
     queryFn: () => apiClient.getOrders(filters?.symbol, filters?.limit, filters?.offset),
     select: selectOrders,
     enabled: isAuthenticated,
     throwOnError: false,
   })
-
-  useEffect(() => {
-    if (query.data) {
-      updateOrders(query.data)
-    }
-  }, [query.data, updateOrders])
-
-  return query
 }
 
 export const useExecutions = (filters?: { limit?: number }) => {
   const { isAuthenticated } = useAuth()
-  const updateExecutions = useTradeStore(state => state.updateExecutions)
   const selectExecutions = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getExecutions>>) =>
       data.map(safeExecutionFromAPI).filter((e): e is NonNullable<typeof e> => e !== null),
     []
   )
-  const query = useQuery({
+
+  return useQuery({
     queryKey: queryKeys.executions(filters),
     queryFn: () => apiClient.getExecutions(filters?.limit),
     select: selectExecutions,
     enabled: isAuthenticated,
     throwOnError: false,
   })
-
-  useEffect(() => {
-    if (query.data) {
-      updateExecutions(query.data)
-    }
-  }, [query.data, updateExecutions])
-
-  return query
 }
 
 const usePositions = () => {
   const { isAuthenticated } = useAuth()
-  const updatePositions = useTradeStore(state => state.updatePositions)
-  const query = useQuery({
+
+  return useQuery({
     queryKey: queryKeys.positions,
-    queryFn: () => apiClient.getPositions(),
+    queryFn: async () => {
+      const data = await apiClient.getPositions()
+
+      return data.map(positionFromAPI)
+    },
     refetchInterval: isAuthenticated ? 10000 : false,
     enabled: isAuthenticated,
     throwOnError: false,
   })
-
-  useEffect(() => {
-    if (query.data) {
-      updatePositions(query.data.map(positionFromAPI))
-    }
-  }, [query.data, updatePositions])
-
-  return query
 }
 
 const useSignals = (
@@ -175,27 +154,19 @@ const useSignals = (
   hours = 24
 ) => {
   const { isAuthenticated } = useAuth()
-  const updateSignals = useTradeStore(state => state.updateSignals)
   const selectSignals = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getSignals>>) =>
       data.map(safeSignalFromAPI).filter((s): s is NonNullable<typeof s> => s !== null),
     []
   )
-  const query = useQuery({
+
+  return useQuery({
     queryKey: queryKeys.signals(strategyId, limit, instrument, hours),
     queryFn: () => apiClient.getSignals(strategyId, limit, instrument, hours),
     select: selectSignals,
     enabled: isAuthenticated,
     throwOnError: false,
   })
-
-  useEffect(() => {
-    if (query.data) {
-      updateSignals(query.data)
-    }
-  }, [query.data, updateSignals])
-
-  return query
 }
 
 export const useOrdersGrouped = (filters?: {
@@ -228,8 +199,8 @@ export const usePositionsSummary = () => {
   const { data: positions, ...rest } = usePositions()
   const summary = React.useMemo(() => {
     if (!positions) return null
-    const totalCost = positions.reduce((sum, p) => sum + p.quantity * p.average_price, 0)
-    const totalPnL = positions.reduce((sum, p) => sum + p.unrealized_pnl + p.realized_pnl, 0)
+    const totalCost = positions.reduce((sum, p) => sum + p.quantity * p.averagePrice, 0)
+    const totalPnL = positions.reduce((sum, p) => sum + p.unrealizedPnl + p.realizedPnl, 0)
     const totalValue = totalCost + totalPnL
     const pnlPercent = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0
 

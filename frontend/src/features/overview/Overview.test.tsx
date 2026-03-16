@@ -16,11 +16,7 @@ vi.mock('../../hooks/queries', () => ({
       brokers: { running: 0, total: 0 },
     },
   })),
-}))
-vi.mock('../../stores/trade', () => ({
-  useTradeStore: vi.fn(() => ({
-    executions: [],
-  })),
+  useExecutions: vi.fn(() => ({ data: [], isLoading: false })),
 }))
 
 const renderWithMocks = (ui: ReactNode) => {
@@ -70,15 +66,15 @@ describe('Overview', () => {
     expect(screen.getByText('No recent executions')).toBeInTheDocument()
   })
   it('handles undefined store values with defaults', async () => {
-    const { useProcessSummary } = await import('../../hooks/queries')
-    const tradeModule = await import('../../stores/trade')
+    const { useProcessSummary, useExecutions } = await import('../../hooks/queries')
 
     vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: undefined,
     } as never)
-    vi.mocked(tradeModule.useTradeStore).mockReturnValue({
-      executions: undefined,
+    vi.mocked(useExecutions).mockReturnValue({
+      data: undefined,
+      isLoading: false,
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('Feeds Running')).toBeInTheDocument()
@@ -206,10 +202,10 @@ describe('Overview', () => {
     expect(screen.getByText('BTC/USD')).toBeInTheDocument()
   })
   it('displays recent executions when available', async () => {
-    const { useTradeStore } = await import('../../stores/trade')
+    const { useExecutions } = await import('../../hooks/queries')
 
-    vi.mocked(useTradeStore).mockReturnValue({
-      executions: [
+    vi.mocked(useExecutions).mockReturnValue({
+      data: [
         {
           publicId: 1,
           instrument: 'ETH/USD',
@@ -219,18 +215,19 @@ describe('Overview', () => {
           executedAt: new Date('2024-01-01T12:00:00Z'),
         },
       ],
+      isLoading: false,
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('ETH/USD')).toBeInTheDocument()
   })
   it('counts today executions correctly', async () => {
-    const { useTradeStore } = await import('../../stores/trade')
+    const { useExecutions } = await import('../../hooks/queries')
 
     const today = new Date()
     const yesterday = new Date(Date.now() - 86400000)
 
-    vi.mocked(useTradeStore).mockReturnValue({
-      executions: [
+    vi.mocked(useExecutions).mockReturnValue({
+      data: [
         {
           publicId: 1,
           instrument: 'BTC/USD',
@@ -256,6 +253,7 @@ describe('Overview', () => {
           executedAt: today,
         },
       ],
+      isLoading: false,
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText("Today's Executions")).toBeInTheDocument()
@@ -278,10 +276,10 @@ describe('Overview', () => {
     expect(screen.getAllByText('SELL').length).toBeGreaterThan(0)
   })
   it('displays execution with sell side', async () => {
-    const { useTradeStore } = await import('../../stores/trade')
+    const { useExecutions } = await import('../../hooks/queries')
 
-    vi.mocked(useTradeStore).mockReturnValue({
-      executions: [
+    vi.mocked(useExecutions).mockReturnValue({
+      data: [
         {
           publicId: 1,
           instrument: 'BTC/USD',
@@ -291,6 +289,7 @@ describe('Overview', () => {
           executedAt: new Date('2024-01-01T12:00:00Z'),
         },
       ],
+      isLoading: false,
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getAllByText('SELL').length).toBeGreaterThan(0)
@@ -364,15 +363,14 @@ describe('Overview', () => {
     expect(screen.getByText('N/A')).toBeInTheDocument()
   })
   it('shows N/A when execution executedAt is undefined', async () => {
-    const { useTradeStore } = await import('../../stores/trade')
-    const { useLatestSignals } = await import('../../hooks/queries')
+    const { useLatestSignals, useExecutions } = await import('../../hooks/queries')
 
     vi.mocked(useLatestSignals).mockReturnValue({
       isLoading: false,
       data: [],
     } as never)
-    vi.mocked(useTradeStore).mockReturnValue({
-      executions: [
+    vi.mocked(useExecutions).mockReturnValue({
+      data: [
         {
           publicId: 1,
           instrument: 'DOT/USD',
@@ -382,6 +380,7 @@ describe('Overview', () => {
           executedAt: undefined,
         },
       ],
+      isLoading: false,
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('DOT/USD')).toBeInTheDocument()

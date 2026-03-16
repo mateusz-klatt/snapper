@@ -1,6 +1,5 @@
 import { QueryClient } from '@tanstack/react-query'
 import WebSocketClient from '../lib/websocket/client'
-import { useTradeStore } from './trade'
 import { useMarketStore } from './market'
 import { useAppStore } from './app'
 import { useProcessStore } from './process'
@@ -21,9 +20,6 @@ import {
 } from '../types/ws'
 import { UIProcessStatus } from '../types/ui'
 import {
-  orderFromWS,
-  executionFromWS,
-  signalFromWS,
   orderDataFromEnvelope,
   executionDataFromEnvelope,
   signalDataFromEnvelope,
@@ -33,7 +29,6 @@ type UnsubscribeFn = () => void
 interface DispatcherConfig {
   queryClient: QueryClient
   topics?: string[]
-  directStoreUpdates?: boolean
   maxCandles?: number
 }
 
@@ -45,7 +40,6 @@ export class WSDispatcher {
   private unsubscribers: UnsubscribeFn[] = []
   private readonly topics: string[]
   private readonly maxCandles: number
-  private readonly directStoreUpdates: boolean
   private readonly candleBuffers: Map<string, CandleData[]> = new Map()
   private orderBuffer: OrderData[] | null = null
   private executionBuffer: ExecutionData[] | null = null
@@ -54,7 +48,6 @@ export class WSDispatcher {
     this.queryClient = config.queryClient
     this.maxCandles = config.maxCandles ?? DEFAULT_MAX_CANDLES
     this.topics = config.topics ?? []
-    this.directStoreUpdates = config.directStoreUpdates ?? true
   }
   attach(client: WebSocketClient): void {
     this.detach()
@@ -103,51 +96,23 @@ export class WSDispatcher {
   private handleOrderMessage(message: WebSocketMessages): void {
     if (!isOrder(message)) return
 
-    if (this.directStoreUpdates) {
-      const store = useTradeStore.getState()
-      const order = orderFromWS(message)
-      const existingOrder = store.orders.find(o => o.clientOrderId === order.clientOrderId)
-
-      if (existingOrder) {
-        store.updateOrder(order.clientOrderId, order)
-      } else {
-        store.addOrder(order)
-      }
-    }
-
     this.mergeOrderIntoCache(message)
   }
   private handleExecutionMessage(message: WebSocketMessages): void {
     if (!isExecution(message)) return
-
-    if (this.directStoreUpdates) {
-      const store = useTradeStore.getState()
-
-      store.addExecution(executionFromWS(message))
-    }
 
     this.mergeExecutionIntoCache(message)
   }
   private handleSignalMessage(message: WebSocketMessages): void {
     if (!isSignal(message)) return
 
-    if (this.directStoreUpdates) {
-      const store = useTradeStore.getState()
-
-      store.addSignal(signalFromWS(message))
-    }
-
     this.mergeSignalIntoCache(message)
   }
   private handleCandleMessage(message: WebSocketMessages): void {
     if (!isCandle(message)) return
 
-    if (this.directStoreUpdates) {
-      const store = useMarketStore.getState()
-
-      if (message.close !== undefined && message.close !== null) {
-        store.updateLastPrice(message.close)
-      }
+    if (message.close !== undefined && message.close !== null) {
+      useMarketStore.getState().updateLastPrice(message.close)
     }
 
     if (message.instrument && message.exchange && message.timeframe) {
@@ -332,33 +297,26 @@ export class WSDispatcher {
   private handleTickMessage(message: WebSocketMessages): void {
     if (!isTick(message)) return
 
-    if (this.directStoreUpdates) {
-      const store = useMarketStore.getState()
-      let lastPrice: number | null = message.last ?? null
+    let lastPrice: number | null = message.last ?? null
 
-      if (
-        lastPrice === null &&
-        message.bid !== null &&
-        message.bid !== undefined &&
-        message.ask !== null &&
-        message.ask !== undefined
-      ) {
-        lastPrice = (message.bid + message.ask) / 2
-      }
+    if (
+      lastPrice === null &&
+      message.bid !== null &&
+      message.bid !== undefined &&
+      message.ask !== null &&
+      message.ask !== undefined
+    ) {
+      lastPrice = (message.bid + message.ask) / 2
+    }
 
-      if (lastPrice !== null) {
-        store.updateLastPrice(lastPrice)
-      }
+    if (lastPrice !== null) {
+      useMarketStore.getState().updateLastPrice(lastPrice)
     }
   }
   private handleTradeMessage(message: WebSocketMessages): void {
     if (!isTrade(message)) return
 
-    if (this.directStoreUpdates) {
-      const store = useMarketStore.getState()
-
-      store.updateLastPrice(message.price)
-    }
+    useMarketStore.getState().updateLastPrice(message.price)
   }
   private handleHeartbeatMessage(message: WebSocketMessages): void {
     if (!isHeartbeat(message)) return

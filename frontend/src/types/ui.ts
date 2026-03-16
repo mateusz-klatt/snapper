@@ -1,5 +1,3 @@
-import type { Order, Execution, Signal, Position } from './entities'
-
 export interface AppState {
   isDarkMode: boolean
   subscribedTopics: string[]
@@ -12,13 +10,6 @@ export interface MarketDataState {
   selectedInstrument: string | null
   selectedTimeframe: string
   lastPrice: number | null
-  lastUpdate: number
-}
-export interface TradeState {
-  orders: Order[]
-  executions: Execution[]
-  positions: Position[]
-  signals: Signal[]
   lastUpdate: number
 }
 export interface UIProcessStatus {

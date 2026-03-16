@@ -25,17 +25,6 @@ vi.mock('./stores/market', () => ({
     updateLastPrice: vi.fn(),
   })),
 }))
-vi.mock('./stores/trade', () => ({
-  useTradeStore: vi.fn(() => ({
-    orders: [],
-    executions: [],
-    positions: [],
-    signals: [],
-    addOrder: vi.fn(),
-    addExecution: vi.fn(),
-    addSignal: vi.fn(),
-  })),
-}))
 vi.mock('./stores/auth', () => ({
   useAuth: vi.fn(() => ({
     user: null,

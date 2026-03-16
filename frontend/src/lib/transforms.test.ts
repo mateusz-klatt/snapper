@@ -269,6 +269,24 @@ describe('Execution Transformers', () => {
     expect(result.status).toBe('filled')
     expect(result.executedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
+  it('sets timestamp to undefined when WS execution has no timestamp', () => {
+    const wsExecution = {
+      type: 'execution',
+      client_order_id: 'client-notimestamp',
+      exchange: 'kraken',
+      instrument: 'BTC/USD',
+      side: 'buy',
+      size: 1,
+      price: 50000,
+      fee: 0.1,
+      fee_asset: 'USD',
+      status: 'filled',
+      executed_at: '2026-01-15T10:30:00Z',
+    } as unknown as ExecutionData
+    const result = executionFromWS(wsExecution)
+
+    expect(result.timestamp).toBeUndefined()
+  })
   it('throws on missing executed_at in WebSocket execution', () => {
     const wsExecution = {
       type: 'execution',

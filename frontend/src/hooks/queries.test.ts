@@ -63,29 +63,19 @@ vi.mock('../stores/auth', () => ({
     isAuthenticated: true,
   })),
 }))
-vi.mock('../stores/trade', () => ({
-  useTradeStore: vi.fn(selector => {
-    const state = {
-      updateOrders: vi.fn(),
-      updateExecutions: vi.fn(),
-      updatePositions: vi.fn(),
-      updateSignals: vi.fn(),
-    }
-
-    return selector ? selector(state) : state
-  }),
-}))
 vi.mock('../lib/transforms', () => ({
   safeOrderFromAPI: vi.fn(o => o),
   safeExecutionFromAPI: vi.fn(e => e),
   safeSignalFromAPI: vi.fn(s => s),
   positionFromAPI: vi.fn(p => ({
-    ...p,
-    averagePrice: p.average_price ?? 0,
-    unrealized_pnl: p.unrealized_pnl ?? 0,
-    realized_pnl: p.realized_pnl ?? 0,
-    quantity: p.quantity ?? 0,
+    publicId: p.public_id,
+    timestamp: p.timestamp ? new Date(p.timestamp) : undefined,
     instrument: p.instrument ?? '',
+    exchange: p.exchange ?? '',
+    quantity: p.quantity ?? 0,
+    averagePrice: p.average_price ?? 0,
+    unrealizedPnl: p.unrealized_pnl ?? 0,
+    realizedPnl: p.realized_pnl ?? 0,
   })),
 }))
 const mockedApiClient = apiClient as unknown as {
@@ -484,16 +474,22 @@ describe('queries', () => {
     it('calculates position summary', async () => {
       mockedApiClient.getPositions.mockResolvedValueOnce([
         {
+          type: 'position' as const,
           public_id: '1',
+          timestamp: new Date().toISOString(),
           instrument: 'BTC/USD',
+          exchange: 'kraken' as const,
           quantity: 10,
           average_price: 100,
           unrealized_pnl: 50,
           realized_pnl: 20,
         },
         {
+          type: 'position' as const,
           public_id: '2',
+          timestamp: new Date().toISOString(),
           instrument: 'ETH/USD',
+          exchange: 'kraken' as const,
           quantity: 5,
           average_price: 200,
           unrealized_pnl: -10,

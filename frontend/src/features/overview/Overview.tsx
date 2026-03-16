@@ -6,8 +6,8 @@ import {
   useLatestSignals,
   useOrdersGrouped,
   useProcessSummary,
+  useExecutions,
 } from '../../hooks/queries'
-import { useTradeStore } from '../../stores/trade'
 import type { Signal, Execution } from '../../types/entities'
 
 const CURRENCY_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
@@ -165,7 +165,7 @@ export const Overview: React.FC = () => {
   const { data: positionsSummary, isLoading: positionsLoading } = usePositionsSummary()
   const { data: latestSignals, isLoading: signalsLoading } = useLatestSignals(5)
   const { data: ordersGrouped } = useOrdersGrouped({ limit: 50 })
-  const { executions = [] } = useTradeStore()
+  const { data: executions = [] } = useExecutions()
   const feeds = processSummary?.feeds ?? zeroCounts
   const strategies = processSummary?.strategies ?? zeroCounts
   const executors = processSummary?.executors ?? zeroCounts

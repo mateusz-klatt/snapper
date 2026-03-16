@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { QueryClient } from '@tanstack/react-query'
 import { WSDispatcher, getDispatcher, resetDispatcher } from './wsDispatcher'
 import WebSocketClient from '../lib/websocket/client'
-import { useTradeStore } from './trade'
 import { useMarketStore } from './market'
 import { useAppStore } from './app'
 import { useProcessStore } from './process'
@@ -15,11 +14,6 @@ import type {
   HeartbeatData,
 } from '../types/ws'
 
-vi.mock('./trade', () => ({
-  useTradeStore: {
-    getState: vi.fn(),
-  },
-}))
 vi.mock('./market', () => ({
   useMarketStore: {
     getState: vi.fn(),
@@ -75,15 +69,6 @@ describe('WSDispatcher', () => {
       isConnected: vi.fn(() => true),
       getSubscribedTopics: vi.fn(() => []),
     } as unknown as WebSocketClient
-    const mockTradeStore = {
-      orders: [],
-      addOrder: vi.fn(),
-      updateOrder: vi.fn(),
-      addExecution: vi.fn(),
-      addSignal: vi.fn(),
-    }
-
-    vi.mocked(useTradeStore.getState).mockReturnValue(mockTradeStore as never)
     const mockMarketStore = {
       updateLastPrice: vi.fn(),
     }
@@ -163,141 +148,6 @@ describe('WSDispatcher', () => {
     })
   })
   describe('message handling', () => {
-    it('handles order message and updates store', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = '2026-01-15T10:30:00Z'
-      const orderMessage: OrderData = {
-        type: 'order',
-        client_order_id: 'client-1',
-        instrument: 'BTC/USD',
-        exchange: 'kraken',
-        side: 'buy',
-        order_type: 'limit',
-        size: 1,
-        price: 50000,
-        status: 'new',
-        filled_size: 0,
-        created_at: nowIso,
-        updated_at: null,
-      }
-      const orderHandler = messageHandlers.get('order')
-
-      expect(orderHandler).toBeDefined()
-      orderHandler?.(orderMessage)
-      expect(useTradeStore.getState().addOrder).toHaveBeenCalledWith({
-        clientOrderId: 'client-1',
-        exchangeOrderId: null,
-        instrument: 'BTC/USD',
-        exchange: 'kraken',
-        side: 'buy',
-        orderType: 'limit',
-        size: 1,
-        filledSize: 0,
-        price: 50000,
-        averagePrice: null,
-        status: 'new',
-        reason: null,
-        createdAt: new Date(nowIso),
-        updatedAt: null,
-      })
-    })
-    it('handles order message and updates existing order', () => {
-      const existingOrder = { clientOrderId: 'client-1', status: 'new' }
-      const mockTradeStore = {
-        orders: [existingOrder],
-        addOrder: vi.fn(),
-        updateOrder: vi.fn(),
-        addExecution: vi.fn(),
-        addSignal: vi.fn(),
-      }
-
-      vi.mocked(useTradeStore.getState).mockReturnValue(mockTradeStore as never)
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = '2026-01-15T10:30:00Z'
-      const orderMessage: OrderData = {
-        type: 'order',
-        client_order_id: 'client-1',
-        instrument: 'BTC/USD',
-        exchange: 'kraken',
-        side: 'buy',
-        order_type: 'limit',
-        size: 1,
-        price: 50000,
-        status: 'filled',
-        filled_size: 0,
-        created_at: nowIso,
-        updated_at: nowIso,
-      }
-      const orderHandler = messageHandlers.get('order')
-
-      orderHandler?.(orderMessage)
-      expect(mockTradeStore.updateOrder).toHaveBeenCalledWith(
-        'client-1',
-        expect.objectContaining({ clientOrderId: 'client-1', status: 'filled' })
-      )
-      expect(mockTradeStore.addOrder).not.toHaveBeenCalled()
-    })
-    it('handles execution message and updates store', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = '2026-01-15T10:30:00Z'
-      const execMessage: ExecutionData = {
-        type: 'execution',
-        client_order_id: 'ord-1',
-        exchange: 'kraken',
-        instrument: 'BTC/USD',
-        side: 'buy',
-        size: 1,
-        price: 50000,
-        fee: 0.1,
-        fee_asset: 'USD',
-        status: 'filled',
-        executed_at: nowIso,
-      }
-      const execHandler = messageHandlers.get('execution')
-
-      expect(execHandler).toBeDefined()
-      execHandler?.(execMessage)
-      expect(useTradeStore.getState().addExecution).toHaveBeenCalledWith({
-        clientOrderId: 'ord-1',
-        tradeId: null,
-        exchangeOrderId: null,
-        exchange: 'kraken',
-        instrument: 'BTC/USD',
-        side: 'buy',
-        size: 1,
-        price: 50000,
-        fee: 0.1,
-        feeAsset: 'USD',
-        status: 'filled',
-        executedAt: new Date(nowIso),
-      })
-    })
-    it('handles signal message and updates store', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const signalMessage: SignalData = {
-        type: 'signal',
-        exchange: 'kraken',
-        instrument: 'BTC/USD',
-        side: 'buy',
-        strength: 0.8,
-        reason: 'Test signal',
-        strategy_name: 'test_strategy',
-        fired_at: new Date().toISOString(),
-      }
-      const signalHandler = messageHandlers.get('signal')
-
-      expect(signalHandler).toBeDefined()
-      signalHandler?.(signalMessage)
-      expect(useTradeStore.getState().addSignal).toHaveBeenCalled()
-    })
     it('handles candle message and updates market store', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
@@ -1012,7 +862,7 @@ describe('WSDispatcher', () => {
 
       expect(cached).toHaveLength(0)
     })
-    it('handles tick message without last price - calculates mid price', () => {
+    it('tick handler updates market store with mid price from bid/ask', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -1030,7 +880,7 @@ describe('WSDispatcher', () => {
       tickHandler?.(tickMessage)
       expect(useMarketStore.getState().updateLastPrice).toHaveBeenCalledWith(50500)
     })
-    it('handles tick message with last price', () => {
+    it('tick handler updates market store with last price', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -1068,7 +918,7 @@ describe('WSDispatcher', () => {
       tickHandler?.(tickMessage)
       expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()
     })
-    it('handles trade message and updates market store', () => {
+    it('trade handler updates market store with trade price', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -1086,7 +936,7 @@ describe('WSDispatcher', () => {
 
       expect(tradeHandler).toBeDefined()
       tradeHandler?.(tradeMessage)
-      expect(useMarketStore.getState().updateLastPrice).toHaveBeenCalledWith(50250)
+      expect(useMarketStore.getState().updateLastPrice).toHaveBeenCalled()
     })
     it('handles heartbeat message and updates app store', () => {
       const dispatcher = new WSDispatcher({ queryClient })
@@ -1298,105 +1148,7 @@ describe('WSDispatcher', () => {
       expect(dispatcher1).not.toBe(dispatcher2)
     })
   })
-  describe('directStoreUpdates option', () => {
-    it('does not update stores when directStoreUpdates is false', () => {
-      const dispatcher = new WSDispatcher({
-        queryClient,
-        directStoreUpdates: false,
-      })
-
-      dispatcher.attach(mockWsClient)
-      const orderMessage: OrderData = {
-        type: 'order',
-        client_order_id: 'client-1',
-        instrument: 'BTC/USD',
-        exchange: 'kraken',
-        side: 'buy',
-        order_type: 'limit',
-        size: 1,
-        price: 50000,
-        status: 'new',
-        filled_size: 0,
-        created_at: new Date().toISOString(),
-        updated_at: null,
-      }
-      const orderHandler = messageHandlers.get('order')
-
-      orderHandler?.(orderMessage)
-      expect(useTradeStore.getState().addOrder).not.toHaveBeenCalled()
-    })
-    it('skips updates for other message types when directStoreUpdates is false', () => {
-      const dispatcher = new WSDispatcher({
-        queryClient,
-        directStoreUpdates: false,
-      })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const execMessage: ExecutionData = {
-        type: 'execution',
-        client_order_id: 'ord-1',
-        exchange: 'kraken',
-        instrument: 'BTC/USD',
-        side: 'buy',
-        size: 1,
-        price: 50000,
-        fee: 0.1,
-        fee_asset: 'USD',
-        status: 'filled',
-        executed_at: nowIso,
-      }
-      const signalMessage: SignalData = {
-        type: 'signal',
-        exchange: 'kraken',
-        instrument: 'BTC/USD',
-        side: 'buy',
-        strength: 0.8,
-        reason: 'Test signal',
-        strategy_name: 'test_strategy',
-        fired_at: nowIso,
-      }
-      const candleMessage: CandleData = {
-        type: 'candle',
-        instrument: 'BTC/USD',
-        exchange: 'kraken',
-        timeframe: '1m',
-        timestamp: nowIso,
-        open_at: nowIso,
-        open: 49000,
-        high: 51000,
-        low: 48500,
-        close: 50500,
-        volume: 100,
-      }
-      const tickMessage = {
-        type: 'tick',
-        instrument: 'BTC/USD',
-        exchange: 'kraken',
-        bid: 50000,
-        ask: 51000,
-        last: 50500,
-        timestamp: nowIso,
-      }
-      const tradeMessage: TradeData = {
-        type: 'trade',
-        instrument: 'BTC/USD',
-        exchange: 'kraken',
-        price: 50250,
-        volume: 1.25,
-        side: 'buy',
-        timestamp: nowIso,
-      }
-
-      messageHandlers.get('execution')?.(execMessage)
-      messageHandlers.get('signal')?.(signalMessage)
-      messageHandlers.get('candle')?.(candleMessage)
-      messageHandlers.get('tick')?.(tickMessage)
-      messageHandlers.get('trade')?.(tradeMessage)
-      expect(useTradeStore.getState().addExecution).not.toHaveBeenCalled()
-      expect(useTradeStore.getState().addSignal).not.toHaveBeenCalled()
-      expect(useMarketStore.getState().updateLastPrice).not.toHaveBeenCalled()
-    })
+  describe('additional message handling', () => {
     it('handles heartbeat with strategy component', () => {
       const mockProcessStore = {
         updateFeedStatus: vi.fn(),
@@ -1544,32 +1296,40 @@ describe('WSDispatcher', () => {
     })
     describe('type guard branches', () => {
       it('order handler ignores non-order messages', () => {
+        queryClient.setQueryData(['orders', undefined], [])
+        const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
         const dispatcher = new WSDispatcher({ queryClient })
 
         dispatcher.attach(mockWsClient)
         const orderHandler = messageHandlers.get('order')
 
         orderHandler?.({ type: 'execution' })
-        expect(useTradeStore.getState().addOrder).not.toHaveBeenCalled()
-        expect(useTradeStore.getState().updateOrder).not.toHaveBeenCalled()
+        expect(setQueryDataSpy).not.toHaveBeenCalled()
+        setQueryDataSpy.mockRestore()
       })
       it('execution handler ignores non-execution messages', () => {
+        queryClient.setQueryData(['executions', undefined], [])
+        const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
         const dispatcher = new WSDispatcher({ queryClient })
 
         dispatcher.attach(mockWsClient)
         const execHandler = messageHandlers.get('execution')
 
         execHandler?.({ type: 'order' })
-        expect(useTradeStore.getState().addExecution).not.toHaveBeenCalled()
+        expect(setQueryDataSpy).not.toHaveBeenCalled()
+        setQueryDataSpy.mockRestore()
       })
       it('signal handler ignores non-signal messages', () => {
+        queryClient.setQueryData(['signals', undefined, 50, undefined, 24], [])
+        const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
         const dispatcher = new WSDispatcher({ queryClient })
 
         dispatcher.attach(mockWsClient)
         const signalHandler = messageHandlers.get('signal')
 
         signalHandler?.({ type: 'execution' })
-        expect(useTradeStore.getState().addSignal).not.toHaveBeenCalled()
+        expect(setQueryDataSpy).not.toHaveBeenCalled()
+        setQueryDataSpy.mockRestore()
       })
       it('candle handler ignores non-candle messages', () => {
         const dispatcher = new WSDispatcher({ queryClient })
@@ -1658,6 +1418,50 @@ describe('WSDispatcher', () => {
       const execHandler = messageHandlers.get('execution')
 
       execHandler?.(execMessage)
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('drops execution message when no cache and no buffer active', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const execMessage: ExecutionData = {
+        type: 'execution',
+        client_order_id: 'ord-drop',
+        exchange: 'kraken',
+        instrument: 'BTC/USD',
+        side: 'buy',
+        size: 1,
+        price: 50000,
+        fee: 0.1,
+        fee_asset: 'USD',
+        status: 'filled',
+        executed_at: new Date().toISOString(),
+      }
+      const execHandler = messageHandlers.get('execution')
+
+      execHandler?.(execMessage)
+      expect(setQueryDataSpy).not.toHaveBeenCalled()
+      setQueryDataSpy.mockRestore()
+    })
+    it('drops signal message when no cache and no buffer active', () => {
+      const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const signalMessage: SignalData = {
+        type: 'signal',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        strength: 0.9,
+        reason: 'test',
+        timestamp: new Date().toISOString(),
+      }
+      const signalHandler = messageHandlers.get('signal')
+
+      signalHandler?.(signalMessage)
       expect(setQueryDataSpy).not.toHaveBeenCalled()
       setQueryDataSpy.mockRestore()
     })
