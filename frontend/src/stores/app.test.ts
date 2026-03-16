@@ -1,10 +1,13 @@
-import { describe, it, expect, beforeEach, vi, afterEach, Mock } from 'vitest'
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { useAppStore } from './app'
+import { useWebSocketStore } from './websocket'
 
-vi.mock('../lib/websocket/instance', () => ({
-  wsClient: {
-    subscribe: vi.fn(),
-    unsubscribe: vi.fn(),
+vi.mock('./websocket', () => ({
+  useWebSocketStore: {
+    getState: vi.fn(() => ({
+      subscribe: vi.fn(),
+      unsubscribe: vi.fn(),
+    })),
   },
 }))
 describe('useAppStore', () => {
@@ -68,69 +71,62 @@ describe('useAppStore', () => {
     })
   })
   describe('addSubscribedTopic', () => {
-    it('adds new topic to subscribedTopics', async () => {
+    it('adds new topic to subscribedTopics', () => {
       useAppStore.getState().addSubscribedTopic('market.kraken.BTC-USD.candles.1m')
-      await vi.waitFor(() => {
-        expect(useAppStore.getState().subscribedTopics).toContain(
-          'market.kraken.BTC-USD.candles.1m'
-        )
-      })
+      expect(useAppStore.getState().subscribedTopics).toContain('market.kraken.BTC-USD.candles.1m')
     })
-    it('does not add duplicate topic', async () => {
+    it('does not add duplicate topic', () => {
       useAppStore.getState().addSubscribedTopic('market.kraken.BTC-USD.candles.1m')
       useAppStore.getState().addSubscribedTopic('market.kraken.BTC-USD.candles.1m')
-      await vi.waitFor(() => {
-        const topics = useAppStore.getState().subscribedTopics
+      const topics = useAppStore.getState().subscribedTopics
 
-        expect(topics.filter(t => t === 'market.kraken.BTC-USD.candles.1m')).toHaveLength(1)
-      })
+      expect(topics.filter(t => t === 'market.kraken.BTC-USD.candles.1m')).toHaveLength(1)
     })
-    it('calls wsClient.subscribe for new topic', async () => {
-      const { wsClient } = await import('../lib/websocket/instance')
+    it('calls websocket store subscribe for new topic', () => {
+      const mockSubscribe = vi.fn()
 
+      vi.mocked(useWebSocketStore.getState).mockReturnValue({
+        subscribe: mockSubscribe,
+        unsubscribe: vi.fn(),
+      } as ReturnType<typeof useWebSocketStore.getState>)
       useAppStore.getState().addSubscribedTopic('orders.')
-      await vi.waitFor(() => {
-        expect(wsClient.subscribe).toHaveBeenCalledWith(['orders.'])
-      })
+      expect(mockSubscribe).toHaveBeenCalledWith(['orders.'])
     })
-    it('does not call wsClient.subscribe for duplicate topic', async () => {
-      const { wsClient } = await import('../lib/websocket/instance')
+    it('does not call subscribe for duplicate topic', () => {
+      const mockSubscribe = vi.fn()
 
+      vi.mocked(useWebSocketStore.getState).mockReturnValue({
+        subscribe: mockSubscribe,
+        unsubscribe: vi.fn(),
+      } as ReturnType<typeof useWebSocketStore.getState>)
       useAppStore.setState({ subscribedTopics: ['signals.'] })
       useAppStore.getState().addSubscribedTopic('signals.')
-      await vi.waitFor(
-        () => {
-          expect((wsClient.subscribe as Mock).mock.calls.length).toBe(0)
-        },
-        { timeout: 100 }
-      )
+      expect(mockSubscribe).not.toHaveBeenCalled()
     })
   })
   describe('removeSubscribedTopic', () => {
-    it('removes topic from subscribedTopics', async () => {
+    it('removes topic from subscribedTopics', () => {
       useAppStore.setState({
         subscribedTopics: ['market.kraken.BTC-USD.candles.1m', 'orders.'],
       })
       useAppStore.getState().removeSubscribedTopic('market.kraken.BTC-USD.candles.1m')
-      await vi.waitFor(() => {
-        expect(useAppStore.getState().subscribedTopics).toEqual(['orders.'])
-      })
+      expect(useAppStore.getState().subscribedTopics).toEqual(['orders.'])
     })
-    it('calls wsClient.unsubscribe', async () => {
-      const { wsClient } = await import('../lib/websocket/instance')
+    it('calls websocket store unsubscribe', () => {
+      const mockUnsubscribe = vi.fn()
 
+      vi.mocked(useWebSocketStore.getState).mockReturnValue({
+        subscribe: vi.fn(),
+        unsubscribe: mockUnsubscribe,
+      } as ReturnType<typeof useWebSocketStore.getState>)
       useAppStore.setState({ subscribedTopics: ['executions.'] })
       useAppStore.getState().removeSubscribedTopic('executions.')
-      await vi.waitFor(() => {
-        expect(wsClient.unsubscribe).toHaveBeenCalledWith(['executions.'])
-      })
+      expect(mockUnsubscribe).toHaveBeenCalledWith(['executions.'])
     })
-    it('handles removing non-existent topic', async () => {
+    it('handles removing non-existent topic', () => {
       useAppStore.setState({ subscribedTopics: ['orders.'] })
       useAppStore.getState().removeSubscribedTopic('non-existent')
-      await vi.waitFor(() => {
-        expect(useAppStore.getState().subscribedTopics).toEqual(['orders.'])
-      })
+      expect(useAppStore.getState().subscribedTopics).toEqual(['orders.'])
     })
   })
   describe('setSubscribedTopics', () => {
