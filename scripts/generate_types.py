@@ -356,7 +356,7 @@ def export_ws_schemas(project_root: Path) -> Path:
             all_definitions[name] = schema_fixed
 
     combined_schema: dict[str, JsonValue] = {
-        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$schema": "https://json-schema.org/draft-07/schema#",
         "title": "WebSocket Messages",
         "description": "WebSocket message schemas for Snapper trading platform",
         "definitions": all_definitions,
@@ -438,7 +438,7 @@ def export_openapi_schemas(project_root: Path) -> Path:
     schemas = openapi_spec.get("components", {}).get("schemas", {})
 
     json_schema: dict[str, JsonValue] = {
-        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$schema": "https://json-schema.org/draft-07/schema#",
         "title": "APITypes",
         "description": "API schemas for Snapper trading platform",
         "definitions": {},
