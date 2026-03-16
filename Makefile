@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate seed migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate docker-seed docker-migrate-dev docker-migrate-prod docker-push docker-run docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate seed migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -95,8 +95,6 @@ help:
 	$(info Docker:)
 	$(info docker-build-dev    Build Docker image [caller UID])
 	$(info docker-build-prod   Build Docker image [UID 10000])
-	$(info docker-migrate      Run database migrations in Docker)
-	$(info docker-seed         Seed database with dev profile in Docker)
 	$(info docker-migrate-dev  Run migrations + seed dev data in Docker)
 	$(info docker-migrate-prod Run migrations + seed prod data in Docker)
 	$(info docker-push         Push Docker image)
@@ -495,15 +493,12 @@ docker-build-dev:
 docker-build-prod:
 	docker build --build-arg UID=$(DOCKER_PROD_UID) -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
-docker-migrate:
+docker-migrate-dev:
 	$(DOCKER_RUN) db-init
-
-docker-seed:
 	$(DOCKER_RUN) db-seed --profile dev
 
-docker-migrate-dev: docker-migrate docker-seed
-
-docker-migrate-prod: docker-migrate
+docker-migrate-prod:
+	$(DOCKER_RUN) db-init
 	$(DOCKER_RUN) db-seed --profile prod
 
 docker-push:
