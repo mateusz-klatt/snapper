@@ -17,6 +17,8 @@ import type {
   ProcessCreateRequest,
   ProcessCreateResponse,
   StrategyListResponse,
+  SettingRead,
+  SettingUpdate,
 } from '../types/api'
 
 const queryKeys = {
@@ -39,6 +41,8 @@ const queryKeys = {
   positions: ['positions'] as const,
   signals: (strategyId?: string, limit?: number, instrument?: string, hours?: number) =>
     ['signals', strategyId, limit, instrument, hours] as const,
+  settings: (category?: string) => ['settings', category] as const,
+  settingCategories: ['settings', 'categories'] as const,
 }
 
 export const useSystemStatus = () => {
@@ -348,6 +352,50 @@ export const useCreateProcessConfig = () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.strategies })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
+    },
+  })
+}
+
+export const useSettings = (category?: string) => {
+  const { isAuthenticated } = useAuth()
+
+  return useQuery<SettingRead[]>({
+    queryKey: queryKeys.settings(category),
+    queryFn: () => apiClient.getSettings(category),
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+}
+
+export const useSettingCategories = () => {
+  const { isAuthenticated } = useAuth()
+
+  return useQuery<string[]>({
+    queryKey: queryKeys.settingCategories,
+    queryFn: () => apiClient.getSettingCategories(),
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+}
+
+export const useUpdateSetting = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<SettingRead, Error, { key: string; data: SettingUpdate }>({
+    mutationFn: ({ key, data }) => apiClient.updateSetting(key, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+  })
+}
+
+export const useDeleteSetting = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<{ message: string }, Error, string>({
+    mutationFn: key => apiClient.deleteSetting(key),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
   })
 }

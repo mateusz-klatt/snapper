@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Settings } from './Settings'
 import { apiClient } from '../../lib/apiClient'
 
@@ -48,9 +49,22 @@ vi.mock('../../lib/apiClient', () => ({
     deleteSetting: vi.fn(),
   },
 }))
+vi.mock('../../stores/auth', () => ({
+  useAuth: vi.fn(() => ({ isAuthenticated: true })),
+}))
+
+const createQueryClient = () =>
+  new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  })
 
 const renderSettings = (ui: ReactNode) => {
-  return render(ui)
+  const queryClient = createQueryClient()
+
+  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
 }
 
 describe('Settings', () => {
@@ -247,19 +261,81 @@ describe('Settings', () => {
     })
     expect(screen.getByText('app.mode')).toBeTruthy()
   })
-  it('dismisses error message', async () => {
+  it('passes isSaving to SettingItem during update', async () => {
+    const mockSettings = [
+      {
+        key: 'busy.key',
+        value: 'val',
+        category: 'test',
+        description: 'Busy setting',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'tester',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+
+    let resolveUpdate: (v: unknown) => void = () => {}
+
+    vi.mocked(apiClient.updateSetting).mockImplementation(
+      () => new Promise(resolve => (resolveUpdate = resolve))
+    )
+    renderSettings(<Settings />)
+    await waitFor(() => expect(screen.getByText('busy.key')).toBeTruthy())
+    await userEvent.click(screen.getByText('Edit'))
+    const textarea = screen.getByPlaceholderText('Enter setting value...')
+
+    await userEvent.clear(textarea)
+    await userEvent.type(textarea, 'new-value')
+    await userEvent.click(screen.getByText('Save'))
+    await waitFor(() => expect(screen.getByText('Saving...')).toBeTruthy())
+    resolveUpdate({
+      key: 'busy.key',
+      value: 'val',
+      category: 'test',
+      description: 'Busy setting',
+      updated_at: '2024-01-02T00:00:00Z',
+      updated_by: 'tester',
+    })
+    await waitFor(() => expect(screen.queryByText('Saving...')).toBeNull())
+  })
+  it('passes isSaving to SettingItem during delete', async () => {
+    const mockSettings = [
+      {
+        key: 'del.busy',
+        value: 'val',
+        category: 'test',
+        description: 'Delete busy',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'tester',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
+    vi.mocked(apiClient.getSettings).mockResolvedValueOnce(mockSettings).mockResolvedValue([])
+
+    let resolveDelete: (v: unknown) => void = () => {}
+
+    vi.mocked(apiClient.deleteSetting).mockImplementation(
+      () => new Promise(resolve => (resolveDelete = resolve))
+    )
+    renderSettings(<Settings />)
+    await waitFor(() => expect(screen.getByText('del.busy')).toBeTruthy())
+    await userEvent.click(screen.getByRole('button', { name: /delete/i }))
+    await userEvent.click(screen.getByRole('button', { name: /Yes, Delete/i }))
+    await waitFor(() => expect(screen.getByText('Deleting...')).toBeTruthy())
+    resolveDelete({ message: 'deleted' })
+    await waitFor(() => expect(screen.queryByText('Deleting...')).toBeNull())
+  })
+  it('displays query error without dismiss button', async () => {
     vi.mocked(apiClient.getSettings).mockRejectedValue(new Error('Network error'))
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue([])
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText(/Network error/i)).toBeTruthy()
     })
-    const dismissButton = screen.getByText('Dismiss')
-
-    await userEvent.click(dismissButton)
-    await waitFor(() => {
-      expect(screen.queryByText(/Network error/i)).toBeFalsy()
-    })
+    expect(screen.queryByText('Dismiss')).toBeNull()
   })
   it('displays all categories option', async () => {
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'database'])
@@ -1064,7 +1140,7 @@ describe('Settings', () => {
       ]
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+      vi.mocked(apiClient.getSettings).mockResolvedValueOnce(mockSettings).mockResolvedValue([])
       vi.mocked(apiClient.deleteSetting).mockResolvedValue({ message: 'Setting deleted' })
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1170,7 +1246,7 @@ describe('Settings', () => {
       }
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValueOnce([]).mockResolvedValue([newSetting])
       vi.mocked(apiClient.updateSetting).mockResolvedValue(newSetting)
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1371,7 +1447,7 @@ describe('Settings', () => {
       await userEvent.selectOptions(comboboxes[1], 'api')
       await userEvent.click(screen.getByRole('button', { name: /Create Setting/i }))
       await waitFor(() => {
-        expect(screen.getByText('Server error')).toBeTruthy()
+        expect(screen.getAllByText('Server error').length).toBeGreaterThan(0)
       })
       expect(screen.getByText('Add New Setting')).toBeTruthy()
     })

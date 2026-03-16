@@ -1,41 +1,42 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import { apiClient } from '../../lib/apiClient'
-import type { SettingRead } from '../../types/api'
+import React, { useState } from 'react'
 import { SettingItem } from './SettingItem'
 import { AddSettingModal } from './AddSettingModal'
 import { ThemeSelect } from '../../components/ThemeSelect'
+import {
+  useSettings,
+  useSettingCategories,
+  useUpdateSetting,
+  useDeleteSetting,
+} from '../../hooks/queries'
 
 export const Settings = () => {
-  const [settings, setSettings] = useState<SettingRead[]>([])
-  const [categories, setCategories] = useState<string[]>([])
   const [selectedCategory, setSelectedCategory] = useState<string>('all')
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
 
-  const loadSettings = useCallback(async () => {
-    try {
-      setLoading(true)
-      setError(null)
-      const [settingsResponse, categoriesResponse] = await Promise.all([
-        apiClient.getSettings(),
-        apiClient.getSettingCategories(),
-      ])
+  const { data: settings = [], isLoading, error: queryError } = useSettings()
+  const { data: rawCategories = [] } = useSettingCategories()
+  const updateMutation = useUpdateSetting()
+  const deleteMutation = useDeleteSetting()
 
-      setSettings(settingsResponse)
-      setCategories(['all', ...categoriesResponse])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load settings')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  const categories = ['all', ...rawCategories]
+  const displayError = queryError ?? updateMutation.error ?? deleteMutation.error
+  const error = (() => {
+    if (!displayError) return null
+    if (displayError instanceof Error) return displayError.message
+    if (updateMutation.error) return 'Failed to update setting'
+    if (deleteMutation.error) return 'Failed to delete setting'
 
-  useEffect(() => {
-    loadSettings()
-  }, [loadSettings])
+    return 'Failed to load settings'
+  })()
+
+  let savingKey: string | null = null
+
+  if (updateMutation.isPending && updateMutation.variables) {
+    savingKey = updateMutation.variables.key
+  } else if (deleteMutation.isPending && deleteMutation.variables) {
+    savingKey = deleteMutation.variables
+  }
 
   const updateSetting = async (
     key: string,
@@ -44,19 +45,9 @@ export const Settings = () => {
     description?: string | null
   ) => {
     try {
-      setSaving(key)
-      setError(null)
-      const response = await apiClient.updateSetting(key, {
-        value,
-        category,
-        description,
-      })
-
-      setSettings(prev => prev.map(setting => (setting.key === key ? response : setting)))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update setting')
-    } finally {
-      setSaving(null)
+      await updateMutation.mutateAsync({ key, data: { value, category, description } })
+    } catch {
+      /* error is captured in updateMutation.error */
     }
   }
 
@@ -70,25 +61,14 @@ export const Settings = () => {
       throw new Error(`Setting with key "${key}" already exists`)
     }
 
-    const response = await apiClient.updateSetting(key, {
-      value,
-      category,
-      description,
-    })
-
-    setSettings(prev => [...prev, response])
+    await updateMutation.mutateAsync({ key, data: { value, category, description } })
   }
 
   const deleteSetting = async (key: string) => {
     try {
-      setSaving(key)
-      setError(null)
-      await apiClient.deleteSetting(key)
-      setSettings(prev => prev.filter(setting => setting.key !== key))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete setting')
-    } finally {
-      setSaving(null)
+      await deleteMutation.mutateAsync(key)
+    } catch {
+      /* error is captured in deleteMutation.error */
     }
   }
 
@@ -102,7 +82,7 @@ export const Settings = () => {
     return categoryMatch && searchMatch
   })
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className='p-8'>
         <div className='animate-pulse'>
@@ -144,12 +124,6 @@ export const Settings = () => {
         {error && (
           <div className='mb-4 p-3 bg-loss-50 border border-loss-500 rounded-lg'>
             <p className='text-loss-700 text-sm'>{error}</p>
-            <button
-              onClick={() => setError(null)}
-              className='mt-1 text-loss-600 hover:text-loss-100 underline text-xs'
-            >
-              Dismiss
-            </button>
           </div>
         )}
         {}
@@ -192,7 +166,7 @@ export const Settings = () => {
                 setting={setting}
                 onUpdate={updateSetting}
                 onDelete={deleteSetting}
-                isSaving={saving === setting.key}
+                isSaving={savingKey === setting.key}
               />
             ))
           )}
