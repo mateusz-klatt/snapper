@@ -1,15 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import {
-  StatusBadge,
-  Card,
-  Button,
-  Badge,
-  LoadingSpinner,
-  ConnectionBar,
-  MetricCard,
-  EmptyState,
-} from './ui'
+import { StatusBadge, Card, Button, Badge, LoadingSpinner, MetricCard, EmptyState } from './ui'
 import userEvent from '@testing-library/user-event'
 
 describe('StatusBadge', () => {
@@ -180,28 +171,6 @@ describe('LoadingSpinner', () => {
     const { container } = render(<LoadingSpinner className='custom-spinner' />)
 
     expect(container.firstChild).toHaveClass('custom-spinner')
-  })
-})
-describe('ConnectionBar', () => {
-  it('shows connected status', () => {
-    render(<ConnectionBar isConnected={true} lag={10} subscribedTopicsCount={5} />)
-    expect(screen.getByText(/connected/i)).toBeInTheDocument()
-  })
-  it('shows disconnected status', () => {
-    render(<ConnectionBar isConnected={false} lag={0} subscribedTopicsCount={0} />)
-    expect(screen.getByText(/disconnected/i)).toBeInTheDocument()
-  })
-  it('displays lag', () => {
-    render(<ConnectionBar isConnected={true} lag={25} subscribedTopicsCount={5} />)
-    expect(screen.getByText(/25ms/i)).toBeInTheDocument()
-  })
-  it('displays unknown lag for negative values', () => {
-    render(<ConnectionBar isConnected={true} lag={-1} subscribedTopicsCount={5} />)
-    expect(screen.getByText(/Unknown/i)).toBeInTheDocument()
-  })
-  it('displays subscribed topics count', () => {
-    render(<ConnectionBar isConnected={true} lag={10} subscribedTopicsCount={8} />)
-    expect(screen.getByText(/Topics: 8/i)).toBeInTheDocument()
   })
 })
 describe('MetricCard', () => {

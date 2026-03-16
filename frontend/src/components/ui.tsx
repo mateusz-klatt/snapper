@@ -145,45 +145,6 @@ export const LoadingSpinner: React.FC<Readonly<LoadingSpinnerProps>> = ({
   )
 }
 
-interface ConnectionBarProps {
-  isConnected: boolean
-  lag: number
-  subscribedTopicsCount: number
-}
-
-export const ConnectionBar: React.FC<Readonly<ConnectionBarProps>> = ({
-  isConnected,
-  lag,
-  subscribedTopicsCount,
-}) => {
-  return (
-    <div
-      className={clsx(
-        'flex items-center justify-between px-4 py-2 text-sm border-b',
-        isConnected
-          ? 'bg-dark-700 border-dark-600 text-accent-800'
-          : 'bg-loss-50 border-loss-200 text-loss-800'
-      )}
-    >
-      <div className='flex items-center gap-4'>
-        <div className='flex items-center gap-2'>
-          <div
-            className={clsx('w-2 h-2 rounded-full', isConnected ? 'bg-accent-400' : 'bg-loss-400')}
-          />
-          <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
-        </div>
-        {isConnected && (
-          <>
-            <div className='text-muted-700'>Lag: {lag >= 0 ? `${lag}ms` : 'Unknown'}</div>
-            <div className='text-muted-700'>Topics: {subscribedTopicsCount}</div>
-          </>
-        )}
-      </div>
-      <div className='text-xs text-muted-500'>Last update: {new Date().toLocaleTimeString()}</div>
-    </div>
-  )
-}
-
 interface EmptyStateProps {
   icon: React.ReactNode
   title: string

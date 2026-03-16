@@ -27,18 +27,18 @@ ReactDOM.createRoot(rootElement).render(
         toastOptions={{
           duration: 4000,
           style: {
-            background: '#1e293b',
-            color: '#ffffff',
-            border: '1px solid #475569',
+            background: 'var(--color-dark-100)',
+            color: 'var(--color-dark-800)',
+            border: '1px solid var(--color-dark-500)',
           },
           success: {
             style: {
-              border: '1px solid #10b981',
+              border: '1px solid var(--color-accent-400)',
             },
           },
           error: {
             style: {
-              border: '1px solid #ef4444',
+              border: '1px solid var(--color-loss-400)',
             },
           },
         }}
