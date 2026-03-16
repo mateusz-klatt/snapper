@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unixodbc \
     && rm -rf /var/lib/apt/lists/*
 
-RUN adduser --disabled-password --gecos '' --no-create-home snapper
+RUN adduser --disabled-password --gecos '' --no-create-home --uid 10000 snapper
 
 COPY --from=py-build /wheels /wheels
 RUN python -m pip install --upgrade pip \
@@ -56,13 +56,13 @@ COPY alembic.ini ./
 COPY src/snapper/data/migrations ./src/snapper/data/migrations
 COPY *proprietary/data/migrations ./proprietary/data/migrations
 
-RUN mkdir -p /app/data
-
-COPY docker-entrypoint.sh /usr/local/bin/
+RUN mkdir -p /app/data && chown snapper:snapper /app/data
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
+USER snapper
+
 EXPOSE 8000
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["snapper"]
 CMD ["server"]
