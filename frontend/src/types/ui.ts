@@ -21,14 +21,14 @@ export interface TradeState {
   signals: Signal[]
   lastUpdate: number
 }
-export interface ProcessStatus {
+export interface UIProcessStatus {
   running: boolean
   lastHeartbeat?: number
   details?: Record<string, unknown>
 }
 export interface ProcessControlState {
-  feeds: Record<string, ProcessStatus>
-  strategies: Record<string, ProcessStatus>
-  executors: Record<string, ProcessStatus>
-  brokers: Record<string, ProcessStatus>
+  feeds: Record<string, UIProcessStatus>
+  strategies: Record<string, UIProcessStatus>
+  executors: Record<string, UIProcessStatus>
+  brokers: Record<string, UIProcessStatus>
 }

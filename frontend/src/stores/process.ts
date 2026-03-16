@@ -1,12 +1,12 @@
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
-import { ProcessControlState, ProcessStatus } from '../types/ui'
+import { ProcessControlState, UIProcessStatus } from '../types/ui'
 
 interface ProcessControlStore extends ProcessControlState {
-  updateFeedStatus: (feedId: string, status: ProcessStatus) => void
-  updateStrategyStatus: (strategyId: string, status: ProcessStatus) => void
-  updateExecutorStatus: (executorId: string, status: ProcessStatus) => void
-  updateBrokerStatus: (brokerId: string, status: ProcessStatus) => void
+  updateFeedStatus: (feedId: string, status: UIProcessStatus) => void
+  updateStrategyStatus: (strategyId: string, status: UIProcessStatus) => void
+  updateExecutorStatus: (executorId: string, status: UIProcessStatus) => void
+  updateBrokerStatus: (brokerId: string, status: UIProcessStatus) => void
   resetProcessStates: () => void
 }
 

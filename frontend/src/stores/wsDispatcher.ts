@@ -19,7 +19,7 @@ import {
   isTrade,
   isHeartbeat,
 } from '../types/ws'
-import { ProcessStatus } from '../types/ui'
+import { UIProcessStatus } from '../types/ui'
 import {
   orderFromWS,
   executionFromWS,
@@ -365,7 +365,7 @@ export class WSDispatcher {
 
     if (component) {
       const processStore = useProcessStore.getState()
-      const status: ProcessStatus = {
+      const status: UIProcessStatus = {
         running: message.status === 'healthy',
         lastHeartbeat: message.timestamp ? new Date(message.timestamp).getTime() : Date.now(),
         details: { lag_ms: message.lag_ms ?? undefined },
