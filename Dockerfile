@@ -44,7 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unixodbc \
     && rm -rf /var/lib/apt/lists/*
 
-RUN adduser --disabled-password --gecos '' --no-create-home --uid 10000 snapper
+ARG UID=10000
+RUN adduser --disabled-password --gecos '' --no-create-home --uid "$UID" snapper
 
 COPY --from=py-build /wheels /wheels
 RUN python -m pip install --upgrade pip \

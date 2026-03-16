@@ -61,7 +61,6 @@ jobs:
       - name: Docker run
         run: |
           cp .env.example .env
-          mkdir -p data && sudo chown 10000:10000 data
           make docker-run
 
       - name: Docker health check

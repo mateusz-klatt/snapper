@@ -478,8 +478,13 @@ ios-clean:
 	$(info Cleaning iOS build artifacts...)
 	rm -rf "$(IOS_DIR)/DerivedData" "$(IOS_DIR)/build"
 
+DOCKER_UID := $(shell id -u)
+ifeq ($(DOCKER_UID),0)
+  DOCKER_UID := 10000
+endif
+
 docker-build:
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker build --build-arg UID=$(DOCKER_UID) -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
 docker-migrate:
 	$(DOCKER_RUN) db-init
