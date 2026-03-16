@@ -56,13 +56,13 @@ COPY alembic.ini ./
 COPY src/snapper/data/migrations ./src/snapper/data/migrations
 COPY *proprietary/data/migrations ./proprietary/data/migrations
 
-RUN mkdir -p /app/data && chown snapper:snapper /app/data
+RUN mkdir -p /app/data
+
+COPY docker-entrypoint.sh /usr/local/bin/
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-USER snapper
-
 EXPOSE 8000
-ENTRYPOINT ["snapper"]
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["server"]
