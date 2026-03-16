@@ -56,7 +56,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
       - name: Docker build
-        run: make docker-build
+        run: make docker-build-dev
 
       - name: Docker run
         run: |
