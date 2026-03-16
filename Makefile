@@ -329,15 +329,15 @@ run-trader-zmq:
 zmq-logger:
 	$(PYRUN) snapper zmq-logger --payload --max-length 500
 
-migrate:
+_migrate:
 	$(PYRUN) snapper db-init
 
 seed:
 	$(PYRUN) snapper db-seed --profile dev
 
-migrate-dev: migrate seed
+migrate-dev: _migrate seed
 
-migrate-prod: migrate
+migrate-prod: _migrate
 	$(PYRUN) snapper db-seed --profile prod
 
 ui-setup:

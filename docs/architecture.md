@@ -104,7 +104,7 @@ Built-in strategies:
 
 - `RSIReversion` (`rsi.py`) — Mean reversion on RSI
 - `MACDCrossover` (`macd.py`) — MACD crossover
-- `Cointegration` (`cointegration.py`) — Pairs trading
+- `CointegrationPairs` (`cointegration.py`) — Pairs trading
 
 ### Indicators (`src/snapper/indicators/`)
 

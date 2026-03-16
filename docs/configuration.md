@@ -163,7 +163,7 @@ GET /api/settings
 
 ```bash
 # .env.development
-DB_URL=sqlite+aiosqlite:///./data/snapper_dev.db
+DB_URL=sqlite+aiosqlite:///./data/snapper.db
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8000
 SERVER_RELOAD=true

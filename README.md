@@ -6,8 +6,8 @@ Supports Kraken, Zonda, Walutomat exchanges and Polygon.io data.
 ## Quick Steps
 
 ```bash
-# Initialize database and build static assets
-make migrate run-static
+# Initialize database with seed data and build static assets
+make migrate-dev run-static
 
 # Start the server
 make run-server
@@ -84,20 +84,14 @@ ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
 ### Running
 
 ```bash
-# Initialize database
-snapper db-init
-
-# Run migrations
-snapper db-upgrade
-
-# Create admin user
-snapper init-admin
+# Initialize database and seed data
+make migrate-dev
 
 # Start server
 snapper server
 ```
 
-Dashboard available at `http://localhost:8000`.
+Dashboard available at `http://localhost:8000/snapper/`.
 
 ## Architecture
 
@@ -234,15 +228,16 @@ make ui-format   # Prettier
 ## Docker
 
 ```bash
-make docker-build   # Build image
-make docker-run     # Run container
-make docker-stop    # Stop container
+make docker-build-dev    # Build dev image
+make docker-build-prod   # Build production image
+make docker-run          # Run container
+make docker-stop         # Stop container
 ```
 
-Or with docker-compose:
+Or with docker compose:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ## Documentation

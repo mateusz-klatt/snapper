@@ -86,7 +86,7 @@ Topic format: `{category}.{exchange}.{instrument}.{type}.{timeframe}`
 
 | Topic | Description |
 | ----- | ----------- |
-| `orders.kraken.BTC-USD` | Order requests for Kraken |
+| `orders.commands.kraken.BTC-USD.submit` | Order requests for Kraken |
 | `orders.events.kraken.BTC-USD.executed` | Order executions from Kraken |
 | `orders.events.kraken.BTC-USD.submitted` | Order submitted events |
 | `orders.events.kraken.BTC-USD.accepted` | Order accepted events |
@@ -407,7 +407,7 @@ TopicSchema(
 ValidatedPublisher/Subscriber validate schemas:
 
 ```python
-from snapper.messaging.topics.validation import validate_message_schema
+from snapper.messaging.topics.schemas import validate_message_schema
 
 is_valid = validate_message_schema("market.kraken.BTC-USD.candles.1h", message)
 ```

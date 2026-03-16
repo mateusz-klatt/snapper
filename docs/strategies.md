@@ -167,7 +167,7 @@ class StrategySignal:
     strength: float
     reason: str
     price: float
-    timestamp: float
+    timestamp: datetime | None
 ```
 
 ## Built-in Strategies
@@ -220,7 +220,7 @@ from snapper.strategies.macd import MACDCrossover
 Pairs trading strategy based on cointegration.
 
 ```python
-from snapper.strategies.cointegration import CointegrationStrategy
+from snapper.strategies.cointegration import CointegrationPairs
 ```
 
 ## Data Access
@@ -283,7 +283,7 @@ macd_line, signal_line, histogram = macd(closes, fast=12, slow=26, signal=9)
 ### TA-Lib (via adapter)
 
 ```python
-from snapper.indicators.ta_lib_adapter import rsi, macd, sma, ema
+from snapper.indicators.ta_lib_adapter import rsi, macd
 ```
 
 ## Configuration Validation

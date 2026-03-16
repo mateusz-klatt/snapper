@@ -296,10 +296,10 @@ place when the schema changes.  After editing the migration, reset and reseed:
 rm -f data/snapper.db && make migrate-dev
 ```
 
-`make migrate-dev` runs both `make migrate` (applies Alembic migrations via
-`snapper db-init`) and `make seed` (seeds development data via
-`snapper db-seed --profile dev`).  Never use bare `make migrate` after a DB
-reset -- always use `make migrate-dev` so seed data is included.
+`make migrate-dev` applies Alembic migrations (via `snapper db-init`) then
+seeds development data (via `snapper db-seed --profile dev`).  There is no
+standalone `make migrate` target -- always use `make migrate-dev` or
+`make migrate-prod`.
 
 ### Applying (Production)
 
@@ -318,7 +318,8 @@ snapper db-downgrade
 ### Build
 
 ```bash
-make docker-build
+make docker-build-dev    # Development image
+make docker-build-prod   # Production image
 ```
 
 ### Run
@@ -327,10 +328,10 @@ make docker-build
 make docker-run
 ```
 
-### docker-compose
+### Docker Compose
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ## CI/CD
