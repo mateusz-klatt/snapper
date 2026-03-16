@@ -388,6 +388,8 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
     await pub._save_to_db("i", msg)
     repo = SimpleNamespace(upsert_instrument=AsyncMock(return_value=1), upsert_candles=AsyncMock())
     pub.repository = repo
+    resolve_mock = AsyncMock(return_value="fake-spid")
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     candle = CandleData(
         instrument="BTC-USD",
         volume=1.0,
@@ -403,7 +405,16 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
         open_at=datetime.now(UTC),
     )
     await pub._save_to_db("BTC-USD", candle)
-    repo.upsert_instrument.assert_awaited_once()
+    resolve_mock.assert_awaited_once_with(repo, "BTC-USD")
+    repo.upsert_instrument.assert_awaited_once_with(
+        symbol_public_id="fake-spid",
+        symbol="BTC-USD",
+        exchange="kraken",
+        base="BTC",
+        quote="USD",
+        tick_size=0.0,
+        lot_size=0.0,
+    )
     repo.upsert_candles.assert_awaited_once()
 
 
@@ -1639,6 +1650,7 @@ class TestFeedPublisherCoverage:
     async def test_save_to_db_inserts_candle(
         self,
         mock_get_settings: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify save_to_db inserts candle to database.
 
@@ -1650,8 +1662,14 @@ class TestFeedPublisherCoverage:
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.db_url = "sqlite:///:memory:"
         mock_get_settings.return_value = mock_settings
-        mock_repository = AsyncMock()
-        mock_repository.upsert_instrument.return_value = 42
+        mock_repository = SimpleNamespace(
+            upsert_instrument=AsyncMock(return_value=42),
+            upsert_candles=AsyncMock(),
+        )
+        resolve_mock = AsyncMock(return_value="fake-spid")
+        monkeypatch.setattr(
+            "snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock
+        )
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.repository = mock_repository
         publisher_any = cast(Any, publisher)
@@ -1669,7 +1687,16 @@ class TestFeedPublisherCoverage:
             open_at=datetime.now(UTC),
         )
         await publisher_any._save_to_db("BTC-USD", bar_message)
-        mock_repository.upsert_instrument.assert_awaited_once()
+        resolve_mock.assert_awaited_once_with(mock_repository, "BTC-USD")
+        mock_repository.upsert_instrument.assert_awaited_once_with(
+            symbol_public_id="fake-spid",
+            symbol="BTC-USD",
+            exchange="kraken",
+            base="BTC",
+            quote="USD",
+            tick_size=0.0,
+            lot_size=0.0,
+        )
         mock_repository.upsert_candles.assert_awaited_once()
         await publisher_any._save_to_db("BTC-USD", bar_message)
         mock_repository.upsert_instrument.assert_awaited_once()
@@ -1761,12 +1788,16 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         "snapper.infrastructure.symbols.functions.native_to_kraken_websocket", _native_to_ws
     )
+    resolve_mock = AsyncMock(return_value="fake-spid")
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     publisher = KrakenMarketDataPublisher(symbols=["EUR-USD"])
     publisher.repository = repo
     bar_message = _build_bar_message("EUR-USD")
     await publisher._save_to_db("EUR-USD", bar_message)
+    resolve_mock.assert_awaited_once_with(repo, "EUR-USD")
     assert repo.instrument_calls == [
         {
+            "symbol_public_id": "fake-spid",
             "symbol": "EUR-USD",
             "exchange": "kraken",
             "base": "EUR",
@@ -2228,7 +2259,9 @@ async def test_ensure_instrument_returns_none_for_unsplittable_symbol() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_instrument_resolves_and_caches() -> None:
+async def test_ensure_instrument_resolves_and_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify _ensure_instrument resolves instrument and caches result.
 
     Given: A publisher with a valid symbol and mock repository,
@@ -2238,8 +2271,40 @@ async def test_ensure_instrument_resolves_and_caches() -> None:
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     mock_upsert = AsyncMock(return_value=42)
     pub.repository = SimpleNamespace(upsert_instrument=mock_upsert)
+    resolve_mock = AsyncMock(return_value="fake-spid")
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     first = await pub._ensure_instrument("BTC-USD")
     second = await pub._ensure_instrument("BTC-USD")
     assert first == 42
     assert second == 42
-    mock_upsert.assert_awaited_once()
+    resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
+    mock_upsert.assert_awaited_once_with(
+        symbol_public_id="fake-spid",
+        symbol="BTC-USD",
+        exchange="kraken",
+        base="BTC",
+        quote="USD",
+        tick_size=0.0,
+        lot_size=0.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_instrument_returns_none_when_symbol_not_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _ensure_instrument returns None when active Symbol is missing.
+
+    Given: A publisher with a splittable symbol,
+    When: symbol resolution returns None,
+    Then: The instrument upsert is skipped.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    mock_upsert = AsyncMock(return_value=42)
+    pub.repository = SimpleNamespace(upsert_instrument=mock_upsert)
+    resolve_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
+    result = await pub._ensure_instrument("BTC-USD")
+    assert result is None
+    resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
+    mock_upsert.assert_not_awaited()

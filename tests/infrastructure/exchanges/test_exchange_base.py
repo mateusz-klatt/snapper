@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -242,7 +243,12 @@ async def test_log_order_to_db_returns_none_when_no_repository() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_log_order_to_db_logs_successfully() -> None:
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> None:
     """Log order persists to database.
 
     Given: Client with mock repository,
@@ -276,14 +282,71 @@ async def test_log_order_to_db_logs_successfully() -> None:
     )
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
-    mock_repo.upsert_instrument.assert_called_once_with(
-        symbol="BTC-USD", exchange="dummy", base="BTC", quote="USD"
+    mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
+    mock_repo.upsert_instrument.assert_awaited_once_with(
+        symbol_public_id="fake-spid",
+        symbol="BTC-USD",
+        exchange="dummy",
+        base="BTC",
+        quote="USD",
     )
-    mock_repo.insert_order.assert_called_once()
+    mock_repo.insert_order.assert_awaited_once()
 
 
 @pytest.mark.asyncio()
-async def test_log_order_to_db_parses_symbol_without_delimiter() -> None:
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value=None,
+)
+async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
+    mock_resolve: AsyncMock,
+) -> None:
+    """Log order returns None when no active Symbol row exists.
+
+    Given: Client with repository configured,
+    When: _log_order_to_db is called and symbol resolution returns None,
+    Then: No instrument or order write is attempted.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.upsert_instrument = AsyncMock(return_value=42)
+    mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
+    client = DummyExchangeClient(repository=mock_repo)
+    request = ExchangeOrderRequest(
+        client_order_id="client_123",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_123",
+        client_order_id="client_123",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        filled=0.0,
+        remaining=0.0,
+        status=OrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result is None
+    mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
+    mock_repo.upsert_instrument.assert_not_awaited()
+    mock_repo.insert_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: AsyncMock) -> None:
     """Log order parses base/quote from symbol without delimiter.
 
     Given: Client with mock repository and symbol without dash,
@@ -317,13 +380,23 @@ async def test_log_order_to_db_parses_symbol_without_delimiter() -> None:
     )
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
-    mock_repo.upsert_instrument.assert_called_once_with(
-        symbol="BTCUSD", exchange="dummy", base="BTCUSD", quote="USD"
+    _mock_resolve.assert_awaited_once_with(mock_repo, "BTCUSD")
+    mock_repo.upsert_instrument.assert_awaited_once_with(
+        symbol_public_id="fake-spid",
+        symbol="BTCUSD",
+        exchange="dummy",
+        base="BTCUSD",
+        quote="USD",
     )
 
 
 @pytest.mark.asyncio()
-async def test_log_order_to_db_handles_exception() -> None:
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_handles_exception(_mock_resolve: AsyncMock) -> None:
     """Log order handles database errors gracefully.
 
     Given: Client with repository that raises exception,

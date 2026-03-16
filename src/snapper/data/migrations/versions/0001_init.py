@@ -243,6 +243,7 @@ def upgrade() -> None:
         "instruments",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("symbol_public_id", sa.String(36), nullable=False),
         sa.Column("symbol", sa.String(32), nullable=False),
         sa.Column("exchange", sa.String(20), nullable=False),
         sa.Column("base", sa.String(16), nullable=False),
@@ -261,13 +262,14 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
-        "uq_instrument_symbol_exchange",
+        "uq_instrument_spid_exchange",
         "instruments",
-        ["symbol", "exchange"],
+        ["symbol_public_id", "exchange"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
+    op.create_index("ix_instruments_symbol_public_id", "instruments", ["symbol_public_id"])
     op.create_index("ix_instruments_symbol", "instruments", ["symbol"])
     op.create_index("ix_instruments_exchange", "instruments", ["exchange"])
     op.create_table(

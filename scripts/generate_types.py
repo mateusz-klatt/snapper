@@ -865,7 +865,6 @@ def generate_ios_types(project_root: Path) -> None:
     any_codable_path.write_text("\n".join(any_codable_lines))
     print(f"Generated {any_codable_path}")
 
-    ws_enums: set[str] = set()
     ws_schema_path = project_root / "build" / _WS_SCHEMAS_FILE
 
     api_schema_path = project_root / "build" / "openapi-schemas.json"
@@ -880,7 +879,7 @@ def generate_ios_types(project_root: Path) -> None:
         )
 
     if ws_schema_path.exists():
-        ws_enums, _ = generate_swift_types(
+        generate_swift_types(
             project_root,
             ws_schema_path,
             ios_gen_dir / "WSMessages.swift",

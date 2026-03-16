@@ -18,6 +18,7 @@ from snapper.config.settings import get_settings
 from snapper.data.models import Instrument
 from snapper.data.models import Signal
 from snapper.data.repository import get_repository
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.strategies.base import StrategySignal
 
 
@@ -66,7 +67,12 @@ class SignalReadService:
                     )
                     base = parts[0]
                     quote = parts[1] if len(parts) > 1 else "USD"
+                    symbol_pid = await resolve_symbol_public_id(self.repo, signal.instrument)
+                    if symbol_pid is None:
+                        logger.error(f"No active Symbol row for {signal.instrument}")
+                        return ""
                     inst_id = await self.repo.upsert_instrument(
+                        symbol_public_id=symbol_pid,
                         symbol=signal.instrument,
                         exchange=exchange,
                         base=base,

@@ -1,9 +1,11 @@
 """Tests for strategy framework and trading signal generation."""
 
 import asyncio
+import gc
 import json
 import logging
 import time
+import warnings
 from collections.abc import Callable
 from collections.abc import Coroutine
 from datetime import UTC
@@ -1307,6 +1309,39 @@ class TestUnsubscribeInputs:
         await strategy._unsubscribe_inputs()
         assert strategy.subscriber is None
 
+    @pytest.mark.asyncio
+    async def test_unsubscribe_inputs_awaits_async_close(
+        self, strategy_config: StrategyConfig
+    ) -> None:
+        """Verify unsubscribe_inputs awaits async subscriber close methods.
+
+        Given: Strategy with subscriber exposing AsyncMock close,
+        When: _unsubscribe_inputs is called,
+        Then: Close is awaited and subscriber is cleared.
+        """
+        strategy = SimpleTestStrategy(strategy_config)
+        mock_subscriber = MagicMock()
+        mock_subscriber.close = AsyncMock()
+        strategy.subscriber = mock_subscriber
+        await strategy._unsubscribe_inputs()
+        mock_subscriber.close.assert_awaited_once()
+        assert strategy.subscriber is None
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_inputs_tolerates_resource_without_close(
+        self, strategy_config: StrategyConfig
+    ) -> None:
+        """Verify unsubscribe_inputs tolerates subscriber-like objects without close.
+
+        Given: Strategy with subscriber object that exposes no close method,
+        When: _unsubscribe_inputs is called,
+        Then: Cleanup still succeeds and subscriber is cleared.
+        """
+        strategy = SimpleTestStrategy(strategy_config)
+        strategy.subscriber = cast(Any, object())
+        await strategy._unsubscribe_inputs()
+        assert strategy.subscriber is None
+
 
 class TestLifecycle:
     """Test suite for strategy lifecycle management."""
@@ -1436,6 +1471,33 @@ class TestLifecycle:
         assert strategy.subscriber is None
         assert strategy.publisher is None
         assert strategy.zmq_context is None
+
+    def test_del_closes_async_mock_resources_without_warning(
+        self, strategy_config: StrategyConfig
+    ) -> None:
+        """Verify __del__ suppresses async close coroutine warnings.
+
+        Given: Strategy with AsyncMock-based subscriber and publisher close methods,
+        When: __del__ runs and garbage collection is forced,
+        Then: No RuntimeWarning is emitted for unawaited close coroutines.
+        """
+        strategy = SimpleTestStrategy(strategy_config)
+        mock_subscriber = MagicMock()
+        mock_subscriber.close = AsyncMock()
+        mock_publisher = MagicMock()
+        mock_publisher.close = AsyncMock()
+        strategy.subscriber = mock_subscriber
+        strategy.publisher = mock_publisher
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            strategy.__del__()
+            gc.collect()
+        runtime_warnings = [
+            warning for warning in caught if issubclass(warning.category, RuntimeWarning)
+        ]
+        assert runtime_warnings == []
+        mock_subscriber.close.assert_called_once()
+        mock_publisher.close.assert_called_once()
 
     def test_del_falls_back_to_term_when_destroy_missing(
         self, strategy_config: StrategyConfig
@@ -2195,6 +2257,25 @@ class TestStop:
         assert setsockopt_calls[0][0] == 17
         assert setsockopt_calls[0][1] == 0
         assert close_called
+        assert strategy.publisher is None
+
+    @pytest.mark.asyncio
+    async def test_stop_awaits_async_publisher_close(self, strategy_config: StrategyConfig) -> None:
+        """Verify stop awaits async publisher close methods.
+
+        Given: Strategy with publisher exposing AsyncMock close,
+        When: stop() is called,
+        Then: Close is awaited and publisher is cleared.
+        """
+        strategy = SimpleTestStrategy(strategy_config)
+        strategy._running = True
+        mock_publisher = MagicMock()
+        mock_publisher.setsockopt = MagicMock()
+        mock_publisher.close = AsyncMock()
+        strategy.publisher = mock_publisher
+        await strategy.stop()
+        mock_publisher.setsockopt.assert_called_once_with(zmq.LINGER, 0)
+        mock_publisher.close.assert_awaited_once()
         assert strategy.publisher is None
 
     @pytest.mark.asyncio

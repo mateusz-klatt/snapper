@@ -534,6 +534,7 @@ class TestTraderSignalHandling:
         await trader._on_signal(invalid_signal)
         assert not mock_engine.execute_desired_units.called
 
+    @patch("snapper.application.engine.trader.resolve_symbol_public_id", new_callable=AsyncMock)
     @patch("snapper.application.engine.trader.ValidatedPublisher")
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
@@ -544,6 +545,7 @@ class TestTraderSignalHandling:
         mock_get_settings: MagicMock,
         mock_get_repo: MagicMock,
         mock_validated_publisher: MagicMock,
+        mock_resolve_spid: AsyncMock,
     ) -> None:
         """Verify paper engine is created dynamically for unknown instrument.
 
@@ -551,6 +553,7 @@ class TestTraderSignalHandling:
         When: Signal for ETH-USD is received,
         Then: Paper engine is created dynamically and registered.
         """
+        mock_resolve_spid.return_value = "fake-symbol-public-id"
         mock_publisher_instance = MagicMock()
         mock_publisher_instance.send_multipart = AsyncMock(return_value=None)
         mock_publisher_instance.close = MagicMock()

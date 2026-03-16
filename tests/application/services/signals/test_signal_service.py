@@ -17,6 +17,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.strategies.base import StrategySignal
 
 
@@ -75,7 +76,10 @@ class TestSignalService:
         When: store_signal called with signal,
         Then: StrategySignal stored with correct attributes.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -114,7 +118,10 @@ class TestSignalService:
         When: store_signal called with price=None,
         Then: StrategySignal stored with price=None.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -144,7 +151,10 @@ class TestSignalService:
         When: get_recent_signals called with limit=2,
         Then: Two most recent signals returned.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -178,7 +188,10 @@ class TestSignalService:
         When: get_recent_signals called with strategy='strategy_b',
         Then: Only strategy_b signals returned.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -205,7 +218,10 @@ class TestSignalService:
         When: get_recent_signals called with instrument='BTCUSD',
         Then: Only BTCUSD signals returned.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -213,7 +229,10 @@ class TestSignalService:
             tick_size=0.01,
             lot_size=0.001,
         )
+        spid_eth = await resolve_symbol_public_id(test_repository, "ETHUSD")
+        assert spid_eth is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid_eth,
             symbol="ETHUSD",
             exchange="testexchange",
             base="ETH",
@@ -251,7 +270,10 @@ class TestSignalService:
         When: get_recent_signals called with exchange='exchange_b',
         Then: Only exchange_b signals returned.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTCUSD",
             exchange="exchange_a",
             base="BTC",
@@ -260,6 +282,7 @@ class TestSignalService:
             lot_size=0.001,
         )
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTCUSD",
             exchange="exchange_b",
             base="BTC",
@@ -398,6 +421,32 @@ class TestSignalServiceCoverage:
             mock_logger.error.assert_called_once()
             assert "Error storing signal" in str(mock_logger.error.call_args)
 
+    async def test_store_signal_returns_empty_when_symbol_not_resolved(
+        self, signal_service: SignalReadService, sample_signal: StrategySignal
+    ) -> None:
+        """Verify store_signal returns empty string when Symbol cannot be resolved.
+
+        Given: No existing instrument and no active Symbol row,
+        When: store_signal is called,
+        Then: The method returns an empty string and logs the reason.
+        """
+        with (
+            patch(
+                "snapper.application.services.signals.service.resolve_symbol_public_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("snapper.application.services.signals.service.logger") as mock_logger,
+        ):
+            signal_id = await signal_service.store_signal(
+                signal=sample_signal,
+                exchange="testexchange",
+                strategy_name="test_strategy",
+                price=50000.0,
+            )
+            assert signal_id == ""
+            mock_logger.error.assert_called_once()
+            assert "No active Symbol row" in str(mock_logger.error.call_args)
+
     async def test_store_signal_upsert_instrument_error(
         self, signal_service: SignalReadService, sample_signal: StrategySignal
     ) -> None:
@@ -480,7 +529,10 @@ class TestSignalServiceCoverage:
         When: store_signal called,
         Then: Returns -1 and logger.error called with message.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTC-USD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTC-USD",
             exchange="testexchange",
             base="BTC",
@@ -566,7 +618,10 @@ class TestSignalServiceCoverage:
         When: get_recent_signals called with filters,
         Then: Empty list returned and logger.error called with message.
         """
+        spid = await resolve_symbol_public_id(test_repository, "BTC-USD")
+        assert spid is not None
         await test_repository.upsert_instrument(
+            symbol_public_id=spid,
             symbol="BTC-USD",
             exchange="testexchange",
             base="BTC",

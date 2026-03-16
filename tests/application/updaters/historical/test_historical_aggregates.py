@@ -29,6 +29,15 @@ from snapper.data.repository import Repository
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 
 
+@pytest.fixture(autouse=True)
+def _patch_resolve_spid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch resolve_symbol_public_id for all tests in this module."""
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.resolve_symbol_public_id",
+        AsyncMock(return_value="stub-spid"),
+    )
+
+
 class _StubScalarsResult:
     """Test stub for SQLAlchemy scalars result."""
 
@@ -260,6 +269,34 @@ async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfil
     call = async_repo.calls[0]
     assert call["symbol"] == "ETH-USD"
     assert call["quote"] == "USD"
+
+
+@pytest.mark.asyncio
+async def test_ensure_instrument_raises_when_symbol_not_resolved(
+    service: PolygonAggregatesBackfillService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _ensure_instrument raises when active Symbol row is missing.
+
+    Given: Async repository without cached instrument,
+    When: symbol resolution returns None,
+    Then: _ensure_instrument raises ValueError.
+    """
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.resolve_symbol_public_id",
+        AsyncMock(return_value=None),
+    )
+    async_repo = _StubAsyncRepo()
+    cast(Any, service)._db_async = async_repo
+    context = _symbol_context(
+        native_symbol="ETH-USD",
+        polygon_symbol="X:ETHUSD",
+        base_currency="ETH",
+        quote_currency="USD",
+    )
+    ensure_instrument = cast(Callable[[Any], Awaitable[int]], cast(Any, service)._ensure_instrument)
+    with pytest.raises(ValueError, match="No active Symbol row for ETH-USD"):
+        await ensure_instrument(context)
 
 
 def test_build_candle_rows() -> None:

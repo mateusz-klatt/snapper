@@ -1092,7 +1092,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             future.set_result(message)
         else:
             error_msg = message.get("error", "Unknown error")
-            future.set_exception(Exception(f"ExchangeOrderSnapshot request failed: {error_msg}"))
+            future.set_exception(RuntimeError(f"ExchangeOrderSnapshot request failed: {error_msg}"))
 
     def _handle_subscription_ack(self, message: dict[str, Any]) -> None:
         """Process subscription acknowledgement messages by channel type.

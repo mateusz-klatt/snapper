@@ -42,6 +42,34 @@ logger = logging.getLogger(__name__)
 _bootstrap_settings = get_bootstrap_settings()
 
 
+async def _close_resource_async(resource: Any) -> None:
+    """Close a strategy resource and await async close methods when needed.
+
+    Args:
+        resource: Resource exposing a close method.
+    """
+    close = getattr(resource, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if asyncio.iscoroutine(result):
+        await result
+
+
+def _close_resource_sync(resource: Any) -> None:
+    """Close a strategy resource during sync cleanup paths.
+
+    Args:
+        resource: Resource exposing a close method.
+    """
+    close = getattr(resource, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if asyncio.iscoroutine(result):
+        result.close()
+
+
 class BaseStrategy(ABC):
     """Abstract base class for trading strategies.
 
@@ -193,7 +221,7 @@ class BaseStrategy(ABC):
                 await self._listen_task
         if self.publisher:
             self.publisher.setsockopt(zmq.LINGER, 0)
-            self.publisher.close()
+            await _close_resource_async(self.publisher)
             self.publisher = None
         if self.zmq_context:
             self.zmq_context.term()
@@ -212,12 +240,12 @@ class BaseStrategy(ABC):
         subscriber = getattr(self, "subscriber", None)
         if subscriber is not None:
             with contextlib.suppress(Exception):
-                subscriber.close()
+                _close_resource_sync(subscriber)
             self.subscriber = None
         publisher = getattr(self, "publisher", None)
         if publisher is not None:
             with contextlib.suppress(Exception):
-                publisher.close()
+                _close_resource_sync(publisher)
             self.publisher = None
         zmq_context = getattr(self, "zmq_context", None)
         if zmq_context is not None:
@@ -296,7 +324,7 @@ class BaseStrategy(ABC):
     async def _unsubscribe_inputs(self) -> None:
         """Unsubscribe from all input topics."""
         if self.subscriber:
-            self.subscriber.close()
+            await _close_resource_async(self.subscriber)
             self.subscriber = None
         await asyncio.sleep(0)
 

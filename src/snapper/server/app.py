@@ -61,6 +61,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import Select
 from sqlalchemy import and_
 from sqlalchemy import desc
 from sqlalchemy import distinct
@@ -411,6 +412,32 @@ def _collect_strategy_statuses(
     return strategies
 
 
+def _apply_signal_filters(
+    query: Select[Any],
+    instrument: str | None,
+    strategy: str | None,
+    exchange: OrderExchange | None,
+) -> Select[Any]:
+    """Apply optional instrument/strategy/exchange filters to a signal query.
+
+    Args:
+        query: Base signal query.
+        instrument: Filter by instrument symbol.
+        strategy: Filter by strategy name.
+        exchange: Filter by exchange.
+
+    Returns:
+        Filtered query.
+    """
+    if instrument:
+        query = query.where(Instrument.symbol == instrument)
+    if strategy:
+        query = query.where(Signal.strategy_name == strategy)
+    if exchange:
+        query = query.where(Instrument.exchange == exchange)
+    return query
+
+
 def _create_candles_signals_router() -> APIRouter:
     """Create router for candles and signals endpoints.
 
@@ -506,12 +533,7 @@ def _create_candles_signals_router() -> APIRouter:
                 query = query.where(
                     Signal.timestamp <= processing_date, Signal.known_to > processing_date
                 )
-                if instrument:
-                    query = query.where(Instrument.symbol == instrument)
-                if strategy:
-                    query = query.where(Signal.strategy_name == strategy)
-                if exchange:
-                    query = query.where(Instrument.exchange == exchange)
+                query = _apply_signal_filters(query, instrument, strategy, exchange)
                 query = query.order_by(desc(Signal.fired_at)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
@@ -597,6 +619,28 @@ def _create_exchange_router() -> APIRouter:
     return router
 
 
+def _apply_order_filters(
+    query: Select[Any],
+    symbol: str | None,
+    exchange: OrderExchange | None,
+) -> Select[Any]:
+    """Apply optional symbol/exchange filters to an orders query.
+
+    Args:
+        query: Base orders query.
+        symbol: Filter by instrument symbol.
+        exchange: Filter by exchange.
+
+    Returns:
+        Filtered query.
+    """
+    if symbol:
+        query = query.where(Instrument.symbol == symbol)
+    if exchange:
+        query = query.where(Instrument.exchange == exchange)
+    return query
+
+
 def _create_orders_executions_router() -> APIRouter:
     """Create router for orders, executions, and positions endpoints.
 
@@ -623,10 +667,7 @@ def _create_orders_executions_router() -> APIRouter:
                 query = query.where(
                     Order.timestamp <= processing_date, Order.known_to > processing_date
                 )
-                if symbol:
-                    query = query.where(Instrument.symbol == symbol)
-                if exchange:
-                    query = query.where(Instrument.exchange == exchange)
+                query = _apply_order_filters(query, symbol, exchange)
                 query = query.order_by(desc(Order.created_at)).offset(offset).limit(limit)
                 result = await session.execute(query)
                 orders_with_instruments = result.all()

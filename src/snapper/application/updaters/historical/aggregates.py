@@ -36,6 +36,7 @@ from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.utils.logging import set_log_context
 
@@ -711,7 +712,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
     async def _ensure_instrument(self, context: _SymbolContext) -> int:
         """Ensure instrument exists in database, return its ID.
 
-        Uses cache to avoid repeated database lookups.
+        Uses cache to avoid repeated database lookups.  Resolves the
+        Symbol.public_id from the database so the Instrument can reference
+        the stable symbol identity.
 
         Args:
             context: Symbol context.
@@ -722,8 +725,12 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         assert self._db_async is not None
         if context.native_symbol in self._instrument_cache:
             return self._instrument_cache[context.native_symbol]
+        symbol_pid = await resolve_symbol_public_id(self._db_async, context.native_symbol)
+        if symbol_pid is None:
+            raise ValueError(f"No active Symbol row for {context.native_symbol}")
         quote_value = context.quote_currency or context.base_currency
         instrument_id = await self._db_async.upsert_instrument(
+            symbol_public_id=symbol_pid,
             symbol=context.native_symbol,
             exchange="polygon",
             base=context.base_currency,

@@ -580,6 +580,7 @@ class _RepositoryStub:
     async def upsert_instrument(
         self,
         *,
+        symbol_public_id: str,
         symbol: str,
         exchange: str,
         base: str,
@@ -589,6 +590,7 @@ class _RepositoryStub:
     ) -> None:
         self.calls.append(
             {
+                "symbol_public_id": symbol_public_id,
                 "symbol": symbol,
                 "exchange": exchange,
                 "base": base,
@@ -737,6 +739,11 @@ def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespac
 
     monkeypatch.setattr(trader_module, "get_settings", _stub_get_settings, raising=True)
     monkeypatch.setattr(trader_module, "get_repository", _stub_get_repository, raising=True)
+    monkeypatch.setattr(
+        trader_module,
+        "resolve_symbol_public_id",
+        AsyncMock(return_value="stub-spid"),
+    )
     return settings, repository
 
 
@@ -851,6 +858,25 @@ async def test_ensure_instrument_handles_delimiters(monkeypatch: pytest.MonkeyPa
     assert symbols["BTC-USD"]["exchange"] == "kraken"
     assert symbols["ETH/EUR"]["quote"] == "EUR"
     assert symbols["ETH/EUR"]["exchange"] == "binance"
+
+
+@pytest.mark.asyncio
+async def test_ensure_instrument_skips_when_symbol_not_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify instrument upsert is skipped when no active Symbol exists.
+
+    Given a TraderCoordinator with repository stub,
+    When _ensure_instrument is called and symbol resolution returns None,
+    Then no instrument upsert is attempted.
+    """
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(trader_module, "resolve_symbol_public_id", AsyncMock(return_value=None))
+    coord = TraderCoordinator()
+    coord_any = cast(Any, coord)
+    await coord_any._ensure_instrument("BTC-USD", exchange="kraken")
+    repository_stub = cast(_RepositoryStub, coord.repository)
+    assert repository_stub.calls == []
 
 
 @pytest.mark.asyncio
@@ -1934,6 +1960,11 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         trader_module,
         "get_repository",
         lambda _url: SimpleNamespace(upsert_instrument=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        trader_module,
+        "resolve_symbol_public_id",
+        AsyncMock(return_value="fake-spid"),
     )
     monkeypatch.setattr(trader_module, "TradingEngineService", StubEngine)
     coordinator = TraderCoordinator()

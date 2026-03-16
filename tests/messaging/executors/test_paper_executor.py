@@ -31,6 +31,14 @@ def _make_repo_mock() -> MagicMock:
     repo.insert_order = AsyncMock(return_value=(1, "order-uuid-0001"))
     repo.update_order = AsyncMock()
     repo.insert_execution = AsyncMock()
+    session = AsyncMock()
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none = MagicMock(return_value="symbol-public-id")
+    session.execute = AsyncMock(return_value=execute_result)
+    session_cm = AsyncMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+    repo.session = MagicMock(return_value=session_cm)
     return repo
 
 

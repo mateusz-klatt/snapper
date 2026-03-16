@@ -36,6 +36,7 @@ from snapper.config.settings import get_settings
 from snapper.core.types import OrderExchange
 from snapper.data.repository import get_repository
 from snapper.infrastructure.symbols.functions import is_tradeable
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -332,6 +333,8 @@ class TraderCoordinator(RegisterableProcess):
         """Ensure instrument exists in database.
 
         Creates or updates the instrument record with base/quote currencies.
+        Resolves Symbol.public_id so the Instrument carries the stable
+        symbol identity key.
 
         Args:
             instrument: Symbol string (e.g., "BTC-USD" or "BTC/USD").
@@ -340,7 +343,14 @@ class TraderCoordinator(RegisterableProcess):
         parts = instrument.split("-") if "-" in instrument else instrument.split("/")
         base = parts[0] if len(parts) > 0 else instrument
         quote = parts[1] if len(parts) > 1 else "USD"
+        symbol_pid = await resolve_symbol_public_id(self.repository, instrument)
+        if symbol_pid is None:
+            logger.warning(
+                f"ZMQTrader: No active Symbol row for {instrument}, skipping instrument upsert"
+            )
+            return
         await self.repository.upsert_instrument(
+            symbol_public_id=symbol_pid,
             symbol=instrument,
             exchange=exchange,
             base=base,

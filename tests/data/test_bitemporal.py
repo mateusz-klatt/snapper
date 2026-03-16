@@ -28,6 +28,7 @@ from snapper.data.models import UserLoginEvent
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
 def assert_contiguous_intervals(versions: list[Any]) -> None:
@@ -70,7 +71,10 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
             )
         )
         await s.commit()
+    spid = await resolve_symbol_public_id(repo, "BTC-USD")
+    assert spid is not None
     inst_id = await repo.upsert_instrument(
+        symbol_public_id=spid,
         symbol="BTC-USD",
         base="BTC",
         quote="USD",

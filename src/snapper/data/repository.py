@@ -266,7 +266,7 @@ class Repository(ABC):
 
     @abstractmethod
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument by (symbol, exchange), returning its ID."""
+        """Insert or retrieve instrument by (symbol_public_id, exchange), returning its ID."""
         ...
 
     @abstractmethod
@@ -494,13 +494,17 @@ class SQLAlchemyRepository(Repository):
             }
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument by (symbol, exchange), returning its ID."""
+        """Insert or retrieve instrument by (symbol_public_id, exchange), returning its ID."""
         filtered = _filter_instrument_kwargs(kwargs)
+        symbol_public_id = filtered["symbol_public_id"]
         exchange = filtered["exchange"]
         async with self.session() as s:
             q = await s.execute(
                 select(Instrument).where(
-                    and_(Instrument.symbol == kwargs["symbol"], Instrument.exchange == exchange)
+                    and_(
+                        Instrument.symbol_public_id == symbol_public_id,
+                        Instrument.exchange == exchange,
+                    )
                 )
             )
             inst = q.scalar_one_or_none()
@@ -514,7 +518,7 @@ class SQLAlchemyRepository(Repository):
                     q2 = await s.execute(
                         select(Instrument).where(
                             and_(
-                                Instrument.symbol == kwargs["symbol"],
+                                Instrument.symbol_public_id == symbol_public_id,
                                 Instrument.exchange == exchange,
                             )
                         )
@@ -1128,14 +1132,18 @@ class MSSQLRepository(Repository):
         return await self._run_sync(_do)
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or retrieve instrument by (symbol, exchange) via sync thread."""
+        """Insert or retrieve instrument by (symbol_public_id, exchange) via sync thread."""
         filtered = _filter_instrument_kwargs(kwargs)
+        symbol_public_id = filtered["symbol_public_id"]
         exchange = filtered["exchange"]
 
         def _do(s: SyncSession) -> int:
             q = s.execute(
                 select(Instrument).where(
-                    and_(Instrument.symbol == kwargs["symbol"], Instrument.exchange == exchange)
+                    and_(
+                        Instrument.symbol_public_id == symbol_public_id,
+                        Instrument.exchange == exchange,
+                    )
                 )
             )
             inst = q.scalar_one_or_none()
@@ -1149,7 +1157,7 @@ class MSSQLRepository(Repository):
                     q2 = s.execute(
                         select(Instrument).where(
                             and_(
-                                Instrument.symbol == kwargs["symbol"],
+                                Instrument.symbol_public_id == symbol_public_id,
                                 Instrument.exchange == exchange,
                             )
                         )

@@ -65,8 +65,8 @@ class WebSocketClient {
   private readonly pendingMessages = new Map<string, WebSocketMessages>()
   private readonly lastMessageTime = new Map<string, number>()
   private pingSentAt: number | null = null
-  private pendingSubscribes = new Set<string>()
-  private pendingUnsubscribes = new Set<string>()
+  private readonly pendingSubscribes = new Set<string>()
+  private readonly pendingUnsubscribes = new Set<string>()
   private subscriptionFlushScheduled = false
   constructor(options: WebSocketClientOptions = {}) {
     this.secure = options.secure || false

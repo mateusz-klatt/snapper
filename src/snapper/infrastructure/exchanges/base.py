@@ -37,6 +37,7 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.contracts import to_fill_status
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 __all__ = ["ExchangeClientBase"]
 
@@ -352,8 +353,16 @@ class ExchangeClientBase(ABC):
             parts = request.symbol.split("-") if "-" in request.symbol else [request.symbol]
             base = parts[0]
             quote = parts[1] if len(parts) > 1 else "USD"
+            symbol_pid = await resolve_symbol_public_id(self.repository, request.symbol)
+            if symbol_pid is None:
+                logger.error(f"No active Symbol row for {request.symbol}, cannot log order")
+                return None
             instrument_id = await self.repository.upsert_instrument(
-                symbol=request.symbol, exchange=self.exchange_name, base=base, quote=quote
+                symbol_public_id=symbol_pid,
+                symbol=request.symbol,
+                exchange=self.exchange_name,
+                base=base,
+                quote=quote,
             )
             return await self.repository.insert_order(
                 instrument_id=instrument_id,

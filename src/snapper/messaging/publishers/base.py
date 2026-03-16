@@ -29,6 +29,7 @@ from snapper.core.types import MarketDataType
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -254,7 +255,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             native_symbol: Native exchange symbol (e.g. 'BTC-USD').
 
         Returns:
-            Database instrument ID, or None if symbol cannot be split.
+            Database instrument ID, or None if symbol cannot be split or
+            the symbol has no active Symbol row.
         """
         instrument_id = self._instrument_cache.get(native_symbol)
         if instrument_id is not None:
@@ -268,7 +270,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             )
             return None
         assert self.repository is not None, "Repository not initialized"
+        symbol_pid = await resolve_symbol_public_id(self.repository, native_symbol)
+        if symbol_pid is None:
+            logger.warning(f"MarketDataPublisherService: No active Symbol row for {native_symbol}")
+            return None
         instrument_id = await self.repository.upsert_instrument(
+            symbol_public_id=symbol_pid,
             symbol=native_symbol,
             exchange=self._get_exchange_name(),
             base=base_currency,

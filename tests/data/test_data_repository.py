@@ -26,6 +26,7 @@ from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations import polygon as polygon_module
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 
 
@@ -461,7 +462,13 @@ async def test_mssql_repository_mock_engine(monkeypatch: Any) -> None:
     assert isinstance(ms_repo.engine, DummySyncEngine)
     assert ms_repo.engine.connected is True
     inst_id = await ms_repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.0001
+        symbol_public_id="fake-spid",
+        symbol="BTC-USD",
+        base="BTC",
+        quote="USD",
+        exchange="kraken",
+        tick_size=0.1,
+        lot_size=0.0001,
     )
     assert isinstance(inst_id, int)
     inserted_c = await ms_repo.upsert_candles(
@@ -1052,7 +1059,10 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
             )
         )
         await s.commit()
+    spid = await resolve_symbol_public_id(repo, "BTC-USD")
+    assert spid is not None
     inst_id = await repo.upsert_instrument(
+        symbol_public_id=spid,
         symbol="BTC-USD",
         base="BTC",
         quote="USD",
@@ -1142,8 +1152,16 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
             )
         )
         await s.commit()
+    spid = await resolve_symbol_public_id(repo, "ETH-USD")
+    assert spid is not None
     inst_id = await repo.upsert_instrument(
-        symbol="ETH-USD", base="ETH", quote="USD", exchange="kraken", tick_size=0.01, lot_size=0.001
+        symbol_public_id=spid,
+        symbol="ETH-USD",
+        base="ETH",
+        quote="USD",
+        exchange="kraken",
+        tick_size=0.01,
+        lot_size=0.001,
     )
     rows = [
         {

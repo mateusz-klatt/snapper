@@ -26,13 +26,19 @@ Example:
     "BTC-USD"
 """
 
+from sqlalchemy import select
+
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketSubscribeExchange
 from snapper.core.types import OrderExchange
+from snapper.data.models import Symbol
+from snapper.data.repository import Repository
+from snapper.data.repository import where_active
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 
 __all__ = [
     "OrderExchange",
+    "resolve_symbol_public_id",
     "kraken_websocket_to_ccxt",
     "ccxt_to_kraken_websocket",
     "native_to_ccxt",
@@ -68,6 +74,30 @@ __all__ = [
     "get_market_data_symbols",
     "_get_db_mapper",
 ]
+
+
+async def resolve_symbol_public_id(repo: Repository, native_symbol: str) -> str | None:
+    """Look up the active Symbol row by native_symbol and return its public_id.
+
+    Args:
+        repo: Async repository providing a session context manager.
+        native_symbol: Canonical native symbol (e.g., ``BTC-USD``).
+
+    Returns:
+        The ``public_id`` of the active Symbol row, or ``None`` when no
+        active row matches.
+    """
+    async with repo.session() as session:
+        ts_filter, kt_filter = where_active(Symbol)
+        result = await session.execute(
+            select(Symbol.public_id).where(
+                Symbol.native_symbol == native_symbol,
+                ts_filter,
+                kt_filter,
+            )
+        )
+        row = result.scalar_one_or_none()
+        return row
 
 
 def kraken_websocket_to_ccxt(symbol: str) -> str:

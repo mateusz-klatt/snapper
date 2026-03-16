@@ -121,13 +121,18 @@ class TemporalMixin:
 
 
 class Instrument(TemporalMixin, Base):
-    """SQLAlchemy model for tradeable financial instruments."""
+    """SQLAlchemy model for tradeable financial instruments.
+
+    Logical identity key is (symbol_public_id, exchange) -- stable across
+    symbol renames.  ``symbol``, ``base``, ``quote`` are snapshot /
+    denormalization attributes carried forward on each SCD2 version.
+    """
 
     __tablename__ = "instruments"
     __table_args__ = (
         Index(
-            "uq_instrument_symbol_exchange",
-            "symbol",
+            "uq_instrument_spid_exchange",
+            "symbol_public_id",
             "exchange",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
@@ -143,6 +148,7 @@ class Instrument(TemporalMixin, Base):
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
         Index("ix_instruments_exchange", "exchange"),
     )
+    symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))

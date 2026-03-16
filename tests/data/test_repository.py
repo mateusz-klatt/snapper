@@ -43,6 +43,7 @@ from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
 class _DummyAsyncSession:
@@ -524,7 +525,10 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             )
         )
         await s.commit()
+    spid = await resolve_symbol_public_id(repo, "BTC-USD")
+    assert spid is not None
     instrument_payload = {
+        "symbol_public_id": spid,
         "symbol": "BTC-USD",
         "base": "BTC",
         "quote": "USD",
@@ -1108,7 +1112,13 @@ async def test_mssql_upsert_instrument_integrity_path(monkeypatch: pytest.Monkey
     monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
     repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
     result = await repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.001
+        symbol_public_id="fake-spid",
+        symbol="BTC-USD",
+        base="BTC",
+        quote="USD",
+        exchange="kraken",
+        tick_size=0.1,
+        lot_size=0.001,
     )
     assert result == 99
     assert created_sessions[0].rollback_calls == 1
@@ -1186,6 +1196,7 @@ async def test_mssql_upsert_instrument_integrity_reraise(monkeypatch: pytest.Mon
     repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
     with pytest.raises(IntegrityError):
         await repo.upsert_instrument(
+            symbol_public_id="fake-spid",
             symbol="BTC-USD",
             base="BTC",
             quote="USD",
@@ -1249,7 +1260,13 @@ async def test_mssql_upsert_instrument_existing(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("snapper.data.repository.asyncio.to_thread", inline_to_thread)
     repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
     result = await repo.upsert_instrument(
-        symbol="BTC-USD", base="BTC", quote="USD", exchange="kraken", tick_size=0.1, lot_size=0.001
+        symbol_public_id="fake-spid",
+        symbol="BTC-USD",
+        base="BTC",
+        quote="USD",
+        exchange="kraken",
+        tick_size=0.1,
+        lot_size=0.001,
     )
     assert result == 42
 
@@ -2467,6 +2484,7 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
             result = await mock_postgres_repo.upsert_instrument(
+                symbol_public_id="fake-spid",
                 symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
@@ -2502,6 +2520,7 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             with pytest.raises(IntegrityError):
                 await mock_postgres_repo.upsert_instrument(
+                    symbol_public_id="fake-spid",
                     symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
@@ -2531,6 +2550,7 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
             result = await mock_postgres_repo.upsert_instrument(
+                symbol_public_id="fake-spid",
                 symbol="ETH-USD",
                 base="ETH",
                 quote="USD",
@@ -2757,6 +2777,7 @@ class TestMSSQLRepository:
             mock_to_thread.return_value = 123
             repo = MSSQLRepository("mssql+pyodbc://user:pass@server/db")
             result = await repo.upsert_instrument(
+                symbol_public_id="fake-spid",
                 symbol="BTC-USD",
                 base="BTC",
                 quote="USD",
