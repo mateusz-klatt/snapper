@@ -75,20 +75,20 @@ Persistence layer with SQLAlchemy:
     - `Signal` — Signal events
     - `User` — System users
     - `Setting` — Settings (encrypted)
-    - `Symbol` — Stable identity table for native symbols
-    - `SymbolVersion` — Versioned attributes (base, quote, asset_type) with SCD Type 2
+    - `Symbol` — Symbol identity with versioned attributes (native_symbol, base, quote, asset_type) via SCD Type 2
     - `SymbolAlias` — Exchange-specific symbol aliases (one row per native/exchange/channel)
     - `SymbolExchangeCapability` — Exchange-specific symbol capabilities
     - `ProcessRun` — Background process execution records
     - `InstrumentSpec` — Instrument trading specifications
     - `MarketSnapshot` — Real-time market data snapshots
+    - `UserLoginEvent` — Authentication event log
 
     All ORM models use a dual-key pattern:
 
     - `id` (INTEGER, internal PK, never exposed outside repository)
     - `public_id` (UUID7 string, external identifier)
     - `timestamp` (DateTime, system time / known_from)
-    - `known_to` (DateTime nullable, bitemporal versioning - NULL = active record)
+    - `known_to` (DateTime NOT NULL, default KNOWN_TO_MAX = 9999-12-31T23:59:59 UTC, active rows have known_to == KNOWN_TO_MAX; query pattern: `WHERE timestamp <= :t AND known_to > :t`)
 
 - **Repository** (`repository.py`) — Async CRUD operations
 
@@ -178,10 +178,14 @@ FastAPI application:
 
 ### API (`src/snapper/api/`)
 
-API schemas:
+API layer:
 
-- **Schemas** (`schemas/`) — Pydantic request/response models
+- **Schemas** (`schemas/`) — Pydantic request/response models (health, process, settings)
 - **Auth** (`auth/`) — Authentication services
+
+REST endpoints return the same Data schemas used by WebSocket messaging
+(`messaging.schemas.data`): `OrderData`, `SignalData`, `ExecutionData`,
+`PositionData`, `CandleData`. Old REST-specific schema modules were removed.
 
 ### Auth (`src/snapper/auth/`)
 
@@ -250,9 +254,9 @@ signals         -- Signals
 -- System
 users           -- Users
 settings        -- Settings (encrypted)
-symbols         -- Symbol identity (native_symbol PK)
-symbol_versions -- Versioned symbol attributes (base/quote, asset type, SCD2)
+symbols         -- Symbol identity + versioned attributes (SCD2)
 symbol_aliases  -- Symbol aliases (exchange-specific symbol mappings)
+user_login_events -- Authentication event log
 process_runs    -- Process history
 ```
 
@@ -264,6 +268,25 @@ Alembic manages migrations:
 snapper db-upgrade    # Apply migrations
 snapper db-downgrade  # Rollback
 ```
+
+## Bitemporal Model
+
+All entity tables inherit `TemporalMixin` which provides `id`, `public_id`,
+`timestamp` (bus-time / known_from), and `known_to` columns.
+
+Key concepts:
+
+- **SCD Type 2** — No in-place UPDATE or DELETE. Mutations use a close+insert
+    pattern: the current row is closed (known_to set to now) and a new row is
+    inserted with the updated values and known_to = KNOWN_TO_MAX.
+- **KNOWN_TO_MAX** — Sentinel value (9999-12-31T23:59:59 UTC) marking the
+    active version of a row.
+- **Point-in-time queries** — REST endpoints accept an `as_of` query parameter
+    to retrieve the state of data at a specific moment.
+- **Helpers**:
+    - `where_active(model, at)` — SQLAlchemy filter for temporal queries
+    - `close_and_insert()` / `close_and_insert_sync()` — Repository helpers
+        that atomically close the current row and insert a new version
 
 ## Processes
 
@@ -288,7 +311,7 @@ Sensitive data (API keys) are encrypted in the database:
 ```mermaid
 flowchart TB
     Input["Master Password + Salt"] --> KDF["Key Derivation PBKDF2"]
-    KDF --> Encryption["AES-256-GCM Encryption"]
+    KDF --> Encryption["Fernet (AES-128-CBC + HMAC-SHA256)"]
     Encryption --> DB["Encrypted Setting in DB"]
 ```
 

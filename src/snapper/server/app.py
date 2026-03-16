@@ -576,8 +576,14 @@ def _create_exchange_router() -> APIRouter:
         """Return distinct exchange names from symbol_aliases."""
         try:
             async with repo.session() as session:
+                now = datetime.now(UTC)
                 result = await session.execute(
-                    select(distinct(SymbolAlias.exchange)).order_by(SymbolAlias.exchange)
+                    select(distinct(SymbolAlias.exchange))
+                    .where(
+                        SymbolAlias.timestamp <= now,
+                        SymbolAlias.known_to > now,
+                    )
+                    .order_by(SymbolAlias.exchange)
                 )
                 return list(result.scalars().all())
         except Exception as exc:

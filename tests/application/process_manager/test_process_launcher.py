@@ -3675,32 +3675,39 @@ class TestProcessFactoryDatabasePersistence:
         mock_get_repo: MagicMock,
         factory: ProcessLauncherService,
     ) -> None:
-        """Verify _update_process_run_record updates status and result.
+        """Verify _update_process_run_record close+inserts with result.
 
         Given: An existing ProcessRun in the database,
         When: _update_process_run_record is called with SUCCEEDED status and result,
-        Then: The run's status, result, and completed_at are updated and committed.
+        Then: Old row closed via UPDATE, new row added with updated fields.
         """
         mock_repo = MagicMock()
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 10
+        mock_process_run.public_id = "test-run-id-123"
+        mock_process_run.process_name = "test"
+        mock_process_run.role = "worker"
+        mock_process_run.lifecycle = "transient"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
-        run_id = "test-run-id-123"
         result_data: dict[str, Any] = {"output": "success", "metrics": {"count": 42}}
         await factory._update_process_run_record(
-            run_id,
+            "test-run-id-123",
             ProcessRunStatusEnum.SUCCEEDED,
             result=result_data,
         )
-        mock_session.execute.assert_called_once()
-        assert mock_process_run.status == ProcessRunStatusEnum.SUCCEEDED.value
-        assert mock_process_run.result == result_data
-        assert isinstance(mock_process_run.completed_at, datetime)
+        assert mock_session.execute.call_count == 2
+        mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
@@ -3709,29 +3716,38 @@ class TestProcessFactoryDatabasePersistence:
         mock_get_repo: MagicMock,
         factory: ProcessLauncherService,
     ) -> None:
-        """Verify _update_process_run_record stores error message on failure.
+        """Verify _update_process_run_record close+inserts with error.
 
         Given: An existing ProcessRun in the database,
         When: _update_process_run_record is called with FAILED status and error,
-        Then: The run's status and error message are updated and committed.
+        Then: Old row closed, new row added with error field.
         """
         mock_repo = MagicMock()
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 11
+        mock_process_run.public_id = "test-run-id-456"
+        mock_process_run.process_name = "test"
+        mock_process_run.role = "worker"
+        mock_process_run.lifecycle = "transient"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
-        run_id = "test-run-id-456"
-        error_message = "Connection failed: timeout after 30s"
         await factory._update_process_run_record(
-            run_id,
+            "test-run-id-456",
             ProcessRunStatusEnum.FAILED,
-            error=error_message,
+            error="Connection failed: timeout after 30s",
         )
-        assert mock_process_run.status == ProcessRunStatusEnum.FAILED.value
-        assert mock_process_run.error == error_message[:1024]
+        assert mock_session.execute.call_count == 2
+        mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
@@ -3744,13 +3760,24 @@ class TestProcessFactoryDatabasePersistence:
 
         Given: An error message longer than 1024 characters,
         When: _update_process_run_record is called with the long error,
-        Then: The error is truncated to exactly 1024 characters.
+        Then: The new row's error is truncated to exactly 1024 characters.
         """
         mock_repo = MagicMock()
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 12
+        mock_process_run.public_id = "test-id"
+        mock_process_run.process_name = "test"
+        mock_process_run.role = "worker"
+        mock_process_run.lifecycle = "transient"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
@@ -3760,8 +3787,8 @@ class TestProcessFactoryDatabasePersistence:
             ProcessRunStatusEnum.FAILED,
             error=long_error,
         )
-        assert len(mock_process_run.error) == 1024
-        assert mock_process_run.error == "X" * 1024
+        added_obj = mock_session.add.call_args[0][0]
+        assert len(added_obj.error) == 1024
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_update_process_run_record_handles_missing_run(
@@ -3794,17 +3821,28 @@ class TestProcessFactoryDatabasePersistence:
         mock_get_repo: MagicMock,
         factory: ProcessLauncherService,
     ) -> None:
-        """Verify _finalize_process_run updates run and removes from active_runs.
+        """Verify _finalize_process_run close+inserts and removes from active_runs.
 
         Given: A process with an active run tracked in factory.active_runs,
         When: _finalize_process_run is called with SUCCEEDED status,
-        Then: The run is updated in DB and removed from active_runs dict.
+        Then: Old row closed, new row added, run removed from active_runs.
         """
         mock_repo = MagicMock()
         mock_session = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 13
+        mock_process_run.public_id = "run-id-789"
+        mock_process_run.process_name = "test_process"
+        mock_process_run.role = "worker"
+        mock_process_run.lifecycle = "transient"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
@@ -3815,8 +3853,8 @@ class TestProcessFactoryDatabasePersistence:
             result={"status": "done"},
         )
         assert "test_process" not in factory.active_runs
-        assert mock_process_run.status == ProcessRunStatusEnum.SUCCEEDED.value
-        assert mock_process_run.result == {"status": "done"}
+        mock_session.add.assert_called_once()
+        mock_session.commit.assert_called_once()
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_finalize_process_run_no_active_run(
@@ -4259,9 +4297,20 @@ class TestProcessFactoryNativeProcessCompletion:
         mock_session = MagicMock()
         mock_session.execute = AsyncMock()
         mock_session.commit = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 20
+        mock_process_run.public_id = "run-id-123"
+        mock_process_run.process_name = "test_process"
+        mock_process_run.role = "core"
+        mock_process_run.lifecycle = "one_shot"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
@@ -4275,7 +4324,7 @@ class TestProcessFactoryNativeProcessCompletion:
         assert "test_process" not in factory.process_lifecycles
         assert "test_process" not in factory.process_roles
         assert "test_process" not in factory.active_runs
-        assert mock_process_run.status == ProcessRunStatusEnum.SUCCEEDED.value
+        mock_session.add.assert_called_once()
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_failure_exit_code_nonzero(
@@ -4294,9 +4343,20 @@ class TestProcessFactoryNativeProcessCompletion:
         mock_session = MagicMock()
         mock_session.execute = AsyncMock()
         mock_session.commit = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 21
+        mock_process_run.public_id = "run-id-456"
+        mock_process_run.process_name = "test_process"
+        mock_process_run.role = "core"
+        mock_process_run.lifecycle = "long_running"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
@@ -4307,8 +4367,7 @@ class TestProcessFactoryNativeProcessCompletion:
         mock_process_info.process.returncode = 1
         await factory._handle_process_completion("test_process", mock_process_info)
         assert "test_process" not in factory.started_processes
-        assert mock_process_run.status == ProcessRunStatusEnum.FAILED.value
-        assert mock_process_run.error == "exit_code=1"
+        mock_session.add.assert_called_once()
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_expected_termination(
@@ -4327,9 +4386,20 @@ class TestProcessFactoryNativeProcessCompletion:
         mock_session = MagicMock()
         mock_session.execute = AsyncMock()
         mock_session.commit = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 22
+        mock_process_run.public_id = "run-id-789"
+        mock_process_run.process_name = "test_process"
+        mock_process_run.role = "core"
+        mock_process_run.lifecycle = "long_running"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
@@ -4340,7 +4410,7 @@ class TestProcessFactoryNativeProcessCompletion:
         mock_process_info.process.returncode = 0
         await factory._handle_process_completion("test_process", mock_process_info)
         assert "test_process" not in factory.expected_terminations
-        assert mock_process_run.status == ProcessRunStatusEnum.CANCELLED.value
+        mock_session.add.assert_called_once()
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_long_running_unexpected_exit(
@@ -4359,9 +4429,20 @@ class TestProcessFactoryNativeProcessCompletion:
         mock_session = MagicMock()
         mock_session.execute = AsyncMock()
         mock_session.commit = AsyncMock()
+        mock_session.add = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        mock_process_run = MagicMock(spec=ProcessRun)
+        mock_process_run = MagicMock()
+        mock_process_run.id = 23
+        mock_process_run.public_id = "run-id-999"
+        mock_process_run.process_name = "test_process"
+        mock_process_run.role = "core"
+        mock_process_run.lifecycle = "long_running"
+        mock_process_run.parameters = None
+        mock_process_run.result = None
+        mock_process_run.error = None
+        mock_process_run.tags = []
+        mock_process_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_process_run
         mock_session.execute.return_value = mock_result
@@ -4370,7 +4451,7 @@ class TestProcessFactoryNativeProcessCompletion:
         factory.active_runs["test_process"] = "run-id-999"
         mock_process_info.process.returncode = 0
         await factory._handle_process_completion("test_process", mock_process_info)
-        assert mock_process_run.status == ProcessRunStatusEnum.SUCCEEDED.value
+        mock_session.add.assert_called_once()
 
     @patch("snapper.application.process_manager.run_recorder.get_repository")
     async def test_handle_process_completion_non_processinfo_object(

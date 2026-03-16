@@ -876,6 +876,7 @@ class SQLAlchemyRepository(Repository):
                     Trade.instrument_id == inst.id,
                     Trade.timestamp >= start,
                     Trade.timestamp <= end,
+                    Trade.known_to > now,
                 )
                 .order_by(Trade.timestamp.asc())
             )
@@ -895,6 +896,7 @@ class SQLAlchemyRepository(Repository):
         self, exchange: AllExchange, symbols: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         """Retrieve market snapshots for exchange and symbols in time range."""
+        now = datetime.now(UTC)
         async with self.session() as s:
             q = await s.execute(
                 select(
@@ -912,12 +914,11 @@ class SQLAlchemyRepository(Repository):
                     MarketSnapshot.high_24h,
                 )
                 .where(
-                    and_(
-                        MarketSnapshot.exchange == exchange,
-                        MarketSnapshot.symbol.in_(symbols),
-                        MarketSnapshot.timestamp >= start,
-                        MarketSnapshot.timestamp <= end,
-                    )
+                    MarketSnapshot.exchange == exchange,
+                    MarketSnapshot.symbol.in_(symbols),
+                    MarketSnapshot.timestamp >= start,
+                    MarketSnapshot.timestamp <= end,
+                    MarketSnapshot.known_to > now,
                 )
                 .order_by(MarketSnapshot.timestamp.asc())
             )
@@ -1500,6 +1501,7 @@ class MSSQLRepository(Repository):
                     Trade.instrument_id == inst.id,
                     Trade.timestamp >= start,
                     Trade.timestamp <= end,
+                    Trade.known_to > datetime.now(UTC),
                 )
                 .order_by(Trade.timestamp.asc())
             )
@@ -1523,6 +1525,7 @@ class MSSQLRepository(Repository):
         """Retrieve market snapshots via sync thread."""
 
         def _do(s: SyncSession) -> list[dict[str, Any]]:
+            now = datetime.now(UTC)
             q = s.execute(
                 select(
                     MarketSnapshot.timestamp,
@@ -1539,12 +1542,11 @@ class MSSQLRepository(Repository):
                     MarketSnapshot.high_24h,
                 )
                 .where(
-                    and_(
-                        MarketSnapshot.exchange == exchange,
-                        MarketSnapshot.symbol.in_(symbols),
-                        MarketSnapshot.timestamp >= start,
-                        MarketSnapshot.timestamp <= end,
-                    )
+                    MarketSnapshot.exchange == exchange,
+                    MarketSnapshot.symbol.in_(symbols),
+                    MarketSnapshot.timestamp >= start,
+                    MarketSnapshot.timestamp <= end,
+                    MarketSnapshot.known_to > now,
                 )
                 .order_by(MarketSnapshot.timestamp.asc())
             )

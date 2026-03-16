@@ -12,12 +12,15 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import desc
 from sqlalchemy import select
+from sqlalchemy import update
 
 from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.config.settings import AppSettings
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import ProcessRun
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 
 
 class ProcessRunRecorder:
@@ -88,20 +91,37 @@ class ProcessRunRecorder:
             error: Optional error message (truncated to 1024 chars).
         """
         repository = get_repository(self.settings.db_url)
+        now = datetime.now(UTC)
         async with repository.session() as session:
             result_row = await session.execute(
-                select(ProcessRun).where(ProcessRun.public_id == public_id)
+                select(ProcessRun).where(
+                    ProcessRun.public_id == public_id,
+                    *where_active(ProcessRun),
+                )
             )
             process_run = result_row.scalar_one_or_none()
             if process_run is None:
                 logger.warning("Process run '{}' not found for status update", public_id)
                 return
-            process_run.status = status.value
-            process_run.completed_at = datetime.now(UTC)
-            if result is not None:
-                process_run.result = result
-            if error is not None:
-                process_run.error = error[:1024]
+            await session.execute(
+                update(ProcessRun).where(ProcessRun.id == process_run.id).values(known_to=now)
+            )
+            new_run = ProcessRun(
+                public_id=process_run.public_id,
+                process_name=process_run.process_name,
+                role=process_run.role,
+                lifecycle=process_run.lifecycle,
+                status=status.value,
+                parameters=process_run.parameters,
+                result=result if result is not None else process_run.result,
+                error=error[:1024] if error is not None else process_run.error,
+                tags=process_run.tags,
+                started_at=process_run.started_at,
+                completed_at=datetime.now(UTC),
+                timestamp=now,
+                known_to=KNOWN_TO_MAX,
+            )
+            session.add(new_run)
             await session.commit()
 
     async def get_recent_runs(
@@ -121,7 +141,13 @@ class ProcessRunRecorder:
         """
         repository = get_repository(self.settings.db_url)
         async with repository.session() as session:
-            stmt = select(ProcessRun).order_by(desc(ProcessRun.started_at)).limit(limit)
+            pr_ts, pr_kt = where_active(ProcessRun)
+            stmt = (
+                select(ProcessRun)
+                .where(pr_ts, pr_kt)
+                .order_by(desc(ProcessRun.started_at))
+                .limit(limit)
+            )
             if name:
                 stmt = stmt.where(ProcessRun.process_name == name)
             result = await session.execute(stmt)

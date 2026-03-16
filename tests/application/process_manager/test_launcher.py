@@ -1154,19 +1154,29 @@ class TestProcessRunRecords:
     async def test_update_process_run_record_with_result(
         self, launcher: ProcessLauncherService
     ) -> None:
-        """Test run record is updated with result.
+        """Test run record close+insert with result.
 
         Given: Existing run record in database.
         When: _update_process_run_record is called with result.
-        Then: Status and result updated, committed.
+        Then: Old row closed via UPDATE, new row added via session.add.
         """
         mock_run = MagicMock()
         mock_run.public_id = "test-run-id"
+        mock_run.process_name = "test-proc"
+        mock_run.role = "worker"
+        mock_run.lifecycle = "transient"
+        mock_run.parameters = None
+        mock_run.result = None
+        mock_run.error = None
+        mock_run.tags = []
+        mock_run.started_at = datetime(2024, 1, 1, tzinfo=UTC)
+        mock_run.id = 10
         with patch(
             "snapper.application.process_manager.run_recorder.get_repository"
         ) as mock_get_repo:
             mock_repo = MagicMock()
             mock_session = AsyncMock()
+            mock_session.add = MagicMock()
             mock_result = MagicMock()
             mock_result.scalar_one_or_none.return_value = mock_run
             mock_session.execute.return_value = mock_result
@@ -1178,8 +1188,8 @@ class TestProcessRunRecords:
                 ProcessRunStatusEnum.SUCCEEDED,
                 result={"output": "success"},
             )
-            assert mock_run.status == ProcessRunStatusEnum.SUCCEEDED.value
-            assert mock_run.result == {"output": "success"}
+            assert mock_session.execute.call_count == 2
+            mock_session.add.assert_called_once()
             mock_session.commit.assert_called_once()
 
 

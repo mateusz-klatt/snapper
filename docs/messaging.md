@@ -119,7 +119,9 @@ from snapper.messaging.schemas.data import TickData
 tick = TickData(
     instrument="BTC-USD",
     exchange="kraken",
-    price=42000.0,
+    bid=41990.0,
+    ask=42010.0,
+    last=42000.0,
     volume=0.5,
     timestamp=datetime.now(UTC),
 )
@@ -133,7 +135,9 @@ tick = TickData(
 | `public_id` | string | UUID7 external identifier |
 | `instrument` | string | Instrument symbol |
 | `exchange` | string | Exchange name |
-| `price` | float | Price |
+| `bid` | float \| None | Best bid price |
+| `ask` | float \| None | Best ask price |
+| `last` | float \| None | Last traded price |
 | `volume` | float | Volume |
 | `timestamp` | datetime | Timestamp |
 
@@ -228,13 +232,14 @@ from snapper.messaging.schemas.data import ExecutionData
 execution = ExecutionData(
     instrument="BTC-USD",
     exchange="kraken",
-    order_id="ord_123",
+    client_order_id="ord_123",
     exchange_order_id="KRAKEN-456",
     side="buy",
     price=42000.0,
-    quantity=0.1,
+    size=0.1,
     fee=0.001,
     fee_asset="USD",
+    status="filled",
 )
 ```
 
@@ -246,7 +251,14 @@ from snapper.messaging.schemas.data import OrderData
 order_status = OrderData(
     instrument="BTC-USD",
     exchange="kraken",
+    client_order_id="ord_123",
+    exchange_order_id="KRAKEN-456",
+    side="buy",
+    order_type="limit",
+    size=0.1,
+    filled_size=0.0,
     status="accepted",
+    price=42000.0,
 )
 ```
 

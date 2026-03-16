@@ -85,6 +85,11 @@ X-CSRF-Token: abc123...
 
 ## REST Endpoints
 
+REST endpoints return the same Data schemas used by WebSocket envelopes
+(`OrderData`, `SignalData`, `ExecutionData`, `PositionData`, `CandleData`
+from `messaging.schemas.data`). This means the wire format is identical
+whether data arrives via REST or the WebSocket feed.
+
 ### Health
 
 ```http
@@ -126,6 +131,7 @@ X-CSRF-Token: <csrf_token>
 | `instrument` | string | yes | Instrument symbol |
 | `timeframe` | string | yes | Timeframe (`1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
 | `limit` | int | no | Number of candles (max 1000, default 100) |
+| `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
 **Response:**
 
@@ -164,6 +170,7 @@ X-CSRF-Token: <csrf_token>
 | `symbol` | string | no | Filter by symbol |
 | `limit` | int | no | Number of orders (max 1000, default 100) |
 | `offset` | int | no | Skip N orders (default 0) |
+| `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
 **Response:**
 
@@ -207,6 +214,7 @@ X-CSRF-Token: <csrf_token>
 | `strategy` | string | no | Filter by strategy |
 | `hours` | int | no | History hours (max 168, default 24) |
 | `limit` | int | no | Number of signals (max 1000, default 100) |
+| `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
 **Response:**
 
@@ -235,6 +243,13 @@ GET /api/executions?limit=100
 X-CSRF-Token: <csrf_token>
 ```
 
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `limit` | int | no | Number of executions (max 1000, default 100) |
+| `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
+
 **Response:**
 
 ```json
@@ -243,17 +258,18 @@ X-CSRF-Token: <csrf_token>
         "public_id": "019e1a2b-...",
         "type": "execution",
         "timestamp": "2026-01-18T12:01:00Z",
-        "exec_id": "TEXEC-123",
         "trade_id": "TTRAD-456",
-        "executed_at": "2026-01-18T12:00:59Z",
-        "price": 42000.0,
+        "exchange_order_id": "KRAKEN-456",
+        "client_order_id": "signal-a1b2c3d4",
+        "instrument": "BTC-USD",
+        "exchange": "kraken",
+        "side": "buy",
         "size": 0.1,
+        "price": 42000.0,
         "fee": 0.001,
         "fee_asset": "USD",
-        "instrument": "BTC-USD",
-        "side": "buy",
-        "exchange": "kraken",
-        "status": "filled"
+        "status": "filled",
+        "executed_at": "2026-01-18T12:00:59Z"
     }
 ]
 ```
@@ -264,6 +280,12 @@ X-CSRF-Token: <csrf_token>
 GET /api/positions
 X-CSRF-Token: <csrf_token>
 ```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
 **Response:**
 
@@ -281,6 +303,36 @@ X-CSRF-Token: <csrf_token>
         "realized_pnl": 100.0
     }
 ]
+```
+
+### Exchanges
+
+```http
+GET /api/exchanges
+X-CSRF-Token: <csrf_token>
+```
+
+Returns distinct exchange names from active symbol aliases.
+
+**Response:**
+
+```json
+["kraken", "polygon", "walutomat", "zonda"]
+```
+
+### Exchange Instruments
+
+```http
+GET /api/exchanges/{exchange}/instruments
+X-CSRF-Token: <csrf_token>
+```
+
+Returns distinct native symbols available on the given exchange.
+
+**Response:**
+
+```json
+["BTC-USD", "ETH-USD", "SOL-USD"]
 ```
 
 ### WebSocket Stats

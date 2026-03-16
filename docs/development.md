@@ -283,16 +283,28 @@ make ui-gen-types   # All types from OpenAPI + WebSocket
 
 ## Database Migrations
 
-### Creating Migration
+### Dev DB Location
+
+The development SQLite database lives at `./data/snapper.db`.
+
+### Destructive Migration Strategy (Development)
+
+The project uses a single-file migration (`0001_init.py`) that is rewritten in
+place when the schema changes.  After editing the migration, reset and reseed:
 
 ```bash
-poetry run alembic revision -m "Add new column"
+rm -f data/snapper.db && make migrate-dev
 ```
 
-### Applying
+`make migrate-dev` runs both `make migrate` (applies Alembic migrations via
+`snapper db-init`) and `make seed` (seeds development data via
+`snapper db-seed --profile dev`).  Never use bare `make migrate` after a DB
+reset -- always use `make migrate-dev` so seed data is included.
+
+### Applying (Production)
 
 ```bash
-snapper db-upgrade
+make migrate-prod
 ```
 
 ### Rollback
