@@ -13,7 +13,7 @@ make migrate-dev run-static
 make run-server
 ```
 
-Open <http://localhost:8000/snapper/> and log in:
+Open <http://localhost:8000/> and log in:
 
 - **Username:** `admin`
 - **Password:** `AdminSnapper2026!`
@@ -91,7 +91,7 @@ make migrate-dev
 snapper server
 ```
 
-Dashboard available at `http://localhost:8000/snapper/`.
+Dashboard available at `http://localhost:8000/`.
 
 ## System Overview
 
