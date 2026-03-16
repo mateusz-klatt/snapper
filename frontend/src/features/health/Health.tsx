@@ -2,15 +2,8 @@ import React from 'react'
 import { useSystemStatus } from '../../hooks/queries'
 import { HealthSkeleton } from '../../components/Skeleton'
 import clsx from 'clsx'
+import type { ProcessStatus } from '../../types/api'
 
-interface ProcessStatus {
-  status: string
-  pid?: number | null
-  started_at?: string | null
-  command?: string | null
-  exit_code?: number | null
-  error?: string | null
-}
 type HealthStatus = 'healthy' | 'warning' | 'error'
 
 interface HealthMetric {

@@ -10,7 +10,7 @@ interface TradeStore extends TradeState {
   updateExecutions: (executions: Execution[]) => void
   addExecution: (execution: Execution) => void
   updatePositions: (positions: Position[]) => void
-  updatePosition: (instrument: string, updates: Partial<Position>) => void
+  updatePosition: (instrument: string, exchange: string, updates: Partial<Position>) => void
   updateSignals: (signals: Signal[]) => void
   addSignal: (signal: Signal) => void
   clearTradeData: () => void
@@ -55,10 +55,10 @@ export const useTradeStore = create<TradeStore>()(
       }
     },
     updatePositions: positions => set({ positions }),
-    updatePosition: (instrument, updates) => {
+    updatePosition: (instrument, exchange, updates) => {
       const current = get().positions
       const updated = current.map(pos =>
-        pos.instrument === instrument ? { ...pos, ...updates } : pos
+        pos.instrument === instrument && pos.exchange === exchange ? { ...pos, ...updates } : pos
       )
 
       set({ positions: updated })

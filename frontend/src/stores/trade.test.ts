@@ -195,7 +195,7 @@ describe('useTradeStore', () => {
       })
 
       useTradeStore.setState({ positions: [position] })
-      useTradeStore.getState().updatePosition('BTC-USD', { unrealizedPnl: 200 })
+      useTradeStore.getState().updatePosition('BTC-USD', 'kraken', { unrealizedPnl: 200 })
       expect(useTradeStore.getState().positions[0].unrealizedPnl).toBe(200)
       expect(useTradeStore.getState().positions[0].quantity).toBe(1)
     })
@@ -217,7 +217,7 @@ describe('useTradeStore', () => {
       ]
 
       useTradeStore.setState({ positions })
-      useTradeStore.getState().updatePosition('BTC-USD', { unrealizedPnl: 200 })
+      useTradeStore.getState().updatePosition('BTC-USD', 'kraken', { unrealizedPnl: 200 })
       const ethPosition = useTradeStore.getState().positions.find(p => p.instrument === 'ETH-USD')
 
       expect(ethPosition?.unrealizedPnl).toBe(50)
