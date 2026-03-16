@@ -94,7 +94,7 @@ help:
 	$(info )
 	$(info Docker:)
 	$(info docker-build-dev    Build Docker image [caller UID])
-	$(info docker-build-prod   Build Docker image [UID 10000])
+	$(info docker-build-prod   Build Docker image [UID 8888])
 	$(info docker-migrate-dev  Run migrations + seed dev data in Docker)
 	$(info docker-migrate-prod Run migrations + seed prod data in Docker)
 	$(info docker-push         Push Docker image)
@@ -477,7 +477,7 @@ ios-clean:
 	$(info Cleaning iOS build artifacts...)
 	rm -rf "$(IOS_DIR)/DerivedData" "$(IOS_DIR)/build"
 
-DOCKER_PROD_UID := 10000
+DOCKER_PROD_UID := 8888
 ifeq ($(OS),Windows_NT)
   DOCKER_DEV_UID := $(DOCKER_PROD_UID)
 else
