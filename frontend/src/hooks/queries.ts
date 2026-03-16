@@ -463,3 +463,13 @@ export const useAdminResetPassword = () => {
     },
   })
 }
+
+export const useChangePassword = () =>
+  useMutation<
+    { message: string },
+    Error,
+    { userId: string; currentPassword: string; newPassword: string }
+  >({
+    mutationFn: ({ userId, currentPassword, newPassword }) =>
+      apiClient.changePassword(userId, currentPassword, newPassword),
+  })

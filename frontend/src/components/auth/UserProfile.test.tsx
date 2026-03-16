@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import UserProfile from './UserProfile'
 import { useAuth } from '../../stores/auth'
 import { apiClient } from '../../lib/apiClient'
@@ -18,7 +19,11 @@ const mockUseAuth = vi.mocked(useAuth)
 const mockChangePassword = vi.mocked(apiClient.changePassword)
 
 const renderWithMocks = (ui: ReactNode) => {
-  return render(ui)
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+
+  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
 }
 
 const createMockAuth = (overrides = {}) => ({

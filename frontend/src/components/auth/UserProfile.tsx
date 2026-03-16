@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useAuth } from '../../stores/auth'
-import { apiClient } from '../../lib/apiClient'
+import { useChangePassword } from '../../hooks/queries'
 import { Modal } from '../ui/Modal'
 
 interface UserProfileProps {
@@ -18,6 +18,7 @@ const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) =
   const [passwordSuccess, setPasswordSuccess] = useState('')
   const [isChangingPassword, setIsChangingPassword] = useState(false)
   const { user, logout, isLoading } = useAuth()
+  const changePasswordMutation = useChangePassword()
 
   if (!user) return null
 
@@ -53,23 +54,26 @@ const UserProfile: React.FC<Readonly<UserProfileProps>> = ({ className = '' }) =
       return
     }
 
+    changePasswordMutation.mutate(
+      { userId: user.username, currentPassword, newPassword },
+      {
+        onSuccess: () => {
+          setPasswordSuccess('Password changed successfully')
+          resetPasswordForm()
+          setTimeout(() => {
+            setShowPasswordForm(false)
+            setPasswordSuccess('')
+          }, 2000)
+        },
+        onError: (error: Error) => {
+          setPasswordError(error.message || 'Failed to change password')
+        },
+        onSettled: () => {
+          setIsChangingPassword(false)
+        },
+      }
+    )
     setIsChangingPassword(true)
-
-    try {
-      await apiClient.changePassword(user.username, currentPassword, newPassword)
-      setPasswordSuccess('Password changed successfully')
-      resetPasswordForm()
-      setTimeout(() => {
-        setShowPasswordForm(false)
-        setPasswordSuccess('')
-      }, 2000)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to change password'
-
-      setPasswordError(message)
-    } finally {
-      setIsChangingPassword(false)
-    }
   }
 
   const getRoleColor = (role: string) => {
