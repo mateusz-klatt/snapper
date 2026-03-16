@@ -82,8 +82,6 @@ export const useAuthStore = create<AuthState>()(
               user: null,
               csrfToken: null,
             })
-            localStorage.removeItem('auth_token')
-            localStorage.removeItem('auth_user_id')
             throw error
           }
         },
@@ -113,8 +111,6 @@ export const useAuthStore = create<AuthState>()(
               isLoading: false,
               error: null,
             })
-            localStorage.removeItem('auth_token')
-            localStorage.removeItem('auth_user_id')
           }
         },
         silentLogout: () => {

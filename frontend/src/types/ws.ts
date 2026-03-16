@@ -5,8 +5,17 @@ export type {
   TradeData,
   SignalData,
   OrderData,
+  OrderCancelData,
+  OrderEventData,
+  OrderReplaceData,
+  OrderRequestData,
   ExecutionData,
   HeartbeatData,
+  PositionData,
+  ReplayEndData,
+  ReplayStartData,
+  SettingChangedData,
+  SymbolAliasUpdateData,
   WSErrorResponse,
   WSAuthRequiredResponse,
   WSAuthOkResponse,
@@ -33,8 +42,17 @@ import type {
   TradeData,
   SignalData,
   OrderData,
+  OrderCancelData,
+  OrderEventData,
+  OrderReplaceData,
+  OrderRequestData,
   ExecutionData,
   HeartbeatData,
+  PositionData,
+  ReplayEndData,
+  ReplayStartData,
+  SettingChangedData,
+  SymbolAliasUpdateData,
   WSErrorResponse,
   WSAuthRequiredResponse,
   WSAuthOkResponse,
@@ -62,8 +80,17 @@ export type WebSocketMessages =
   | TradeData
   | SignalData
   | OrderData
+  | OrderCancelData
+  | OrderEventData
+  | OrderReplaceData
+  | OrderRequestData
   | ExecutionData
   | HeartbeatData
+  | PositionData
+  | ReplayEndData
+  | ReplayStartData
+  | SettingChangedData
+  | SymbolAliasUpdateData
   | WSErrorResponse
   | WSAuthRequiredResponse
   | WSAuthOkResponse

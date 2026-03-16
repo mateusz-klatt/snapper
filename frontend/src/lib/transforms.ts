@@ -184,7 +184,6 @@ export function positionFromAPI(api: PositionData): Position {
     averagePrice: api.average_price,
     unrealizedPnl: api.unrealized_pnl,
     realizedPnl: api.realized_pnl,
-    updatedAt: api.timestamp ? new Date(api.timestamp) : new Date(),
   }
 }
 
@@ -358,7 +357,7 @@ export function isTradeSide(value: unknown): value is TradeSide {
   return value === 'buy' || value === 'sell'
 }
 
-export function isOrder(value: unknown): value is Order {
+export function isOrderStatus(value: unknown): value is string {
   return (
     value === 'new' ||
     value === 'submitted' ||

@@ -13,6 +13,7 @@ export type {
   Heartbeat,
   OrderRequest,
   Order,
+  Position,
   ReplayEnd,
   ReplayStart,
   SettingChanged,
@@ -33,19 +34,3 @@ export type {
   OrderType,
   HeartbeatStatus,
 } from './entities.generated'
-
-/**
- * Canonical Position entity.
- * Derived from REST PositionData (no WS envelope exists for positions).
- */
-export interface Position {
-  publicId?: string | number
-  timestamp?: Date
-  instrument: string
-  exchange: string
-  quantity: number
-  averagePrice: number
-  unrealizedPnl: number
-  realizedPnl: number
-  updatedAt: Date
-}

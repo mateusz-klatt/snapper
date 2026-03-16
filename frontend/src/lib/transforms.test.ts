@@ -17,7 +17,7 @@ import {
   positionsFromAPI,
   candlesFromAPI,
   isTradeSide,
-  isOrder,
+  isOrderStatus,
   isOrderType,
   safeOrderFromAPI,
   safeExecutionFromAPI,
@@ -449,9 +449,9 @@ describe('Position Transformers', () => {
     expect(result.averagePrice).toBe(48000)
     expect(result.unrealizedPnl).toBe(3000)
     expect(result.realizedPnl).toBe(500)
-    expect(result.updatedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
+    expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
   })
-  it('falls back to current date when timestamp is undefined in API position', () => {
+  it('sets timestamp to undefined when API position has no timestamp', () => {
     const apiPosition = {
       type: 'position',
       instrument: 'BTC/USD',
@@ -461,10 +461,9 @@ describe('Position Transformers', () => {
       unrealized_pnl: 3000,
       realized_pnl: 500,
     } as unknown as PositionData
-    const before = new Date()
     const result = positionFromAPI(apiPosition)
 
-    expect(result.updatedAt.getTime()).toBeGreaterThanOrEqual(before.getTime())
+    expect(result.timestamp).toBeUndefined()
   })
 })
 describe('Candle Transformers', () => {
@@ -858,15 +857,15 @@ describe('Type Guards', () => {
     expect(isTradeSide(null)).toBe(false)
   })
   it('validates OrderStatus', () => {
-    expect(isOrder('new')).toBe(true)
-    expect(isOrder('submitted')).toBe(true)
-    expect(isOrder('open')).toBe(true)
-    expect(isOrder('filled')).toBe(true)
-    expect(isOrder('partially_filled')).toBe(true)
-    expect(isOrder('cancelled')).toBe(true)
-    expect(isOrder('rejected')).toBe(true)
-    expect(isOrder('unknown')).toBe(false)
-    expect(isOrder(null)).toBe(false)
+    expect(isOrderStatus('new')).toBe(true)
+    expect(isOrderStatus('submitted')).toBe(true)
+    expect(isOrderStatus('open')).toBe(true)
+    expect(isOrderStatus('filled')).toBe(true)
+    expect(isOrderStatus('partially_filled')).toBe(true)
+    expect(isOrderStatus('cancelled')).toBe(true)
+    expect(isOrderStatus('rejected')).toBe(true)
+    expect(isOrderStatus('unknown')).toBe(false)
+    expect(isOrderStatus(null)).toBe(false)
   })
   it('validates OrderType', () => {
     expect(isOrderType('market')).toBe(true)
