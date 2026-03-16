@@ -93,7 +93,7 @@ snapper server
 
 Dashboard available at `http://localhost:8000/snapper/`.
 
-## Architecture
+## System Overview
 
 ```mermaid
 flowchart TB
