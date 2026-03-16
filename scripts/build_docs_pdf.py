@@ -334,7 +334,6 @@ class MarkdownToPdf:
                 margin: 0.2em 0;
             }}
             section.toc {{
-                page-break-after: always;
             }}
             section.toc h2 {{
                 font-size: {self._config.title_font_size_pt}pt;
@@ -422,7 +421,9 @@ class MarkdownToPdf:
             }}
             figure.diagram img {{
                 max-width: 100%;
+                max-height: 85vh;
                 height: auto;
+                object-fit: contain;
             }}
             table {{
                 border-collapse: collapse;

@@ -1,14 +1,28 @@
 # API
 
 Snapper provides a REST API and WebSocket interface for platform interaction.
-API requires JWT authentication via HTTP-only cookies.
+The API requires JWT authentication via HTTP-only cookies. All mutating
+requests (POST, PUT, DELETE) require a valid `X-CSRF-Token` header.
 
 ## Authentication
 
-Authentication uses HTTP-only cookies for security. After login, the server
-sets `access_token`, `refresh_token`, and `csrf_token` cookies automatically.
+Authentication uses HTTP-only cookies. After login, the server sets
+`access_token`, `refresh_token`, and `csrf_token` cookies automatically.
 
-### Login
+### Roles and Permissions
+
+| Role | Access |
+| ---- | ------ |
+| `viewer` | Read-only market data, orders, positions, strategies, system status |
+| `operator` | Viewer permissions plus trade execution, process management |
+| `admin` | Full access including user management and system configuration |
+
+### POST /api/auth/login
+
+Authenticate and create a session. Sets `access_token`, `refresh_token`,
+and `csrf_token` cookies on the response.
+
+**Request:**
 
 ```http
 POST /api/auth/login
@@ -16,87 +30,134 @@ Content-Type: application/json
 
 {
     "username": "admin",
-    "password": "password123"
+    "password": "password123",
+    "remember_me": false
 }
 ```
 
-**Response:**
-
-The server sets HTTP-only cookies and returns user info:
+**Response (200):**
 
 ```json
 {
+    "message": "Login successful",
+    "expires_in": 900,
     "user": {
-        "id": "admin",
         "username": "admin",
+        "email": "admin@example.com",
         "role": "admin",
-        "is_active": true
+        "is_active": true,
+        "created_at": "2026-01-10T08:00:00Z"
     }
 }
 ```
 
 **Cookies set:**
 
-| Cookie | HttpOnly | Secure | SameSite | Description |
-| ------ | -------- | ------ | -------- | ----------- |
-| `access_token` | Yes | Yes (prod) | Lax/Strict | JWT access token (15min) |
-| `refresh_token` | Yes | Yes (prod) | Lax/Strict | JWT refresh token (7 days) |
-| `csrf_token` | No | Yes (prod) | Lax/Strict | CSRF protection token |
+| Cookie | HttpOnly | Secure | SameSite | Path | Max-Age | Description |
+| ------ | -------- | ------ | -------- | ---- | ------- | ----------- |
+| `access_token` | Yes | Yes (prod) | Lax/Strict | `/` | session | JWT access token (15 min) |
+| `refresh_token` | Yes | Yes (prod) | Lax/Strict | `/api/auth` | 7 days | JWT refresh token |
+| `csrf_token` | No | Yes (prod) | Lax/Strict | `/` | session | CSRF protection token |
 
-### Refresh Token
+### POST /api/auth/refresh
+
+Refresh session tokens. The `refresh_token` cookie is sent automatically by
+the browser. Returns new tokens in cookies plus a WebSocket authentication
+token in the response body. This is the only way to obtain a `ws_token`.
+
+**Request:**
 
 ```http
 POST /api/auth/refresh
 ```
 
-The `refresh_token` cookie is sent automatically by the browser. Server
-returns new tokens in cookies.
-
-### Logout
-
-```http
-POST /api/auth/logout
-X-CSRF-Token: <csrf_token>
-```
-
-Clears all authentication cookies.
-
-### CSRF Token
-
-For mutating requests (POST, PUT, DELETE), a CSRF token is required:
-
-```http
-GET /api/auth/csrf
-```
-
-**Response:**
+**Response (200):**
 
 ```json
 {
-    "csrf_token": "abc123..."
+    "message": "session refreshed",
+    "ws_token": "eyJhbGciOi...",
+    "ws_token_exp": "2026-01-18T12:30:00Z",
+    "csrf_token": "abc123def456...",
+    "user": {
+        "username": "admin",
+        "email": "admin@example.com",
+        "role": "admin",
+        "is_active": true,
+        "created_at": "2026-01-10T08:00:00Z"
+    }
 }
 ```
 
-Then add the header to mutating requests:
+### POST /api/auth/logout
+
+Logout and invalidate the current session. Clears all authentication cookies
+and blacklists tokens.
+
+**Request:**
 
 ```http
-X-CSRF-Token: abc123...
+POST /api/auth/logout
 ```
+
+**Response (200):**
+
+```json
+{
+    "message": "Logged out successfully"
+}
+```
+
+### GET /api/auth/me
+
+Get the currently authenticated user's profile.
+
+**Request:**
+
+```http
+GET /api/auth/me
+```
+
+**Response (200):**
+
+```json
+{
+    "username": "admin",
+    "email": "admin@example.com",
+    "role": "admin",
+    "is_active": true,
+    "created_at": "2026-01-10T08:00:00Z"
+}
+```
+
+### CSRF Protection
+
+The `csrf_token` cookie is readable by JavaScript (not HttpOnly). For all
+mutating requests (POST, PUT, DELETE), include its value as a header:
+
+```http
+X-CSRF-Token: <value from csrf_token cookie>
+```
+
+New CSRF tokens are issued on login and refresh. There is no separate
+endpoint for obtaining CSRF tokens.
 
 ## REST Endpoints
 
-REST endpoints return the same Data schemas used by WebSocket envelopes
+REST endpoints return the same Data schemas used by WebSocket messages
 (`OrderData`, `SignalData`, `ExecutionData`, `PositionData`, `CandleData`
 from `messaging.schemas.data`). This means the wire format is identical
 whether data arrives via REST or the WebSocket feed.
 
-### Health
+All data endpoints support bitemporal querying via the optional `as_of`
+parameter (UTC datetime). When provided, the query returns data as it was
+known at that point in time. When omitted, the current time is used.
 
-```http
-GET /api/health
-```
+### GET /api/health
 
-**Response:**
+Public health check endpoint. No authentication required.
+
+**Response (200):**
 
 ```json
 {
@@ -111,16 +172,20 @@ GET /api/health
         "active_clients": 3
     },
     "topics": {
-        "available": 50,
-        "active": 12
+        "available": 7,
+        "active": 3
     }
 }
 ```
 
-### Candles (OHLCV)
+### GET /api/candles
+
+Fetch OHLCV candlestick data. Requires `read:market_data` permission.
+
+**Request:**
 
 ```http
-GET /api/candles?instrument=BTC-USD&timeframe=1h&limit=100
+GET /api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=100
 X-CSRF-Token: <csrf_token>
 ```
 
@@ -128,17 +193,20 @@ X-CSRF-Token: <csrf_token>
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `instrument` | string | yes | Instrument symbol |
-| `timeframe` | string | yes | Timeframe (`1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
-| `limit` | int | no | Number of candles (max 1000, default 100) |
+| `instrument` | string | yes | Instrument symbol (e.g., `BTC-USD`) |
+| `exchange` | string | yes | Exchange name (`kraken`, `zonda`, `walutomat`, `polygon`) |
+| `timeframe` | string | yes | Candle timeframe (e.g., `1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
+| `limit` | int | no | Number of candles, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
-**Response:**
+Returns 204 No Content if the instrument is not found.
+
+**Response (200):**
 
 ```json
 [
     {
-        "public_id": "019e1a2b-...",
+        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
         "type": "candle",
         "timestamp": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
@@ -156,10 +224,14 @@ X-CSRF-Token: <csrf_token>
 ]
 ```
 
-### Orders
+### GET /api/orders
+
+Fetch orders with optional filtering. Requires `read:orders` permission.
+
+**Request:**
 
 ```http
-GET /api/orders?symbol=BTC-USD&limit=100&offset=0
+GET /api/orders?symbol=BTC-USD&exchange=kraken&limit=100&offset=0
 X-CSRF-Token: <csrf_token>
 ```
 
@@ -167,22 +239,23 @@ X-CSRF-Token: <csrf_token>
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `symbol` | string | no | Filter by symbol |
-| `limit` | int | no | Number of orders (max 1000, default 100) |
-| `offset` | int | no | Skip N orders (default 0) |
+| `symbol` | string | no | Filter by instrument symbol |
+| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `zonda`, `walutomat`) |
+| `limit` | int | no | Number of orders, 1-1000 (default 100) |
+| `offset` | int | no | Number of orders to skip (default 0) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
-**Response:**
+**Response (200):**
 
 ```json
 [
     {
-        "public_id": "019e1a2b-...",
+        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
         "type": "order",
         "timestamp": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
         "exchange": "kraken",
-        "client_order_id": "ord_123",
+        "client_order_id": "signal-a1b2c3d4",
         "exchange_order_id": "KRAKEN-456",
         "created_at": "2026-01-18T12:00:00Z",
         "updated_at": "2026-01-18T12:01:00Z",
@@ -199,10 +272,15 @@ X-CSRF-Token: <csrf_token>
 ]
 ```
 
-### Signals
+### GET /api/signals
+
+Fetch trading signals with optional filtering. Requires `read:market_data`
+permission.
+
+**Request:**
 
 ```http
-GET /api/signals?instrument=BTC-USD&strategy=rsi&hours=24&limit=100
+GET /api/signals?instrument=BTC-USD&strategy=rsi_btc_1h&exchange=paper&hours=24&limit=100
 X-CSRF-Token: <csrf_token>
 ```
 
@@ -210,33 +288,38 @@ X-CSRF-Token: <csrf_token>
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `instrument` | string | no | Filter by instrument |
-| `strategy` | string | no | Filter by strategy |
-| `hours` | int | no | History hours (max 168, default 24) |
-| `limit` | int | no | Number of signals (max 1000, default 100) |
+| `instrument` | string | no | Filter by instrument symbol |
+| `strategy` | string | no | Filter by strategy name |
+| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `zonda`, `walutomat`) |
+| `hours` | int | no | Hours of history, max 168 (default 24) |
+| `limit` | int | no | Number of signals, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
-**Response:**
+**Response (200):**
 
 ```json
 [
     {
-        "public_id": "019e1a2b-...",
+        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
         "type": "signal",
         "timestamp": "2026-01-18T12:00:00Z",
-        "fired_at": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
         "exchange": "paper",
         "side": "buy",
         "strength": 0.85,
         "reason": "RSI 28.5 <= 30",
         "strategy_name": "rsi_btc_1h",
-        "price": 42000.0
+        "price": 42000.0,
+        "fired_at": "2026-01-18T12:00:00Z"
     }
 ]
 ```
 
-### Executions
+### GET /api/executions
+
+Fetch order fills/executions. Requires `read:orders` permission.
+
+**Request:**
 
 ```http
 GET /api/executions?limit=100
@@ -247,15 +330,15 @@ X-CSRF-Token: <csrf_token>
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `limit` | int | no | Number of executions (max 1000, default 100) |
+| `limit` | int | no | Number of executions, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
-**Response:**
+**Response (200):**
 
 ```json
 [
     {
-        "public_id": "019e1a2b-...",
+        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
         "type": "execution",
         "timestamp": "2026-01-18T12:01:00Z",
         "trade_id": "TTRAD-456",
@@ -274,7 +357,11 @@ X-CSRF-Token: <csrf_token>
 ]
 ```
 
-### Positions
+### GET /api/positions
+
+Fetch current portfolio positions. Requires `read:positions` permission.
+
+**Request:**
 
 ```http
 GET /api/positions
@@ -287,12 +374,12 @@ X-CSRF-Token: <csrf_token>
 | --------- | ---- | -------- | ----------- |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
-**Response:**
+**Response (200):**
 
 ```json
 [
     {
-        "public_id": "019e1a2b-...",
+        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
         "type": "position",
         "timestamp": "2026-01-18T12:00:00Z",
         "instrument": "BTC-USD",
@@ -305,44 +392,97 @@ X-CSRF-Token: <csrf_token>
 ]
 ```
 
-### Exchanges
+### GET /api/exchanges
+
+List distinct exchange names from active symbol aliases. Requires
+`read:market_data` permission.
+
+**Request:**
 
 ```http
 GET /api/exchanges
 X-CSRF-Token: <csrf_token>
 ```
 
-Returns distinct exchange names from active symbol aliases.
-
-**Response:**
+**Response (200):**
 
 ```json
 ["kraken", "polygon", "walutomat", "zonda"]
 ```
 
-### Exchange Instruments
+### GET /api/exchanges/{exchange}/instruments
+
+List distinct native symbols available on a given exchange. Requires
+`read:market_data` permission.
+
+**Request:**
 
 ```http
-GET /api/exchanges/{exchange}/instruments
+GET /api/exchanges/kraken/instruments
 X-CSRF-Token: <csrf_token>
 ```
 
-Returns distinct native symbols available on the given exchange.
-
-**Response:**
+**Response (200):**
 
 ```json
 ["BTC-USD", "ETH-USD", "SOL-USD"]
 ```
 
-### WebSocket Stats
+### GET /api/status
+
+System-wide status including trader process, backtests, and active
+strategies. Requires `read:system_status` permission.
+
+**Request:**
+
+```http
+GET /api/status
+X-CSRF-Token: <csrf_token>
+```
+
+**Response (200):**
+
+```json
+{
+    "trader": {
+        "status": "running",
+        "pid": null,
+        "started_at": null,
+        "command": null,
+        "exit_code": null,
+        "error": null
+    },
+    "backtests": {},
+    "strategies": [
+        {
+            "strategy_name": "rsi_btc_1h",
+            "status": "running",
+            "details": {},
+            "signals_generated": 42,
+            "trades_executed": 5,
+            "last_signal": "buy",
+            "last_signal_time": "2026-01-18T11:45:00Z",
+            "pnl": 150.25,
+            "pid": 12345,
+            "uptime": "2h 15m"
+        }
+    ]
+}
+```
+
+### GET /api/ws/stats
+
+WebSocket and ZMQ bridge statistics. Requires `read:system_status`
+permission.
+
+**Request:**
 
 ```http
 GET /api/ws/stats
 X-CSRF-Token: <csrf_token>
 ```
 
-**Response:**
+**Response (200):**
 
 ```json
 {
@@ -357,151 +497,552 @@ X-CSRF-Token: <csrf_token>
     "zmq_bridge": {
         "active_topics": 12,
         "subscriber_tasks": 12,
-        "available_topics": ["market.kraken.BTC-USD.candles.1h", "..."]
+        "available_topics": ["market", "signals", "orders.events"]
+    },
+    "connections": {
+        "active_connections": 5,
+        "zmq_subscribers": 12,
+        "subscriber_tasks": 12,
+        "active_topics": 8,
+        "active_clients": 5
+    },
+    "topics": {
+        "market.kraken.BTC-USD.candles.1h": {
+            "active_subscribers": 3,
+            "received": 1200,
+            "forwarded": 1180,
+            "throttled": 20,
+            "dropped": 0,
+            "timeout": 0,
+            "errors": 0,
+            "last_message_ts": 1737208800.0,
+            "throttle_ms": 100,
+            "pattern": "market."
+        }
+    },
+    "subscriptions": {
+        "per_topic": {
+            "market.kraken.BTC-USD.candles.1h": 3
+        },
+        "per_client": {
+            "140234567890": ["market.kraken.BTC-USD.candles.1h"]
+        }
     },
     "config": {
-        "max_connections": 100,
-        "heartbeat_interval": 30
+        "broker_xpub": "tcp://127.0.0.1:7501",
+        "heartbeat_interval_ms": 15000
     }
 }
 ```
 
-### ZMQ Health
+### GET /api/zmq/health
+
+ZMQ bridge health check. Requires `read:system_status` permission.
+
+**Request:**
 
 ```http
 GET /api/zmq/health
 X-CSRF-Token: <csrf_token>
 ```
 
-**Response:**
+**Response (200):**
 
 ```json
 {
     "status": "healthy",
+    "timestamp": "2026-01-18T12:00:00Z",
     "components": {
-        "broker": "running",
-        "bridge": "running"
+        "zmq_context": "ok",
+        "websocket_manager": "ok",
+        "active_connections": 5
     },
     "config": {
-        "xsub_endpoint": "tcp://127.0.0.1:7500",
-        "xpub_endpoint": "tcp://127.0.0.1:7501"
-    }
+        "available_topics": ["market", "signals", "orders.events", "orders.commands", "system.heartbeats.*", "strategy.signals", "admin"]
+    },
+    "connections": {
+        "active_connections": 5,
+        "zmq_subscribers": 12,
+        "subscriber_tasks": 12,
+        "active_topics": 8,
+        "active_clients": 3
+    },
+    "message_stats": {},
+    "errors": []
 }
 ```
 
 ## Process Management
 
-### List Processes
+Process endpoints manage background services (feeds, strategies, executors,
+brokers). Most require `manage:processes` permission (operator/admin). The
+summary endpoint requires only `read:system_status` (viewer+).
 
-```http
-GET /api/processes
+### GET /api/processes/available
+
+List registered process templates that can be instantiated. Requires
+`manage:processes` permission.
+
+**Response (200):**
+
+```json
+{
+    "processes": [
+        {
+            "name": "zmq_broker",
+            "class_path": "snapper.messaging.broker.ZmqBroker",
+            "method": "run",
+            "description": "ZeroMQ XPUB/XSUB message broker",
+            "lifecycle": "long_running",
+            "role": "core",
+            "tags": ["infrastructure"],
+            "parameters_schema": null
+        }
+    ],
+    "count": 1
+}
 ```
 
-**Response:**
+### GET /api/processes/configured
+
+List configured process instances with runtime state. Requires
+`manage:processes` permission.
+
+**Response (200):**
+
+```json
+{
+    "processes": [
+        {
+            "name": "zmq_broker",
+            "enabled": true,
+            "running": true,
+            "mode": "process",
+            "class_path": "snapper.messaging.broker.ZmqBroker",
+            "method": "run",
+            "args": [],
+            "kwargs": {},
+            "note": null,
+            "lifecycle": "long_running",
+            "role": "core",
+            "tags": ["infrastructure"],
+            "parameters_schema": null,
+            "is_one_shot": false,
+            "active_public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b"
+        }
+    ],
+    "count": 1
+}
+```
+
+### GET /api/processes/summary
+
+Lightweight process category counts for the overview dashboard. Requires
+`read:system_status` permission.
+
+**Response (200):**
+
+```json
+{
+    "feeds": { "running": 2, "total": 3 },
+    "strategies": { "running": 1, "total": 2 },
+    "executors": { "running": 1, "total": 1 },
+    "brokers": { "running": 1, "total": 1 }
+}
+```
+
+### POST /api/processes
+
+Create a new process configuration from a registered template. Requires
+`manage:processes` permission. Returns 201 on success.
+
+**Request:**
+
+```http
+POST /api/processes
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "name": "feed_publisher_kraken_btc",
+    "template": "feed_publisher",
+    "enabled": true,
+    "mode": "process",
+    "kwargs": { "instrument": "BTC-USD", "exchange": "kraken" },
+    "note": "Kraken BTC feed"
+}
+```
+
+**Response (201):**
+
+```json
+{
+    "status": "created",
+    "process": {
+        "name": "feed_publisher_kraken_btc",
+        "template": "feed_publisher"
+    }
+}
+```
+
+### GET /api/processes/schema/{name}
+
+Get the configuration schema and defaults for a registered process template.
+Requires `manage:processes` permission.
+
+**Response (200):**
+
+```json
+{
+    "name": "feed_publisher",
+    "description": "Market data feed publisher",
+    "class_path": "snapper.feeds.publisher.FeedPublisher",
+    "method": "run",
+    "default_enabled": true,
+    "default_mode": "process",
+    "default_args": [],
+    "default_kwargs": {},
+    "lifecycle": "long_running"
+}
+```
+
+### POST /api/processes/{name}/start
+
+Start a configured process. Requires `manage:processes` permission.
+
+**Request:**
+
+```http
+POST /api/processes/zmq_broker/start
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "mode": "process",
+    "autostart": true
+}
+```
+
+All fields are optional. When omitted, stored configuration values are used.
+
+**Response (200):**
+
+```json
+{
+    "status": "success",
+    "name": "zmq_broker",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "message": "Process started"
+}
+```
+
+### POST /api/processes/{name}/stop
+
+Stop a running process. Requires `manage:processes` permission.
+
+**Request:**
+
+```http
+POST /api/processes/zmq_broker/stop
+X-CSRF-Token: <csrf_token>
+```
+
+**Response (200):**
+
+```json
+{
+    "status": "success",
+    "name": "zmq_broker",
+    "message": "Process stopped"
+}
+```
+
+### GET /api/processes/runs
+
+List historical process runs. Requires `manage:processes` permission.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `limit` | int | no | Number of runs to return (default 50) |
+| `name` | string | no | Filter by process name |
+
+**Response (200):**
+
+```json
+{
+    "runs": [
+        {
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "process_name": "zmq_broker",
+            "status": "completed",
+            "role": "core",
+            "lifecycle": "long_running",
+            "parameters": {},
+            "result": null,
+            "error": null,
+            "tags": ["infrastructure"],
+            "started_at": "2026-01-18T10:00:00Z",
+            "completed_at": "2026-01-18T18:00:00Z"
+        }
+    ],
+    "count": 1
+}
+```
+
+## Strategies
+
+### GET /api/strategies
+
+List configured strategy processes with lightweight status. Requires
+`read:strategies` permission (viewer+).
+
+**Response (200):**
+
+```json
+{
+    "strategies": [
+        {
+            "name": "strategy_rsi_btc_1h",
+            "running": true,
+            "enabled": true,
+            "mode": "process"
+        }
+    ],
+    "count": 1
+}
+```
+
+## Settings
+
+Settings endpoints require `configure:system` permission (admin only).
+
+### GET /api/settings
+
+List all settings, optionally filtered by category.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `category` | string | no | Filter by setting category |
+
+**Response (200):**
 
 ```json
 [
     {
-        "name": "zmq_broker",
-        "description": "ZeroMQ XPUB/XSUB message broker",
-        "status": "running",
-        "role": "core",
-        "priority": 10,
-        "enabled": true,
-        "pid": 12345,
-        "started_at": "2026-01-18T10:00:00Z"
-    },
-    {
-        "name": "strategy_rsi_btc_1h",
-        "description": "RSI Reversion Strategy for BTC",
-        "status": "stopped",
-        "role": "strategy",
-        "priority": 50,
-        "enabled": false
+        "key": "kraken_api_key",
+        "value": "xK9m...",
+        "category": "exchanges",
+        "description": "Kraken REST API key",
+        "updated_at": "2026-01-15T10:00:00Z",
+        "updated_by": "admin"
     }
 ]
 ```
 
-### Start Process
+### GET /api/settings/categories
 
-```http
-POST /api/processes/{name}/start
-X-CSRF-Token: <csrf_token>
-```
+List distinct setting category names.
 
-### Stop Process
-
-```http
-POST /api/processes/{name}/stop
-X-CSRF-Token: <csrf_token>
-```
-
-### System Status
-
-```http
-GET /api/system/status
-```
-
-**Response:**
+**Response (200):**
 
 ```json
 {
-    "running_processes": 5,
-    "total_processes": 10,
-    "cpu_usage": 25.5,
-    "memory_usage": 512000000,
-    "uptime_seconds": 3600
+    "categories": ["exchanges", "strategy", "system"]
 }
 ```
 
-## Settings API
+### PUT /api/settings/{key}
 
-### List Settings
+Create or update a setting. Performs an upsert operation.
 
-```http
-GET /api/settings
-```
-
-### Get Setting
+**Request:**
 
 ```http
-GET /api/settings/{key}
-```
-
-### Save Setting
-
-```http
-PUT /api/settings/{key}
-X-CSRF-Token: <csrf_token>
+PUT /api/settings/kraken_api_key
 Content-Type: application/json
+X-CSRF-Token: <csrf_token>
 
 {
-    "value": "new_value",
-    "encrypted": true
+    "value": "new-api-key-value",
+    "category": "exchanges",
+    "description": "Kraken REST API key"
+}
+```
+
+**Request body fields:**
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `value` | string | yes | Setting value |
+| `category` | string | no | Setting category (default: `system`) |
+| `description` | string | no | Human-readable description |
+
+**Response (200):**
+
+```json
+{
+    "key": "kraken_api_key",
+    "value": "new-api-key-value",
+    "category": "exchanges",
+    "description": "Kraken REST API key",
+    "updated_at": "2026-01-18T12:00:00Z",
+    "updated_by": "admin"
+}
+```
+
+### DELETE /api/settings/{key}
+
+Soft-delete a setting by key (sets `known_to` to current time).
+
+**Request:**
+
+```http
+DELETE /api/settings/kraken_api_key
+X-CSRF-Token: <csrf_token>
+```
+
+**Response (200):**
+
+```json
+{
+    "message": "Setting 'kraken_api_key' deleted successfully"
 }
 ```
 
 ## WebSocket
 
-### Connection
+### Connection and Authentication
 
-WebSocket endpoint requires a one-time token for authentication:
+The WebSocket endpoint is at `/api/ws`. Authentication is message-based,
+not query-parameter-based.
 
+**Connection flow:**
+
+1. Client connects to `ws://host:port/api/ws`
+2. Server accepts the connection and validates the origin header
+3. Server sends `auth_required` message
+4. Client sends `authenticate` message with a WebSocket token
+5. Server validates the token and sends `auth_ok`
+6. Server sends `auth_complete` with available topics for the user's role
+7. Client can now subscribe to topics
+
+**Obtaining a WebSocket token:**
+
+Call `POST /api/auth/refresh` (requires a valid `refresh_token` cookie).
+The response includes `ws_token` and `ws_token_exp` fields.
+
+### Authentication Messages
+
+**Server sends after connection:**
+
+```json
+{
+    "type": "auth_required",
+    "timeout": 30,
+    "timestamp": "2026-01-18T12:00:00Z"
+}
 ```
-ws://localhost:8000/api/ws?token=<ws_token>
+
+**Client sends to authenticate:**
+
+```json
+{
+    "type": "authenticate",
+    "ws_token": "eyJhbGciOi...",
+    "timestamp": "2026-01-18T12:00:00Z"
+}
 ```
 
-Get the WebSocket token from:
+**Server sends on success:**
 
-```http
-GET /api/auth/ws-token
+```json
+{
+    "type": "auth_ok",
+    "exp": "2026-01-18T12:30:00Z",
+    "timestamp": "2026-01-18T12:00:00Z"
+}
 ```
 
-### Message Protocol
+**Server sends session info:**
 
-All messages are in JSON format.
+```json
+{
+    "type": "auth_complete",
+    "available_topics": [
+        "market",
+        "signals",
+        "orders.events",
+        "system.heartbeats.*"
+    ],
+    "user_role": "operator",
+    "session_expires_at": "2026-01-18T12:15:00Z",
+    "ws_token_exp": "2026-01-18T12:30:00Z",
+    "timestamp": "2026-01-18T12:00:00Z"
+}
+```
 
-#### Subscribe
+**Server sends on failure:**
+
+```json
+{
+    "type": "auth_failed",
+    "reason": "Invalid token",
+    "timestamp": "2026-01-18T12:00:00Z"
+}
+```
+
+### Reauthentication
+
+Before the WebSocket token expires, the server sends a `reauth_required`
+message. The client should obtain a new `ws_token` via `POST /api/auth/refresh`
+and send it as a `reauth` message.
+
+**Server warning:**
+
+```json
+{
+    "type": "reauth_required",
+    "deadline": "2026-01-18T12:29:00Z",
+    "timestamp": "2026-01-18T12:28:00Z"
+}
+```
+
+**Client sends new token:**
+
+```json
+{
+    "type": "reauth",
+    "ws_token": "eyJhbGciOi...(new token)...",
+    "timestamp": "2026-01-18T12:28:30Z"
+}
+```
+
+**Server confirms:**
+
+```json
+{
+    "type": "reauth_ok",
+    "exp": "2026-01-18T13:00:00Z",
+    "timestamp": "2026-01-18T12:28:30Z"
+}
+```
+
+If the client does not reauthenticate in time:
+
+```json
+{
+    "type": "auth_expired",
+    "timestamp": "2026-01-18T12:30:00Z"
+}
+```
+
+### Subscription Management
+
+**Subscribe to topics:**
 
 ```json
 {
@@ -510,7 +1051,23 @@ All messages are in JSON format.
 }
 ```
 
-#### Unsubscribe
+**Server confirms subscription:**
+
+```json
+{
+    "type": "subscription_success",
+    "action": "subscribe",
+    "status": "subscribed",
+    "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD"],
+    "denied_topics": [],
+    "active_subscriptions": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD"],
+    "zmq_topics": ["market.", "signals."],
+    "message": null,
+    "timestamp": "2026-01-18T12:00:01Z"
+}
+```
+
+**Unsubscribe:**
 
 ```json
 {
@@ -519,7 +1076,49 @@ All messages are in JSON format.
 }
 ```
 
-#### Ping/Pong
+**List active subscriptions:**
+
+```json
+{
+    "type": "get_subscriptions"
+}
+```
+
+**Response:**
+
+```json
+{
+    "type": "subscriptions_list",
+    "subscriptions": ["signals.paper.BTC-USD"],
+    "available_topics": ["market", "signals", "orders.events"],
+    "total_available": 7,
+    "timestamp": "2026-01-18T12:00:02Z"
+}
+```
+
+**Topic autocomplete suggestions:**
+
+```json
+{
+    "type": "get_topic_suggestions",
+    "prefix": "market"
+}
+```
+
+**Response:**
+
+```json
+{
+    "type": "topic_suggestions",
+    "prefix": "market",
+    "suggestions": ["market.kraken.BTC-USD.candles.1h", "market.kraken.ETH-USD.ticks"],
+    "timestamp": "2026-01-18T12:00:03Z"
+}
+```
+
+### Ping/Pong
+
+**Client sends:**
 
 ```json
 {
@@ -527,25 +1126,26 @@ All messages are in JSON format.
 }
 ```
 
-Response:
+**Server responds:**
 
 ```json
 {
     "type": "pong",
-    "timestamp": 1705579200000
+    "timestamp": "2026-01-18T12:00:00Z",
+    "active_connections": 5
 }
 ```
 
-### Server Messages
+### Server Data Messages
 
-#### Candle (OHLCV)
+Data messages are flat JSON objects forwarded directly from the ZMQ bus.
+There is no `"data"` wrapper.
 
-Messages are flat envelopes (no `"data"` wrapper). ZMQ payloads are
-forwarded directly to WebSocket clients.
+#### Candle
 
 ```json
 {
-    "public_id": "019e1a2b-...",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "candle",
     "timestamp": "2026-01-18T11:00:00Z",
     "instrument": "BTC-USD",
@@ -566,7 +1166,7 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
-    "public_id": "019e1a2b-...",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "tick",
     "timestamp": "2026-01-18T12:00:00Z",
     "instrument": "BTC-USD",
@@ -578,21 +1178,37 @@ forwarded directly to WebSocket clients.
 }
 ```
 
+#### Trade
+
+```json
+{
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "type": "trade",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "executed_at": "2026-01-18T12:00:00Z",
+    "price": 42000.5,
+    "volume": 0.25,
+    "side": "buy"
+}
+```
+
 #### Signal
 
 ```json
 {
-    "public_id": "019e1a2b-...",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "signal",
     "timestamp": "2026-01-18T12:00:00Z",
-    "fired_at": "2026-01-18T12:00:00Z",
     "instrument": "BTC-USD",
     "exchange": "paper",
     "side": "buy",
     "strength": 0.85,
     "reason": "RSI 28.5 <= 30",
     "price": 42000.0,
-    "strategy_name": "rsi_btc_1h"
+    "strategy_name": "rsi_btc_1h",
+    "fired_at": "2026-01-18T12:00:00Z"
 }
 ```
 
@@ -600,12 +1216,12 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
-    "public_id": "019e1a2b-...",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "execution",
     "timestamp": "2026-01-18T12:01:00Z",
-    "client_order_id": "signal-a1b2c3d4",
+    "trade_id": "TTRAD-456",
     "exchange_order_id": "KRAKEN-456",
-    "trade_id": "TTRAD-789",
+    "client_order_id": "signal-a1b2c3d4",
     "instrument": "BTC-USD",
     "exchange": "kraken",
     "side": "buy",
@@ -622,7 +1238,7 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
-    "public_id": "019e1a2b-...",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "order",
     "timestamp": "2026-01-18T12:00:00Z",
     "exchange_order_id": "KRAKEN-456",
@@ -636,7 +1252,11 @@ forwarded directly to WebSocket clients.
     "filled_size": 0.0,
     "price": 42000.0,
     "average_price": null,
-    "created_at": "2026-01-18T12:00:00Z"
+    "reason": null,
+    "time_in_force": "GTC",
+    "error": null,
+    "created_at": "2026-01-18T12:00:00Z",
+    "updated_at": null
 }
 ```
 
@@ -644,13 +1264,14 @@ forwarded directly to WebSocket clients.
 
 ```json
 {
-    "public_id": "019e1a2b-...",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "heartbeat",
     "timestamp": "2026-01-18T12:00:00Z",
     "component": "zmq_broker",
     "sequence": 42,
     "status": "healthy",
-    "lag_ms": 5
+    "lag_ms": 5,
+    "meta": {}
 }
 ```
 
@@ -659,48 +1280,57 @@ forwarded directly to WebSocket clients.
 ```json
 {
     "type": "error",
-    "code": "INVALID_TOPIC",
-    "message": "Topic 'invalid.topic' does not exist"
+    "message": "Topic 'invalid.topic' does not exist",
+    "timestamp": "2026-01-18T12:00:00Z"
 }
 ```
 
-### Available Topics
+### Available Topic Patterns
+
+Topics use dot-separated hierarchical names. Subscribe using the full topic
+string or a prefix to match multiple topics.
 
 #### Market Data
 
-- `market.{exchange}.{instrument}.candles.{timeframe}` — OHLCV candles
-- `market.{exchange}.{instrument}.ticks` — Price ticks
+- `market.{exchange}.{instrument}.candles.{timeframe}` -- OHLCV candles
+- `market.{exchange}.{instrument}.ticks` -- Price ticks
+- `market.{exchange}.{instrument}.trades` -- Individual trades
 
 #### Signals
 
-- `signals.paper.{instrument}.{strategy}` — Paper trading signals
-- `signals.{exchange}.{instrument}.live` — Live signals
+- `signals.{exchange}.{instrument}` -- Trading signals
 
 #### Order Events
 
-- `orders.events.{exchange}.{instrument}.submitted` — Order submitted
-- `orders.events.{exchange}.{instrument}.accepted` — Order accepted
-- `orders.events.{exchange}.{instrument}.rejected` — Order rejected
-- `orders.events.{exchange}.{instrument}.executed` — Order executed (fill)
-- `orders.events.{exchange}.{instrument}.cancelled` — Order cancelled
-- `orders.events.{exchange}.{instrument}.expired` — Order expired
-- `orders.events.{exchange}.{instrument}.replaced` — Order replaced
+- `orders.events.{exchange}.{instrument}.submitted` -- Order submitted
+- `orders.events.{exchange}.{instrument}.accepted` -- Order accepted
+- `orders.events.{exchange}.{instrument}.rejected` -- Order rejected
+- `orders.events.{exchange}.{instrument}.executed` -- Order fill
+- `orders.events.{exchange}.{instrument}.cancelled` -- Order cancelled
+- `orders.events.{exchange}.{instrument}.expired` -- Order expired
+- `orders.events.{exchange}.{instrument}.replaced` -- Order replaced
+
+#### Order Commands
+
+- `orders.commands.{exchange}.{instrument}.submit` -- Submit order
+- `orders.commands.{exchange}.{instrument}.cancel` -- Cancel order
+- `orders.commands.{exchange}.{instrument}.replace` -- Replace order
 
 #### System
 
-- `system.heartbeat` — Component heartbeats
-- `system.process.{name}` — Process status
+- `system.heartbeats.{component}` -- Component heartbeats
+- `admin.{resource}` -- Administrative events (admin only)
 
-## Error Codes
+## Error Handling
 
-| Code | HTTP Status | Description |
-| ---- | ----------- | ----------- |
-| `UNAUTHORIZED` | 401 | Missing or invalid token |
-| `FORBIDDEN` | 403 | Insufficient permissions |
-| `CSRF_INVALID` | 403 | Invalid CSRF token |
-| `NOT_FOUND` | 404 | Resource not found |
-| `VALIDATION_ERROR` | 422 | Data validation error |
-| `INTERNAL_ERROR` | 500 | Server error |
+| HTTP Status | Description |
+| ----------- | ----------- |
+| 401 | Missing or invalid authentication |
+| 403 | Insufficient permissions or invalid CSRF token |
+| 404 | Resource not found |
+| 422 | Request validation error |
+| 429 | Rate limit exceeded (Retry-After header included) |
+| 500 | Internal server error |
 
 ## Usage Example (Python)
 
@@ -711,52 +1341,75 @@ BASE_URL = "http://localhost:8000/api"
 
 async def main():
     async with httpx.AsyncClient() as client:
-        # Login - cookies are set automatically
-        response = await client.post(
+        login_resp = await client.post(
             f"{BASE_URL}/auth/login",
-            json={"username": "admin", "password": "password123"}
+            json={"username": "admin", "password": "password123"},
         )
-        # Cookies are stored in client automatically
-
-        # Get CSRF token from cookie
         csrf_token = client.cookies.get("csrf_token")
 
-        # Fetch candles - cookies sent automatically
-        response = await client.get(
+        refresh_resp = await client.post(f"{BASE_URL}/auth/refresh")
+        ws_token = refresh_resp.json()["ws_token"]
+
+        candles_resp = await client.get(
             f"{BASE_URL}/candles",
-            params={"instrument": "BTC-USD", "timeframe": "1h"},
-            headers={"X-CSRF-Token": csrf_token}
+            params={
+                "instrument": "BTC-USD",
+                "exchange": "kraken",
+                "timeframe": "1h",
+            },
+            headers={"X-CSRF-Token": csrf_token},
         )
-        candles = response.json()
+        candles = candles_resp.json()
         print(candles)
 ```
 
-## WebSocket Example (JavaScript)
+## Usage Example (JavaScript)
 
 ```javascript
-// Get WS token first (requires authenticated session)
-const tokenResponse = await fetch('/api/auth/ws-token', {
-    credentials: 'include'  // Include cookies
-});
-const { token } = await tokenResponse.json();
+async function connect() {
+    const refreshResp = await fetch("/api/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+    });
+    const { ws_token } = await refreshResp.json();
 
-const ws = new WebSocket(`ws://localhost:8000/api/ws?token=${token}`);
+    const ws = new WebSocket(`ws://${location.host}/api/ws`);
 
-ws.onopen = () => {
-    // Subscribe to topics
-    ws.send(JSON.stringify({
-        type: 'subscribe',
-        topics: ['market.kraken.BTC-USD.candles.1h', 'signals.paper.BTC-USD']
-    }));
-};
+    ws.onopen = () => {
+        console.log("Connected, waiting for auth_required...");
+    };
 
-ws.onmessage = (event) => {
-    const message = JSON.parse(event.data);
-    console.log('Received:', message.type, message);
-};
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
 
-// Heartbeat
-setInterval(() => {
-    ws.send(JSON.stringify({ type: 'ping' }));
-}, 30000);
+        if (msg.type === "auth_required") {
+            ws.send(JSON.stringify({
+                type: "authenticate",
+                ws_token: ws_token,
+            }));
+        }
+
+        if (msg.type === "auth_complete") {
+            console.log("Authenticated. Topics:", msg.available_topics);
+            ws.send(JSON.stringify({
+                type: "subscribe",
+                topics: ["market.kraken.BTC-USD.candles.1h"],
+            }));
+        }
+
+        if (msg.type === "candle" || msg.type === "tick") {
+            console.log("Data:", msg);
+        }
+
+        if (msg.type === "reauth_required") {
+            refreshAndReauth(ws);
+        }
+    };
+
+    setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "ping" }));
+        }
+    }, 30000);
+}
 ```

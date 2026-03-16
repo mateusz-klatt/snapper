@@ -43,7 +43,7 @@ Open <http://localhost:8000/snapper/> and log in:
 
 ```bash
 # Clone repository
-git clone https://github.com/user/snapper.git
+git clone https://github.com/mateusz-klatt/snapper.git
 cd snapper
 
 # Install system dependencies (macOS)
