@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate seed migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -42,8 +42,6 @@ help:
 	$(info run-polygon-aggregates     Backfill Polygon OHLCV [settings symbols])
 	$(info run-polygon-aggregates-all Backfill Polygon OHLCV [all mapped symbols])
 	$(info run-polygon-grouped        Backfill Polygon grouped daily [CLI])
-	$(info migrate                    Run database migrations)
-	$(info seed                       Seed database with dev profile)
 	$(info migrate-dev                Run migrations + seed dev data)
 	$(info migrate-prod               Run migrations + seed prod data)
 	$(info )
@@ -329,15 +327,12 @@ run-trader-zmq:
 zmq-logger:
 	$(PYRUN) snapper zmq-logger --payload --max-length 500
 
-_migrate:
+migrate-dev:
 	$(PYRUN) snapper db-init
-
-seed:
 	$(PYRUN) snapper db-seed --profile dev
 
-migrate-dev: _migrate seed
-
-migrate-prod: _migrate
+migrate-prod:
+	$(PYRUN) snapper db-init
 	$(PYRUN) snapper db-seed --profile prod
 
 ui-setup:
