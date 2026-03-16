@@ -111,6 +111,8 @@ export type WebSocketMessages =
   | WSTopicSuggestionsResponse
   | WSPongResponse
 
+export type PongWithRtt = WSPongResponse & { rtt_ms: number }
+
 export function isCandle(msg: WebSocketMessages): msg is CandleData {
   return msg.type === 'candle'
 }

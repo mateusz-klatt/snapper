@@ -1,5 +1,6 @@
 import type {
   WebSocketMessages,
+  PongWithRtt,
   WSSubscribeRequest,
   WSUnsubscribeRequest,
   WSGetSubscriptionsRequest,
@@ -186,7 +187,9 @@ class WebSocketClient {
           const rtt = Date.now() - this.pingSentAt
 
           this.pingSentAt = null
-          this.notifyHandlers({ ...message, rtt_ms: rtt } as WebSocketMessages)
+          const pongWithRtt: PongWithRtt = { ...message, rtt_ms: rtt }
+
+          this.notifyHandlers(pongWithRtt)
         }
 
         return
@@ -654,28 +657,6 @@ class WebSocketClient {
 
       this.send(request)
     })
-  }
-  async getSubscriptionStats(): Promise<unknown> {
-    try {
-      const response = await fetch('/api/ws/stats')
-
-      return await response.json()
-    } catch (error) {
-      console.error('Failed to get subscription stats:', error)
-
-      return null
-    }
-  }
-  async checkHealth(): Promise<unknown> {
-    try {
-      const response = await fetch('/api/zmq/health')
-
-      return await response.json()
-    } catch (error) {
-      console.error('Failed to check ZMQ health:', error)
-
-      return { status: 'error', error: error instanceof Error ? error.message : String(error) }
-    }
   }
   getConnectionStats(): object {
     return {

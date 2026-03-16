@@ -6,6 +6,7 @@ import { useAppStore } from './app'
 import { useProcessStore } from './process'
 import {
   type WebSocketMessages,
+  type PongWithRtt,
   type CandleData,
   type OrderData,
   type ExecutionData,
@@ -396,7 +397,7 @@ export class WSDispatcher {
     useAppStore.getState().updateLastUpdate()
   }
   private handlePongMessage(message: WebSocketMessages): void {
-    const rtt = (message as WebSocketMessages & { rtt_ms?: number }).rtt_ms
+    const rtt = (message as PongWithRtt).rtt_ms
 
     if (rtt !== undefined) {
       useAppStore.getState().setConnectionLag(rtt)

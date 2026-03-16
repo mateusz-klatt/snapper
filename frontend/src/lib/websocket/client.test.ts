@@ -1071,50 +1071,6 @@ describe('WebSocketClient', () => {
       expect((result as Error).message).toBe('Timeout waiting for topics response')
     })
   })
-  describe('getSubscriptionStats', () => {
-    it('fetches stats from API', async () => {
-      const mockFetch = vi.fn().mockResolvedValueOnce({
-        json: async () => ({ subscribers: 10 }),
-      })
-
-      globalThis.fetch = mockFetch
-      const stats = await client.getSubscriptionStats()
-
-      expect(stats).toEqual({ subscribers: 10 })
-      expect(mockFetch).toHaveBeenCalledWith('/api/ws/stats')
-    })
-    it('returns null on error', async () => {
-      globalThis.fetch = vi.fn().mockRejectedValueOnce(new Error('Network error'))
-      const stats = await client.getSubscriptionStats()
-
-      expect(stats).toBe(null)
-    })
-  })
-  describe('checkHealth', () => {
-    it('fetches health from API', async () => {
-      const mockFetch = vi.fn().mockResolvedValueOnce({
-        json: async () => ({ status: 'ok' }),
-      })
-
-      globalThis.fetch = mockFetch
-      const health = await client.checkHealth()
-
-      expect(health).toEqual({ status: 'ok' })
-      expect(mockFetch).toHaveBeenCalledWith('/api/zmq/health')
-    })
-    it('returns error status on failure', async () => {
-      globalThis.fetch = vi.fn().mockRejectedValueOnce(new Error('Network error'))
-      const health = await client.checkHealth()
-
-      expect(health).toEqual({ status: 'error', error: 'Network error' })
-    })
-    it('returns error status for non-Error rejection', async () => {
-      globalThis.fetch = vi.fn().mockRejectedValueOnce('Network error')
-      const health = await client.checkHealth()
-
-      expect(health).toEqual({ status: 'error', error: 'Network error' })
-    })
-  })
   describe('handler errors', () => {
     it('handles errors in message handlers gracefully', async () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
