@@ -151,7 +151,7 @@ const usePositions = () => {
   })
 }
 
-const useSignals = (
+export const useSignals = (
   strategyId: string | undefined,
   limit: number,
   instrument?: string,

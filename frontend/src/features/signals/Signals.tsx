@@ -1,13 +1,11 @@
 import React, { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { Download } from 'lucide-react'
-import { useAuth } from '../../stores/auth'
-import { apiClient } from '../../lib/apiClient'
 import { SignalCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
 import { exportToCSV } from '../../lib/csvExport'
 import { EmptyState } from '../../components/ui'
-import type { SignalData } from '../../types/api'
+import { useSignals } from '../../hooks/queries'
+import type { Signal } from '../../types/entities'
 import clsx from 'clsx'
 import {
   SIGNAL_STRENGTH_STRONG,
@@ -15,7 +13,7 @@ import {
   SIGNAL_STRENGTH_WEAK,
 } from '../../lib/constants'
 
-const SignalCard: React.FC<{ signal: SignalData }> = ({ signal }) => {
+const SignalCard: React.FC<{ signal: Signal }> = ({ signal }) => {
   const getSideColor = (side: string) => {
     return side === 'buy' ? 'text-gain-400 bg-gain-900/20' : 'text-loss-400 bg-loss-900/20'
   }
@@ -36,8 +34,7 @@ const SignalCard: React.FC<{ signal: SignalData }> = ({ signal }) => {
     return 'Very Weak'
   }
 
-  const formatTime = (timestamp: string) => {
-    const date = new Date(timestamp)
+  const formatTime = (date: Date) => {
     const now = new Date()
     const diffMs = now.getTime() - date.getTime()
     const diffMins = Math.floor(diffMs / 60000)
@@ -62,15 +59,13 @@ const SignalCard: React.FC<{ signal: SignalData }> = ({ signal }) => {
           >
             {signal.side.toUpperCase()}
           </span>
-          {signal.strategy_name && (
+          {signal.strategyName && (
             <span className='rounded-md bg-info-50 px-2 py-1 text-xs text-info-600'>
-              {signal.strategy_name}
+              {signal.strategyName}
             </span>
           )}
         </div>
-        <div className='text-xs text-muted-500'>
-          {signal.fired_at ? formatTime(signal.fired_at) : 'N/A'}
-        </div>
+        <div className='text-xs text-muted-500'>{formatTime(signal.firedAt)}</div>
       </div>
       <div className='grid grid-cols-3 gap-4 text-sm mb-3'>
         <div>
@@ -102,157 +97,111 @@ const SignalCard: React.FC<{ signal: SignalData }> = ({ signal }) => {
 
 export const Signals: React.FC = () => {
   const [strategyFilter, setStrategyFilter] = useState<string>('all')
-  const { isAuthenticated } = useAuth()
-  const { data: signals = [], isLoading } = useQuery({
-    queryKey: ['signals', strategyFilter],
-    queryFn: async () => {
-      return await apiClient.getSignals(strategyFilter === 'all' ? undefined : strategyFilter, 50)
-    },
-    refetchInterval: false,
-    enabled: isAuthenticated,
-  })
+  const { data: signals = [], isLoading } = useSignals(
+    strategyFilter === 'all' ? undefined : strategyFilter,
+    50
+  )
   const availableStrategies = Array.from(
-    new Set(signals.map((signal: SignalData) => signal.strategy_name).filter(Boolean))
+    new Set(signals.map(signal => signal.strategyName).filter(Boolean))
   )
   const filteredSignals = signals.filter(
-    (signal: SignalData) => strategyFilter === 'all' || signal.strategy_name === strategyFilter
+    signal => strategyFilter === 'all' || signal.strategyName === strategyFilter
   )
   const totalSignals = filteredSignals.length
-  const buySignals = filteredSignals.filter((s: SignalData) => s.side === 'buy').length
-  const sellSignals = filteredSignals.filter((s: SignalData) => s.side === 'sell').length
+  const buySignals = filteredSignals.filter(s => s.side === 'buy').length
+  const sellSignals = filteredSignals.filter(s => s.side === 'sell').length
   const avgStrength =
-    totalSignals > 0
-      ? filteredSignals.reduce((sum: number, s: SignalData) => sum + s.strength, 0) / totalSignals
-      : 0
+    totalSignals > 0 ? filteredSignals.reduce((sum, s) => sum + s.strength, 0) / totalSignals : 0
 
-  const handleExportSignals = () => {
-    const headers = ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At']
-    const rows = filteredSignals.map((s: SignalData) => [
-      s.instrument,
-      s.side,
-      (s.strength * 100).toFixed(0) + '%',
-      s.price ? s.price.toFixed(2) : '',
-      s.strategy_name ?? '',
-      s.reason ?? '',
-      s.fired_at ?? '',
-    ])
+  const handleExport = () => {
+    const rows = filteredSignals.map(s => ({
+      instrument: s.instrument,
+      exchange: s.exchange,
+      side: s.side,
+      strength: s.strength,
+      strategy: s.strategyName ?? '',
+      price: s.price ?? '',
+      reason: s.reason,
+      fired_at: s.firedAt.toISOString(),
+    }))
 
-    exportToCSV('signals.csv', headers, rows)
+    exportToCSV(rows, 'signals')
+  }
+
+  if (isLoading) {
+    return (
+      <div className='space-y-6'>
+        <h2 className='text-xl font-semibold text-alpine-900'>Signals</h2>
+        <div className='grid grid-cols-1 lg:grid-cols-2 gap-4'>
+          {Array.from({ length: 4 }, (_, i) => (
+            <SignalCardSkeleton key={`signal-skeleton-${i}`} />
+          ))}
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className='space-y-6'>
-      <div className='flex items-center justify-between'>
-        <h2 className='text-xl font-semibold text-alpine-900'>Trading Signals</h2>
-        <button
-          onClick={handleExportSignals}
-          disabled={filteredSignals.length === 0}
-          className='flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-dark-600 bg-alpine-50 hover:bg-muted-200 disabled:opacity-50 disabled:cursor-not-allowed text-alpine-900 rounded-lg transition-colors'
-        >
-          <Download size={14} />
-          Export CSV
-        </button>
-      </div>
-      <div className='grid grid-cols-2 gap-4 sm:grid-cols-4'>
-        <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-4'>
-          <div className='text-sm text-muted-500'>Total Signals</div>
-          <div className='text-2xl font-semibold text-alpine-900'>{totalSignals}</div>
-        </div>
-        <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-4'>
-          <div className='text-sm text-muted-500'>Buy Signals</div>
-          <div className='text-2xl font-semibold text-gain-600'>{buySignals}</div>
-        </div>
-        <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-4'>
-          <div className='text-sm text-muted-500'>Sell Signals</div>
-          <div className='text-2xl font-semibold text-loss-600'>{sellSignals}</div>
-        </div>
-        <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-4'>
-          <div className='text-sm text-muted-500'>Avg Strength</div>
-          <div className='text-2xl font-semibold text-info-600'>
-            {(avgStrength * 100).toFixed(0)}%
-          </div>
-        </div>
-      </div>
-      <div className='flex flex-col gap-3 rounded-xl border border-dark-600 bg-alpine-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between'>
-        <div className='flex items-center space-x-4'>
-          <label htmlFor='strategy-filter' className='text-sm text-muted-600'>
-            Filter by strategy:
-          </label>
+      <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4'>
+        <h2 className='text-xl font-semibold text-alpine-900'>Signals</h2>
+        <div className='flex items-center gap-3'>
           <ThemeSelect
-            id='strategy-filter'
             value={strategyFilter}
             onChange={setStrategyFilter}
             options={[
               { value: 'all', label: 'All Strategies' },
-              ...availableStrategies.map(strategy => ({ value: strategy, label: strategy })),
+              ...availableStrategies.map(s => ({
+                value: String(s),
+                label: String(s),
+              })),
             ]}
-            className='max-w-56'
           />
-        </div>
-        {}
-        <div className='flex items-center space-x-4 text-sm'>
-          <div className='text-muted-600'>Market Sentiment:</div>
-          <div
-            className={clsx(
-              'rounded-full px-3 py-1 text-xs font-medium',
-              buySignals > sellSignals && 'bg-gain-50 text-gain-600',
-              sellSignals > buySignals && 'bg-loss-50 text-loss-600',
-              buySignals === sellSignals && 'bg-dark-700 text-muted-600'
-            )}
+          <button
+            onClick={handleExport}
+            className='flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-dark-600 text-muted-700 hover:bg-dark-700 transition-colors'
+            disabled={filteredSignals.length === 0}
           >
-            {(() => {
-              if (buySignals > sellSignals) return 'Bullish'
-              if (sellSignals > buySignals) return 'Bearish'
-
-              return 'Neutral'
-            })()}
-          </div>
+            <Download className='w-4 h-4' />
+            Export
+          </button>
         </div>
       </div>
-      <div className='space-y-4'>
-        {isLoading && (
-          <div className='space-y-3'>
-            <SignalCardSkeleton />
-            <SignalCardSkeleton />
-            <SignalCardSkeleton />
-            <SignalCardSkeleton />
+      {}
+      <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
+        <div className='rounded-xl border border-dark-600 bg-alpine-50 p-4 text-center'>
+          <div className='text-2xl font-bold text-alpine-900'>{totalSignals}</div>
+          <div className='text-xs text-muted-500'>Total</div>
+        </div>
+        <div className='rounded-xl border border-dark-600 bg-alpine-50 p-4 text-center'>
+          <div className='text-2xl font-bold text-gain-400'>{buySignals}</div>
+          <div className='text-xs text-muted-500'>Buy</div>
+        </div>
+        <div className='rounded-xl border border-dark-600 bg-alpine-50 p-4 text-center'>
+          <div className='text-2xl font-bold text-loss-400'>{sellSignals}</div>
+          <div className='text-xs text-muted-500'>Sell</div>
+        </div>
+        <div className='rounded-xl border border-dark-600 bg-alpine-50 p-4 text-center'>
+          <div className='text-2xl font-bold text-alpine-900'>
+            {(avgStrength * 100).toFixed(0)}%
           </div>
-        )}
-        {!isLoading && filteredSignals.length === 0 && (
-          <EmptyState
-            icon={
-              <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
-                <path
-                  strokeLinecap='round'
-                  strokeLinejoin='round'
-                  strokeWidth={2}
-                  d='M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z'
-                />
-              </svg>
-            }
-            title='No signals found'
-            message={
-              strategyFilter === 'all'
-                ? 'Signals from active strategies will appear here'
-                : `No signals from ${strategyFilter} strategy`
-            }
-          />
-        )}
-        {!isLoading && filteredSignals.length > 0 && (
-          <div className='space-y-3'>
-            <div className='flex items-center justify-between text-sm text-muted-500'>
-              <span>Showing {filteredSignals.length} signals</span>
-              <span>Latest signals first</span>
-            </div>
-            {filteredSignals.map((signal: SignalData, index: number) => (
-              <SignalCard
-                key={`${signal.instrument}-${signal.fired_at ?? index}`}
-                signal={signal}
-              />
-            ))}
-          </div>
-        )}
+          <div className='text-xs text-muted-500'>Avg Strength</div>
+        </div>
       </div>
+      {}
+      {filteredSignals.length === 0 ? (
+        <EmptyState
+          icon={<span className='text-4xl'>📡</span>}
+          title='No signals found'
+          message='No trading signals match your current filters.'
+        />
+      ) : (
+        <div className='grid grid-cols-1 lg:grid-cols-2 gap-4'>
+          {filteredSignals.map((signal, index) => (
+            <SignalCard key={signal.publicId ?? `signal-${index}`} signal={signal} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

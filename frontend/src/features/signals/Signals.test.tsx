@@ -99,9 +99,9 @@ describe('Signals', () => {
         <Signals />
       </QueryClientProvider>
     )
-    expect(screen.getByText('Trading Signals')).toBeInTheDocument()
+    expect(screen.getByText('Signals')).toBeInTheDocument()
   })
-  it('displays stats cards with correct labels', () => {
+  it('displays stats cards with correct labels', async () => {
     const queryClient = createTestQueryClient()
 
     render(
@@ -109,12 +109,13 @@ describe('Signals', () => {
         <Signals />
       </QueryClientProvider>
     )
-    expect(screen.getByText('Total Signals')).toBeInTheDocument()
-    expect(screen.getByText('Buy Signals')).toBeInTheDocument()
-    expect(screen.getByText('Sell Signals')).toBeInTheDocument()
+    await screen.findByText('Total')
+    expect(screen.getByText('Total')).toBeInTheDocument()
+    expect(screen.getByText('Buy')).toBeInTheDocument()
+    expect(screen.getByText('Sell')).toBeInTheDocument()
     expect(screen.getByText('Avg Strength')).toBeInTheDocument()
   })
-  it('renders strategy filter dropdown', () => {
+  it('renders strategy filter dropdown', async () => {
     const queryClient = createTestQueryClient()
 
     render(
@@ -122,10 +123,11 @@ describe('Signals', () => {
         <Signals />
       </QueryClientProvider>
     )
-    expect(screen.getByText('Filter by strategy:')).toBeInTheDocument()
+    await screen.findByText('BTC-USD')
     const select = screen.getByRole('combobox')
 
     expect(select).toBeInTheDocument()
+    expect(screen.getByText('All Strategies')).toBeInTheDocument()
   })
   it('displays loading state initially', () => {
     const queryClient = createTestQueryClient()
@@ -185,7 +187,7 @@ describe('Signals', () => {
     expect(buySignals.length).toBeGreaterThanOrEqual(2)
     expect(screen.getByText('75%')).toBeInTheDocument()
   })
-  it('displays market sentiment based on signal distribution', async () => {
+  it('displays balanced stats when signal distribution is even', async () => {
     const queryClient = createTestQueryClient()
 
     render(
@@ -194,9 +196,11 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    expect(screen.getByText('Neutral')).toBeInTheDocument()
+    const buyCount = screen.getAllByText('1')
+
+    expect(buyCount.length).toBeGreaterThanOrEqual(2)
   })
-  it('displays bullish sentiment when buy signals dominate', async () => {
+  it('displays all buy stats when buy signals dominate', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
@@ -231,9 +235,10 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    expect(screen.getByText('Bullish')).toBeInTheDocument()
+    expect(screen.getAllByText('2').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('BUY').length).toBe(2)
   })
-  it('displays bearish sentiment when sell signals dominate', async () => {
+  it('displays all sell stats when sell signals dominate', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
@@ -268,7 +273,8 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    expect(screen.getByText('Bearish')).toBeInTheDocument()
+    expect(screen.getAllByText('2').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('SELL').length).toBe(2)
   })
   it('displays strength label based on strength value', async () => {
     const queryClient = createTestQueryClient()
@@ -453,7 +459,7 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('No signals found')
-    expect(screen.getByText('Signals from active strategies will appear here')).toBeInTheDocument()
+    expect(screen.getByText('No trading signals match your current filters.')).toBeInTheDocument()
   })
   it('shows empty state for filtered strategy with no results', async () => {
     const { apiClient } = await import('../../lib/apiClient')
@@ -498,7 +504,7 @@ describe('Signals', () => {
 
     await user.selectOptions(select, 'macd')
     await screen.findByText('No signals found')
-    expect(screen.getByText('No signals from macd strategy')).toBeInTheDocument()
+    expect(screen.getByText('No trading signals match your current filters.')).toBeInTheDocument()
   })
   it('filters signals by strategy', async () => {
     const { apiClient } = await import('../../lib/apiClient')
@@ -622,13 +628,12 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+    const exportButton = screen.getByRole('button', { name: /Export/i })
 
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
-      'signals.csv',
-      ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At'],
-      expect.arrayContaining([expect.arrayContaining(['BTC-USD', 'buy'])])
+      expect.arrayContaining([expect.objectContaining({ instrument: 'BTC-USD', side: 'buy' })]),
+      'signals'
     )
   })
   it('disables export button when no signals', async () => {
@@ -643,11 +648,11 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('No signals found')
-    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+    const exportButton = screen.getByRole('button', { name: /Export/i })
 
     expect(exportButton).toBeDisabled()
   })
-  it('renders signal with undefined fired_at', async () => {
+  it('renders signal with undefined fired_at as Just now', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
@@ -671,7 +676,7 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('SOL-USD')
-    expect(screen.getByText('N/A')).toBeInTheDocument()
+    expect(screen.getByText('Just now')).toBeInTheDocument()
   })
   it('exports signals with undefined fired_at', async () => {
     const { apiClient } = await import('../../lib/apiClient')
@@ -700,13 +705,22 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('SOL-USD')
-    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+    const exportButton = screen.getByRole('button', { name: /Export/i })
 
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
-      'signals.csv',
-      ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At'],
-      [['SOL-USD', 'sell', '60%', '', '', 'test', '']]
+      [
+        expect.objectContaining({
+          instrument: 'SOL-USD',
+          side: 'sell',
+          strength: 0.6,
+          price: '',
+          strategy: '',
+          reason: 'test',
+          fired_at: expect.any(String),
+        }),
+      ],
+      'signals'
     )
   })
   it('exports signals with null price and null strategy_name', async () => {
@@ -736,13 +750,22 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+    const exportButton = screen.getByRole('button', { name: /Export/i })
 
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
-      'signals.csv',
-      ['Instrument', 'Side', 'Strength', 'Price', 'Strategy', 'Reason', 'Fired At'],
-      [['BTC-USD', 'buy', '85%', '', '', '', '2024-01-01T00:00:00Z']]
+      [
+        expect.objectContaining({
+          instrument: 'BTC-USD',
+          side: 'buy',
+          strength: 0.85,
+          price: '',
+          strategy: '',
+          reason: null,
+          fired_at: '2024-01-01T00:00:00.000Z',
+        }),
+      ],
+      'signals'
     )
   })
 })
