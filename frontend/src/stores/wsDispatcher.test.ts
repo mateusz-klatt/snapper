@@ -517,7 +517,7 @@ describe('WSDispatcher', () => {
       expect(cached).toHaveLength(2)
       expect(cached?.[0]?.client_order_id).toBe('ord-1')
     })
-    it('execution message deduplicates by client_order_id and executed_at', () => {
+    it('execution message deduplicates by public_id', () => {
       const executedAt = new Date().toISOString()
       const existingExecs = [
         {
@@ -541,6 +541,7 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const execMessage: ExecutionData = {
         type: 'execution',
+        public_id: 'uuid-1',
         client_order_id: 'ord-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',

@@ -48,9 +48,9 @@ export const useTradeStore = create<TradeStore>()(
     updateExecutions: executions => set({ executions }),
     addExecution: execution => {
       const current = get().executions
-      const existing = current.find(e => e.clientOrderId === execution.clientOrderId)
+      const isDuplicate = current.some(e => e.publicId === execution.publicId)
 
-      if (!existing) {
+      if (!isDuplicate) {
         set({ executions: [execution, ...current] })
       }
     },
@@ -66,13 +66,15 @@ export const useTradeStore = create<TradeStore>()(
     updateSignals: signals => set({ signals }),
     addSignal: signal => {
       const current = get().signals
-      const existing = current.find(
+      const isDuplicate = current.some(
         s =>
           s.firedAt?.getTime() === signal.firedAt?.getTime() &&
-          s.strategyName === signal.strategyName
+          s.strategyName === signal.strategyName &&
+          s.instrument === signal.instrument &&
+          s.exchange === signal.exchange
       )
 
-      if (!existing) {
+      if (!isDuplicate) {
         set({ signals: [signal, ...current].slice(0, 100) })
       }
     },

@@ -130,8 +130,6 @@ export const useAuthStore = create<AuthState>()(
             isLoading: false,
             error: null,
           })
-          localStorage.removeItem('auth_token')
-          localStorage.removeItem('auth_user_id')
         },
         refreshToken: async () => {
           try {

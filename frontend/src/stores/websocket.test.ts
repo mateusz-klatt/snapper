@@ -305,26 +305,6 @@ describe('websocket store', () => {
       void 0
     }
   })
-  it('handles auth_error message', async () => {
-    const connectPromise = useWebSocketStore.getState().connect('ws://test')
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5)
-    })
-    mockClient.triggerMessage('auth_error', { reason: 'Server error' })
-    expect(useWebSocketStore.getState().error).toBe('WebSocket authentication failed: Server error')
-    mockClient.isConnected.mockReturnValue(true)
-    mockClient.triggerConnection(true)
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(50)
-    })
-
-    try {
-      await connectPromise
-    } catch {
-      void 0
-    }
-  })
   it('handles auth_expired message', async () => {
     const connectPromise = useWebSocketStore.getState().connect('ws://test')
 

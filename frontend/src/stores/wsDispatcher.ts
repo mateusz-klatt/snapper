@@ -293,9 +293,7 @@ export class WSDispatcher {
     for (const [queryKey, existing] of queries) {
       if (!existing) continue
 
-      const isDuplicate = existing.some(
-        e => e.client_order_id === data.client_order_id && e.executed_at === data.executed_at
-      )
+      const isDuplicate = existing.some(e => e.public_id === data.public_id)
 
       if (!isDuplicate) {
         this.queryClient.setQueryData<ExecutionData[]>(queryKey, [data, ...existing])
@@ -319,7 +317,11 @@ export class WSDispatcher {
       if (!existing) continue
 
       const isDuplicate = existing.some(
-        s => s.strategy_name === data.strategy_name && s.fired_at === data.fired_at
+        s =>
+          s.strategy_name === data.strategy_name &&
+          s.fired_at === data.fired_at &&
+          s.instrument === data.instrument &&
+          s.exchange === data.exchange
       )
 
       if (!isDuplicate) {

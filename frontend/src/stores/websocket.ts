@@ -64,7 +64,6 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => {
             set({ error: null })
           })
           client.onMessage('auth_failed', authErrorHandler)
-          client.onMessage('auth_error', authErrorHandler)
           client.onMessage('auth_expired', () => {
             set({ error: 'WebSocket session expired, attempting to reconnect…' })
           })
