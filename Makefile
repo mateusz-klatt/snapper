@@ -478,9 +478,13 @@ ios-clean:
 	$(info Cleaning iOS build artifacts...)
 	rm -rf "$(IOS_DIR)/DerivedData" "$(IOS_DIR)/build"
 
-DOCKER_UID := $(shell id -u)
-ifeq ($(DOCKER_UID),0)
+ifeq ($(OS),Windows_NT)
   DOCKER_UID := 10000
+else
+  DOCKER_UID := $(shell id -u)
+  ifeq ($(DOCKER_UID),0)
+    DOCKER_UID := 10000
+  endif
 endif
 
 docker-build:
