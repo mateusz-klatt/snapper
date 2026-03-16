@@ -106,8 +106,8 @@ class MermaidRenderer:
         assets_dir: Path,
         project_root: Path,
         *,
-        width_px: int = 1920,
-        scale: float = 2.0,
+        width_px: int = 1200,
+        scale: float = 1.5,
     ) -> None:
         """Initialize the instance.
 
@@ -310,6 +310,8 @@ class MarkdownToPdf:
                 margin: {self._config.page_margin_mm}mm;
             }}
             body {{
+                orphans: 3;
+                widows: 3;
                 font-family: '{self._config.font_family}',
                     'DejaVu Sans', 'Liberation Sans', sans-serif;
                 color: #111827;
@@ -354,6 +356,7 @@ class MarkdownToPdf:
                 color: #0f172a;
                 margin: 1.2em 0 0.6em 0;
                 font-weight: 600;
+                page-break-after: avoid;
             }}
             h1 {{
                 font-size: {self._config.title_font_size_pt}pt;
@@ -368,6 +371,9 @@ class MarkdownToPdf:
             }}
             p {{
                 margin: 0.6em 0;
+            }}
+            p > strong:only-child {{
+                page-break-after: avoid;
             }}
             ul, ol {{
                 color: inherit;
@@ -417,7 +423,6 @@ class MarkdownToPdf:
                 display: flex;
                 justify-content: center;
                 margin: 1.2em 0;
-                page-break-inside: avoid;
             }}
             figure.diagram img {{
                 max-width: 100%;
