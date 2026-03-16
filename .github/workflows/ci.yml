@@ -39,7 +39,7 @@ jobs:
         run: make ui-build
 
       - name: Initialize database
-        run: make migrate
+        run: make migrate-dev
 
       - name: Check for type drift
         run: make ui-check-types
