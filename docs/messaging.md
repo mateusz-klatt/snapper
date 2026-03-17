@@ -170,11 +170,14 @@ candle = CandleData(
 | `instrument` | string | Symbol |
 | `exchange` | string | Exchange |
 | `timeframe` | string | Timeframe (`1m`, `5m`, `1h`, etc.) |
+| `open_at` | datetime | Exchange-provided candle interval start time |
 | `open` | float | Open price |
 | `high` | float | High |
 | `low` | float | Low |
 | `close` | float | Close price |
 | `volume` | float | Volume |
+| `vwap` | float \| null | Volume-weighted average price (optional) |
+| `trades` | int \| null | Number of trades in the candle (optional) |
 | `timestamp` | datetime | Timestamp |
 
 ### SignalData

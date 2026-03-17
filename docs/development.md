@@ -280,7 +280,7 @@ make ui-fix   # lint-fix + format-fix + dead-code-fix
 ### Type Generation
 
 ```bash
-make ui-gen-types   # All types from OpenAPI + WebSocket
+make ui-gen-types   # OpenAPI types, WebSocket types, Zod schemas, entity aliases, permissions
 ```
 
 ## Database Migrations

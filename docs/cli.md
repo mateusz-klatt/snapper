@@ -93,7 +93,7 @@ snapper trade-zmq [OPTIONS]
 **Example:**
 
 ```bash
-snapper trade-zmq --signal-topics "signals.rsi,signals.macd"
+snapper trade-zmq --signal-topics "signals.paper.BTC-USD.rsi_btc_1h,signals.kraken.BTC-USD.live"
 ```
 
 ### `executor`
