@@ -152,6 +152,7 @@ class TestLifespan:
                 pass
         mock_factory.sync_registry_to_database.assert_awaited_once()
         mock_factory.start_all_processes.assert_not_awaited()
+        mock_zmq_bridge.start.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_lifespan_cleanup_error_propagates(self) -> None:
