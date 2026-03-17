@@ -115,11 +115,11 @@ class TestLifespan:
 
     @pytest.mark.asyncio
     async def test_lifespan_api_only_skips_engine(self) -> None:
-        """Test api-only mode skips process autostart and ZMQ bridge.
+        """Test api-only mode skips process autostart but starts bridge.
 
         Given: SERVER_API_ONLY=true in settings,
         When: Lifespan runs,
-        Then: start_all_processes is not called, bridge is not started.
+        Then: start_all_processes is not called, bridge still starts.
         """
         mock_app = MagicMock()
         mock_manager = MagicMock()
@@ -152,7 +152,6 @@ class TestLifespan:
                 pass
         mock_factory.sync_registry_to_database.assert_awaited_once()
         mock_factory.start_all_processes.assert_not_awaited()
-        mock_zmq_bridge.start.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_lifespan_cleanup_error_propagates(self) -> None:

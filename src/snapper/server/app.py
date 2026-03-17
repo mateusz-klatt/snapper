@@ -246,15 +246,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         logger.info("Starting application lifespan - checking autostart settings")
         await process_factory.sync_registry_to_database()
         if settings.server_api_only:
-            logger.info(
-                "API-only mode (SERVER_API_ONLY=true) — "
-                "skipping process autostart and ZMQ bridge"
-            )
+            logger.info("API-only mode (SERVER_API_ONLY=true) — skipping process autostart")
         else:
             await process_factory.start_all_processes()
-            manager_ref: WebSocketConnectionManager = app.state.manager
-            app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
-            logger.info("Application startup complete - autostart processes initialized")
+        manager_ref: WebSocketConnectionManager = app.state.manager
+        app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
+        logger.info("Application startup complete")
         yield
     except asyncio.CancelledError:
         logger.info("Application lifespan cancelled by shutdown signal")

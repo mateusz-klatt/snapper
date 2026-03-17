@@ -51,9 +51,10 @@ class BootstrapSettingsLoader(BaseSettings):
         server_port: HTTP server port.
         server_reload: Enable uvicorn auto-reload for development.
         server_api_only: When True, the server starts without launching
-            background processes or the ZMQ bridge.  Useful for production
-            deployments where the engine runs as a separate process, or
-            when running multiple uvicorn workers.
+            background processes (broker, publishers, strategies, executors).
+            The ZMQ-WebSocket bridge still starts so the frontend receives
+            live data from a separately-running engine.  Useful for
+            production deployments or multiple uvicorn workers.
         server_proxy_headers: Enable parsing proxy headers in uvicorn.
         server_forwarded_allow_ips: Trusted proxy source IP list for
             forwarded headers.

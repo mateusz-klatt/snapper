@@ -106,9 +106,9 @@ class AppSettings:
     def server_api_only(self) -> bool:
         """Return whether the server should skip engine autostart.
 
-        When True the lifespan does not call ``start_all_processes()``
-        and does not start the ZMQ-WebSocket bridge.  Useful for
-        multi-worker deployments or when the engine runs separately.
+        When True the lifespan does not call ``start_all_processes()``.
+        The ZMQ-WebSocket bridge still starts so the frontend receives
+        live data from a separately-running engine.
 
         Returns:
             True if API-only mode is enabled, False otherwise.
