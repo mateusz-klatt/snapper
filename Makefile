@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -12,26 +12,26 @@ help:
 	$(info setup-full  Install system deps + setup [Linux/macOS only])
 	$(info )
 	$(info Quality Gates:)
-	$(info fmt               Check formatting [ruff, black, isort])
-	$(info fmt-fix           Auto-fix formatting [ruff, isort, black])
-	$(info lint              Run linting checks [ruff])
-	$(info lint-fix          Auto-fix linting issues [ruff --fix])
-	$(info typecheck         Run type checking [mypy])
-	$(info test              Run unit tests in parallel [pytest -n auto])
-	$(info test-serial       Run unit tests sequentially [debugging])
-	$(info cov               Run tests with coverage [parallel, 100% required])
-	$(info cov-serial        Run tests with coverage [sequential])
-	$(info cov-xml           Run tests with coverage + export XML [for SonarCloud])
-	$(info check             Backend quality checks [fmt + lint + typecheck])
-	$(info fix               Backend quality fixes [fmt-fix + lint-fix + move-imports])
-	$(info check-all         Complete quality gate [check + ui + exclusions + cov])
-	$(info check-exclusions  Fail if pragma/noqa/ignore comments exist [strict])
-	$(info check-docstrings  Check docstring compliance [Google/BDD style])
-	$(info check-no-comments Fail if Python hash comments exist [strict])
-	$(info check-main-guard  Validate __main__ blocks use raise SystemExit)
-	$(info check-init-files  Validate __init__.py files are empty [strict])
-	$(info check-temporal-mutations Fail if forbidden temporal mutations exist)
-	$(info fix-all           Complete quality fixes [backend + frontend])
+	$(info fmt                       Check formatting [ruff, black, isort])
+	$(info fmt-fix                   Auto-fix formatting [ruff, isort, black])
+	$(info lint                      Run linting checks [ruff])
+	$(info lint-fix                  Auto-fix linting issues [ruff --fix])
+	$(info typecheck                 Run type checking [mypy])
+	$(info test                      Run unit tests in parallel [pytest -n auto])
+	$(info test-serial               Run unit tests sequentially [debugging])
+	$(info cov                       Run tests with coverage [parallel, 100% required])
+	$(info cov-serial                Run tests with coverage [sequential])
+	$(info cov-xml                   Run tests with coverage + export XML [for SonarCloud])
+	$(info check                     Backend quality checks [fmt + lint + typecheck])
+	$(info fix                       Backend quality fixes [fmt-fix + lint-fix + move-imports])
+	$(info check-all                 Complete quality gate [check + ui + exclusions + cov])
+	$(info check-exclusions          Fail if pragma/noqa/ignore comments exist [strict])
+	$(info check-docstrings          Check docstring compliance [Google/BDD style])
+	$(info check-no-comments         Fail if Python hash comments exist [strict])
+	$(info check-main-guard          Validate __main__ blocks use raise SystemExit)
+	$(info check-init-files          Validate __init__.py files are empty [strict])
+	$(info check-temporal-mutations  Fail if forbidden temporal mutations exist)
+	$(info fix-all                   Complete quality fixes [backend + frontend])
 	$(info )
 	$(info Application:)
 	$(info run-collector              Start data collector)
@@ -92,15 +92,18 @@ help:
 	$(info ios-ipa       Build IPA [archive + export])
 	$(info )
 	$(info Docker:)
-	$(info docker-build-dev    Build Docker image [caller UID])
-	$(info docker-build-prod   Build Docker image [UID 8888])
-	$(info docker-migrate-dev  Run migrations + seed dev data in Docker)
-	$(info docker-migrate-prod Run migrations + seed prod data in Docker)
-	$(info docker-push         Push Docker image)
-	$(info docker-run          Run Docker container [background])
-	$(info docker-run-static   Refresh verified symbol mappings in Docker)
-	$(info docker-stop         Stop Docker container)
-	$(info server-check        Health check server [cross-platform])
+	$(info docker-build-dev              Build Docker image [caller UID])
+	$(info docker-build-prod             Build Docker image [UID 8888])
+	$(info docker-migrate-dev            Run migrations + seed dev data in Docker)
+	$(info docker-migrate-prod           Run migrations + seed prod data in Docker)
+	$(info docker-push                   Push Docker image)
+	$(info docker-run                    Run Docker container [background])
+	$(info docker-run-static             Refresh verified symbol mappings in Docker)
+	$(info docker-polygon-aggregates     Backfill Polygon OHLCV in Docker [settings symbols])
+	$(info docker-polygon-aggregates-all Backfill Polygon OHLCV in Docker [all mapped symbols])
+	$(info docker-polygon-grouped        Backfill Polygon grouped daily in Docker)
+	$(info docker-stop                   Stop Docker container)
+	$(info server-check                  Health check server [cross-platform])
 	$(info )
 	$(info Docs:)
 	$(info docs-pdf Export README + docs/*.md into snapper.pdf)
@@ -511,6 +514,19 @@ docker-run-static:
 	$(DOCKER_RUN) update-kraken-market-snapshot
 	$(DOCKER_RUN) update-zonda-market-snapshot
 	$(DOCKER_RUN) update-walutomat-market-snapshot
+
+docker-polygon-aggregates:
+	$(DOCKER_RUN) polygon-backfill-aggregates -d 32
+	$(DOCKER_RUN) polygon-backfill-aggregates -d 730
+
+docker-polygon-aggregates-all:
+	$(DOCKER_RUN) polygon-backfill-aggregates --all -d 32
+	$(DOCKER_RUN) polygon-backfill-aggregates --all -d 730
+
+docker-polygon-grouped:
+	$(DOCKER_RUN) polygon-backfill-grouped -m crypto -d 729
+	$(DOCKER_RUN) polygon-backfill-grouped -m stocks -l us -d 729
+	$(DOCKER_RUN) polygon-backfill-grouped -m fx -d 729
 
 docker-stop:
 	-docker stop $(DOCKER_NAME)
