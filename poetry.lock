@@ -688,14 +688,14 @@ redis = ["redis (>=2.10.5)"]
 
 [[package]]
 name = "ccxt"
-version = "4.5.43"
+version = "4.5.44"
 description = "A cryptocurrency trading API with more than 100 exchanges in JavaScript / TypeScript / Python / C# / PHP / Go"
 optional = false
 python-versions = "*"
 groups = ["main"]
 files = [
-    {file = "ccxt-4.5.43-py2.py3-none-any.whl", hash = "sha256:badac1eef7f469821d5f66ff5c3dd0e4299d39bf10c45af8343859d6e1451d36"},
-    {file = "ccxt-4.5.43.tar.gz", hash = "sha256:b69f3f0ec6b0946371c43b565502750817d1dc66b28c5394e9c79e2f97bb5bb1"},
+    {file = "ccxt-4.5.44-py2.py3-none-any.whl", hash = "sha256:a03deab603cdec47034ae3689c9e6dc5e71b82f51816e93eb7a1b6335fab65a8"},
+    {file = "ccxt-4.5.44.tar.gz", hash = "sha256:e488b7f812c3dc61afb0560100c8ea60d1a72f5b936f212fdae33382fb0ce1f7"},
 ]
 
 [package.dependencies]
@@ -7143,4 +7143,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "56ca2abd541dd4b2ec64b65fdca2d49d7663f495b6a868e38ff8e0c95303d9f9"
+content-hash = "b27b35910cfae2df327c6a7ea5505c6d783df315ff801d4657fe9ccdc8b355cc"
