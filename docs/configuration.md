@@ -16,15 +16,18 @@ Settings loaded from `.env` file or environment variables.
 Database URL examples:
 
 ```bash
-# SQLite (default)
+# SQLite (development default)
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
-# PostgreSQL
+# PostgreSQL (production)
 DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 
-# Azure SQL
+# Azure SQL (ingestion-only -- session() not implemented, server/auth will not work)
 DB_URL=mssql+pyodbc://user:password@server.database.windows.net/snapper?driver=ODBC+Driver+18+for+SQL+Server
 ```
+
+Support levels: SQLite for development, PostgreSQL for production.
+MSSQL is limited to background data ingestion (named CRUD methods only).
 
 ### Encryption
 
@@ -43,6 +46,7 @@ DB_URL=mssql+pyodbc://user:password@server.database.windows.net/snapper?driver=O
 | `SERVER_RELOAD` | `false` | Auto-reload for development |
 | `SERVER_PROXY_HEADERS` | `true` | Enable proxy header parsing in uvicorn |
 | `SERVER_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for forwarded headers |
+| `SERVER_API_ONLY` | `false` | Skip engine autostart; serve API + WS bridge only (for multi-worker or separate engine) |
 
 ### ZeroMQ
 

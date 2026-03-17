@@ -33,10 +33,16 @@ snapper server [OPTIONS]
 | `--port` | int | from env | Server port |
 | `--reload` | bool | from env | Auto-reload for development |
 
+**Environment:**
+
+Set `SERVER_API_ONLY=true` to skip engine process autostart while keeping
+the ZMQ-WebSocket bridge alive (useful for multi-worker deployments or when
+the engine runs as a separate process).
+
 **Examples:**
 
 ```bash
-# Start with default settings
+# Start with default settings (all-in-one dev mode)
 snapper server
 
 # Start on all interfaces
@@ -44,6 +50,9 @@ snapper server --host 0.0.0.0 --port 8000
 
 # Development mode with auto-reload
 snapper server --reload
+
+# API-only mode (engine runs separately)
+SERVER_API_ONLY=true snapper server
 ```
 
 ### `broker`

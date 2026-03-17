@@ -99,10 +99,11 @@ Topic format: `{category}.{exchange}.{instrument}.{type}.{timeframe}`
 
 | Topic | Description |
 | ----- | ----------- |
-| `system.heartbeat` | Component heartbeats |
-| `system.settings.changed` | Configuration changes |
-| `replay.start` | Data replay start |
-| `replay.end` | Replay end |
+| `system.heartbeats.{component}.{name}` | Component heartbeats |
+| `system.settings` | Configuration change notifications |
+| `system.symbol_aliases` | Symbol cache invalidation |
+| `system.replay.start` | Data replay start |
+| `system.replay.end` | Replay end |
 
 ## Message Data Classes
 
@@ -367,7 +368,10 @@ flowchart TB
 Bridge automatically:
 
 - Subscribes to ZMQ topics when WebSocket client subscribes
-- Forwards messages to WebSocket clients
+- Forwards messages via `_forward_to_clients` with per-subscription backpressure
+- Throttles market data per subscriber (configurable `throttle_ms`)
+- Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
+- Disconnects slow clients on trade topics when exceeding `MAX_PENDING_MESSAGES_TRADE` (1000)
 - Unsubscribes when last client disconnects
 
 ## Message Logger
@@ -412,6 +416,20 @@ from snapper.messaging.topics.schemas import validate_message_schema
 is_valid = validate_message_schema("market.kraken.BTC-USD.candles.1h", message)
 ```
 
+## High Water Mark (HWM) Policy
+
+ZMQ sockets use explicit high water marks via `apply_hwm()` from
+`validated_socket.py` to bound queue depth and prevent silent message loss:
+
+| Tier | Constant | Value | Used by |
+| ---- | -------- | ----- | ------- |
+| Order flow | `HWM_ORDER_FLOW` | 0 (unlimited) | Executor, trader coordinator |
+| Broker | `HWM_BROKER` | 10 000 | XSUB (rcvhwm), XPUB (sndhwm) |
+| Market data | `HWM_MARKET_DATA` | 5 000 | Publishers, strategies, bridge, settings, symbol updaters |
+| Audit | `HWM_AUDIT` | 10 000 | Message logger |
+
+`apply_hwm()` must be called **before** `connect()` or `bind()`.
+
 ## Retry and Resilience
 
 Sockets automatically:
@@ -419,6 +437,7 @@ Sockets automatically:
 - Reconnect on connection loss
 - Buffer messages when broker unavailable
 - LINGER=0 on close (discard pending)
+- HWM applied before connect/bind (see above)
 
 ## Best Practices
 

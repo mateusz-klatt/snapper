@@ -235,7 +235,10 @@ flowchart TB
 
 ## Database
 
-SQLite by default, with PostgreSQL and Azure SQL support.
+SQLite for development, PostgreSQL for production.  Azure SQL (MSSQL) is
+supported for background data ingestion only -- `MSSQLRepository.session()`
+is not implemented, so the API server, authentication, and process manager
+cannot run against MSSQL.
 
 ### Schema
 
@@ -301,6 +304,14 @@ Processes can be:
 
 - `long_running` — Run continuously (services)
 - `one_shot` — Execute once (tasks)
+
+### Deployment Modes
+
+By default, the FastAPI lifespan starts all enabled processes (all-in-one
+dev mode).  Set `SERVER_API_ONLY=true` to skip process autostart -- the
+ZMQ-WebSocket bridge still starts, so the frontend receives live data from
+a separately-running engine.  Useful for multi-worker uvicorn or when
+broker/strategies/executors run on different hosts.
 
 ## Security
 
