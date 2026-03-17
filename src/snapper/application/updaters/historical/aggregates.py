@@ -107,7 +107,16 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
     - Rate limiting and chunked requests
 
     Registered as one-shot task process.
+
+    Attributes:
+        BATCH_COMMIT_SIZE: Maximum rows per ``upsert_candles`` call.
+            Each call runs in its own DB transaction, so smaller values
+            reduce SQLite write-lock hold time at the cost of more
+            round-trips.  Default 500 balances throughput with write
+            contention on single-writer databases.
     """
+
+    BATCH_COMMIT_SIZE: int = 500
 
     @staticmethod
     def get_default_kwargs(settings: AppSettings) -> dict[str, object]:
@@ -486,14 +495,14 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             )
             return
         rows = self._build_candle_rows(candles, instrument_id, timeframe)
-        batch_size = 3000
         total_inserted = 0
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i : i + batch_size]
+        for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
+            batch = rows[i : i + self.BATCH_COMMIT_SIZE]
             inserted = await self._db_async.upsert_candles(batch)
             total_inserted += inserted
             logger.debug(
-                f"Inserted batch {i // batch_size + 1}: {inserted}/{len(batch)} candles",
+                f"Inserted batch {i // self.BATCH_COMMIT_SIZE + 1}: "
+                f"{inserted}/{len(batch)} candles",
                 symbol=context.native_symbol,
             )
         logger.info(

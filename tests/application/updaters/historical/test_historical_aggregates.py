@@ -2332,3 +2332,63 @@ def test_lookup_context_by_polygon_symbol_alias_found_catalog_missing() -> None:
 
     service._db_sync = cast(Any, SimpleNamespace(get_session=lambda: _Session()))
     assert service._lookup_context_by_polygon_symbol("X:ORPHAN") is None
+
+
+def test_batch_commit_size_default() -> None:
+    """Verify default BATCH_COMMIT_SIZE is 500.
+
+    Given: The PolygonAggregatesBackfillService class,
+    When: BATCH_COMMIT_SIZE is read,
+    Then: It equals 500.
+    """
+    assert PolygonAggregatesBackfillService.BATCH_COMMIT_SIZE == 500
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_persist_chunk_splits_into_batches(
+    monkeypatch: pytest.MonkeyPatch,
+    service_and_mapper: tuple[PolygonAggregatesBackfillService, _MockSymbolMapper],
+) -> None:
+    """Large candle sets are split into BATCH_COMMIT_SIZE batches.
+
+    Given: A backfill service with BATCH_COMMIT_SIZE=3,
+    When: Persisting 7 candle rows,
+    Then: upsert_candles is called 3 times with sizes [3, 3, 1].
+    """
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.datetime",
+        _FixedDateTime,
+    )
+    candles = [
+        AggregateCandle(
+            ticker="X:BTCUSD",
+            timestamp=_FIXED_NOW - timedelta(hours=i),
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("90"),
+            close=Decimal("105"),
+            volume=Decimal("5"),
+            vwap=Decimal("103"),
+            transactions=20,
+        )
+        for i in range(7)
+    ]
+    service, _ = service_and_mapper
+    service.BATCH_COMMIT_SIZE = 3
+    service_private = cast(Any, service)
+    service._days_back = 1
+    service._resume = False
+    service._save_csv = False
+    loader_stub = _LoaderStub(csv_exists=False, candles=candles)
+    service._loader = cast(Any, loader_stub)
+    repo = _RepoStub()
+    service._db_async = cast(Repository, repo)
+    context = SimpleNamespace(
+        native_symbol="BTC-USD",
+        polygon_symbol="X:BTCUSD",
+        base_currency="BTC",
+        quote_currency="USD",
+    )
+    await service_private._process_symbol(context)
+    batch_sizes = [len(b) for b in repo.candle_batches]
+    assert batch_sizes == [3, 3, 1]
