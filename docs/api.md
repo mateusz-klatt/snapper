@@ -1063,7 +1063,7 @@ If the client does not reauthenticate in time:
     "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
     "denied_topics": [],
     "active_subscriptions": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
-    "zmq_topics": ["market.", "signals."],
+    "zmq_topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
     "message": null,
     "timestamp": "2026-01-18T12:00:01Z"
 }
@@ -1321,7 +1321,7 @@ string or a prefix to match multiple topics.
 
 #### System
 
-- `system.heartbeats.{component}` -- Component heartbeats
+- `system.heartbeats.{component}.{name}[.{source}]` -- Component heartbeats
 - `admin.{resource}` -- Administrative events (admin only)
 
 ## Error Handling
