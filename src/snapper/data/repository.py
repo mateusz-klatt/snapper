@@ -76,14 +76,11 @@ from snapper.data.models import Trade
 __all__ = [
     "Repository",
     "SQLAlchemyRepository",
-    "SQLiteRepository",
-    "CloudRepository",
     "DatabaseRepository",
     "close_and_insert",
     "close_and_insert_sync",
     "get_repository",
     "dispose_repositories",
-    "clear_repository_cache",
     "where_active",
 ]
 
@@ -970,44 +967,6 @@ async def dispose_repositories() -> None:
         except Exception as e:
             logger.warning(f"Failed to dispose repository engine: {e}")
     _repository_cache.clear()
-
-
-def clear_repository_cache() -> None:
-    """Clear repository cache without disposing engines.
-
-    Useful for testing when engines should not be disposed.
-    """
-    _repository_cache.clear()
-
-
-class SQLiteRepository(SQLAlchemyRepository):
-    """SQLite-specific repository.
-
-    Convenience subclass that configures appropriate pooling for SQLite.
-    """
-
-    def __init__(self, path_url: str) -> None:
-        """Initialize SQLite repository.
-
-        Args:
-            path_url: SQLite database URL (e.g., 'sqlite+aiosqlite:///./data/db.sqlite').
-        """
-        super().__init__(path_url)
-
-
-class CloudRepository(SQLAlchemyRepository):
-    """Cloud database repository (PostgreSQL, etc.).
-
-    Convenience subclass for cloud-hosted databases.
-    """
-
-    def __init__(self, db_url: str) -> None:
-        """Initialize cloud repository.
-
-        Args:
-            db_url: Async database URL for cloud database.
-        """
-        super().__init__(db_url)
 
 
 class DatabaseRepository:

@@ -11,7 +11,6 @@ It handles:
 import asyncio
 import contextlib
 import json
-from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -32,25 +31,6 @@ from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import SettingChangedData
-
-
-@dataclass
-class SettingChangeEvent:
-    """Event data for a setting change.
-
-    Attributes:
-        key: Setting key that was changed.
-        value: New setting value.
-        category: Setting category.
-        timestamp: When the change occurred.
-        updated_by: Optional user who made the change.
-    """
-
-    key: str
-    value: str
-    category: str
-    timestamp: datetime
-    updated_by: str | None = None
 
 
 class SettingsService:

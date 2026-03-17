@@ -7,7 +7,6 @@ interface MarketDataStore extends MarketDataState {
   setSelectedInstrument: (instrument: string | null) => void
   setSelectedTimeframe: (timeframe: string) => void
   updateLastPrice: (price: number) => void
-  clearMarketData: () => void
 }
 
 export const useMarketStore = create<MarketDataStore>()(
@@ -32,13 +31,5 @@ export const useMarketStore = create<MarketDataStore>()(
     },
     setSelectedTimeframe: timeframe => set({ selectedTimeframe: timeframe }),
     updateLastPrice: price => set({ lastPrice: price }),
-    clearMarketData: () =>
-      set({
-        selectedExchange: null,
-        selectedInstrument: null,
-        selectedTimeframe: '1m',
-        lastPrice: null,
-        lastUpdate: Date.now(),
-      }),
   }))
 )

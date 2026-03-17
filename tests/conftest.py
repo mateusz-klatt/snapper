@@ -65,7 +65,7 @@ from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config import settings
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
-from snapper.data.repository import clear_repository_cache
+from snapper.data.repository import _repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
@@ -341,7 +341,7 @@ def mock_settings_for_tests(
     if "real_settings" in request.keywords:
         return
     _clear_auth_singletons()
-    clear_repository_cache()
+    _repository_cache.clear()
     mock_settings = _build_mock_settings()
 
     def mock_get_settings() -> AppSettings:
@@ -441,7 +441,7 @@ def cleanup_session_resources() -> Generator[None]:
         loop.run_until_complete(dispose_repositories())
     finally:
         loop.close()
-    clear_repository_cache()
+    _repository_cache.clear()
     gc.collect()
 
 
@@ -498,7 +498,7 @@ def cleanup_all() -> Generator[None]:
         pass
     finally:
         _cleanup_zmq_contexts()
-        clear_repository_cache()
+        _repository_cache.clear()
 
 
 @pytest.fixture(autouse=True, scope="function")

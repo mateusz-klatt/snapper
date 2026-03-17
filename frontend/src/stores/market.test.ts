@@ -77,21 +77,4 @@ describe('useMarketStore', () => {
       expect(useMarketStore.getState().lastPrice).toBe(45100)
     })
   })
-  describe('clearMarketData', () => {
-    it('resets all state to defaults', () => {
-      useMarketStore.setState({
-        selectedExchange: 'kraken',
-        selectedInstrument: 'BTC-USD',
-        selectedTimeframe: '4h',
-        lastPrice: 50000,
-      })
-      useMarketStore.getState().clearMarketData()
-      const state = useMarketStore.getState()
-
-      expect(state.selectedExchange).toBeNull()
-      expect(state.selectedInstrument).toBeNull()
-      expect(state.selectedTimeframe).toBe('1m')
-      expect(state.lastPrice).toBeNull()
-    })
-  })
 })

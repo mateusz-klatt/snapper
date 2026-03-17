@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
 import { AppState } from '../types/ui'
-import { useWebSocketStore } from './websocket'
 
 const DARK_MODE_KEY = 'snapper-dark-mode'
 
@@ -18,15 +17,13 @@ const loadDarkModePreference = (): boolean => {
 interface AppStore extends AppState {
   setConnected: (connected: boolean) => void
   setConnectionLag: (lag: number) => void
-  addSubscribedTopic: (topic: string) => void
-  removeSubscribedTopic: (topic: string) => void
   setSubscribedTopics: (topics: string[]) => void
   updateLastUpdate: () => void
   toggleDarkMode: () => void
 }
 
 export const useAppStore = create<AppStore>()(
-  subscribeWithSelector((set, get) => ({
+  subscribeWithSelector((set, _get) => ({
     isConnected: false,
     connectionLag: 0,
     subscribedTopics: [],
@@ -34,21 +31,6 @@ export const useAppStore = create<AppStore>()(
     isDarkMode: loadDarkModePreference(),
     setConnected: connected => set({ isConnected: connected }),
     setConnectionLag: lag => set({ connectionLag: lag }),
-    addSubscribedTopic: topic => {
-      const current = get().subscribedTopics
-
-      if (!current.includes(topic)) {
-        set({ subscribedTopics: [...current, topic] })
-        useWebSocketStore.getState().subscribe([topic])
-      }
-    },
-    removeSubscribedTopic: topic => {
-      const current = get().subscribedTopics
-      const newTopics = current.filter(t => t !== topic)
-
-      set({ subscribedTopics: newTopics })
-      useWebSocketStore.getState().unsubscribe([topic])
-    },
     setSubscribedTopics: topics => set({ subscribedTopics: topics }),
     updateLastUpdate: () => set({ lastUpdate: new Date().toISOString() }),
     toggleDarkMode: () =>

@@ -19,7 +19,6 @@ from snapper.utils.autoload import import_all_under
 __all__ = [
     "register_process",
     "get_registered_processes",
-    "get_process_metadata",
     "discover_processes",
 ]
 _PROCESS_REGISTRY: dict[str, ProcessRegistryEntry] = {}
@@ -111,18 +110,6 @@ def get_registered_processes() -> dict[str, ProcessRegistryEntry]:
         Dict mapping process name to ProcessRegistryEntry.
     """
     return _PROCESS_REGISTRY.copy()
-
-
-def get_process_metadata(process_name: str) -> ProcessRegistryEntry | None:
-    """Get metadata for a specific registered process.
-
-    Args:
-        process_name: Name of the process to look up.
-
-    Returns:
-        ProcessRegistryEntry, or None if not found.
-    """
-    return _PROCESS_REGISTRY.get(process_name)
 
 
 def discover_processes() -> None:

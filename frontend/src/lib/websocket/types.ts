@@ -68,12 +68,6 @@ export type TypedMessageHandler<T extends WebSocketMessageType> = (
 ) => void
 export type ConnectionHandler = (connected: boolean) => void
 export type UnsubscribeFn = () => void
-export type ConnectionState =
-  | 'disconnected'
-  | 'connecting'
-  | 'connected'
-  | 'authenticating'
-  | 'authenticated'
 export interface WebSocketClientOptions {
   url?: string
   reconnectInterval?: number

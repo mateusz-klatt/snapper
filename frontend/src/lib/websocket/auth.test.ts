@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { isAuthControlMessage, getWsToken, calculateReauthDelay } from './auth'
+import { isAuthControlMessage, getWsToken } from './auth'
 import * as wsTicketCache from '../wsTicketCache'
 import { apiClient } from '../apiClient'
 
@@ -121,41 +121,6 @@ describe('auth', () => {
       expect(result1).toEqual({ token: 'dedup-token', exp: expectedExp })
       expect(result2).toEqual({ token: 'dedup-token', exp: expectedExp })
       expect(apiClient.postJSON).toHaveBeenCalledTimes(1)
-    })
-  })
-  describe('calculateReauthDelay', () => {
-    it('calculates delay for future expiration', () => {
-      const futureExpSeconds = Math.floor(Date.now() / 1000) + 120
-      const delay = calculateReauthDelay(futureExpSeconds)
-
-      expect(delay).toBeGreaterThan(70000)
-      expect(delay).toBeLessThan(80000)
-    })
-    it('returns 0 for near expiration (within lead time)', () => {
-      const nearExpSeconds = Math.floor(Date.now() / 1000) + 30
-      const delay = calculateReauthDelay(nearExpSeconds)
-
-      expect(delay).toBe(0)
-    })
-    it('returns 0 for past expiration', () => {
-      const pastExpSeconds = Math.floor(Date.now() / 1000) - 100
-      const delay = calculateReauthDelay(pastExpSeconds)
-
-      expect(delay).toBe(0)
-    })
-    it('uses custom lead time', () => {
-      const futureExpSeconds = Math.floor(Date.now() / 1000) + 60
-      const customLeadTime = 10000
-      const delay = calculateReauthDelay(futureExpSeconds, customLeadTime)
-
-      expect(delay).toBeGreaterThan(45000)
-      expect(delay).toBeLessThan(55000)
-    })
-    it('returns minimum 5000ms when delta is small but positive', () => {
-      const expSeconds = Math.floor(Date.now() / 1000) + 47
-      const delay = calculateReauthDelay(expSeconds, 45000)
-
-      expect(delay).toBeGreaterThanOrEqual(5000)
     })
   })
 })

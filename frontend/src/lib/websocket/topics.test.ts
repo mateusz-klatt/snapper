@@ -5,10 +5,8 @@ import {
   shouldThrottle,
   getSubscriptionTopics,
   MARKET_TOPIC_PREFIX,
-  ORDERS_TOPIC_PREFIX,
   ORDERS_COMMANDS_PREFIX,
   ORDERS_EVENTS_PREFIX,
-  EXECUTIONS_TOPIC_PREFIX,
   SIGNALS_TOPIC_PREFIX,
   STRATEGY_TOPIC_PREFIX,
   HEARTBEATS_TOPIC_PREFIX,
@@ -169,17 +167,11 @@ describe('topics', () => {
     it('exports MARKET_TOPIC_PREFIX', () => {
       expect(MARKET_TOPIC_PREFIX).toBe('market.')
     })
-    it('exports ORDERS_TOPIC_PREFIX for internal routing', () => {
-      expect(ORDERS_TOPIC_PREFIX).toBe('orders.')
-    })
     it('exports ORDERS_COMMANDS_PREFIX for subscription', () => {
       expect(ORDERS_COMMANDS_PREFIX).toBe('orders.commands.')
     })
     it('exports ORDERS_EVENTS_PREFIX for subscription', () => {
       expect(ORDERS_EVENTS_PREFIX).toBe('orders.events.')
-    })
-    it('exports EXECUTIONS_TOPIC_PREFIX for internal routing', () => {
-      expect(EXECUTIONS_TOPIC_PREFIX).toBe('executions.')
     })
     it('exports SIGNALS_TOPIC_PREFIX', () => {
       expect(SIGNALS_TOPIC_PREFIX).toBe('signals.')

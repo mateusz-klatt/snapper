@@ -40,17 +40,3 @@ export async function getWsToken(): Promise<{ token: string; exp: number }> {
 
   return { token: ws_token, exp: expSeconds }
 }
-
-const REAUTH_LEAD_TIME_MS = 45000
-
-export function calculateReauthDelay(
-  expirationSeconds: number,
-  leadTimeMs: number = REAUTH_LEAD_TIME_MS
-): number {
-  const expirationMs = expirationSeconds * 1000
-  const targetTimeMs = expirationMs - leadTimeMs
-  const now = Date.now()
-  const delta = targetTimeMs - now
-
-  return delta <= 0 ? 0 : Math.max(delta, 5000)
-}

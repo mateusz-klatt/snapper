@@ -9,7 +9,7 @@ import pytest
 
 import snapper.strategies.macd as macd_module
 import snapper.strategies.rsi as rsi_module
-from snapper.application.process_manager.registry import get_process_metadata
+from snapper.application.process_manager.registry import get_registered_processes
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.process_wrapper import create_strategy_process
 
@@ -60,7 +60,7 @@ async def test_strategy_process_creation() -> None:
             "params": {"fast": 12, "slow": 26, "signal_period": 9},
         },
     )
-    metadata = get_process_metadata("test_macd")
+    metadata = get_registered_processes().get("test_macd")
     assert metadata is not None
     assert metadata.enabled is False
     assert metadata.mode == "thread"
@@ -400,7 +400,7 @@ async def test_predefined_macd_strategy() -> None:
     When fetching its process metadata,
     Then it returns valid configuration with disabled state, thread mode, and strategy role.
     """
-    metadata = get_process_metadata("strategy_macd_btc_1h")
+    metadata = get_registered_processes().get("strategy_macd_btc_1h")
     assert metadata is not None
     assert metadata.enabled is False
     assert metadata.mode == "thread"
@@ -416,7 +416,7 @@ async def test_predefined_rsi_strategy() -> None:
     When fetching its process metadata,
     Then it returns valid configuration with disabled state, thread mode, and strategy role.
     """
-    metadata = get_process_metadata("strategy_rsi_eth_1h")
+    metadata = get_registered_processes().get("strategy_rsi_eth_1h")
     assert metadata is not None
     assert metadata.enabled is False
     assert metadata.mode == "thread"

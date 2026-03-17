@@ -174,6 +174,3 @@ class StrategyFactory:
                 else:
                     outputs_seen[topic] = config.name
         return errors
-
-
-strategy_factory = StrategyFactory()

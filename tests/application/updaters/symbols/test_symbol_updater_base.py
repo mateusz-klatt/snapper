@@ -23,7 +23,7 @@ from snapper.data.models import Symbol as _Sym
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
-from snapper.data.repository import clear_repository_cache
+from snapper.data.repository import _repository_cache
 from snapper.data.repository import close_and_insert_sync
 
 
@@ -190,7 +190,7 @@ def updater_factory(
             SymbolUpdaterService._cleanup_zmq(updater)
         for repository in created_repositories:
             repository.engine.dispose()
-        clear_repository_cache()
+        _repository_cache.clear()
 
     request.addfinalizer(cleanup)
     return factory

@@ -17,7 +17,6 @@ from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessRegistryEntry
-from snapper.application.services.settings import SettingChangeEvent
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
 from snapper.config.app import AppSettings
@@ -471,22 +470,6 @@ class TestSettingsService:
             assert "new_key" in result
             assert result["existing_key"] == "existing_value"
             assert result["new_key"] == "new_value"
-
-    def test_setting_change_model(self) -> None:
-        """Verify SettingChangeEvent model stores attributes correctly.
-
-        Given: SettingChangeEvent with key, value, category, timestamp,
-        When: Attributes accessed,
-        Then: Correct values returned.
-        """
-        timestamp = datetime.now(UTC)
-        change = SettingChangeEvent(
-            key="test_key", value="test_value", category="test", timestamp=timestamp
-        )
-        assert change.key == "test_key"
-        assert change.value == "test_value"
-        assert change.category == "test"
-        assert change.timestamp == timestamp
 
     @pytest.mark.asyncio
     @pytest.mark.asyncio

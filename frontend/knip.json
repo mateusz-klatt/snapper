@@ -10,7 +10,6 @@
     "src/types/entities.generated.ts",
     "src/types/permissions.generated.ts",
     "src/lib/websocket/client.ts",
-    "src/lib/websocket/instance.ts",
     "src/lib/websocket/types.ts",
     "src/lib/transforms.ts",
     "src/lib/schemas/ws.ts"

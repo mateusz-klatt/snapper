@@ -5,7 +5,6 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import discover_processes
-from snapper.application.process_manager.registry import get_process_metadata
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.application.process_manager.registry import register_process
 
@@ -27,7 +26,7 @@ class TestRegisterProcess:
                 """No-op start for BasicProcess test stub."""
                 pass
 
-        metadata = get_process_metadata("test_basic")
+        metadata = get_registered_processes().get("test_basic")
         assert metadata is not None
         assert isinstance(metadata, ProcessRegistryEntry)
         assert metadata.class_ref == BasicProcess
@@ -70,7 +69,7 @@ class TestRegisterProcess:
                 """No-op run for CustomProcess test stub."""
                 pass
 
-        metadata = get_process_metadata("test_custom")
+        metadata = get_registered_processes().get("test_custom")
         assert metadata is not None
         assert isinstance(metadata, ProcessRegistryEntry)
         assert metadata.class_ref == CustomProcess
@@ -103,7 +102,7 @@ class TestRegisterProcess:
                 """No-op start for StringEnumProcess test stub."""
                 pass
 
-        metadata = get_process_metadata("test_string_enums")
+        metadata = get_registered_processes().get("test_string_enums")
         assert metadata is not None
         assert isinstance(metadata, ProcessRegistryEntry)
         assert metadata.lifecycle == ProcessLifecycleEnum.ONE_SHOT
@@ -123,7 +122,7 @@ class TestRegisterProcess:
                 """No-op start for NoTagsProcess test stub."""
                 pass
 
-        metadata = get_process_metadata("test_no_tags")
+        metadata = get_registered_processes().get("test_no_tags")
         assert metadata is not None
         assert isinstance(metadata, ProcessRegistryEntry)
         assert metadata.tags == ()
@@ -142,7 +141,7 @@ class TestRegisterProcess:
                 """No-op start for NoArgsProcess test stub."""
                 pass
 
-        metadata = get_process_metadata("test_no_args")
+        metadata = get_registered_processes().get("test_no_args")
         assert metadata is not None
         assert isinstance(metadata, ProcessRegistryEntry)
         assert metadata.args == []
@@ -161,7 +160,7 @@ class TestRegisterProcess:
                 """No-op start for ClassPathProcess test stub."""
                 pass
 
-        metadata = get_process_metadata("test_class_path")
+        metadata = get_registered_processes().get("test_class_path")
         assert metadata is not None
         assert isinstance(metadata, ProcessRegistryEntry)
         assert metadata.class_path.endswith(
@@ -231,39 +230,6 @@ class TestGetRegisteredProcesses:
         assert hasattr(metadata, "enabled")
         assert hasattr(metadata, "mode")
         assert hasattr(metadata, "args")
-
-
-class TestGetProcessMetadata:
-    """Test cases for retrieving process metadata."""
-
-    def test_get_existing_process(self) -> None:
-        """Verify get_process_metadata returns data for existing process.
-
-        Given: A registered process,
-        When: get_process_metadata is called with its name,
-        Then: Correct metadata with class_ref is returned.
-        """
-
-        @register_process(name="test_existing")
-        class ExistingProcess(RegisterableProcess):
-            async def start(self) -> None:
-                """No-op start for ExistingProcess test stub."""
-                pass
-
-        metadata = get_process_metadata("test_existing")
-        assert metadata is not None
-        assert isinstance(metadata, ProcessRegistryEntry)
-        assert metadata.class_ref == ExistingProcess
-
-    def test_get_nonexistent_process(self) -> None:
-        """Verify get_process_metadata returns None for unknown process.
-
-        Given: No process registered with given name,
-        When: get_process_metadata is called,
-        Then: None is returned.
-        """
-        metadata = get_process_metadata("nonexistent_process_xyz")
-        assert metadata is None
 
 
 class TestDiscoverProcesses:

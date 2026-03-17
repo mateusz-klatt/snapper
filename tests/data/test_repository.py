@@ -32,12 +32,9 @@ from snapper.data import repository as repo_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
-from snapper.data.repository import CloudRepository
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
-from snapper.data.repository import SQLiteRepository
-from snapper.data.repository import clear_repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
@@ -421,11 +418,11 @@ def test_get_repository_caches_instances(monkeypatch: pytest.MonkeyPatch) -> Non
     When: Called twice with same URL,
     Then: Returns same cached instance.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
     first = get_repository("sqlite+aiosqlite:///:memory:")
     second = get_repository("sqlite+aiosqlite:///:memory:")
     assert first is second
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
 
 @pytest.mark.asyncio
@@ -436,7 +433,7 @@ async def test_dispose_repositories_awaits_and_clears_cache() -> None:
     When: dispose_repositories is called,
     Then: Engine dispose is awaited and cache cleared.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
     class _Repo:
         def __init__(self) -> None:
@@ -679,7 +676,7 @@ class DummyRepo(SimpleNamespace):
 
 def teardown_function() -> None:
     """Clear repository cache after each test function."""
-    repo.clear_repository_cache()
+    repo._repository_cache.clear()
 
 
 @pytest.mark.asyncio
@@ -693,18 +690,6 @@ async def test_dispose_repositories_awaits_dispose(monkeypatch: pytest.MonkeyPat
     dummy = DummyRepo()
     repo._repository_cache["test"] = cast(Any, dummy)
     await repo.dispose_repositories()
-    assert not repo._repository_cache
-
-
-def test_clear_repository_cache_clears() -> None:
-    """Test clear_repository_cache empties the cache.
-
-    Given: Repository cache with entry,
-    When: clear_repository_cache is called,
-    Then: Cache is empty.
-    """
-    repo._repository_cache["x"] = cast(Any, DummyRepo())
-    repo.clear_repository_cache()
     assert not repo._repository_cache
 
 
@@ -874,58 +859,6 @@ class DummyRepository(Repository):
         return []
 
 
-def test_sqlite_and_cloud_repository_initialization(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test SQLite and Cloud repository initialization.
-
-    Given: Mocked async engine creation,
-    When: SQLiteRepository and CloudRepository created,
-    Then: URLs are preserved and engines created.
-    """
-    created_urls: list[str] = []
-
-    class DummyAsyncEngine:
-        class _URL:
-            @staticmethod
-            def get_dialect() -> Any:
-                class _Dialect:
-                    name = "dummy"
-
-                return _Dialect()
-
-        def __init__(self, url: str) -> None:
-            self.url = self._URL()
-            self._db_url = url
-            self.sync_engine = None
-
-    def fake_create_async_engine(
-        db_url: str,
-        future: bool = True,
-        connect_args: dict[str, Any] | None = None,
-        poolclass: Any = None,
-    ) -> DummyAsyncEngine:
-        created_urls.append(db_url)
-        return DummyAsyncEngine(db_url)
-
-    def fake_async_sessionmaker(
-        engine: Any, expire_on_commit: bool = False, class_: type[AsyncSession] | None = None
-    ) -> Callable[[], Any]:
-        def factory() -> Any:
-            return object()
-
-        return factory
-
-    monkeypatch.setattr(snapper.data.repository, "create_async_engine", fake_create_async_engine)
-    monkeypatch.setattr(snapper.data.repository, "async_sessionmaker", fake_async_sessionmaker)
-    sqlite_repo = SQLiteRepository("sqlite+aiosqlite:///tmp/test.db")
-    cloud_repo = CloudRepository("postgresql+asyncpg://user:pass@host/db")
-    assert sqlite_repo.db_url == "sqlite+aiosqlite:///tmp/test.db"
-    assert cloud_repo.db_url == "postgresql+asyncpg://user:pass@host/db"
-    assert created_urls == [
-        "sqlite+aiosqlite:///tmp/test.db",
-        "postgresql+asyncpg://user:pass@host/db",
-    ]
-
-
 @pytest.mark.parametrize(
     ("input_url", "expected"),
     [
@@ -1011,7 +944,7 @@ def test_get_repository_caches_by_url(monkeypatch: pytest.MonkeyPatch) -> None:
     When: Called with same URL twice,
     Then: Returns same cached instance.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
     class _StubRepo:
         def __init__(self, url: str) -> None:
@@ -1034,7 +967,7 @@ async def test_dispose_repositories_handles_mock_engine(monkeypatch: pytest.Monk
     When: dispose_repositories is called,
     Then: Cache is cleared.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
     class _StubRepo:
         def __init__(self, url: str) -> None:
@@ -1055,7 +988,7 @@ async def test_dispose_repositories_with_sync_dispose(monkeypatch: pytest.Monkey
     When: dispose_repositories is called,
     Then: Dispose is called and cache cleared.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
     dispose_called = {"value": False}
 
     class _SyncEngine:
@@ -1081,7 +1014,7 @@ async def test_dispose_repositories_engine_no_dispose() -> None:
     When: dispose_repositories is called,
     Then: Logs warning and clears cache.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
     class _EngineNoDispose:
         pass
@@ -1106,7 +1039,7 @@ async def test_dispose_repositories_engine_dispose_not_callable() -> None:
     When: dispose_repositories is called,
     Then: Logs warning and clears cache.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
     class _EngineDisposeNotCallable:
         dispose = "not_callable"
@@ -1131,7 +1064,7 @@ async def test_dispose_repositories_engine_none(monkeypatch: pytest.MonkeyPatch)
     When: dispose_repositories is called,
     Then: Cache is cleared without error.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
     class _StubRepo:
         def __init__(self) -> None:
@@ -1150,7 +1083,7 @@ async def test_dispose_repositories_no_engine_attr(monkeypatch: pytest.MonkeyPat
     When: dispose_repositories is called,
     Then: Cache is cleared without error.
     """
-    clear_repository_cache()
+    repo._repository_cache.clear()
 
     class _StubRepo:
         pass
@@ -1631,7 +1564,7 @@ async def test_dispose_repositories_awaits_coroutine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify dispose_repositories awaits async dispose methods."""
-    clear_repository_cache()
+    repo._repository_cache.clear()
     disposed: list[bool] = []
 
     async def _async_dispose() -> None:
