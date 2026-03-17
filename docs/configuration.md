@@ -85,24 +85,22 @@ Sensitive data is stored encrypted in the `settings` table.
 ## `.env.example` File
 
 ```bash
-# =============================================================================
-# Snapper Environment Configuration
-# =============================================================================
-
-# Database (SQLite default, PostgreSQL optional)
+# Database connection
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
-# Settings Encryption (CHANGE IN PRODUCTION!)
-MASTER_PASSWORD=your_secure_master_password
+# Encryption settings for sensitive data (API keys, secrets)
+# IMPORTANT: Change this default in production!
+MASTER_PASSWORD=snapper_default_master_password_v1
 
-# HTTP Server
-SERVER_HOST=127.0.0.1
+# Server settings
+SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
 SERVER_RELOAD=false
+SERVER_API_ONLY=false
 SERVER_PROXY_HEADERS=true
-SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
+SERVER_FORWARDED_ALLOW_IPS=127.0.0.1,172.17.0.1
 
-# ZeroMQ Broker Endpoints
+# ZMQ broker settings
 ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500
 ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
 ```

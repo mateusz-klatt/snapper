@@ -590,7 +590,7 @@ List registered process templates that can be instantiated. Requires
     "processes": [
         {
             "name": "zmq_broker",
-            "class_path": "snapper.messaging.broker.ZmqBroker",
+            "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
             "method": "run",
             "description": "ZeroMQ XPUB/XSUB message broker",
             "lifecycle": "long_running",
@@ -618,7 +618,7 @@ List configured process instances with runtime state. Requires
             "enabled": true,
             "running": true,
             "mode": "process",
-            "class_path": "snapper.messaging.broker.ZmqBroker",
+            "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
             "method": "run",
             "args": [],
             "kwargs": {},
@@ -696,7 +696,7 @@ Requires `manage:processes` permission.
 {
     "name": "feed_publisher",
     "description": "Market data feed publisher",
-    "class_path": "snapper.feeds.publisher.FeedPublisher",
+    "class_path": "snapper.messaging.publishers.kraken.KrakenMarketDataPublisher",
     "method": "run",
     "default_enabled": true,
     "default_mode": "process",

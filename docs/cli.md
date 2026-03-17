@@ -221,6 +221,15 @@ snapper db-downgrade
 snapper db-downgrade --revision base
 ```
 
+### `db-seed`
+
+Seeds the database with default data (users, settings).
+Automatically run by `make migrate-dev` and `make migrate-prod`.
+
+```bash
+snapper db-seed
+```
+
 ## Users
 
 ### `init-admin`

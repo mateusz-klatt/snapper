@@ -276,49 +276,44 @@ heartbeat = HeartbeatData(
 
 ## Publisher
 
-Publishing messages via validated socket:
+Publishing messages via validated socket wrapper around a raw ZMQ PUB socket:
 
 ```python
-from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.schemas.data import CandleData
+import zmq.asyncio
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher, apply_hwm, HWM_MARKET_DATA
 
-async def publish_bars():
-    publisher = ValidatedPublisher()
-    await publisher.connect()
+ctx = zmq.asyncio.Context()
+raw_socket = ctx.socket(zmq.PUB)
+apply_hwm(raw_socket, sndhwm=HWM_MARKET_DATA)
+raw_socket.connect("tcp://127.0.0.1:7500")  # broker XSUB
+publisher = ValidatedPublisher(raw_socket)
 
-    topic = "market.kraken.BTC-USD.candles.1h"
-    candle = CandleData(
-        instrument="BTC-USD",
-        exchange="kraken",
-        timeframe="1h",
-        open=42000.0,
-        high=42500.0,
-        low=41800.0,
-        close=42300.0,
-        volume=1234.56,
-    )
-
-    await publisher.publish(topic, candle)
-    await publisher.close()
+topic = "market.kraken.BTC-USD.candles.1h"
+payload = candle_data.to_json().encode()
+await publisher.send_multipart(topic, payload)
+publisher.close()
 ```
 
 ## Subscriber
 
-Subscribing to messages:
+Subscribing to messages via validated socket wrapper around a raw ZMQ SUB socket:
 
 ```python
-from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+import zmq.asyncio
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber, apply_hwm, HWM_MARKET_DATA
 from snapper.messaging.schemas.messages import parse_message
 
-async def subscribe_to_market():
-    subscriber = ValidatedSubscriber()
-    await subscriber.connect()
-    await subscriber.subscribe("market.kraken.BTC-USD.")
+ctx = zmq.asyncio.Context()
+raw_socket = ctx.socket(zmq.SUB)
+apply_hwm(raw_socket, rcvhwm=HWM_MARKET_DATA)
+raw_socket.connect("tcp://127.0.0.1:7501")  # broker XPUB
+subscriber = ValidatedSubscriber(raw_socket)
+subscriber.subscribe("market.kraken.BTC-USD.")
 
-    while True:
-        topic, message = await subscriber.receive()
-        envelope = parse_message(message)
-        print(f"Received {envelope.type} on {topic}")
+while True:
+    topic, payload = await subscriber.recv_multipart()
+    envelope = parse_message(payload)
+    print(f"Received {envelope.type} on {topic}")
 ```
 
 ## Market Data Publisher
@@ -349,7 +344,7 @@ snapper executor -e kraken
 
 Executor:
 
-1.  Subscribes to `orders.{exchange}.*` topics
+1.  Subscribes to `orders.commands.{exchange}.*` topics
 2.  Receives OrderRequestData
 3.  Executes order via exchange API
 4.  Publishes ExecutionData or OrderData

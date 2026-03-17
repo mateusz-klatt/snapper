@@ -90,7 +90,8 @@ Persistence layer with SQLAlchemy:
     - `timestamp` (DateTime, system time / known_from)
     - `known_to` (DateTime NOT NULL, default KNOWN_TO_MAX = 9999-12-31T23:59:59 UTC, active rows have known_to == KNOWN_TO_MAX; query pattern: `WHERE timestamp <= :t AND known_to > :t`)
 
-- **Repository** (`repository.py`) — Async CRUD operations
+- **SQLAlchemyRepository** (`repository.py`) — Async CRUD for SQLite/PostgreSQL
+- **DatabaseRepository** (`repository.py`) — Sync access for scripts and background updaters
 
 ### Strategies (`src/snapper/strategies/`)
 

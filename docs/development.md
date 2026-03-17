@@ -215,10 +215,9 @@ import pytest
 @pytest.mark.asyncio
 async def test_fetch_candles() -> None:
     """Test fetching candles from repository."""
-    repo = Repository(db_url)
-    async with repo.session() as session:
-        candles = await repo.get_candles(session, "BTC-USD", limit=10)
-        assert len(candles) <= 10
+    repo = get_repository(db_url)
+    candles = await repo.get_candles("BTC-USD", limit=10)
+    assert len(candles) <= 10
 ```
 
 ### Fixtures
@@ -439,9 +438,9 @@ pre-commit run --all-files
 ```python
 from loguru import logger
 
-logger.info("Processing signal", signal=signal)
-logger.debug("Calculated RSI", value=rsi_value)
-logger.error("Failed to execute order", error=str(e))
+logger.info(f"Processing signal: {signal}")
+logger.debug(f"Calculated RSI: {rsi_value}")
+logger.error(f"Failed to execute order: {e}")
 ```
 
 ### ZMQ Logger
