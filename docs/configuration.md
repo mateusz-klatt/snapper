@@ -21,13 +21,7 @@ DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
 # PostgreSQL (production)
 DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
-
-# Azure SQL (ingestion-only -- session() not implemented, server/auth will not work)
-DB_URL=mssql+pyodbc://user:password@server.database.windows.net/snapper?driver=ODBC+Driver+18+for+SQL+Server
 ```
-
-Support levels: SQLite for development, PostgreSQL for production.
-MSSQL is limited to background data ingestion (named CRUD methods only).
 
 ### Encryption
 

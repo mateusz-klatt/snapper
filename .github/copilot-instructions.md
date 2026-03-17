@@ -134,6 +134,6 @@ Before finishing ANY task or making changes:
 
 Notes
 
-- SQLite is the default DB; Postgres/Azure SQL can be used by switching `DB_URL` without code changes.
+- SQLite is the default DB; PostgreSQL can be used by switching `DB_URL` without code changes.
 - Ensure Alembic migrations are up-to-date for any ORM model change.
 - Keep README and .env.example consistent with current behavior when relevant changes are made.

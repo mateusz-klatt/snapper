@@ -6,7 +6,6 @@ implementations for different database backends:
 - **SQLAlchemyRepository**: Async repository for SQLite and PostgreSQL.
 - **SQLiteRepository**: Convenience subclass for SQLite databases.
 - **CloudRepository**: Convenience subclass for cloud databases.
-- **MSSQLRepository**: Sync repository wrapped with asyncio.to_thread.
 - **DatabaseRepository**: Simple sync repository for scripts/notebooks.
 
 Key Features:
@@ -31,11 +30,9 @@ Example:
         inserted = await repo.upsert_candles(rows)
 """
 
-import asyncio
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
-from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 from datetime import UTC
@@ -43,8 +40,6 @@ from datetime import datetime
 from inspect import isawaitable
 from typing import Any
 from typing import cast
-from urllib.parse import parse_qsl
-from urllib.parse import urlencode
 from uuid import uuid7
 
 from loguru import logger
@@ -78,14 +73,11 @@ from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
 from snapper.data.models import Trade
 
-_MSSQL_PREFIX = "mssql+pyodbc://"
-
 __all__ = [
     "Repository",
     "SQLAlchemyRepository",
     "SQLiteRepository",
     "CloudRepository",
-    "MSSQLRepository",
     "DatabaseRepository",
     "close_and_insert",
     "close_and_insert_sync",
@@ -261,7 +253,7 @@ class Repository(ABC):
     @property
     @abstractmethod
     def dialect_name(self) -> str:
-        """Return the database dialect name (sqlite, postgresql, mssql)."""
+        """Return the database dialect name (sqlite, postgresql)."""
         ...
 
     @abstractmethod
@@ -949,7 +941,6 @@ def get_repository(db_url: str) -> Repository:
     """Get or create a cached repository instance.
 
     Returns an existing repository for the given URL or creates a new one.
-    Uses MSSQLRepository for MSSQL URLs, SQLAlchemyRepository otherwise.
 
     Args:
         db_url: Database connection URL.
@@ -958,16 +949,7 @@ def get_repository(db_url: str) -> Repository:
         Cached or newly created Repository instance.
     """
     if db_url not in _repository_cache:
-        if db_url.startswith(_MSSQL_PREFIX):
-            logger.warning(
-                "MSSQLRepository selected — session() is not implemented. "
-                "Background writers work, but the API server, auth, and "
-                "settings endpoints will raise NotImplementedError. "
-                "See MSSQLRepository docstring for details."
-            )
-            _repository_cache[db_url] = MSSQLRepository(db_url)
-        else:
-            _repository_cache[db_url] = SQLAlchemyRepository(db_url)
+        _repository_cache[db_url] = SQLAlchemyRepository(db_url)
     return _repository_cache[db_url]
 
 
@@ -1028,573 +1010,6 @@ class CloudRepository(SQLAlchemyRepository):
         super().__init__(db_url)
 
 
-class MSSQLRepository(Repository):
-    """Microsoft SQL Server repository using sync driver with async wrapper.
-
-    Uses pyodbc driver with synchronous SQLAlchemy engine, wrapping all
-    operations in ``asyncio.to_thread()`` for async compatibility.
-
-    Automatically configures ODBC driver settings for Azure SQL.
-
-    Limitations:
-        The ``session()`` context manager is **not implemented**.  All named
-        CRUD methods (``upsert_candles``, ``insert_order``, etc.) work via
-        ``_run_sync``, so background writers (publishers, backfill) function
-        correctly.  However, the API server, authentication, settings, and
-        process-manager paths all require ``session()`` for arbitrary async
-        queries and will raise ``NotImplementedError`` at runtime.
-
-        To use MSSQL as the primary database you would need either:
-
-        - an async MSSQL driver (e.g. ``aioodbc``) behind an
-          ``async_sessionmaker``, or
-        - migration of all ``session()`` callers to named repository methods.
-
-        Until then, MSSQL is supported only for background data ingestion,
-        not as the full server runtime backend.
-
-    Attributes:
-        db_url: Processed connection URL with driver settings.
-        engine: Sync SQLAlchemy engine.
-        session_factory: Sync session factory.
-    """
-
-    def __init__(self, db_url: str) -> None:
-        """Initialize MSSQL repository.
-
-        Args:
-            db_url: MSSQL connection URL (mssql+pyodbc://...).
-        """
-        self.db_url = self._ensure_driver(db_url)
-        self.engine: SyncEngine = create_sync_engine(self.db_url, future=True)
-        self.session_factory = sync_sessionmaker(
-            self.engine, expire_on_commit=False, class_=SyncSession
-        )
-
-    @staticmethod
-    def _ensure_driver(db_url: str) -> str:
-        if not db_url.startswith(_MSSQL_PREFIX):
-            return db_url
-        if "?" not in db_url:
-            return (
-                db_url
-                + "?"
-                + urlencode(
-                    {
-                        "driver": "ODBC Driver 18 for SQL Server",
-                        "Encrypt": "yes",
-                        "TrustServerCertificate": "yes",
-                    }
-                )
-            )
-        base, qs = db_url.split("?", 1)
-        params = dict(parse_qsl(qs))
-        if "driver" not in params:
-            params["driver"] = "ODBC Driver 18 for SQL Server"
-        params.setdefault("Encrypt", "yes")
-        params.setdefault("TrustServerCertificate", "yes")
-        return base + "?" + urlencode(params)
-
-    async def create_all(self) -> None:
-        """Create all database tables synchronously via thread."""
-
-        def _create() -> None:
-            Base.metadata.create_all(self.engine)
-
-        await asyncio.to_thread(_create)
-
-    @property
-    def dialect_name(self) -> str:
-        """Return the database dialect name."""
-        return self.engine.url.get_dialect().name
-
-    def session(self) -> AbstractAsyncContextManager[AsyncSession]:
-        """Not implemented for MSSQL repository."""
-        raise NotImplementedError("MSSQLRepository session() not implemented for server use")
-
-    async def _run_sync[T](self, fn: Callable[[SyncSession], T]) -> T:
-        """Execute a sync session callback in a background thread.
-
-        Opens a sync session, passes it to ``fn``, and runs the whole
-        closure via ``asyncio.to_thread`` so the event-loop stays free.
-
-        Args:
-            fn: Callable receiving a SyncSession and returning T.
-
-        Returns:
-            The value returned by *fn*.
-        """
-
-        def _work() -> T:
-            with self.session_factory() as s:
-                return fn(s)
-
-        return await asyncio.to_thread(_work)
-
-    @staticmethod
-    def _sync_upsert_batch(s: SyncSession, model: type[Base], rows: list[dict[str, Any]]) -> int:
-        """Insert rows one-by-one, skipping duplicates via SAVEPOINT.
-
-        Each row is wrapped in a nested transaction (SAVEPOINT) so that
-        an IntegrityError only rolls back the failing row, preserving
-        previously inserted rows and keeping the counter accurate.
-
-        Args:
-            s: Active sync session.
-            model: SQLAlchemy model class to insert into.
-            rows: List of column-value dicts.
-
-        Returns:
-            Number of rows successfully inserted.
-        """
-        for r in rows:
-            if "public_id" not in r:
-                r["public_id"] = str(uuid7())
-        inserted = 0
-        for r in rows:
-            try:
-                with s.begin_nested():
-                    s.execute(insert(model).values(**r))
-                inserted += 1
-            except IntegrityError:
-                continue
-        s.commit()
-        return inserted
-
-    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
-        """Load the latest candle public_id per (instrument_id, timeframe) via sync thread."""
-
-        def _do(s: SyncSession) -> dict[tuple[int, str], tuple[datetime, str]]:
-            now = datetime.now(UTC)
-            latest = (
-                select(
-                    Candle.instrument_id,
-                    Candle.timeframe,
-                    func.max(Candle.open_at).label("max_open_at"),
-                )
-                .where(Candle.timestamp <= now, Candle.known_to > now)
-                .group_by(Candle.instrument_id, Candle.timeframe)
-                .subquery()
-            )
-            q = s.execute(
-                select(Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id)
-                .where(Candle.timestamp <= now, Candle.known_to > now)
-                .join(
-                    latest,
-                    and_(
-                        Candle.instrument_id == latest.c.instrument_id,
-                        Candle.timeframe == latest.c.timeframe,
-                        Candle.open_at == latest.c.max_open_at,
-                    ),
-                )
-            )
-            return {
-                (row.instrument_id, row.timeframe): (row.open_at, row.public_id) for row in q.all()
-            }
-
-        return await self._run_sync(_do)
-
-    async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Insert or update instrument by (symbol_public_id, exchange) via sync thread.
-
-        Temporal SCD2: payload compare + close+insert when changed.
-        """
-        filtered = _filter_instrument_kwargs(kwargs)
-        symbol_public_id = filtered["symbol_public_id"]
-        exchange = filtered["exchange"]
-        bus_time = filtered.get("timestamp") or datetime.now(UTC)
-        filtered["timestamp"] = bus_time
-
-        def _do(s: SyncSession) -> int:
-            ts_filter, kt_filter = where_active(Instrument, bus_time)
-            q = s.execute(
-                select(Instrument).where(
-                    Instrument.symbol_public_id == symbol_public_id,
-                    Instrument.exchange == exchange,
-                    ts_filter,
-                    kt_filter,
-                )
-            )
-            inst = q.scalar_one_or_none()
-            if inst is None:
-                new_inst = Instrument(**filtered)
-                s.add(new_inst)
-                try:
-                    s.commit()
-                except IntegrityError as exc:
-                    s.rollback()
-                    retry_ts, retry_kt = where_active(Instrument)
-                    q2 = s.execute(
-                        select(Instrument).where(
-                            Instrument.symbol_public_id == symbol_public_id,
-                            Instrument.exchange == exchange,
-                            retry_ts,
-                            retry_kt,
-                        )
-                    )
-                    inst = q2.scalar_one_or_none()
-                    if inst is None:
-                        raise exc
-                    return int(inst.id)
-                s.refresh(new_inst)
-                return int(new_inst.id)
-            payload_same = (
-                inst.symbol == filtered.get("symbol")
-                and inst.base == filtered.get("base")
-                and inst.quote == filtered.get("quote")
-            )
-            if payload_same:
-                return int(inst.id)
-            new_row = close_and_insert_sync(
-                s,
-                Instrument,
-                [
-                    Instrument.symbol_public_id == symbol_public_id,
-                    Instrument.exchange == exchange,
-                ],
-                filtered,
-                bus_time,
-            )
-            s.commit()
-            s.refresh(new_row)
-            return int(new_row.id)
-
-        return await self._run_sync(_do)
-
-    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        """Close-old + insert-new (SCD Type 2) for candle rows via sync thread."""
-        if not rows:
-            return 0
-        for r in rows:
-            if "public_id" not in r:
-                r["public_id"] = str(uuid7())
-            if "known_to" not in r:
-                r["known_to"] = KNOWN_TO_MAX
-            if "timestamp" not in r:
-                r["timestamp"] = datetime.now(UTC)
-
-        def _do(s: SyncSession) -> int:
-            count = 0
-            for r in rows:
-                bus_time = r["timestamp"]
-                existing = (
-                    s.execute(
-                        select(Candle).where(
-                            Candle.instrument_id == r["instrument_id"],
-                            Candle.timeframe == r["timeframe"],
-                            Candle.open_at == r["open_at"],
-                            Candle.timestamp <= bus_time,
-                            Candle.known_to > bus_time,
-                        )
-                    )
-                    .scalars()
-                    .first()
-                )
-                if existing:
-                    s.execute(
-                        update(Candle).where(Candle.id == existing.id).values(known_to=bus_time)
-                    )
-                    r["public_id"] = existing.public_id
-                s.add(Candle(**r))
-                count += 1
-            s.commit()
-            return count
-
-        return await self._run_sync(_do)
-
-    async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
-        """Insert trades via sync thread, skipping duplicates."""
-        if not rows:
-            return 0
-        return await self._run_sync(lambda s: self._sync_upsert_batch(s, Trade, rows))
-
-    async def insert_order(
-        self,
-        instrument_id: int,
-        client_order_id: str | None,
-        exchange_order_id: str | None,
-        created_at: datetime,
-        side: str,
-        order_type: str,
-        price: float | None,
-        size: float,
-        status: str,
-        time_in_force: str | None = None,
-    ) -> tuple[int, str]:
-        """Insert order record via sync thread."""
-
-        def _do(s: SyncSession) -> tuple[int, str]:
-            order = Order(
-                instrument_id=instrument_id,
-                client_order_id=client_order_id,
-                exchange_order_id=exchange_order_id,
-                created_at=created_at,
-                updated_at=None,
-                timestamp=datetime.now(UTC),
-                side=side,
-                order_type=order_type,
-                price=price,
-                size=size,
-                filled_size=0.0,
-                average_price=None,
-                status=status,
-                time_in_force=time_in_force,
-                error=None,
-            )
-            s.add(order)
-            s.commit()
-            s.refresh(order)
-            return (order.id, order.public_id)
-
-        return await self._run_sync(_do)
-
-    async def update_order(
-        self,
-        order_id: int,
-        status: str,
-        updated_at: datetime,
-        exchange_order_id: str | None = None,
-        error: str | None = None,
-        filled_size: float | None = None,
-        average_price: float | None = None,
-    ) -> int:
-        """Close old order version and insert new one (SCD Type 2) via sync thread."""
-
-        def _do(s: SyncSession) -> int:
-            now = datetime.now(UTC)
-            old_order = s.execute(select(Order).where(Order.id == order_id)).scalars().one()
-            s.execute(update(Order).where(Order.id == order_id).values(known_to=now))
-            new_order = Order(
-                public_id=old_order.public_id,
-                instrument_id=old_order.instrument_id,
-                client_order_id=old_order.client_order_id,
-                exchange_order_id=exchange_order_id or old_order.exchange_order_id,
-                created_at=old_order.created_at,
-                updated_at=updated_at,
-                timestamp=now,
-                side=old_order.side,
-                order_type=old_order.order_type,
-                price=old_order.price,
-                size=old_order.size,
-                filled_size=filled_size if filled_size is not None else old_order.filled_size,
-                average_price=(
-                    average_price if average_price is not None else old_order.average_price
-                ),
-                status=status,
-                time_in_force=old_order.time_in_force,
-                error=error,
-            )
-            s.add(new_order)
-            s.commit()
-            s.refresh(new_order)
-            return new_order.id
-
-        return await self._run_sync(_do)
-
-    async def insert_execution(
-        self,
-        order_id: int,
-        order_public_id: str,
-        timestamp: datetime,
-        side: str,
-        status: str,
-        price: float,
-        size: float,
-        fee: float,
-        fee_asset: str,
-        exec_id: str | None = None,
-        trade_id: str | None = None,
-        executed_at: datetime | None = None,
-    ) -> int:
-        """Insert execution record via sync thread."""
-
-        def _do(s: SyncSession) -> int:
-            execution = Execution(
-                order_id=order_id,
-                order_public_id=order_public_id,
-                exec_id=exec_id,
-                trade_id=trade_id,
-                timestamp=timestamp,
-                side=side,
-                status=status,
-                executed_at=executed_at,
-                price=price,
-                size=size,
-                fee=fee,
-                fee_asset=fee_asset,
-            )
-            s.add(execution)
-            s.commit()
-            s.refresh(execution)
-            return execution.id
-
-        return await self._run_sync(_do)
-
-    async def get_candles(
-        self,
-        instrument: str,
-        timeframe: str,
-        start: datetime,
-        end: datetime,
-        exchange: AllExchange,
-    ) -> list[dict[str, Any]]:
-        """Retrieve active candles via sync thread."""
-
-        def _do(s: SyncSession) -> list[dict[str, Any]]:
-            now = datetime.now(UTC)
-            i_ts, i_kt = where_active(Instrument, now)
-            q_inst = s.execute(
-                select(Instrument).where(
-                    Instrument.symbol == instrument,
-                    Instrument.exchange == exchange,
-                    i_ts,
-                    i_kt,
-                )
-            )
-            inst = q_inst.scalars().first()
-            if inst is None:
-                return []
-            q = s.execute(
-                select(
-                    Candle.open_at,
-                    Candle.timeframe,
-                    Candle.open,
-                    Candle.high,
-                    Candle.low,
-                    Candle.close,
-                    Candle.volume,
-                    Candle.vwap,
-                    Candle.trades,
-                )
-                .where(
-                    Candle.instrument_id == inst.id,
-                    Candle.timeframe == timeframe,
-                    Candle.open_at >= start,
-                    Candle.open_at <= end,
-                    Candle.timestamp <= now,
-                    Candle.known_to > now,
-                )
-                .order_by(Candle.open_at.asc())
-            )
-            rows = q.all()
-            return [
-                {
-                    "open_at": r.open_at,
-                    "timeframe": r.timeframe,
-                    "open": r.open,
-                    "high": r.high,
-                    "low": r.low,
-                    "close": r.close,
-                    "volume": r.volume,
-                    "vwap": r.vwap,
-                    "trades": r.trades,
-                }
-                for r in rows
-            ]
-
-        return await self._run_sync(_do)
-
-    async def get_trades(
-        self, instrument: str, start: datetime, end: datetime, exchange: AllExchange
-    ) -> list[dict[str, Any]]:
-        """Retrieve trades via sync thread."""
-
-        def _do(s: SyncSession) -> list[dict[str, Any]]:
-            i_ts, i_kt = where_active(Instrument)
-            q_inst = s.execute(
-                select(Instrument).where(
-                    Instrument.symbol == instrument,
-                    Instrument.exchange == exchange,
-                    i_ts,
-                    i_kt,
-                )
-            )
-            inst = q_inst.scalars().first()
-            if inst is None:
-                return []
-            q = s.execute(
-                select(
-                    Trade.timestamp,
-                    Trade.price,
-                    Trade.size,
-                    Trade.side,
-                    Trade.trade_id,
-                )
-                .where(
-                    Trade.instrument_id == inst.id,
-                    Trade.timestamp >= start,
-                    Trade.timestamp <= end,
-                    Trade.known_to > datetime.now(UTC),
-                )
-                .order_by(Trade.timestamp.asc())
-            )
-            rows = q.all()
-            return [
-                {
-                    "timestamp": r.timestamp,
-                    "price": r.price,
-                    "size": r.size,
-                    "side": r.side,
-                    "trade_id": r.trade_id,
-                }
-                for r in rows
-            ]
-
-        return await self._run_sync(_do)
-
-    async def get_market_snapshots(
-        self, exchange: AllExchange, symbols: list[str], start: datetime, end: datetime
-    ) -> list[dict[str, Any]]:
-        """Retrieve market snapshots via sync thread."""
-
-        def _do(s: SyncSession) -> list[dict[str, Any]]:
-            now = datetime.now(UTC)
-            q = s.execute(
-                select(
-                    MarketSnapshot.timestamp,
-                    MarketSnapshot.symbol,
-                    MarketSnapshot.exchange,
-                    MarketSnapshot.bid,
-                    MarketSnapshot.bid_volume,
-                    MarketSnapshot.ask,
-                    MarketSnapshot.ask_volume,
-                    MarketSnapshot.last_price,
-                    MarketSnapshot.volume_24h,
-                    MarketSnapshot.vwap_24h,
-                    MarketSnapshot.low_24h,
-                    MarketSnapshot.high_24h,
-                )
-                .where(
-                    MarketSnapshot.exchange == exchange,
-                    MarketSnapshot.symbol.in_(symbols),
-                    MarketSnapshot.timestamp >= start,
-                    MarketSnapshot.timestamp <= end,
-                    MarketSnapshot.known_to > now,
-                )
-                .order_by(MarketSnapshot.timestamp.asc())
-            )
-            rows = q.all()
-            return [
-                {
-                    "ts": r.timestamp,
-                    "symbol": r.symbol,
-                    "exchange": r.exchange,
-                    "bid": r.bid,
-                    "bid_volume": r.bid_volume,
-                    "ask": r.ask,
-                    "ask_volume": r.ask_volume,
-                    "last": r.last_price,
-                    "volume": r.volume_24h,
-                    "vwap": r.vwap_24h,
-                    "low": r.low_24h,
-                    "high": r.high_24h,
-                }
-                for r in rows
-            ]
-
-        return await self._run_sync(_do)
-
-
 class DatabaseRepository:
     """Simple synchronous repository for scripts and notebooks.
 
@@ -1623,12 +1038,18 @@ class DatabaseRepository:
 
     @staticmethod
     def _convert_to_sync_url(db_url: str) -> str:
+        """Convert an async database URL to its synchronous equivalent.
+
+        Args:
+            db_url: Possibly async database URL.
+
+        Returns:
+            Sync-compatible database URL.
+        """
         if db_url.startswith("sqlite+aiosqlite://"):
             return db_url.replace("sqlite+aiosqlite://", "sqlite://")
         if db_url.startswith("postgresql+asyncpg://"):
             return db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
-        if db_url.startswith(_MSSQL_PREFIX):
-            return db_url
         return db_url
 
     def get_session(self) -> SyncSession:

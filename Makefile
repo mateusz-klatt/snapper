@@ -158,19 +158,17 @@ system-deps:
 ifeq ($(OS),Windows_NT)
 	$(info On Windows, please manually install:)
 	$(info - Microsoft C++ Build Tools or Visual Studio)
-	$(info - ODBC Driver for SQL Server [if using Azure SQL])
 	$(info - curl [usually available in Windows 10+])
 else ifeq ($(shell uname),Darwin)
-	@echo "Detected macOS - installing unixodbc via brew"
-	@brew install unixodbc || true
+	@echo "Detected macOS"
 else ifeq ($(shell command -v apt-get 2>/dev/null),)
 	@echo "Detected RHEL/CentOS - using yum"
 	@sudo yum groupinstall -y "Development Tools"
-	@sudo yum install -y curl unixODBC-devel
+	@sudo yum install -y curl
 else
 	@echo "Detected Ubuntu/Debian - using apt-get"
 	@sudo apt-get update
-	@sudo apt-get install -y --no-install-recommends build-essential curl unixodbc-dev
+	@sudo apt-get install -y --no-install-recommends build-essential curl
 endif
 	@(corepack --version 2>/dev/null && echo "corepack already installed") || (echo "Installing corepack..." && sudo npm install -g --ignore-scripts corepack)
 	@corepack enable

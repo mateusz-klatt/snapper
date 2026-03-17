@@ -235,10 +235,7 @@ flowchart TB
 
 ## Database
 
-SQLite for development, PostgreSQL for production.  Azure SQL (MSSQL) is
-supported for background data ingestion only -- `MSSQLRepository.session()`
-is not implemented, so the API server, authentication, and process manager
-cannot run against MSSQL.
+SQLite for development, PostgreSQL for production.
 
 ### Schema
 

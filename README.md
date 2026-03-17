@@ -64,7 +64,7 @@ cp .env.example .env
 Edit `.env` file:
 
 ```bash
-# Database (SQLite dev, PostgreSQL prod, MSSQL ingestion-only)
+# Database (SQLite dev, PostgreSQL prod)
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
 # Settings encryption in database
