@@ -69,17 +69,17 @@ Sensitive data is stored encrypted in the `settings` table.
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `trading_instruments` | `["BTC-USD", "ETH-USD"]` | List of trading instruments |
-| `default_timeframe` | `1h` | Default candle timeframe |
-| `max_position_size` | `1.0` | Maximum position size |
-| `risk_per_trade` | `0.02` | Risk per trade (2%) |
+| `instruments` | `{"kraken": ["BTC-USD", ...], ...}` | Instruments per exchange (dict) |
+| `timeframes` | `["1m"]` | Candle timeframes (list) |
+| `risk_max_leverage` | `1.0` | Maximum leverage |
+| `risk_r_per_trade` | `0.005` | Risk per trade (0.5%) |
 
 ### Authentication
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `access_token_expire_minutes` | `15` | Access token lifetime |
-| `refresh_token_expire_days` | `7` | Refresh token lifetime |
+| `auth_access_token_expire_minutes` | `15` | Access token lifetime |
+| `auth_refresh_token_expire_days` | `7` | Refresh token lifetime |
 | `csrf_token_expire_minutes` | `60` | CSRF token lifetime |
 
 ## `.env.example` File

@@ -65,7 +65,7 @@ broker.stop()
 
 ## Topics
 
-Topic format: `{category}.{exchange}.{instrument}.{type}.{timeframe}`
+Topic format varies by category (see per-category tables below).
 
 ### Market Data
 
@@ -151,6 +151,7 @@ candle = CandleData(
     instrument="BTC-USD",
     exchange="kraken",
     timeframe="1h",
+    open_at=datetime(2026, 1, 18, 12, 0, tzinfo=UTC),
     open=42000.0,
     high=42500.0,
     low=41800.0,
@@ -222,6 +223,8 @@ order = OrderRequestData(
     order_type="limit",
     price=42000.0,
     quantity=0.1,
+    strategy_id="rsi_btc_1h",
+    mode="live",
 )
 ```
 
@@ -271,6 +274,8 @@ from snapper.messaging.schemas.data import HeartbeatData
 heartbeat = HeartbeatData(
     component="zmq_broker",
     status="healthy",
+    sequence=1,
+    lag_ms=5,
 )
 ```
 
@@ -312,7 +317,7 @@ subscriber.subscribe("market.kraken.BTC-USD.")
 
 while True:
     topic, payload = await subscriber.recv_multipart()
-    envelope = parse_message(payload)
+    envelope = parse_message(payload.decode())
     print(f"Received {envelope.type} on {topic}")
 ```
 

@@ -40,10 +40,13 @@ Executes the complete quality gate:
 2.  Linting (ruff)
 3.  Type checking (mypy)
 4.  Docstring compliance
-5.  No `#` comments
-6.  No pragma/noqa/ignore
-7.  Tests with 100% coverage
-8.  Frontend (ESLint, Prettier, dead code)
+5.  No `#` comments in Python
+6.  Canonical `__main__` guards
+7.  Empty `__init__.py` files
+8.  No forbidden temporal mutations
+9.  No pragma/noqa/ignore exclusions
+10. Tests with 100% coverage
+11. Frontend (ESLint, Prettier, dead code, tests with coverage)
 
 ### Individual Steps
 
