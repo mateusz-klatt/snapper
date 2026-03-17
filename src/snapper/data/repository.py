@@ -4,8 +4,6 @@ This module provides the Repository abstract base class and concrete
 implementations for different database backends:
 
 - **SQLAlchemyRepository**: Async repository for SQLite and PostgreSQL.
-- **SQLiteRepository**: Convenience subclass for SQLite databases.
-- **CloudRepository**: Convenience subclass for cloud databases.
 - **DatabaseRepository**: Simple sync repository for scripts/notebooks.
 
 Key Features:
