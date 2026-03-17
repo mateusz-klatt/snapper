@@ -615,6 +615,9 @@ class _SocketStub:
     def close(self) -> None:
         self.closed = True
 
+    def setsockopt(self, _option: int, _value: int) -> None:
+        """Set integer socket option."""
+
     def setsockopt_string(self, option: int, value: str) -> None:
         self.options.append((option, value))
 

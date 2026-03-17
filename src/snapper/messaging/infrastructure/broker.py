@@ -63,6 +63,8 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.messaging.infrastructure.validated_socket import HWM_BROKER
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.utils.logging import set_log_context
 
 
@@ -170,8 +172,10 @@ class ZmqBrokerProcess(RegisterableProcess):
             return
         self.context = zmq.asyncio.Context()
         self.xsub_socket = self.context.socket(zmq.XSUB)
+        apply_hwm(self.xsub_socket, rcvhwm=HWM_BROKER)
         self.xsub_socket.bind(self.xsub_endpoint)
         self.xpub_socket = self.context.socket(zmq.XPUB)
+        apply_hwm(self.xpub_socket, sndhwm=HWM_BROKER)
         self.xpub_socket.bind(self.xpub_endpoint)
         self.proxy_task = asyncio.create_task(self._proxy_loop())
         self.running = True
@@ -322,8 +326,10 @@ class ZmqBrokerThread:
             return
         self.context = zmq.Context()
         self.xsub_socket = self.context.socket(zmq.XSUB)
+        apply_hwm(self.xsub_socket, rcvhwm=HWM_BROKER)
         self.xsub_socket.bind(self.xsub_endpoint)
         self.xpub_socket = self.context.socket(zmq.XPUB)
+        apply_hwm(self.xpub_socket, sndhwm=HWM_BROKER)
         self.xpub_socket.bind(self.xpub_endpoint)
         self.proxy_thread = threading.Thread(target=self._proxy_loop, daemon=True)
         self.proxy_thread.start()

@@ -22,8 +22,10 @@ import zmq
 import zmq.asyncio
 
 from snapper.config.settings import get_bootstrap_settings
+from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SignalData
@@ -182,6 +184,7 @@ class BaseStrategy(ABC):
         if not self.publisher:
             assert self.zmq_context is not None, "ZMQ context must be initialized in start()"
             raw_pub_socket = self.zmq_context.socket(zmq.PUB)
+            apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
             broker_addr = _bootstrap_settings.zmq_broker_xsub
             logger.info(f"Strategy {self.name}: Connecting publisher to broker {broker_addr}")
             raw_pub_socket.connect(broker_addr)
@@ -303,6 +306,7 @@ class BaseStrategy(ABC):
             return
         assert self.zmq_context is not None, "ZMQ context must be initialized in start()"
         raw_sub_socket = self.zmq_context.socket(zmq.SUB)
+        apply_hwm(raw_sub_socket, rcvhwm=HWM_MARKET_DATA)
         self._connect_subscriber_socket(raw_sub_socket)
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
         for topic in self.inputs:

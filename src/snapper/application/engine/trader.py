@@ -38,8 +38,10 @@ from snapper.data.repository import get_repository
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
@@ -366,6 +368,7 @@ class TraderCoordinator(RegisterableProcess):
         """
         self.execution_context = zmq.asyncio.Context()
         raw_pub_socket = self.execution_context.socket(zmq.PUB)
+        apply_hwm(raw_pub_socket, sndhwm=HWM_ORDER_FLOW)
         raw_pub_socket.connect(self.settings.zmq_broker_xsub)
         self.execution_publisher = ValidatedPublisher(raw_pub_socket)
         logger.info(
@@ -383,6 +386,7 @@ class TraderCoordinator(RegisterableProcess):
         """
         self.zmq_context = zmq.asyncio.Context()
         raw_sub_socket = self.zmq_context.socket(zmq.SUB)
+        apply_hwm(raw_sub_socket, rcvhwm=HWM_ORDER_FLOW)
         broker_addr = _bootstrap_settings.zmq_broker_xpub
         logger.info(f"ZMQTrader: Connecting signal subscriber to broker {broker_addr}")
         raw_sub_socket.connect(broker_addr)

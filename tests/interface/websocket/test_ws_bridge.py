@@ -501,7 +501,8 @@ async def test_start_zmq_subscriber_success_creates_task(
         await bridge.start_zmq_subscriber(topic)
     await asyncio.gather(*tasks)
     mock_context.socket.assert_called_once()
-    mock_socket.setsockopt.assert_called_once()
+    assert mock_socket.setsockopt.call_count == 2
+    mock_socket.setsockopt.assert_any_call(zmq.RCVHWM, 5000)
     assert len(tasks) == 1
     assert topic in bridge.subscriber_tasks
     assert topic in bridge.zmq_subscribers
@@ -1636,9 +1637,9 @@ class TestZMQSubscriptionLoop:
             await bridge._start_zmq_subscription(topic)
         bridge.context.socket.assert_called_once_with(zmq.SUB)
         mock_socket.connect.assert_called_once_with(config.endpoint)
-        mock_socket.setsockopt.assert_called_once_with(
-            zmq.SUBSCRIBE, config.pattern.encode("utf-8")
-        )
+        assert mock_socket.setsockopt.call_count == 2
+        mock_socket.setsockopt.assert_any_call(zmq.RCVHWM, 5000)
+        mock_socket.setsockopt.assert_any_call(zmq.SUBSCRIBE, config.pattern.encode("utf-8"))
         assert bridge.zmq_subscribers[topic] == mock_socket
         assert bridge.subscriber_tasks[topic] == mock_task
         mock_create_task_func.assert_called_once()

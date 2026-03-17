@@ -23,6 +23,8 @@ from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
+from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.topics.builders import is_order_topic
 from snapper.messaging.topics.schemas import TOPIC_REGISTRY
 from snapper.utils.logging import set_log_context
@@ -213,6 +215,7 @@ class ZmqWebSocketBridgeService:
         try:
             assert self.context is not None, "ZMQ context must be initialized in start()"
             socket = self.context.socket(zmq.SUB)
+            apply_hwm(socket, rcvhwm=HWM_MARKET_DATA)
             socket.connect(topic_config.endpoint)
             socket.setsockopt(zmq.SUBSCRIBE, topic_config.pattern.encode("utf-8"))
             self.zmq_subscribers[topic] = socket
@@ -469,6 +472,7 @@ class ZmqWebSocketBridgeService:
         try:
             assert self.context is not None, "ZMQ context must be initialized in start()"
             socket = self.context.socket(zmq.SUB)
+            apply_hwm(socket, rcvhwm=HWM_MARKET_DATA)
             socket.connect(config.endpoint)
             socket.setsockopt(zmq.SUBSCRIBE, topic.encode())
             self.zmq_subscribers[topic] = socket

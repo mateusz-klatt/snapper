@@ -35,8 +35,10 @@ from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -122,6 +124,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         self.context = zmq.asyncio.Context()
         raw_sub_socket = self.context.socket(zmq.SUB)
+        apply_hwm(raw_sub_socket, rcvhwm=HWM_ORDER_FLOW)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
         commands_prefix = f"orders.commands.{exchange_name}."
@@ -133,6 +136,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"system.symbol_aliases, system.settings from {self.settings.zmq_broker_xpub}"
         )
         raw_pub_socket = self.context.socket(zmq.PUB)
+        apply_hwm(raw_pub_socket, sndhwm=HWM_ORDER_FLOW)
         raw_pub_socket.connect(self.settings.zmq_broker_xsub)
         self.publisher = ValidatedPublisher(raw_pub_socket)
         logger.info(

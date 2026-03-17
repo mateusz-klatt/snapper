@@ -58,7 +58,47 @@ from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import validate_subscription_pattern
 from snapper.messaging.topics.validation import validate_topic
 
-__all__ = ["ValidatedPublisher", "ValidatedSubscriber"]
+__all__ = [
+    "HWM_AUDIT",
+    "HWM_BROKER",
+    "HWM_MARKET_DATA",
+    "HWM_ORDER_FLOW",
+    "ValidatedPublisher",
+    "ValidatedSubscriber",
+    "apply_hwm",
+]
+
+HWM_ORDER_FLOW = 0
+
+HWM_BROKER = 10_000
+
+HWM_MARKET_DATA = 5_000
+
+HWM_AUDIT = 10_000
+
+
+def apply_hwm(
+    socket: zmq.asyncio.Socket | zmq.Socket[bytes],
+    *,
+    sndhwm: int | None = None,
+    rcvhwm: int | None = None,
+) -> None:
+    """Set send and/or receive high water marks on a ZMQ socket.
+
+    Must be called before ``connect()`` or ``bind()`` for the limits
+    to apply to all subsequent messages.
+
+    Args:
+        socket: Raw ZMQ socket (async or sync).
+        sndhwm: Send high water mark (outgoing queue depth).
+            0 means unlimited.  ``None`` leaves the libzmq default (1000).
+        rcvhwm: Receive high water mark (incoming queue depth).
+            0 means unlimited.  ``None`` leaves the libzmq default (1000).
+    """
+    if sndhwm is not None:
+        socket.setsockopt(zmq.SNDHWM, sndhwm)
+    if rcvhwm is not None:
+        socket.setsockopt(zmq.RCVHWM, rcvhwm)
 
 
 class ValidatedPublisher:

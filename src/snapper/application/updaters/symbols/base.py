@@ -35,7 +35,9 @@ from snapper.data.repository import close_and_insert_sync
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.utils.logging import set_log_context
 
@@ -90,6 +92,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         self.context = zmq.asyncio.Context()
         raw_pub_socket = self.context.socket(zmq.PUB)
+        apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
         raw_pub_socket.connect(self.settings.zmq_broker_xsub)
         self.publisher = ValidatedPublisher(raw_pub_socket)
         logger.info(f"SymbolUpdater: Connected to broker {self.settings.zmq_broker_xsub}")

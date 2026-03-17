@@ -6,8 +6,13 @@ from unittest.mock import MagicMock
 import pytest
 import zmq
 
+from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
+from snapper.messaging.infrastructure.validated_socket import HWM_BROKER
+from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
+from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.topics.validation import TopicValidationError
 
 
@@ -233,3 +238,105 @@ class TestValidatedSubscriber:
         subscriber = ValidatedSubscriber(mock_socket)
         subscriber.__del__()
         mock_socket.close.assert_called_once()
+
+
+class TestHwmConstants:
+    """Tests for ZMQ high water mark constants."""
+
+    def test_order_flow_is_unlimited(self) -> None:
+        """Test order flow HWM is zero (unlimited).
+
+        Given: HWM_ORDER_FLOW constant,
+        When: Checked,
+        Then: Value is 0 meaning unlimited buffering.
+        """
+        assert HWM_ORDER_FLOW == 0
+
+    def test_broker_hwm_is_generous(self) -> None:
+        """Test broker HWM is larger than default.
+
+        Given: HWM_BROKER constant,
+        When: Compared to libzmq default of 1000,
+        Then: Value is significantly higher.
+        """
+        assert HWM_BROKER == 10_000
+
+    def test_market_data_hwm_above_default(self) -> None:
+        """Test market data HWM exceeds libzmq default.
+
+        Given: HWM_MARKET_DATA constant,
+        When: Compared to default,
+        Then: Value provides burst tolerance.
+        """
+        assert HWM_MARKET_DATA == 5_000
+
+    def test_audit_hwm_is_generous(self) -> None:
+        """Test audit HWM minimizes message loss.
+
+        Given: HWM_AUDIT constant,
+        When: Checked,
+        Then: Value is high to preserve audit trail.
+        """
+        assert HWM_AUDIT == 10_000
+
+
+class TestApplyHwm:
+    """Tests for apply_hwm helper function."""
+
+    def test_apply_sndhwm_only(self) -> None:
+        """Test setting only send high water mark.
+
+        Given: A mock socket,
+        When: apply_hwm called with sndhwm only,
+        Then: Only SNDHWM set on socket.
+        """
+        sock = MagicMock()
+        apply_hwm(sock, sndhwm=5000)
+        sock.setsockopt.assert_called_once_with(zmq.SNDHWM, 5000)
+
+    def test_apply_rcvhwm_only(self) -> None:
+        """Test setting only receive high water mark.
+
+        Given: A mock socket,
+        When: apply_hwm called with rcvhwm only,
+        Then: Only RCVHWM set on socket.
+        """
+        sock = MagicMock()
+        apply_hwm(sock, rcvhwm=10000)
+        sock.setsockopt.assert_called_once_with(zmq.RCVHWM, 10000)
+
+    def test_apply_both_hwm(self) -> None:
+        """Test setting both send and receive high water marks.
+
+        Given: A mock socket,
+        When: apply_hwm called with both sndhwm and rcvhwm,
+        Then: Both options set on socket.
+        """
+        sock = MagicMock()
+        apply_hwm(sock, sndhwm=5000, rcvhwm=10000)
+        assert sock.setsockopt.call_count == 2
+        sock.setsockopt.assert_any_call(zmq.SNDHWM, 5000)
+        sock.setsockopt.assert_any_call(zmq.RCVHWM, 10000)
+
+    def test_apply_no_args_is_noop(self) -> None:
+        """Test apply_hwm with no arguments does nothing.
+
+        Given: A mock socket,
+        When: apply_hwm called without sndhwm or rcvhwm,
+        Then: No setsockopt calls made.
+        """
+        sock = MagicMock()
+        apply_hwm(sock)
+        sock.setsockopt.assert_not_called()
+
+    def test_apply_zero_means_unlimited(self) -> None:
+        """Test zero value means unlimited buffering.
+
+        Given: A mock socket,
+        When: apply_hwm called with HWM_ORDER_FLOW (0),
+        Then: Socket option set to 0.
+        """
+        sock = MagicMock()
+        apply_hwm(sock, sndhwm=HWM_ORDER_FLOW, rcvhwm=HWM_ORDER_FLOW)
+        sock.setsockopt.assert_any_call(zmq.SNDHWM, 0)
+        sock.setsockopt.assert_any_call(zmq.RCVHWM, 0)

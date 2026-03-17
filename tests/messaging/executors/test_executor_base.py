@@ -113,7 +113,12 @@ async def test_start_with_websocket_client(monkeypatch: pytest.MonkeyPatch) -> N
 
     class DummySock(SimpleNamespace):
         def __init__(self) -> None:
-            super().__init__(connect=lambda *_: None, close=lambda: None, term=lambda: None)
+            super().__init__(
+                connect=lambda *_: None,
+                close=lambda: None,
+                term=lambda: None,
+                setsockopt=lambda *_: None,
+            )
 
     class DummyCtx:
         def socket(self, *_args: Any) -> DummySock:
@@ -171,7 +176,12 @@ async def test_start_without_websocket_client(monkeypatch: pytest.MonkeyPatch) -
 
     class DummySock(SimpleNamespace):
         def __init__(self) -> None:
-            super().__init__(connect=lambda *_: None, close=lambda: None, term=lambda: None)
+            super().__init__(
+                connect=lambda *_: None,
+                close=lambda: None,
+                term=lambda: None,
+                setsockopt=lambda *_: None,
+            )
 
     class DummyCtx:
         def socket(self, *_args: Any) -> DummySock:

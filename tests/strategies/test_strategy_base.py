@@ -484,6 +484,9 @@ class DummySubSocket:
         """Connect to the specified address."""
         self.addr = addr
 
+    def setsockopt(self, _option: int, _value: int) -> None:
+        """Set integer socket option."""
+
     def setsockopt_string(self, _option: Any, pattern: str) -> None:
         """Set socket option as string."""
         self.subscribed.append(pattern)

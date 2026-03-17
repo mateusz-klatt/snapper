@@ -62,6 +62,8 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
+from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 
 SUBSCRIBE_ALL = b""
 
@@ -198,6 +200,7 @@ class ZmqMessageLogger(RegisterableProcess):
         self.running = True
         self.context = zmq.asyncio.Context()
         self.subscriber = self.context.socket(zmq.SUB)
+        apply_hwm(self.subscriber, rcvhwm=HWM_AUDIT)
         self.subscriber.connect(self.broker_xpub)
         self.subscriber.setsockopt(zmq.SUBSCRIBE, SUBSCRIBE_ALL)
         try:

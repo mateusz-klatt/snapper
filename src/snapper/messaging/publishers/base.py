@@ -31,8 +31,10 @@ from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -147,6 +149,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             )
         self.context = zmq.asyncio.Context()
         raw_pub_socket = self.context.socket(zmq.PUB)
+        apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
         raw_pub_socket.connect(self.pub_endpoint)
         self.publisher = ValidatedPublisher(raw_pub_socket)
         logger.info(f"{process_name}: Connected to broker: {self.pub_endpoint}")

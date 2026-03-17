@@ -28,7 +28,9 @@ from snapper.data.repository import where_active
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import force_encrypt_if_cleartext
+from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import SettingChangedData
 
 
@@ -201,6 +203,7 @@ class SettingsService:
         """Set up ZMQ publisher for broadcasting changes."""
         self._zmq_context = zmq.asyncio.Context()
         raw_pub_socket = self._zmq_context.socket(zmq.PUB)
+        apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
         raw_pub_socket.connect(self.zmq_broker_xpub)
         self._publisher = ValidatedPublisher(raw_pub_socket)
         logger.info(f"Settings service connected to ZMQ broker: {self.zmq_broker_xpub}")
