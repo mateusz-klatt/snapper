@@ -959,6 +959,12 @@ def get_repository(db_url: str) -> Repository:
     """
     if db_url not in _repository_cache:
         if db_url.startswith(_MSSQL_PREFIX):
+            logger.warning(
+                "MSSQLRepository selected — session() is not implemented. "
+                "Background writers work, but the API server, auth, and "
+                "settings endpoints will raise NotImplementedError. "
+                "See MSSQLRepository docstring for details."
+            )
             _repository_cache[db_url] = MSSQLRepository(db_url)
         else:
             _repository_cache[db_url] = SQLAlchemyRepository(db_url)
@@ -1026,9 +1032,26 @@ class MSSQLRepository(Repository):
     """Microsoft SQL Server repository using sync driver with async wrapper.
 
     Uses pyodbc driver with synchronous SQLAlchemy engine, wrapping all
-    operations in asyncio.to_thread() for async compatibility.
+    operations in ``asyncio.to_thread()`` for async compatibility.
 
     Automatically configures ODBC driver settings for Azure SQL.
+
+    Limitations:
+        The ``session()`` context manager is **not implemented**.  All named
+        CRUD methods (``upsert_candles``, ``insert_order``, etc.) work via
+        ``_run_sync``, so background writers (publishers, backfill) function
+        correctly.  However, the API server, authentication, settings, and
+        process-manager paths all require ``session()`` for arbitrary async
+        queries and will raise ``NotImplementedError`` at runtime.
+
+        To use MSSQL as the primary database you would need either:
+
+        - an async MSSQL driver (e.g. ``aioodbc``) behind an
+          ``async_sessionmaker``, or
+        - migration of all ``session()`` callers to named repository methods.
+
+        Until then, MSSQL is supported only for background data ingestion,
+        not as the full server runtime backend.
 
     Attributes:
         db_url: Processed connection URL with driver settings.
