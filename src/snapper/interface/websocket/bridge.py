@@ -504,6 +504,9 @@ class ZmqWebSocketBridgeService:
     ) -> None:
         """Handle incoming ZMQ messages for a topic.
 
+        Routes through ``_process_zmq_message`` which applies backpressure,
+        pending-count tracking, and metrics via ``_forward_to_clients``.
+
         Args:
             topic: The topic being handled.
             socket: The ZMQ socket to receive from.
@@ -511,11 +514,9 @@ class ZmqWebSocketBridgeService:
         """
         try:
             while True:
-                raw_topic, raw_data = await socket.recv_multipart()
+                parts = await socket.recv_multipart()
                 try:
-                    topic_str = raw_topic.decode()
-                    message_str = raw_data.decode()
-                    await self._forward_to_websockets(topic, topic_str, message_str)
+                    await self._process_zmq_message(topic, parts)
                 except Exception as e:
                     logger.error(f"Error processing ZMQ message for {topic}: {e}")
         except asyncio.CancelledError:
@@ -523,56 +524,6 @@ class ZmqWebSocketBridgeService:
             raise
         except Exception as e:
             logger.error(f"ZMQ message handler for {topic} failed: {e}")
-
-    async def _forward_to_websockets(self, topic: str, _zmq_topic: str, message_str: str) -> None:
-        """Forward a message to subscribed WebSockets with throttling.
-
-        Args:
-            topic: The subscription topic.
-            _zmq_topic: The actual ZMQ topic (unused; reserved for future routing).
-            message_str: The message payload string.
-        """
-        if topic not in self.topic_subscriptions:
-            return
-        current_time = time.time()
-        disconnected: list[TopicSubscriptionModel] = []
-        for subscription in self.topic_subscriptions[topic].copy():
-            if self._is_throttled(subscription, current_time, topic):
-                continue
-            try:
-                async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
-                    await subscription.websocket.send_text(message_str)
-                subscription.last_sent = current_time
-            except TimeoutError:
-                if topic in self.topic_metrics:
-                    self.topic_metrics[topic].timeout_count += 1
-                logger.warning(
-                    f"Send timeout for client {subscription.client_id} on topic {topic}, "
-                    f"disconnecting slow client"
-                )
-                disconnected.append(subscription)
-            except Exception:
-                disconnected.append(subscription)
-        await self._cleanup_disconnected_subscribers(topic, disconnected)
-
-    async def _cleanup_disconnected_subscribers(
-        self, topic: str, disconnected: list[TopicSubscriptionModel]
-    ) -> None:
-        """Remove disconnected subscribers and clean up metrics.
-
-        Args:
-            topic: The topic to clean up subscribers for.
-            disconnected: List of subscriptions to remove.
-        """
-        for sub in disconnected:
-            if sub in self.topic_subscriptions.get(topic, []):
-                self.topic_subscriptions[topic].remove(sub)
-            if topic in self.topic_metrics:
-                self.topic_metrics[topic].active_subscribers = max(
-                    0, self.topic_metrics[topic].active_subscribers - 1
-                )
-            with contextlib.suppress(Exception):
-                await self.disconnect_client(sub.websocket)
 
     async def subscribe_websocket(
         self, websocket: WebSocket, topic: str, throttle_ms: int = 100

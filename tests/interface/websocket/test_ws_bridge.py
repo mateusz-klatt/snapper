@@ -558,10 +558,10 @@ async def test_unsubscribe_retains_topic_when_other_clients_present(
 
 
 @pytest.mark.asyncio
-async def test_forward_to_websockets_throttled_skip(
+async def test_forward_to_clients_throttled_skip(
     bridge: ZmqWebSocketBridgeService,
 ) -> None:
-    """Forward to websockets skips throttled messages.
+    """Forward to clients skips throttled messages.
 
     Given: A subscription with active throttle window,
     When: A message is forwarded,
@@ -578,7 +578,7 @@ async def test_forward_to_websockets_throttled_skip(
     bridge.topic_subscriptions[topic] = [subscription]
     bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
     with patch("snapper.interface.websocket.bridge.time.time", return_value=123.0):
-        await bridge._forward_to_websockets(topic, topic, _make_candle_json())
+        await bridge._forward_to_clients(topic, topic, _make_candle_json())
     websocket.send_text.assert_not_awaited()
     assert bridge.topic_metrics[topic].active_subscribers == 1
 
@@ -603,32 +603,31 @@ async def test_handle_zmq_messages_forwards_raw_json(
             asyncio.CancelledError(),
         ]
     )
-    forward_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    process_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
-    async def forward_stub(*args: object, **kwargs: object) -> None:
-        forward_calls.append((args, kwargs))
+    async def process_stub(*args: object, **kwargs: object) -> None:
+        process_calls.append((args, kwargs))
 
     with (
-        patch.object(bridge, "_forward_to_websockets", new=forward_stub),
+        patch.object(bridge, "_process_zmq_message", new=process_stub),
         pytest.raises(asyncio.CancelledError),
     ):
         await bridge._handle_zmq_messages(topic, mock_socket, config)
-    assert len(forward_calls) == 1
-    args = forward_calls[0][0]
+    assert len(process_calls) == 1
+    args = process_calls[0][0]
     assert args[0] == topic
-    assert args[1] == topic
-    assert args[2] == raw_json
+    assert args[1] == [topic.encode(), raw_json.encode()]
 
 
 @pytest.mark.asyncio
-async def test_forward_to_websockets_timeout_disconnects(
+async def test_forward_to_clients_timeout_disconnects_inline(
     bridge: ZmqWebSocketBridgeService,
 ) -> None:
-    """Forward to websockets disconnects on timeout.
+    """Forward to clients disconnects on timeout inline.
 
     Given: A subscription with a slow websocket,
     When: Send times out,
-    Then: The client is disconnected and metrics are updated.
+    Then: The client is disconnected and timeout metric is incremented.
     """
     topic = "market.candles."
     websocket = AsyncMock()
@@ -642,11 +641,9 @@ async def test_forward_to_websockets_timeout_disconnects(
     bridge.topic_subscriptions[topic] = [subscription]
     bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
     with patch.object(bridge, "disconnect_client", new_callable=AsyncMock) as disconnect_mock:
-        await bridge._forward_to_websockets(topic, topic, _make_candle_json())
+        await bridge._forward_to_clients(topic, topic, _make_candle_json())
     disconnect_mock.assert_awaited_once_with(websocket)
     assert bridge.topic_metrics[topic].timeout_count == 1
-    assert bridge.topic_metrics[topic].active_subscribers == 0
-    assert subscription not in bridge.topic_subscriptions.get(topic, [])
 
 
 class TestZMQBridgeRemainingCoverage:
@@ -697,7 +694,7 @@ class TestZMQBridgeRemainingCoverage:
         }
         data_str = json.dumps(data_dict)
         data_bytes = data_str.encode()
-        with patch.object(bridge, "_forward_to_websockets", new_callable=AsyncMock) as mock_forward:
+        with patch.object(bridge, "_process_zmq_message", new_callable=AsyncMock) as mock_process:
             call_count = 0
 
             async def mock_recv_side_effect() -> list[bytes]:
@@ -712,11 +709,10 @@ class TestZMQBridgeRemainingCoverage:
             handle_messages = bridge._handle_zmq_messages
             with contextlib.suppress(asyncio.CancelledError):
                 await handle_messages("test.topic", mock_socket, config)
-            mock_forward.assert_called_once()
-            args = mock_forward.call_args[0]
+            mock_process.assert_called_once()
+            args = mock_process.call_args[0]
             assert args[0] == "test.topic"
-            assert args[1] == "test.topic"
-            assert args[2] == data_str
+            assert args[1] == [topic_bytes, data_bytes]
 
     @pytest.mark.asyncio
     async def test_handle_zmq_messages_general_exception(
@@ -739,7 +735,7 @@ class TestZMQBridgeRemainingCoverage:
         await handle_messages("test.topic", mock_socket, config)
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_no_subscriptions(
+    async def test_forward_to_clients_no_subscriptions(
         self, bridge: ZmqWebSocketBridgeService
     ) -> None:
         """Verify forwarding handles missing subscriptions.
@@ -748,12 +744,11 @@ class TestZMQBridgeRemainingCoverage:
         When: Forwarding a message,
         Then: Method returns without error.
         """
-        forward_func = bridge._forward_to_websockets
         test_data_str = '{"type": "test", "data": "value"}'
-        await forward_func("nonexistent", "test.topic", test_data_str)
+        await bridge._forward_to_clients("nonexistent", "test.topic", test_data_str)
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_with_throttling(
+    async def test_forward_to_clients_with_throttling(
         self, bridge: ZmqWebSocketBridgeService, mock_websocket: MagicMock
     ) -> None:
         """Verify throttling prevents rapid message sending.
@@ -771,7 +766,6 @@ class TestZMQBridgeRemainingCoverage:
         bridge.topic_subscriptions[topic] = [subscription]
         with patch("time.time", return_value=1000.5):
             mock_websocket.send_text = AsyncMock()
-            forward_func = bridge._forward_to_websockets
             test_data_str = json.dumps(
                 {
                     "type": "candle",
@@ -786,11 +780,11 @@ class TestZMQBridgeRemainingCoverage:
                     "timestamp": "2024-01-01T00:00:00+00:00",
                 }
             )
-            await forward_func(topic, topic, test_data_str)
+            await bridge._forward_to_clients(topic, topic, test_data_str)
             mock_websocket.send_text.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_send_success(
+    async def test_forward_to_clients_send_success(
         self, bridge: ZmqWebSocketBridgeService, mock_websocket: MagicMock
     ) -> None:
         """Verify successful message forwarding.
@@ -805,7 +799,6 @@ class TestZMQBridgeRemainingCoverage:
         )
         bridge.topic_subscriptions[topic] = [subscription]
         mock_websocket.send_text = AsyncMock()
-        forward_func = bridge._forward_to_websockets
         test_data_str = json.dumps(
             {
                 "type": "candle",
@@ -820,18 +813,18 @@ class TestZMQBridgeRemainingCoverage:
                 "timestamp": "2024-01-01T00:00:00+00:00",
             }
         )
-        await forward_func(topic, topic, test_data_str)
+        await bridge._forward_to_clients(topic, topic, test_data_str)
         mock_websocket.send_text.assert_called_once_with(test_data_str)
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_send_failure(
+    async def test_forward_to_clients_send_failure_disconnects(
         self, bridge: ZmqWebSocketBridgeService, mock_websocket: MagicMock
     ) -> None:
-        """Verify send failure removes subscription.
+        """Verify send failure disconnects client.
 
         Given: A subscription with failing WebSocket,
         When: Forwarding a message,
-        Then: Subscription is removed from topic.
+        Then: Client is disconnected via disconnect_client.
         """
         topic = "market.kraken.BTC-USD.candles"
         subscription = TopicSubscriptionModel(
@@ -839,7 +832,7 @@ class TestZMQBridgeRemainingCoverage:
         )
         bridge.topic_subscriptions[topic] = [subscription]
         mock_websocket.send_text = AsyncMock(side_effect=Exception("Send failed"))
-        forward_func = bridge._forward_to_websockets
+        bridge.disconnect_client = AsyncMock()
         test_data_str = json.dumps(
             {
                 "type": "candle",
@@ -854,18 +847,18 @@ class TestZMQBridgeRemainingCoverage:
                 "timestamp": "2024-01-01T00:00:00+00:00",
             }
         )
-        await forward_func(topic, topic, test_data_str)
-        assert len(bridge.topic_subscriptions[topic]) == 0
+        await bridge._forward_to_clients(topic, topic, test_data_str)
+        bridge.disconnect_client.assert_awaited_once_with(mock_websocket)
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_send_timeout(
+    async def test_forward_to_clients_send_timeout_disconnects(
         self, bridge: ZmqWebSocketBridgeService, mock_websocket: MagicMock
     ) -> None:
-        """Verify timeout handling removes subscription.
+        """Verify timeout handling disconnects client.
 
         Given: A subscription with WebSocket that times out,
         When: Forwarding a message,
-        Then: Subscription removed and timeout count updated.
+        Then: Client is disconnected and timeout count updated.
         """
         topic = "market.kraken.BTC-USD.candles"
         subscription = TopicSubscriptionModel(
@@ -874,8 +867,7 @@ class TestZMQBridgeRemainingCoverage:
         bridge.topic_subscriptions[topic] = [subscription]
         bridge.topic_metrics[topic] = TopicMetricsModel()
         mock_websocket.send_text = AsyncMock(side_effect=TimeoutError())
-
-        forward_func = bridge._forward_to_websockets
+        bridge.disconnect_client = AsyncMock()
         test_data_str = json.dumps(
             {
                 "type": "candle",
@@ -890,8 +882,8 @@ class TestZMQBridgeRemainingCoverage:
                 "timestamp": "2024-01-01T00:00:00+00:00",
             }
         )
-        await forward_func(topic, topic, test_data_str)
-        assert len(bridge.topic_subscriptions[topic]) == 0
+        await bridge._forward_to_clients(topic, topic, test_data_str)
+        bridge.disconnect_client.assert_awaited_once_with(mock_websocket)
         assert bridge.topic_metrics[topic].timeout_count == 1
 
 
@@ -2098,11 +2090,11 @@ class TestZMQBridgeIntegration:
 
     @pytest.mark.asyncio
     async def test_websocket_error_handling(self, zmq_bridge: ZmqWebSocketBridgeService) -> None:
-        """Verify WebSocket send errors remove broken subscriptions.
+        """Verify WebSocket send errors disconnect broken clients.
 
         Given: A subscribed client that raises exception on send,
         When: Forwarding a message to the client,
-        Then: Subscription is removed after error.
+        Then: Client is disconnected via disconnect_client.
         """
         mock_websocket = AsyncMock(spec=WebSocket)
         topic = "market.candles"
@@ -2124,12 +2116,9 @@ class TestZMQBridgeIntegration:
                 "timestamp": "2024-01-01T00:00:00+00:00",
             }
         )
-        forward_method = zmq_bridge._forward_to_websockets
-        await forward_method(topic, "market.BTCUSD.candles", valid_candle_payload)
-        assert (
-            topic not in zmq_bridge.topic_subscriptions
-            or len(zmq_bridge.topic_subscriptions[topic]) == 0
-        )
+        zmq_bridge.disconnect_client = AsyncMock()
+        await zmq_bridge._forward_to_clients(topic, "market.BTCUSD.candles", valid_candle_payload)
+        zmq_bridge.disconnect_client.assert_awaited_once_with(mock_websocket)
 
 
 class TestZMQBridgeHelperMethods:
@@ -2813,9 +2802,7 @@ class TestZMQBridgeAdditionalCoverage:
         mock_socket.close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_success(
-        self, zmq_bridge: ZmqWebSocketBridgeService
-    ) -> None:
+    async def test_forward_to_clients_success(self, zmq_bridge: ZmqWebSocketBridgeService) -> None:
         """Verify message forwarded to all subscribed WebSockets.
 
         Given: Multiple WebSockets subscribed to a topic,
@@ -2831,12 +2818,12 @@ class TestZMQBridgeAdditionalCoverage:
             TopicSubscriptionModel(websocket=mock_ws1),
             TopicSubscriptionModel(websocket=mock_ws2),
         ]
-        await zmq_bridge._forward_to_websockets(topic, zmq_topic, message_str)
+        await zmq_bridge._forward_to_clients(topic, zmq_topic, message_str)
         for ws in [mock_ws1, mock_ws2]:
             ws.send_text.assert_called_once_with(message_str)
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_throttled(
+    async def test_forward_to_clients_throttled(
         self, zmq_bridge: ZmqWebSocketBridgeService
     ) -> None:
         """Verify throttled subscriptions skip message.
@@ -2853,18 +2840,18 @@ class TestZMQBridgeAdditionalCoverage:
         subscription = TopicSubscriptionModel(websocket=mock_websocket, throttle_ms=throttle_ms)
         subscription.last_sent = time.time()
         zmq_bridge.topic_subscriptions[topic] = [subscription]
-        await zmq_bridge._forward_to_websockets(topic, zmq_topic, message_str)
+        await zmq_bridge._forward_to_clients(topic, zmq_topic, message_str)
         mock_websocket.send_text.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_error_handling(
+    async def test_forward_to_clients_error_handling_disconnects(
         self, zmq_bridge: ZmqWebSocketBridgeService
     ) -> None:
-        """Verify error handling removes failed subscription.
+        """Verify error handling disconnects failed client.
 
         Given: A subscription with WebSocket that fails on send,
         When: Forwarding a message,
-        Then: Subscription is removed from topic subscriptions.
+        Then: Client is disconnected via disconnect_client.
         """
         topic = "market.kraken.BTC-USD.candles"
         zmq_topic = "market.kraken.BTC-USD.candles.1m"
@@ -2873,10 +2860,10 @@ class TestZMQBridgeAdditionalCoverage:
         mock_websocket = AsyncMock(spec=WebSocket)
         subscription = TopicSubscriptionModel(websocket=mock_websocket, throttle_ms=throttle_ms)
         zmq_bridge.topic_subscriptions[topic] = [subscription]
-        zmq_bridge.topic_subscriptions[topic] = [subscription]
         mock_websocket.send_text.side_effect = Exception("Send failed")
-        await zmq_bridge._forward_to_websockets(topic, zmq_topic, message_str)
-        assert subscription not in zmq_bridge.topic_subscriptions[topic]
+        zmq_bridge.disconnect_client = AsyncMock()
+        await zmq_bridge._forward_to_clients(topic, zmq_topic, message_str)
+        zmq_bridge.disconnect_client.assert_awaited_once_with(mock_websocket)
 
     @pytest.mark.asyncio
     async def test_client_subscription_edge_cases(

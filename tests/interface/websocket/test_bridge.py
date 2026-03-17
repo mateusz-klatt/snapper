@@ -359,12 +359,12 @@ class TestBridgeMissingBranches:
         assert "market.ticks" not in bridge.zmq_subscribers
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_timeout_with_metrics(self) -> None:
-        """Forward to websockets increments timeout count.
+    async def test_forward_to_clients_timeout_increments_count(self) -> None:
+        """Forward to clients increments timeout count on TimeoutError.
 
-        Given: A subscription with a websocket that times out,
+        Given: A subscription with a websocket that raises TimeoutError,
         When: Forwarding a message,
-        Then: Timeout count is incremented.
+        Then: Timeout count is incremented in topic metrics.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         ws: Any = DummyWebSocket()
@@ -383,16 +383,16 @@ class TestBridgeMissingBranches:
                 "timestamp": datetime.now(tz=UTC).isoformat(),
             }
         )
-        await bridge._forward_to_websockets(topic, "market.ticks.btc", tick_data_str)
+        await bridge._forward_to_clients(topic, "market.ticks.btc", tick_data_str)
         assert bridge.topic_metrics[topic].timeout_count == 1
 
     @pytest.mark.asyncio
-    async def test_forward_to_websockets_disconnect_updates_metrics(self) -> None:
-        """Forward to websockets updates metrics on disconnect.
+    async def test_forward_to_clients_disconnect_on_send_error(self) -> None:
+        """Forward to clients disconnects client on send error.
 
         Given: A subscription with a failing websocket,
         When: Forwarding a message and send fails,
-        Then: Active subscribers count is decremented.
+        Then: Client is disconnected via disconnect_client.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         ws: Any = DummyWebSocket()
@@ -412,8 +412,8 @@ class TestBridgeMissingBranches:
                 "timestamp": datetime.now(tz=UTC).isoformat(),
             }
         )
-        await bridge._forward_to_websockets(topic, "market.ticks.btc", tick_data_str)
-        assert bridge.topic_metrics[topic].active_subscribers == 0
+        await bridge._forward_to_clients(topic, "market.ticks.btc", tick_data_str)
+        bridge.disconnect_client.assert_awaited_once_with(ws)
 
     @pytest.mark.asyncio
     async def test_unsubscribe_websocket_updates_metrics(self) -> None:
@@ -589,8 +589,8 @@ class TestHandleZmqMessagesCoverage:
             )
 
 
-class TestForwardToWebsocketsTimeoutCoverage:
-    """Tests for WebSocket send timeout handling in forward_to_websockets."""
+class TestForwardToClientsTimeoutCoverage:
+    """Tests for WebSocket send timeout handling in _forward_to_clients."""
 
     @pytest.mark.asyncio
     async def test_send_timeout_disconnects_slow_client(self) -> None:
@@ -609,7 +609,7 @@ class TestForwardToWebsocketsTimeoutCoverage:
         bridge.topic_metrics[topic] = TopicMetricsModel()
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
-        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"candle"}')
+        await bridge._forward_to_clients(topic, "market.candles.BTC", '{"type":"candle"}')
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
         assert bridge.topic_metrics[topic].timeout_count == 1
 
@@ -629,41 +629,19 @@ class TestForwardToWebsocketsTimeoutCoverage:
         bridge.topic_subscriptions[topic] = [sub]
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
-        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"candle"}')
+        await bridge._forward_to_clients(topic, "market.candles.BTC", '{"type":"candle"}')
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
 
     @pytest.mark.asyncio
-    async def test_cleanup_when_sub_not_in_list(self) -> None:
-        """Verify cleanup handles concurrent subscription list modification.
+    async def test_disconnect_during_iteration(self) -> None:
+        """Verify disconnect handles concurrent subscription list modification.
 
         Given: Multiple subscriptions with timeouts,
         When: Disconnect modifies subscription list during iteration,
-        Then: Cleanup handles concurrent modification gracefully.
+        Then: Iteration over snapshot copy handles modification gracefully.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         topic = "market.candles"
-        mock_ws = AsyncMock()
-        mock_ws.send_text = AsyncMock(side_effect=TimeoutError())
-        sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="test")
-        bridge.topic_subscriptions[topic] = [sub]
-        bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
-        bridge.client_subscriptions[mock_ws] = {topic}
-        original_remove = list.remove
-
-        def _remove_that_clears_first(self: list[Any], item: Any) -> None:
-            """Clear entire list on removal (stress-test helper)."""
-            self.clear()
-
-        bridge.disconnect_client = AsyncMock()
-        remove_count = [0]
-
-        def _patched_remove(self: list[Any], item: Any) -> None:
-            """Count removals and delegate to original (stress-test helper)."""
-            remove_count[0] += 1
-            if remove_count[0] != 1:
-                """First call is intentionally a no-op."""
-            original_remove(self, item)
-
         mock_ws1 = AsyncMock()
         mock_ws1.send_text = AsyncMock(side_effect=TimeoutError())
         mock_ws2 = AsyncMock()
@@ -677,12 +655,13 @@ class TestForwardToWebsocketsTimeoutCoverage:
         call_count = [0]
 
         async def disconnect_clears_list(ws: Any) -> None:
+            """Simulate disconnect clearing the subscription list."""
             call_count[0] += 1
             if call_count[0] == 1:
                 bridge.topic_subscriptions[topic].clear()
 
         bridge.disconnect_client = AsyncMock(side_effect=disconnect_clears_list)
-        await bridge._forward_to_websockets(topic, "market.candles.BTC", '{"type":"candle"}')
+        await bridge._forward_to_clients(topic, "market.candles.BTC", '{"type":"candle"}')
         assert bridge.disconnect_client.await_count == 2
 
 
@@ -1005,8 +984,8 @@ class TestStopZmqSubscriber:
         task.cancel()
 
 
-class TestForwardToWebsockets:
-    """Tests for _forward_to_websockets method."""
+class TestForwardToClientsCore:
+    """Tests for _forward_to_clients method."""
 
     @pytest.mark.asyncio
     async def test_returns_early_for_no_subscriptions(self) -> None:
@@ -1018,7 +997,7 @@ class TestForwardToWebsockets:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge.topic_subscriptions = {}
-        await bridge._forward_to_websockets("unknown", "unknown", '{"type": "test"}')
+        await bridge._forward_to_clients("unknown", "unknown", '{"type": "test"}')
 
     @pytest.mark.asyncio
     async def test_sends_to_subscribers(self) -> None:
@@ -1036,7 +1015,7 @@ class TestForwardToWebsockets:
         ]
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle", "instrument": "BTC-USD"}'
-        await bridge._forward_to_websockets(topic, topic, message_str)
+        await bridge._forward_to_clients(topic, topic, message_str)
         mock_ws.send_text.assert_awaited_once_with(message_str)
 
     @pytest.mark.asyncio
@@ -1056,7 +1035,7 @@ class TestForwardToWebsockets:
         ]
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
-        await bridge._forward_to_websockets(topic, topic, message_str)
+        await bridge._forward_to_clients(topic, topic, message_str)
         mock_ws.send_text.assert_not_awaited()
 
 
@@ -1279,8 +1258,8 @@ class TestForwardToClientsExceptionHandling:
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
 
 
-class TestForwardToWebsocketsBranchCoverage:
-    """Tests for _forward_to_websockets branch coverage."""
+class TestForwardToClientsBranchCoverage:
+    """Tests for _forward_to_clients branch coverage."""
 
     @pytest.mark.asyncio
     async def test_updates_last_sent_on_success(self) -> None:
@@ -1297,7 +1276,7 @@ class TestForwardToWebsocketsBranchCoverage:
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
-        await bridge._forward_to_websockets(topic, topic, message_str)
+        await bridge._forward_to_clients(topic, topic, message_str)
         assert sub.last_sent > 0
 
     @pytest.mark.asyncio
@@ -1317,7 +1296,7 @@ class TestForwardToWebsocketsBranchCoverage:
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
-        await bridge._forward_to_websockets(topic, topic, message_str)
+        await bridge._forward_to_clients(topic, topic, message_str)
         bridge.disconnect_client.assert_awaited_once()
         assert bridge.topic_metrics[topic].timeout_count == 1
 
@@ -1409,7 +1388,7 @@ class TestHandleZmqMessagesBranchCoverage:
         Then: Raw JSON string is forwarded to websockets.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
-        bridge._forward_to_websockets = AsyncMock()
+        bridge._process_zmq_message = AsyncMock()
         topic = "market.candles.BTC"
         config = TopicConfigurationModel(
             endpoint="tcp://localhost:5555",
@@ -1423,6 +1402,7 @@ class TestHandleZmqMessagesBranchCoverage:
         )
         with pytest.raises(asyncio.CancelledError):
             await bridge._handle_zmq_messages(topic, mock_socket, config)
-        bridge._forward_to_websockets.assert_awaited_once()
-        args = bridge._forward_to_websockets.call_args[0]
-        assert args[2] == raw_json
+        bridge._process_zmq_message.assert_awaited_once()
+        args = bridge._process_zmq_message.call_args[0]
+        assert args[0] == topic
+        assert args[1] == valid_message
