@@ -179,10 +179,14 @@ FastAPI application:
 
 ### API (`src/snapper/api/`)
 
-API layer:
+Shared API schemas and WebSocket auth helpers (not route definitions):
 
 - **Schemas** (`schemas/`) — Pydantic request/response models (health, process, settings)
-- **Auth** (`auth/`) — Authentication services
+- **Auth** (`auth/`) — WebSocket token service and schemas
+
+Route modules live closer to their domains: `server/app.py` (assembly and
+data endpoints), `server/process_routes.py`, `server/strategy_routes.py`,
+`config/settings_routes.py`, and `auth/routes.py`.
 
 REST endpoints return the same Data schemas used by WebSocket messaging
 (`messaging.schemas.data`): `OrderData`, `SignalData`, `ExecutionData`,
@@ -194,7 +198,7 @@ Authentication system:
 
 - JWT tokens with access/refresh via HTTP-only cookies
 - CSRF protection
-- Role-based access (admin, user, viewer)
+- Role-based access (viewer, operator, admin)
 - WebSocket authentication
 
 ### CLI (`src/snapper/cli/`)

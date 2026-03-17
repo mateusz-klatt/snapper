@@ -40,7 +40,7 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 | `SERVER_RELOAD` | `false` | Auto-reload for development |
 | `SERVER_PROXY_HEADERS` | `true` | Enable proxy header parsing in uvicorn |
 | `SERVER_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for forwarded headers |
-| `SERVER_API_ONLY` | `false` | Skip engine autostart; serve API + WS bridge only (for multi-worker or separate engine) |
+| `SERVER_API_ONLY` | `false` | Skip process autostart; serve API + WS bridge only (for multi-worker or separate engine) |
 
 ### ZeroMQ
 
@@ -128,13 +128,20 @@ api_key = settings.kraken_api_key  # Decrypted from database
 
 ## Managing Settings via API
 
-### Get Setting
+### List Settings
 
 ```http
-GET /api/settings/{key}
+GET /api/settings
+GET /api/settings?category=exchange
 ```
 
-### Save Setting
+### List Categories
+
+```http
+GET /api/settings/categories
+```
+
+### Update Setting
 
 ```http
 PUT /api/settings/{key}
@@ -143,14 +150,16 @@ Content-Type: application/json
 
 {
     "value": "new_value",
-    "encrypted": true
+    "category": "system",
+    "description": "optional description"
 }
 ```
 
-### List Settings
+### Delete Setting
 
 ```http
-GET /api/settings
+DELETE /api/settings/{key}
+X-CSRF-Token: <csrf_token>
 ```
 
 ## Environment Configuration

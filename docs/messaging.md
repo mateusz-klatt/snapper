@@ -403,12 +403,20 @@ TopicSchema(
 
 ## Message Validation
 
-ValidatedPublisher/Subscriber validate schemas:
+ValidatedPublisher and ValidatedSubscriber validate **topic strings**, not
+message payloads.  `ValidatedPublisher.send_multipart()` calls
+`validate_topic()` before sending; `ValidatedSubscriber.subscribe()` calls
+`validate_subscription_pattern()` before subscribing.  Both raise
+`TopicValidationError` on invalid topics.
+
+A separate `validate_message_schema()` utility in `messaging.topics.schemas`
+checks a message dict against the required fields registered for a topic and
+returns `(bool, list[str])`:
 
 ```python
 from snapper.messaging.topics.schemas import validate_message_schema
 
-is_valid = validate_message_schema("market.kraken.BTC-USD.candles.1h", message)
+is_valid, missing = validate_message_schema("market", {"exchange": "kraken"})
 ```
 
 ## High Water Mark (HWM) Policy

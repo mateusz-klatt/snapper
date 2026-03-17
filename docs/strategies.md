@@ -342,7 +342,8 @@ config = StrategyConfig(
     params={"period": 14, "upper": 70, "lower": 30},
 )
 
-strategy = StrategyFactory.create("RSIReversion", config)
+factory = StrategyFactory()
+strategy = factory.create_strategy(config)
 
 async def main():
     await strategy.start()

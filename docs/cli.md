@@ -35,7 +35,7 @@ snapper server [OPTIONS]
 
 **Environment:**
 
-Set `SERVER_API_ONLY=true` to skip engine process autostart while keeping
+Set `SERVER_API_ONLY=true` to skip process autostart while keeping
 the ZMQ-WebSocket bridge alive (useful for multi-worker deployments or when
 the engine runs as a separate process).
 
@@ -223,12 +223,18 @@ snapper db-downgrade --revision base
 
 ### `db-seed`
 
-Seeds the database with default data (users, settings).
+Seeds the database with environment-specific data from TOML profiles.
 Automatically run by `make migrate-dev` and `make migrate-prod`.
 
 ```bash
-snapper db-seed
+snapper db-seed [OPTIONS]
 ```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `--profile` | string | `dev` | Seed profile name (e.g. dev, prod) |
 
 ## Users
 
@@ -430,9 +436,7 @@ snapper settings-rotate-encryption [OPTIONS]
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `--new-password` | string | (required) | New master password |
-| `--new-salt` | string | (unchanged) | New salt |
-| `--old-password` | string | from env | Current password |
-| `--old-salt` | string | from env | Current salt |
+| `--old-password` | string | from env | Current master password (optional, reads from env/bootstrap) |
 | `--dry-run` | bool | `false` | Show changes without applying |
 
 **Example:**
@@ -442,7 +446,7 @@ snapper settings-rotate-encryption [OPTIONS]
 snapper settings-rotate-encryption --new-password NewSecurePass --dry-run
 
 # Actual rotation
-snapper settings-rotate-encryption --new-password NewSecurePass --new-salt NewSalt123
+snapper settings-rotate-encryption --new-password NewSecurePass
 ```
 
 ## Example Workflows

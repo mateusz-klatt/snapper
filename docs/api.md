@@ -490,14 +490,14 @@ X-CSRF-Token: <csrf_token>
         "active_connections": 5,
         "topic_subscribers": {
             "market.kraken.BTC-USD.candles.1h": 3,
-            "signals.paper.BTC-USD": 2
+            "signals.paper.BTC-USD.rsi_btc_1h": 2
         },
         "client_count": 5
     },
     "zmq_bridge": {
         "active_topics": 12,
         "subscriber_tasks": 12,
-        "available_topics": ["market", "signals", "orders.events"]
+        "available_topics": ["admin", "market", "orders.commands", "orders.events", "signals", "strategy.signals", "system.heartbeats."]
     },
     "connections": {
         "active_connections": 5,
@@ -558,7 +558,7 @@ X-CSRF-Token: <csrf_token>
         "active_connections": 5
     },
     "config": {
-        "available_topics": ["market", "signals", "orders.events", "orders.commands", "system.heartbeats.*", "strategy.signals", "admin"]
+        "available_topics": ["admin", "market", "orders.commands", "orders.events", "signals", "strategy.signals", "system.heartbeats."]
     },
     "connections": {
         "active_connections": 5,
@@ -922,7 +922,7 @@ not query-parameter-based.
 
 **Connection flow:**
 
-1. Client connects to `ws://host:port/api/ws`
+1. Client connects to `ws://host:port/api/ws` (or `wss://` over TLS)
 2. Server accepts the connection and validates the origin header
 3. Server sends `auth_required` message
 4. Client sends `authenticate` message with a WebSocket token
@@ -974,9 +974,11 @@ The response includes `ws_token` and `ws_token_exp` fields.
     "type": "auth_complete",
     "available_topics": [
         "market",
-        "signals",
+        "orders.commands",
         "orders.events",
-        "system.heartbeats.*"
+        "signals",
+        "strategy.signals",
+        "system.heartbeats."
     ],
     "user_role": "operator",
     "session_expires_at": "2026-01-18T12:15:00Z",
@@ -1047,7 +1049,7 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "subscribe",
-    "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD"]
+    "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"]
 }
 ```
 
@@ -1058,9 +1060,9 @@ If the client does not reauthenticate in time:
     "type": "subscription_success",
     "action": "subscribe",
     "status": "subscribed",
-    "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD"],
+    "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
     "denied_topics": [],
-    "active_subscriptions": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD"],
+    "active_subscriptions": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
     "zmq_topics": ["market.", "signals."],
     "message": null,
     "timestamp": "2026-01-18T12:00:01Z"
@@ -1089,9 +1091,9 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "subscriptions_list",
-    "subscriptions": ["signals.paper.BTC-USD"],
-    "available_topics": ["market", "signals", "orders.events"],
-    "total_available": 7,
+    "subscriptions": ["signals.paper.BTC-USD.rsi_btc_1h"],
+    "available_topics": ["market", "orders.commands", "orders.events", "signals", "strategy.signals", "system.heartbeats."],
+    "total_available": 6,
     "timestamp": "2026-01-18T12:00:02Z"
 }
 ```
@@ -1111,7 +1113,7 @@ If the client does not reauthenticate in time:
 {
     "type": "topic_suggestions",
     "prefix": "market",
-    "suggestions": ["market.kraken.BTC-USD.candles.1h", "market.kraken.ETH-USD.ticks"],
+    "suggestions": ["market"],
     "timestamp": "2026-01-18T12:00:03Z"
 }
 ```
@@ -1298,7 +1300,8 @@ string or a prefix to match multiple topics.
 
 #### Signals
 
-- `signals.{exchange}.{instrument}` -- Trading signals
+- `signals.{exchange}.{instrument}.live` -- Live trading signals
+- `signals.paper.{instrument}.{strategy_name}` -- Paper trading signals
 
 #### Order Events
 
@@ -1373,7 +1376,8 @@ async function connect() {
     });
     const { ws_token } = await refreshResp.json();
 
-    const ws = new WebSocket(`ws://${location.host}/api/ws`);
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${protocol}//${location.host}/api/ws`);
 
     ws.onopen = () => {
         console.log("Connected, waiting for auth_required...");
