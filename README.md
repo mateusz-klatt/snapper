@@ -64,7 +64,7 @@ cp .env.example .env
 Edit `.env` file:
 
 ```bash
-# Database (SQLite by default, PostgreSQL optional)
+# Database (SQLite dev, PostgreSQL prod, MSSQL ingestion-only)
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
 # Settings encryption in database
@@ -73,6 +73,7 @@ MASTER_PASSWORD=your_master_password
 # HTTP Server
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8000
+SERVER_API_ONLY=false
 SERVER_PROXY_HEADERS=true
 SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
 

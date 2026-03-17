@@ -99,7 +99,7 @@ Topic format: `{category}.{exchange}.{instrument}.{type}.{timeframe}`
 
 | Topic | Description |
 | ----- | ----------- |
-| `system.heartbeats.{component}.{name}` | Component heartbeats |
+| `system.heartbeats.{component}.{name}[.{source}]` | Component heartbeats (e.g. `feed.kraken`, `feed.paper.kraken`) |
 | `system.settings` | Configuration change notifications |
 | `system.symbol_aliases` | Symbol cache invalidation |
 | `system.replay.start` | Data replay start |
