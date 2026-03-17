@@ -289,6 +289,9 @@ def server(
 ) -> None:
     """Start the FastAPI server with dashboard.
 
+    Set ``SERVER_API_ONLY=true`` to start without engine processes or the
+    ZMQ bridge (useful for multi-worker deployments).
+
     Args:
         host: Server host address.
         port: Server port number.

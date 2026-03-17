@@ -114,6 +114,47 @@ class TestLifespan:
         mock_manager.cleanup.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_lifespan_api_only_skips_engine(self) -> None:
+        """Test api-only mode skips process autostart and ZMQ bridge.
+
+        Given: SERVER_API_ONLY=true in settings,
+        When: Lifespan runs,
+        Then: start_all_processes is not called, bridge is not started.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        api_only_settings = MagicMock()
+        api_only_settings.server_api_only = True
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app.get_settings_with_service",
+                return_value=api_only_settings,
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+        mock_factory.sync_registry_to_database.assert_awaited_once()
+        mock_factory.start_all_processes.assert_not_awaited()
+        mock_zmq_bridge.start.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_lifespan_cleanup_error_propagates(self) -> None:
         """Test cleanup errors propagate through lifespan.
 

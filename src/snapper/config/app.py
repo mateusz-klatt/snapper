@@ -103,6 +103,19 @@ class AppSettings:
         return self._bootstrap.server_reload
 
     @property
+    def server_api_only(self) -> bool:
+        """Return whether the server should skip engine autostart.
+
+        When True the lifespan does not call ``start_all_processes()``
+        and does not start the ZMQ-WebSocket bridge.  Useful for
+        multi-worker deployments or when the engine runs separately.
+
+        Returns:
+            True if API-only mode is enabled, False otherwise.
+        """
+        return self._bootstrap.server_api_only
+
+    @property
     def server_proxy_headers(self) -> bool:
         """Return whether uvicorn should parse proxy headers.
 

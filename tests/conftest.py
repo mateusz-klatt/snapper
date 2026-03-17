@@ -240,6 +240,7 @@ def _build_mock_settings() -> Mock:
     mock_settings.server_host = bootstrap.server_host
     mock_settings.server_port = bootstrap.server_port
     mock_settings.server_reload = bootstrap.server_reload
+    mock_settings.server_api_only = bootstrap.server_api_only
     mock_settings.zmq_broker_xsub = bootstrap.zmq_broker_xsub
     mock_settings.zmq_broker_xpub = bootstrap.zmq_broker_xpub
     mock_settings.kraken_api_key = ""

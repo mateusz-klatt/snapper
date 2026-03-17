@@ -50,6 +50,10 @@ class BootstrapSettingsLoader(BaseSettings):
         server_host: HTTP server bind address.
         server_port: HTTP server port.
         server_reload: Enable uvicorn auto-reload for development.
+        server_api_only: When True, the server starts without launching
+            background processes or the ZMQ bridge.  Useful for production
+            deployments where the engine runs as a separate process, or
+            when running multiple uvicorn workers.
         server_proxy_headers: Enable parsing proxy headers in uvicorn.
         server_forwarded_allow_ips: Trusted proxy source IP list for
             forwarded headers.
@@ -67,6 +71,7 @@ class BootstrapSettingsLoader(BaseSettings):
     server_host: str = Field(default="127.0.0.1", alias="SERVER_HOST")
     server_port: int = Field(default=8000, alias="SERVER_PORT")
     server_reload: bool = Field(default=False, alias="SERVER_RELOAD")
+    server_api_only: bool = Field(default=False, alias="SERVER_API_ONLY")
     server_proxy_headers: bool = Field(default=True, alias="SERVER_PROXY_HEADERS")
     server_forwarded_allow_ips: str = Field(default="127.0.0.1", alias="SERVER_FORWARDED_ALLOW_IPS")
     zmq_broker_xsub: str = Field(default="tcp://127.0.0.1:7500", alias="ZMQ_BROKER_XSUB")
