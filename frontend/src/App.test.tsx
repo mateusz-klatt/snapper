@@ -8,17 +8,6 @@ import { useAppStore } from './stores/app'
 vi.mock('./stores/app', () => ({
   useAppStore: vi.fn(),
 }))
-vi.mock('./stores/process', () => ({
-  useProcessStore: vi.fn(() => ({
-    feeds: {},
-    strategies: {},
-    executor: null,
-    broker: null,
-    updateFeedStatus: vi.fn(),
-    updateExecutorStatus: vi.fn(),
-    updateBrokerStatus: vi.fn(),
-  })),
-}))
 vi.mock('./stores/market', () => ({
   useMarketStore: vi.fn(() => ({
     selectedInstrument: null,

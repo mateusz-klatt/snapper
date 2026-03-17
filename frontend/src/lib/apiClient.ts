@@ -499,47 +499,6 @@ class APIClient {
 
 export const apiClient = APIClient.getInstance()
 
-export async function api(path: string, init: RequestInit = {}): Promise<Response> {
-  const csrf = getCookie('csrf_token')
-  const headers = new Headers(init.headers)
-
-  if (MUTATING_METHODS.has(init.method?.toUpperCase() || 'GET')) {
-    if (csrf) {
-      headers.set('X-CSRF-Token', csrf)
-    }
-  }
-
-  if (init.body && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json')
-  }
-
-  const res = await fetch(`/api${path}`, {
-    credentials: 'include',
-    ...init,
-    headers,
-  })
-
-  if (res.status === 401) {
-    try {
-      const refreshResponse = await fetch('/api/auth/refresh', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'X-CSRF-Token': csrf },
-      })
-
-      if (refreshResponse.ok) {
-        await cacheWsTicketFromResponse(refreshResponse)
-
-        return api(path, init)
-      }
-    } catch {
-      void 0
-    }
-  }
-
-  return res
-}
-
 async function cacheWsTicketFromResponse(response: Response): Promise<void> {
   try {
     const payload = (await response.clone().json()) as {

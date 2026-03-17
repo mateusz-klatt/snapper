@@ -4,7 +4,6 @@ import { WSDispatcher, getDispatcher, resetDispatcher } from './wsDispatcher'
 import WebSocketClient from '../lib/websocket/client'
 import { useMarketStore } from './market'
 import { useAppStore } from './app'
-import { useProcessStore } from './process'
 import type {
   OrderData,
   ExecutionData,
@@ -21,11 +20,6 @@ vi.mock('./market', () => ({
 }))
 vi.mock('./app', () => ({
   useAppStore: {
-    getState: vi.fn(),
-  },
-}))
-vi.mock('./process', () => ({
-  useProcessStore: {
     getState: vi.fn(),
   },
 }))
@@ -82,13 +76,6 @@ describe('WSDispatcher', () => {
     }
 
     vi.mocked(useAppStore.getState).mockReturnValue(mockAppStore as never)
-    const mockProcessStore = {
-      updateFeedStatus: vi.fn(),
-      updateExecutorStatus: vi.fn(),
-      updateBrokerStatus: vi.fn(),
-    }
-
-    vi.mocked(useProcessStore.getState).mockReturnValue(mockProcessStore as never)
     resetDispatcher()
   })
   afterEach(() => {
@@ -958,125 +945,6 @@ describe('WSDispatcher', () => {
       expect(useAppStore.getState().setConnectionLag).not.toHaveBeenCalled()
       expect(useAppStore.getState().updateLastUpdate).toHaveBeenCalled()
     })
-    it('handles heartbeat with feed component and updates ProcessStore', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatData = {
-        type: 'heartbeat',
-        component: 'feed',
-        status: 'healthy',
-        timestamp: nowIso,
-        lag_ms: 10,
-        sequence: 1,
-      }
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(useProcessStore.getState().updateFeedStatus).toHaveBeenCalledWith(
-        'feed',
-        expect.objectContaining({
-          running: true,
-          details: { lag_ms: 10 },
-        })
-      )
-    })
-    it('handles heartbeat with suffixed feed component (feed.kraken)', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatData = {
-        type: 'heartbeat',
-        component: 'feed.kraken',
-        status: 'healthy',
-        timestamp: nowIso,
-        lag_ms: 5,
-        sequence: 1,
-      }
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(useProcessStore.getState().updateFeedStatus).toHaveBeenCalledWith(
-        'feed_kraken',
-        expect.objectContaining({
-          running: true,
-          details: { lag_ms: 5 },
-        })
-      )
-    })
-    it('handles heartbeat with executor component', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatData = {
-        type: 'heartbeat',
-        component: 'executor_binance',
-        status: 'error',
-        timestamp: nowIso,
-        lag_ms: 0,
-        sequence: 1,
-      }
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(useProcessStore.getState().updateExecutorStatus).toHaveBeenCalledWith(
-        'executor_binance',
-        expect.objectContaining({
-          running: false,
-          details: { lag_ms: 0 },
-        })
-      )
-    })
-    it('handles heartbeat without timestamp (uses Date.now fallback)', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const heartbeatMessage = {
-        type: 'heartbeat',
-        component: 'feed_test',
-        status: 'healthy',
-        lag_ms: 5,
-        sequence: 1,
-      } as HeartbeatData
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(useProcessStore.getState().updateFeedStatus).toHaveBeenCalledWith(
-        'feed_test',
-        expect.objectContaining({
-          running: true,
-          lastHeartbeat: expect.any(Number),
-          details: { lag_ms: 5 },
-        })
-      )
-    })
-    it('handles heartbeat with broker component', () => {
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatData = {
-        type: 'heartbeat',
-        component: 'broker',
-        status: 'healthy',
-        timestamp: nowIso,
-        lag_ms: 15,
-        sequence: 1,
-      }
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(useProcessStore.getState().updateBrokerStatus).toHaveBeenCalledWith(
-        'broker',
-        expect.objectContaining({
-          running: true,
-          details: { lag_ms: 15 },
-        })
-      )
-    })
   })
   describe('connection handling', () => {
     it('subscribes to topics when connected', () => {
@@ -1149,38 +1017,6 @@ describe('WSDispatcher', () => {
     })
   })
   describe('additional message handling', () => {
-    it('handles heartbeat with strategy component', () => {
-      const mockProcessStore = {
-        updateFeedStatus: vi.fn(),
-        updateExecutorStatus: vi.fn(),
-        updateBrokerStatus: vi.fn(),
-        updateStrategyStatus: vi.fn(),
-      }
-
-      vi.mocked(useProcessStore.getState).mockReturnValue(mockProcessStore as never)
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatData = {
-        type: 'heartbeat',
-        component: 'strategy_macd',
-        status: 'healthy',
-        timestamp: nowIso,
-        lag_ms: 5,
-        sequence: 1,
-      }
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(mockProcessStore.updateStrategyStatus).toHaveBeenCalledWith(
-        'strategy_macd',
-        expect.objectContaining({
-          running: true,
-          details: { lag_ms: 5 },
-        })
-      )
-    })
     it('handles heartbeat without data', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
@@ -1191,67 +1027,6 @@ describe('WSDispatcher', () => {
       const heartbeatHandler = messageHandlers.get('heartbeat')
 
       expect(() => heartbeatHandler?.(heartbeatMessage)).not.toThrow()
-    })
-    it('handles heartbeat with dot separator in component', () => {
-      const mockProcessStore = {
-        updateFeedStatus: vi.fn(),
-        updateExecutorStatus: vi.fn(),
-        updateBrokerStatus: vi.fn(),
-        updateStrategyStatus: vi.fn(),
-      }
-
-      vi.mocked(useProcessStore.getState).mockReturnValue(mockProcessStore as never)
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const heartbeatMessage: HeartbeatData = {
-        type: 'heartbeat',
-        component: 'feed.kraken',
-        status: 'healthy',
-        timestamp: nowIso,
-        lag_ms: 10,
-        sequence: 1,
-      }
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(mockProcessStore.updateFeedStatus).toHaveBeenCalledWith(
-        'feed_kraken',
-        expect.objectContaining({
-          running: true,
-        })
-      )
-    })
-    it('handles heartbeat without lag_ms', () => {
-      const mockProcessStore = {
-        updateFeedStatus: vi.fn(),
-        updateExecutorStatus: vi.fn(),
-        updateBrokerStatus: vi.fn(),
-        updateStrategyStatus: vi.fn(),
-      }
-
-      vi.mocked(useProcessStore.getState).mockReturnValue(mockProcessStore as never)
-      const dispatcher = new WSDispatcher({ queryClient })
-
-      dispatcher.attach(mockWsClient)
-      const nowIso = new Date().toISOString()
-      const heartbeatMessage = {
-        type: 'heartbeat',
-        component: 'executor_binance',
-        status: 'healthy',
-        timestamp: nowIso,
-      } as unknown as HeartbeatData
-      const heartbeatHandler = messageHandlers.get('heartbeat')
-
-      heartbeatHandler?.(heartbeatMessage)
-      expect(mockProcessStore.updateExecutorStatus).toHaveBeenCalledWith(
-        'executor_binance',
-        expect.objectContaining({
-          running: true,
-          details: { lag_ms: undefined },
-        })
-      )
     })
     it('handles heartbeat without component', () => {
       const dispatcher = new WSDispatcher({ queryClient })
@@ -1268,7 +1043,6 @@ describe('WSDispatcher', () => {
 
       heartbeatHandler?.(heartbeatMessage)
       expect(useAppStore.getState().setConnectionLag).not.toHaveBeenCalled()
-      expect(useProcessStore.getState().updateFeedStatus).not.toHaveBeenCalled()
     })
     it('handles pong message with rtt_ms and updates connectionLag', () => {
       const dispatcher = new WSDispatcher({ queryClient })

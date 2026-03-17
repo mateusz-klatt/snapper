@@ -2,7 +2,6 @@ import { QueryClient } from '@tanstack/react-query'
 import WebSocketClient from '../lib/websocket/client'
 import { useMarketStore } from './market'
 import { useAppStore } from './app'
-import { useProcessStore } from './process'
 import {
   type WebSocketMessages,
   type PongWithRtt,
@@ -18,7 +17,6 @@ import {
   isTrade,
   isHeartbeat,
 } from '../types/ws'
-import { UIProcessStatus } from '../types/ui'
 import {
   orderDataFromEnvelope,
   executionDataFromEnvelope,
@@ -320,39 +318,6 @@ export class WSDispatcher {
   }
   private handleHeartbeatMessage(message: WebSocketMessages): void {
     if (!isHeartbeat(message)) return
-
-    const component = message.component
-
-    if (component) {
-      const processStore = useProcessStore.getState()
-      const status: UIProcessStatus = {
-        running: message.status === 'healthy',
-        lastHeartbeat: message.timestamp ? new Date(message.timestamp).getTime() : Date.now(),
-        details: { lag_ms: message.lag_ms ?? undefined },
-      }
-      const separatorIndex = component.includes('_')
-        ? component.indexOf('_')
-        : component.indexOf('.')
-      const baseComponent =
-        separatorIndex === -1 ? component : component.substring(0, separatorIndex)
-      const suffix = separatorIndex === -1 ? 'default' : component.substring(separatorIndex + 1)
-      const componentKey = suffix === 'default' ? baseComponent : `${baseComponent}_${suffix}`
-
-      switch (baseComponent) {
-        case 'feed':
-          processStore.updateFeedStatus(componentKey, status)
-          break
-        case 'executor':
-          processStore.updateExecutorStatus(componentKey, status)
-          break
-        case 'broker':
-          processStore.updateBrokerStatus(componentKey, status)
-          break
-        case 'strategy':
-          processStore.updateStrategyStatus(componentKey, status)
-          break
-      }
-    }
 
     useAppStore.getState().updateLastUpdate()
   }
