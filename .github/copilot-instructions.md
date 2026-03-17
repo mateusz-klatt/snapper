@@ -130,7 +130,10 @@ Examples (illustrative; use only verified configured identities):
 Before finishing ANY task or making changes:
 
 1. ALWAYS run `make check-all` to verify backend + frontend quality + coverage
-2. Only mark task complete if `make check-all` passes successfully
+2. Review affected documentation after `make check-all` passes and before any git commit
+    - Check `README.md`, `docs/*.md`, and `.env.example` when behavior, commands, configuration, architecture, API contracts, messaging topics, or workflows changed
+    - Update documentation to match the current code before creating the commit
+3. Only mark task complete if `make check-all` passes successfully
 
 Notes
 

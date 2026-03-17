@@ -132,12 +132,12 @@ snapper feed [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `--symbols` | string | `BTC/USD` | Comma-separated symbols |
+| `--symbols` | string | `BTC-USD` | Comma-separated symbols |
 
 **Example:**
 
 ```bash
-snapper feed --symbols "BTC/USD,ETH/USD,SOL/USD"
+snapper feed --symbols "BTC-USD,ETH-USD,SOL-USD"
 ```
 
 ### `zmq-logger`
@@ -475,7 +475,7 @@ snapper server
 snapper broker
 
 # Terminal 2: Data feed
-snapper feed --symbols "BTC/USD,ETH/USD"
+snapper feed --symbols "BTC-USD,ETH-USD"
 
 # Terminal 3: Executor
 snapper executor -e kraken
@@ -484,7 +484,7 @@ snapper executor -e kraken
 snapper trade-zmq
 
 # Terminal 5: Server with dashboard
-snapper server
+SERVER_API_ONLY=true snapper server
 ```
 
 ### Historical Data Backfill

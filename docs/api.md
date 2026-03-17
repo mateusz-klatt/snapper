@@ -1,8 +1,9 @@
 # API
 
 Snapper provides a REST API and WebSocket interface for platform interaction.
-The API requires JWT authentication via HTTP-only cookies. All mutating
-requests (POST, PUT, DELETE) require a valid `X-CSRF-Token` header.
+The API requires JWT authentication via HTTP-only cookies. Auth bootstrap
+endpoints under `/api/auth` are exempt, but other mutating requests
+(`POST`, `PUT`, `DELETE`) require a valid `X-CSRF-Token` header.
 
 ## Authentication
 
@@ -132,8 +133,9 @@ GET /api/auth/me
 
 ### CSRF Protection
 
-The `csrf_token` cookie is readable by JavaScript (not HttpOnly). For all
-mutating requests (POST, PUT, DELETE), include its value as a header:
+The `csrf_token` cookie is readable by JavaScript (not HttpOnly). For
+authenticated mutating requests outside `/api/auth/login`,
+`/api/auth/refresh`, and `/api/auth/logout`, include its value as a header:
 
 ```http
 X-CSRF-Token: <value from csrf_token cookie>
@@ -591,7 +593,7 @@ List registered process templates that can be instantiated. Requires
         {
             "name": "zmq_broker",
             "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
-            "method": "run",
+            "method": "start",
             "description": "ZeroMQ XPUB/XSUB message broker",
             "lifecycle": "long_running",
             "role": "core",
@@ -617,9 +619,9 @@ List configured process instances with runtime state. Requires
             "name": "zmq_broker",
             "enabled": true,
             "running": true,
-            "mode": "process",
+            "mode": "thread",
             "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
-            "method": "run",
+            "method": "start",
             "args": [],
             "kwargs": {},
             "note": null,
@@ -664,11 +666,11 @@ Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
 {
-    "name": "feed_publisher_kraken_btc",
-    "template": "feed_publisher",
+    "name": "kraken_feed_btc",
+    "template": "kraken_feed_publisher",
     "enabled": true,
-    "mode": "process",
-    "kwargs": { "instrument": "BTC-USD", "exchange": "kraken" },
+    "mode": "thread",
+    "kwargs": { "symbols": ["BTC-USD"] },
     "note": "Kraken BTC feed"
 }
 ```
@@ -679,8 +681,8 @@ X-CSRF-Token: <csrf_token>
 {
     "status": "created",
     "process": {
-        "name": "feed_publisher_kraken_btc",
-        "template": "feed_publisher"
+        "name": "kraken_feed_btc",
+        "template": "kraken_feed_publisher"
     }
 }
 ```
@@ -694,12 +696,12 @@ Requires `manage:processes` permission.
 
 ```json
 {
-    "name": "feed_publisher",
-    "description": "Market data feed publisher",
+    "name": "kraken_feed_publisher",
+    "description": "Kraken market data feed publisher",
     "class_path": "snapper.messaging.publishers.kraken.KrakenMarketDataPublisher",
-    "method": "run",
+    "method": "start",
     "default_enabled": true,
-    "default_mode": "process",
+    "default_mode": "thread",
     "default_args": [],
     "default_kwargs": {},
     "lifecycle": "long_running"
@@ -776,7 +778,7 @@ List historical process runs. Requires `manage:processes` permission.
         {
             "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
             "process_name": "zmq_broker",
-            "status": "completed",
+            "status": "succeeded",
             "role": "core",
             "lifecycle": "long_running",
             "parameters": {},
@@ -942,7 +944,7 @@ The response includes `ws_token` and `ws_token_exp` fields.
 ```json
 {
     "type": "auth_required",
-    "timeout": 30,
+    "timeout": 10,
     "timestamp": "2026-01-18T12:00:00Z"
 }
 ```
@@ -987,6 +989,11 @@ The response includes `ws_token` and `ws_token_exp` fields.
 }
 ```
 
+`available_topics` contains allowed topic roots/pattern keys for the user's
+role. Concrete subscriptions may use those roots as prefixes or full topic
+strings such as `market.kraken.BTC-USD.candles.1h` or
+`signals.paper.BTC-USD.rsi_btc_1h`.
+
 **Server sends on failure:**
 
 ```json
@@ -1000,8 +1007,9 @@ The response includes `ws_token` and `ws_token_exp` fields.
 ### Reauthentication
 
 Before the WebSocket token expires, the server sends a `reauth_required`
-message. The client should obtain a new `ws_token` via `POST /api/auth/refresh`
-and send it as a `reauth` message.
+message. Clients may also refresh proactively before that deadline. In both
+cases they obtain a new `ws_token` via `POST /api/auth/refresh` and send it as
+a `reauth` message.
 
 **Server warning:**
 
@@ -1297,6 +1305,8 @@ string or a prefix to match multiple topics.
 - `market.{exchange}.{instrument}.candles.{timeframe}` -- OHLCV candles
 - `market.{exchange}.{instrument}.ticks` -- Price ticks
 - `market.{exchange}.{instrument}.trades` -- Individual trades
+- `market.paper.{source_exchange}.{instrument}.candles.{timeframe}` -- Paper candles sourced from a real exchange
+- `market.paper.{source_exchange}.{instrument}.ticks` -- Paper ticks sourced from a real exchange
 
 #### Signals
 
@@ -1367,6 +1377,10 @@ async def main():
 ```
 
 ## Usage Example (JavaScript)
+
+This example is intentionally minimal. The shipped frontend client reuses
+cached WS tickets, schedules proactive reauthentication before expiry, and
+sends heartbeat pings every 5 seconds.
 
 ```javascript
 async function connect() {

@@ -338,12 +338,17 @@ docker compose up -d
 
 ## CI/CD
 
-Pipeline executes:
+Pipeline executes the same consolidated gate used locally:
 
-1.  `make check` — Quality checks
-2.  `make cov` — Tests with coverage
-3.  `make ui-check` — Frontend checks
-4.  `make ui-cov` — Frontend tests
+1.  `make check-all` — Backend checks, frontend checks, exclusion scan, and tests with coverage
+
+For debugging a failing pipeline locally, the equivalent steps are:
+
+1.  `make check` — Backend quality checks
+2.  `make ui-check` — Frontend lint, format, and dead-code checks
+3.  `make check-exclusions` — No pragma/noqa/ignore bypasses
+4.  `make cov` — Backend tests with coverage
+5.  `make ui-cov` — Frontend tests with coverage
 
 ## Workflow
 

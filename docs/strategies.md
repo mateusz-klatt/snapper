@@ -140,13 +140,17 @@ class RSIReversion(BaseStrategy):
 
 ### Input Topics
 
-Format: `market.{exchange}.{instrument}.{type}.{timeframe}`
+Common formats:
+
+- `market.{exchange}.{instrument}.candles.{timeframe}` — Candle streams
+- `market.{exchange}.{instrument}.ticks` — Tick streams
+- `market.{exchange}.{instrument}.trades` — Trade streams
 
 Examples:
 
 - `market.kraken.BTC-USD.candles.1h` — Hourly BTC/USD candles from Kraken
-- `market.kraken.ETH-USD.candles.15m` — 15-minute ETH/USD candles
-- `market.polygon.AAPL.candles.1d` — Daily AAPL candles from Polygon
+- `market.kraken.ETH-USD.ticks` — ETH/USD ticks from Kraken
+- `market.polygon.AAPL.trades` — AAPL trade tape from Polygon
 
 ### Output Topics (Signals)
 

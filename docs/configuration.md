@@ -78,9 +78,18 @@ Sensitive data is stored encrypted in the `settings` table.
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
+| `auth_secret_key` | `change-me-in-production-use-openssl-rand-hex-32` | JWT signing secret |
+| `csrf_secret_key` | `change-me-in-production-csrf-key` | CSRF token signing secret |
+| `auth_algorithm` | `HS256` | JWT signing algorithm |
 | `auth_access_token_expire_minutes` | `15` | Access token lifetime |
 | `auth_refresh_token_expire_days` | `7` | Refresh token lifetime |
+| `auth_refresh_token_expire_days_extended` | `30` | Extended refresh token lifetime |
+| `ws_token_ttl_seconds` | `900` | WebSocket token lifetime |
 | `csrf_token_expire_minutes` | `60` | CSRF token lifetime |
+| `session_secure` | `false` | Require HTTPS for session cookies |
+| `session_same_site` | `lax` | Session cookie SameSite mode |
+| `session_domain` | `""` | Session cookie domain override |
+| `ui_origin` | `""` | Additional allowed UI origins for CORS and WS origin validation |
 
 ## `.env.example` File
 

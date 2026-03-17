@@ -329,7 +329,7 @@ while True:
 Built-in publisher for exchange data:
 
 ```bash
-snapper feed --symbols "BTC/USD,ETH/USD"
+snapper feed --symbols "BTC-USD,ETH-USD"
 ```
 
 Programmatically:
@@ -338,7 +338,7 @@ Programmatically:
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 
 async def run_feed():
-    publisher = KrakenMarketDataPublisher(symbols=["BTC/USD", "ETH/USD"])
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD", "ETH-USD"])
     await publisher.start()
 ```
 
@@ -455,5 +455,5 @@ Sockets automatically:
 1.  **One broker per system** — All components connect to the same broker
 2.  **Topic hierarchy** — Use hierarchy for filtering (`market.kraken.*`)
 3.  **Data types** — Always use typed Data classes from `messaging.schemas.data`
-4.  **Heartbeats** — Send heartbeats every 30s from components
+4.  **Heartbeats** — Keep component-specific heartbeat cadences small and regular
 5.  **Graceful shutdown** — Close sockets with LINGER=0
