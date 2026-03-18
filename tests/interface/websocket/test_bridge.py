@@ -190,11 +190,11 @@ class TestBridgeMissingBranches:
 
     @pytest.mark.asyncio
     async def test_zmq_subscription_loop_json_decode_error(self) -> None:
-        """Subscription loop forwards invalid JSON as raw payload.
+        """Subscription loop drops invalid JSON in strict mode.
 
         Given: A ZMQ subscription loop receiving messages,
         When: An invalid JSON message is received,
-        Then: The raw payload is forwarded to clients.
+        Then: The message is dropped and not forwarded to clients.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge.topic_metrics["test_topic"] = TopicMetricsModel()
@@ -217,8 +217,8 @@ class TestBridgeMissingBranches:
         bridge._forward_to_clients = mock_forward
         with pytest.raises(asyncio.CancelledError):
             await bridge._zmq_subscription_loop("test_topic", mock_socket)
-        assert len(forward_calls) == 1
-        assert forward_calls[0][2] == "invalid json {{{"
+        assert len(forward_calls) == 0
+        assert bridge.topic_metrics["test_topic"].invalid_messages == 1
 
     @pytest.mark.asyncio
     async def test_zmq_subscription_loop_unexpected_error_with_metrics(self) -> None:
@@ -1406,3 +1406,117 @@ class TestHandleZmqMessagesBranchCoverage:
         args = bridge._process_zmq_message.call_args[0]
         assert args[0] == topic
         assert args[1] == valid_message
+
+
+class TestCheckGap:
+    """Tests for ZmqWebSocketBridgeService._check_gap typed envelope parsing."""
+
+    def test_valid_envelope_calls_gap_detector(self) -> None:
+        """Valid provenance envelope reaches the gap detector and returns True.
+
+        Given: A JSON payload with session_id and sequence_id,
+        When: _check_gap is called,
+        Then: GapDetector.check is called with the correct values and True is returned.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.topic_metrics["market.ticks"] = TopicMetricsModel()
+        payload = '{"type":"tick","session_id":"abc","sequence_id":5}'
+        with patch.object(bridge._gap_detector, "check") as mock_check:
+            result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", payload)
+        mock_check.assert_called_once_with("market.kraken.BTC-USD.ticks", "abc", 5)
+        assert bridge.topic_metrics["market.ticks"].invalid_messages == 0
+        assert result is True
+
+    def test_missing_provenance_fields_skips_gap_detection(self) -> None:
+        """Envelope without provenance fields defaults to empty session_id and zero sequence.
+
+        Given: A valid JSON payload without session_id or sequence_id,
+        When: _check_gap is called,
+        Then: GapDetector.check receives empty defaults, True is returned (valid JSON).
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.topic_metrics["market.ticks"] = TopicMetricsModel()
+        payload = '{"type":"tick"}'
+        with patch.object(bridge._gap_detector, "check") as mock_check:
+            result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", payload)
+        mock_check.assert_called_once_with("market.kraken.BTC-USD.ticks", "", 0)
+        assert bridge.topic_metrics["market.ticks"].invalid_messages == 0
+        assert result is True
+
+    def test_malformed_json_logs_warning_and_increments_counter(self) -> None:
+        """Malformed JSON logs a warning, increments the counter, and returns False.
+
+        Given: A payload that is not valid JSON,
+        When: _check_gap is called,
+        Then: Warning is logged, invalid_messages incremented, gap detector not called, False returned.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.topic_metrics["market.ticks"] = TopicMetricsModel()
+        with (
+            patch.object(bridge._gap_detector, "check") as mock_check,
+            patch("snapper.interface.websocket.bridge.logger") as mock_logger,
+        ):
+            result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", "not-json{{{")
+        mock_check.assert_not_called()
+        mock_logger.warning.assert_called_once()
+        assert bridge.topic_metrics["market.ticks"].invalid_messages == 1
+        assert result is False
+
+    def test_malformed_json_without_metrics_does_not_raise(self) -> None:
+        """Malformed JSON without a matching metrics entry does not raise, returns False.
+
+        Given: A payload that is not valid JSON and no metrics entry for the topic,
+        When: _check_gap is called,
+        Then: Warning is logged, no exception raised, False returned.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        with patch("snapper.interface.websocket.bridge.logger") as mock_logger:
+            result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", "{{invalid}}")
+        mock_logger.warning.assert_called_once()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_drops_message(self) -> None:
+        """Message with malformed JSON is dropped and not forwarded to clients.
+
+        Given: A bridge with a subscription and a malformed payload,
+        When: _process_zmq_message processes the message,
+        Then: _forward_to_clients is never called (strict drop mode).
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.topic_metrics["market.ticks"] = TopicMetricsModel()
+        forwarded: list[tuple[str, str, str]] = []
+
+        async def capture_forward(topic_name: str, received: str, payload: str) -> None:
+            forwarded.append((topic_name, received, payload))
+
+        bridge._forward_to_clients = capture_forward
+        await bridge._process_zmq_message(
+            "market.ticks",
+            [b"market.kraken.BTC-USD.ticks", b"{{not-json}}"],
+        )
+        assert len(forwarded) == 0
+
+    @pytest.mark.asyncio
+    async def test_valid_json_is_forwarded(self) -> None:
+        """Message with valid JSON payload is forwarded to clients.
+
+        Given: A bridge with a subscription and a valid JSON payload,
+        When: _process_zmq_message processes the message,
+        Then: _forward_to_clients is called with the raw payload string.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.topic_metrics["market.ticks"] = TopicMetricsModel()
+        forwarded: list[tuple[str, str, str]] = []
+
+        async def capture_forward(topic_name: str, received: str, payload: str) -> None:
+            forwarded.append((topic_name, received, payload))
+
+        bridge._forward_to_clients = capture_forward
+        payload = '{"type":"tick","session_id":"s1","sequence_id":1}'
+        await bridge._process_zmq_message(
+            "market.ticks",
+            [b"market.kraken.BTC-USD.ticks", payload.encode()],
+        )
+        assert len(forwarded) == 1
+        assert forwarded[0][2] == payload

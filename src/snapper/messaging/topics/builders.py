@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import cast
 from typing import get_args
 
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.core.types import OrderCommand
@@ -465,3 +466,99 @@ def is_order_topic(topic: str) -> bool:
         return False
     two_level = f"{parts[0]}.{parts[1]}"
     return two_level in ("orders.commands", "orders.events")
+
+
+def heartbeat_topic_from_component(component: str) -> str:
+    """Derive heartbeat topic from a dotted component name.
+
+    The component name is expected to use dots as separators
+    (e.g. 'executor.kraken', 'feed.kraken', 'strategy.momentum').
+
+    Args:
+        component: Dotted component identifier.
+
+    Returns:
+        Full heartbeat topic string.
+
+    Examples:
+        >>> heartbeat_topic_from_component("executor.kraken")
+        'system.heartbeats.executor.kraken'
+        >>> heartbeat_topic_from_component("feed.paper.kraken")
+        'system.heartbeats.feed.paper.kraken'
+    """
+    return f"system.heartbeats.{component}"
+
+
+def topic_for_message(data: StrictDataSchema) -> str:
+    """Derive ZMQ topic from a Data schema instance.
+
+    Uses isinstance dispatch to call the appropriate builder function
+    for each message type. Raises ValueError for types that cannot
+    derive a topic from their payload fields alone.
+
+    Args:
+        data: Any StrictDataSchema subclass instance.
+
+    Returns:
+        Fully-qualified ZMQ topic string.
+
+    Raises:
+        ValueError: If topic cannot be derived for the given type,
+            or if required fields are missing (e.g. paper signal
+            without strategy_name).
+    """
+    from snapper.messaging.schemas.data import CandleData
+    from snapper.messaging.schemas.data import ExecutionData
+    from snapper.messaging.schemas.data import HeartbeatData
+    from snapper.messaging.schemas.data import OrderCancelData
+    from snapper.messaging.schemas.data import OrderData
+    from snapper.messaging.schemas.data import OrderEventData
+    from snapper.messaging.schemas.data import OrderReplaceData
+    from snapper.messaging.schemas.data import OrderRequestData
+    from snapper.messaging.schemas.data import ReplayEndData
+    from snapper.messaging.schemas.data import ReplayStartData
+    from snapper.messaging.schemas.data import SettingChangedData
+    from snapper.messaging.schemas.data import SignalData
+    from snapper.messaging.schemas.data import SymbolAliasUpdateData
+    from snapper.messaging.schemas.data import TickData
+    from snapper.messaging.schemas.data import TradeData
+
+    match data:
+        case TickData():
+            return market_topic(cast(OrderExchange, data.exchange), data.instrument, "ticks")
+        case CandleData():
+            return market_topic(
+                cast(OrderExchange, data.exchange), data.instrument, "candles", data.timeframe
+            )
+        case TradeData():
+            return market_topic(cast(OrderExchange, data.exchange), data.instrument, "trades")
+        case OrderRequestData():
+            return order_command_topic(data.exchange, data.instrument, "submit")
+        case OrderCancelData():
+            return order_command_topic(data.exchange, data.instrument, "cancel")
+        case OrderReplaceData():
+            return order_command_topic(data.exchange, data.instrument, "replace")
+        case OrderData():
+            return order_event_topic(data.exchange, data.instrument, cast(OrderEvent, data.status))
+        case OrderEventData():
+            return order_event_topic(data.exchange, data.instrument, data.event)
+        case ExecutionData():
+            return order_event_topic(data.exchange, data.instrument, "executed")
+        case SignalData():
+            if data.exchange == "paper":
+                if not data.strategy_name:
+                    raise ValueError("Paper signal requires strategy_name for topic derivation")
+                return signal_topic(data.exchange, data.instrument, data.strategy_name)
+            return signal_topic(data.exchange, data.instrument, "live")
+        case HeartbeatData():
+            return heartbeat_topic_from_component(data.component)
+        case SettingChangedData():
+            return system_topic("settings")
+        case SymbolAliasUpdateData():
+            return system_topic("symbol_aliases")
+        case ReplayStartData():
+            return "system.replay.start"
+        case ReplayEndData():
+            return "system.replay.end"
+        case _:
+            raise ValueError(f"No topic derivation for {type(data).__name__}")

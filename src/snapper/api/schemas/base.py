@@ -103,6 +103,8 @@ class StrictDataSchema(BaseModel):
     public_id: str = Field(default_factory=lambda: str(uuid7()))
     type: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    session_id: str = ""
+    sequence_id: int = 0
 
     def to_json(self) -> str:
         """Serialize to JSON string for ZMQ transport.

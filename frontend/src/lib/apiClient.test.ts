@@ -513,6 +513,8 @@ describe('domain API methods', () => {
       json: async () => [
         {
           type: 'candle',
+          session_id: '',
+          sequence_id: 0,
           instrument: 'BTC/USD',
           exchange: 'kraken',
           timeframe: '1h',
@@ -563,6 +565,8 @@ describe('domain API methods', () => {
       json: async () => [
         {
           type: 'order',
+          session_id: '',
+          sequence_id: 0,
           instrument: 'BTC/USD',
           exchange: 'kraken',
           client_order_id: 'client-1',
@@ -605,6 +609,8 @@ describe('domain API methods', () => {
       json: async () => [
         {
           type: 'execution',
+          session_id: '',
+          sequence_id: 0,
           client_order_id: 'client-1',
           executed_at: '2024-01-01T00:00:00Z',
           price: 100,
@@ -630,6 +636,8 @@ describe('domain API methods', () => {
       json: async () => [
         {
           type: 'execution',
+          session_id: '',
+          sequence_id: 0,
           client_order_id: 'client-1',
           executed_at: '2024-01-01T00:00:00Z',
           price: 100,
@@ -655,6 +663,8 @@ describe('domain API methods', () => {
       json: async () => [
         {
           type: 'position',
+          session_id: '',
+          sequence_id: 0,
           instrument: 'BTC/USD',
           exchange: 'kraken',
           quantity: 1,
@@ -676,6 +686,8 @@ describe('domain API methods', () => {
       json: async () => [
         {
           type: 'signal',
+          session_id: '',
+          sequence_id: 0,
           instrument: 'BTC/USD',
           exchange: 'kraken',
           fired_at: '2024-01-01T00:00:00Z',

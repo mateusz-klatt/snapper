@@ -1,6 +1,6 @@
 """Tests for symbol updater base class."""
 
-import json
+import json as _json
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -9,7 +9,8 @@ from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -25,6 +26,9 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import _repository_cache
 from snapper.data.repository import close_and_insert_sync
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import SymbolAliasUpdateData
 
 
 def _lookup_spid(session: Session, native_symbol: str) -> str:
@@ -364,12 +368,12 @@ async def test_setup_and_cleanup_zmq_manage_resources(
     updater.setup_zmq_public()
     assert factory.created is not None
     assert updater.context is not None
-    assert updater.publisher is not None
+    assert updater.msg_publisher is not None
     assert socket.connected_to == updater.settings.zmq_broker_xsub
     updater.cleanup_zmq_public()
     assert socket.closed is True
     assert factory.created.terminated is True
-    assert updater.publisher is None
+    assert updater.msg_publisher is None
     assert updater.context is None
 
 
@@ -385,20 +389,19 @@ async def test_broadcast_cache_invalidation_uses_socket(
     Then: Message sent with topic and invalidation payload.
     """
     updater = updater_factory(2, False)
-    socket = StubSocket()
+    mock_msg_pub = MagicMock()
+    mock_msg_pub.publish = AsyncMock()
 
     def fake_setup() -> None:
-        updater.publisher = cast(Any, socket)
+        updater.msg_publisher = mock_msg_pub
 
     monkeypatch.setattr(updater, "_setup_zmq", fake_setup)
     await updater.broadcast_cache_invalidation()
-    assert socket.sent_multipart, "Expected broadcast message to be sent"
-    topic, payload = socket.sent_multipart[0]
-    assert topic == "system.symbol_aliases"
-    payload_data = json.loads(payload.decode("utf-8"))
-    assert payload_data["event"] == "symbol_aliases_updated"
-    assert payload_data["action"] == "clear_cache"
-    assert "timestamp" in payload_data
+    mock_msg_pub.publish.assert_called_once()
+    called_data = mock_msg_pub.publish.call_args.args[0]
+    assert called_data.event == "symbol_aliases_updated"
+    assert called_data.action == "clear_cache"
+    assert called_data.timestamp is not None
 
 
 @pytest.mark.asyncio()
@@ -413,22 +416,53 @@ async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
     Then: Setup not called, message still sent.
     """
     updater = updater_factory(1, False)
-    socket = StubSocket()
+    mock_msg_pub = MagicMock()
+    mock_msg_pub.publish = AsyncMock()
     setup_called = False
 
     def fake_setup() -> None:
         nonlocal setup_called
         setup_called = True
 
-    updater.publisher = cast(Any, socket)
+    updater.msg_publisher = mock_msg_pub
     monkeypatch.setattr(updater, "_setup_zmq", fake_setup)
     await updater.broadcast_cache_invalidation()
     assert setup_called is False
-    assert socket.sent_multipart, "Expected broadcast message when publisher present"
-    topic, payload = socket.sent_multipart[0]
+    mock_msg_pub.publish.assert_called_once()
+    called_data = mock_msg_pub.publish.call_args.args[0]
+    assert called_data.event == "symbol_aliases_updated"
+
+
+@pytest.mark.asyncio()
+async def test_broadcast_cache_invalidation_stamped_envelope(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify broadcast_cache_invalidation publishes a fully-stamped ZMQ envelope.
+
+    Given: Updater with a real MessagePublisher backed by a mock ValidatedPublisher,
+    When: broadcast_cache_invalidation called,
+    Then: Payload sent over ZMQ carries non-empty session_id, sequence_id >= 1,
+          and correct SymbolAliasUpdateData fields.
+    """
+    updater = updater_factory(1, False)
+    mock_vp = MagicMock()
+    mock_vp.send_multipart = AsyncMock()
+    tracker = SequenceTracker()
+    updater.msg_publisher = MessagePublisher(mock_vp, tracker)
+    await updater.broadcast_cache_invalidation()
+    mock_vp.send_multipart.assert_called_once()
+    call_args = mock_vp.send_multipart.call_args
+    topic: str = call_args.args[0]
+    raw: bytes = call_args.args[1]
     assert topic == "system.symbol_aliases"
-    payload_data = json.loads(payload.decode("utf-8"))
-    assert payload_data["event"] == "symbol_aliases_updated"
+    data = _json.loads(raw.decode())
+    assert data["type"] == "symbol_alias_update"
+    assert data["event"] == "symbol_aliases_updated"
+    assert data["session_id"] == tracker.session_id
+    assert data["session_id"] != ""
+    assert data["sequence_id"] >= 1
+    stamped = SymbolAliasUpdateData.model_validate(data)
+    assert isinstance(stamped, SymbolAliasUpdateData)
 
 
 @pytest.mark.asyncio()
@@ -444,7 +478,7 @@ async def test_cleanup_safe_when_no_resources(
     updater = updater_factory(1, False)
     updater.cleanup_zmq_public()
     assert updater.context is None
-    assert updater.publisher is None
+    assert updater.msg_publisher is None
 
 
 @pytest.mark.asyncio()
@@ -704,7 +738,7 @@ async def test_broadcast_cache_invalidation_handles_missing_publisher(
     updater = updater_factory(1, False)
 
     def mock_setup_fails() -> None:
-        updater.publisher = None
+        updater.msg_publisher = None
 
     monkeypatch.setattr(updater, "_setup_zmq", mock_setup_fails)
     await updater.broadcast_cache_invalidation()

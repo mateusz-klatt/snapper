@@ -906,6 +906,16 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Instrument */
             instrument: string;
             /**
@@ -1177,6 +1187,16 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Trade Id */
             trade_id?: string | null;
             /** Exchange Order Id */
@@ -1369,6 +1389,16 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Exchange Order Id */
             exchange_order_id?: string | null;
             /** Client Order Id */
@@ -1444,6 +1474,16 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Instrument */
             instrument: string;
             /**
@@ -2042,6 +2082,16 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Instrument */
             instrument: string;
             /**
@@ -2244,6 +2294,7 @@ export type Components = {
          *         dropped: Messages dropped due to backpressure.
          *         timeout: Messages that timed out during send.
          *         errors: Number of errors encountered.
+         *         invalid_messages: Messages that could not be parsed as a typed envelope.
          *         last_message_ts: Timestamp of last received message.
          *         throttle_ms: Configured throttle interval (None if unconfigured).
          *         pattern: ZMQ subscription pattern (None if unconfigured).
@@ -2291,6 +2342,12 @@ export type Components = {
              * @default 0
              */
             errors: number;
+            /**
+             * Invalid Messages
+             * @description Messages with unparseable envelope
+             * @default 0
+             */
+            invalid_messages: number;
             /**
              * Last Message Ts
              * @description Last message timestamp

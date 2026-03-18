@@ -151,6 +151,10 @@ REST endpoints return the same Data schemas used by WebSocket messages
 from `messaging.schemas.data`). This means the wire format is identical
 whether data arrives via REST or the WebSocket feed.
 
+All Data objects carry `session_id` (UUID7 string) and `sequence_id` (int) provenance
+fields stamped by the producer. These are empty string / 0 for rows written before stream
+provenance was wired up or for write paths not yet connected to a `SequenceTracker`.
+
 All data endpoints support bitemporal querying via the optional `as_of`
 parameter (UTC datetime). When provided, the query returns data as it was
 known at that point in time. When omitted, the current time is used.
@@ -517,6 +521,7 @@ X-CSRF-Token: <csrf_token>
             "dropped": 0,
             "timeout": 0,
             "errors": 0,
+            "invalid_messages": 0,
             "last_message_ts": 1737208800.0,
             "throttle_ms": 100,
             "pattern": "market."
@@ -1149,7 +1154,11 @@ If the client does not reauthenticate in time:
 ### Server Data Messages
 
 Data messages are flat JSON objects forwarded directly from the ZMQ bus.
-There is no `"data"` wrapper.
+There is no `"data"` wrapper. Messages with malformed JSON are dropped by the bridge
+before forwarding and are counted in the `invalid_messages` metric for the topic.
+
+All data messages carry `session_id` and `sequence_id` provenance fields (see REST section
+above). Clients can use these to detect gaps without server-side replay support.
 
 #### Candle
 
@@ -1158,6 +1167,8 @@ There is no `"data"` wrapper.
     "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "candle",
     "timestamp": "2026-01-18T11:00:00Z",
+    "session_id": "019e0000-0000-7000-0000-000000000001",
+    "sequence_id": 42,
     "instrument": "BTC-USD",
     "exchange": "kraken",
     "timeframe": "1h",
@@ -1211,6 +1222,8 @@ There is no `"data"` wrapper.
     "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "signal",
     "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "019e0000-0000-7000-0000-000000000001",
+    "sequence_id": 7,
     "instrument": "BTC-USD",
     "exchange": "paper",
     "side": "buy",

@@ -1,6 +1,6 @@
 """Unit tests for SettingsService and related configuration utilities."""
 
-import json
+import json as _json
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
@@ -30,7 +30,10 @@ from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import clear_encryption
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import get_encryption_service
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import SettingChangedData
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import list_process_runs
 from snapper.strategies.base import BaseStrategy
@@ -145,15 +148,21 @@ class MockSession:
 class TestSettingsService:
     """Test cases for SettingsService functionality."""
 
-    class _StubPublisher:
+    class _StubMsgPublisher:
         def __init__(self) -> None:
-            self.messages: list[tuple[str, bytes]] = []
+            self.published: list[Any] = []
 
-        async def send_multipart(self, topic: str, payload: bytes) -> None:
-            self.messages.append((topic, payload))
+        async def publish(self, data: Any, *, topic: str | None = None, flags: int = 0) -> Any:
+            """Record published data and return it unchanged."""
+            self.published.append(data)
+            return data
 
         def close(self) -> None:
             """No-op close for test stub."""
+            pass
+
+        def setsockopt(self, option: int, value: int) -> None:
+            """No-op socket option for test stub."""
             pass
 
     def test_init_service(self) -> None:
@@ -183,7 +192,7 @@ class TestSettingsService:
             zmq_broker_xpub="tcp://127.0.0.1:7501",
         )
         assert service._zmq_context is None
-        assert service._publisher is None
+        assert service._msg_publisher is None
         await service.shutdown()
 
     def test_init_service_with_encryption(self) -> None:
@@ -295,18 +304,49 @@ class TestSettingsService:
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
         )
-        publisher = self._StubPublisher()
-        cast(Any, service)._publisher = publisher
+        publisher = self._StubMsgPublisher()
+        cast(Any, service)._msg_publisher = publisher
         await cast(Any, service)._broadcast_change("api_key", "secure", "auth", updated_by="tester")
-        assert publisher.messages
-        topic, payload = publisher.messages[0]
+        assert publisher.published
+        msg = publisher.published[0]
+        assert msg.type == "setting_changed"
+        assert msg.key == "api_key"
+        assert msg.value == "secure"
+        assert msg.category == "auth"
+        assert msg.updated_by == "tester"
+
+    @pytest.mark.asyncio
+    async def test_broadcast_change_stamped_envelope(self) -> None:
+        """Verify _broadcast_change stamps session_id and sequence_id via real MessagePublisher.
+
+        Given: Service with a real MessagePublisher backed by a mock ValidatedPublisher,
+        When: _broadcast_change called,
+        Then: Payload sent over ZMQ contains non-empty session_id, sequence_id >= 1,
+              correct type, and envelope fields match the changed setting.
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        mock_vp = MagicMock()
+        mock_vp.send_multipart = AsyncMock()
+        tracker = SequenceTracker()
+        msg_pub = MessagePublisher(cast(Any, mock_vp), tracker)
+        cast(Any, service)._msg_publisher = msg_pub
+        await cast(Any, service)._broadcast_change("api_key", "s3cr3t", "auth")
+        mock_vp.send_multipart.assert_called_once()
+        call_args = mock_vp.send_multipart.call_args
+        topic = call_args.args[0]
+        raw: bytes = call_args.args[1]
         assert topic == "system.settings"
-        message = json.loads(payload.decode("utf-8"))
-        assert message["type"] == "setting_changed"
-        assert message["key"] == "api_key"
-        assert message["value"] == "secure"
-        assert message["category"] == "auth"
-        assert message["updated_by"] == "tester"
+        data = _json.loads(raw.decode())
+        assert data["type"] == "setting_changed"
+        assert data["key"] == "api_key"
+        assert data["session_id"] == tracker.session_id
+        assert data["session_id"] != ""
+        assert data["sequence_id"] >= 1
+        stamped = SettingChangedData.model_validate(data)
+        assert isinstance(stamped, SettingChangedData)
 
     @pytest.mark.asyncio
     async def test_broadcast_change_without_publisher(self) -> None:
@@ -335,8 +375,8 @@ class TestSettingsService:
             zmq_broker_xpub="tcp://127.0.0.1:7501",
         )
         publisher = MagicMock()
-        publisher.send_multipart = AsyncMock(side_effect=RuntimeError("fail"))
-        cast(Any, service)._publisher = publisher
+        publisher.publish = AsyncMock(side_effect=RuntimeError("fail"))
+        cast(Any, service)._msg_publisher = publisher
         with patch("snapper.application.services.settings.logger.error") as log_error:
             await cast(Any, service)._broadcast_change("api_key", "secure", "auth")
         log_error.assert_called_once()
@@ -834,7 +874,7 @@ async def test_broadcast_change_when_publisher_is_none() -> None:
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
     )
-    service._publisher = None
+    service._msg_publisher = None
     await service._broadcast_change("test_key", "test_value", "system", "user1")
 
 
@@ -851,10 +891,10 @@ async def test_broadcast_change_when_send_multipart_raises() -> None:
         zmq_broker_xpub="tcp://127.0.0.1:7501",
     )
     mock_publisher = MagicMock()
-    mock_publisher.send_multipart = AsyncMock(side_effect=Exception("ZMQ error"))
-    service._publisher = mock_publisher
+    mock_publisher.publish = AsyncMock(side_effect=Exception("ZMQ error"))
+    service._msg_publisher = mock_publisher
     await service._broadcast_change("test_key", "test_value", "system", "user1")
-    assert mock_publisher.send_multipart.called
+    assert mock_publisher.publish.called
 
 
 @pytest.mark.asyncio
@@ -990,7 +1030,7 @@ async def test_shutdown_when_publisher_exists() -> None:
         zmq_broker_xpub="tcp://127.0.0.1:7501",
     )
     mock_publisher = MagicMock()
-    service._publisher = mock_publisher
+    service._msg_publisher = mock_publisher
     mock_context = MagicMock()
     service._zmq_context = mock_context
     await service.shutdown()
@@ -1010,7 +1050,7 @@ async def test_shutdown_when_publisher_is_none() -> None:
         db_url="sqlite+aiosqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
     )
-    service._publisher = None
+    service._msg_publisher = None
     mock_context = MagicMock()
     service._zmq_context = mock_context
     await service.shutdown()

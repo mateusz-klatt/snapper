@@ -286,6 +286,8 @@ export interface CandleData {
   public_id?: string;
   type: Type;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   instrument: string;
   exchange: Exchange;
   timeframe: string;
@@ -324,6 +326,8 @@ export interface ExecutionData {
   public_id?: string;
   type: Type1;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   trade_id?: TradeId;
   exchange_order_id?: ExchangeOrderId;
   client_order_id: string;
@@ -354,6 +358,8 @@ export interface HeartbeatData {
   public_id?: string;
   type: Type2;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   component: string;
   sequence: number;
   status: Status1;
@@ -379,6 +385,8 @@ export interface OrderCancelData {
   public_id?: string;
   type: Type3;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   exchange: Exchange2;
   instrument: string;
   exchange_order_id: string;
@@ -415,6 +423,8 @@ export interface OrderData {
   public_id?: string;
   type: Type4;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   exchange_order_id?: ExchangeOrderId1;
   client_order_id: string;
   instrument: string;
@@ -455,6 +465,8 @@ export interface OrderEventData {
   public_id?: string;
   type: Type5;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   exchange_order_id: string;
   client_order_id: string;
   exchange: Exchange4;
@@ -480,6 +492,8 @@ export interface OrderReplaceData {
   public_id?: string;
   type: Type6;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   exchange: Exchange5;
   instrument: string;
   exchange_order_id: string;
@@ -510,6 +524,8 @@ export interface OrderRequestData {
   public_id?: string;
   type: Type7;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   strategy_id: string;
   exchange: Exchange6;
   instrument: string;
@@ -540,6 +556,8 @@ export interface PositionData {
   public_id?: string;
   type: Type8;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   instrument: string;
   exchange: Exchange7;
   quantity: number;
@@ -557,6 +575,8 @@ export interface ReplayEndData {
   public_id?: string;
   type: Type9;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
 }
 /**
  * Historical data replay start marker.
@@ -571,6 +591,8 @@ export interface ReplayStartData {
   public_id?: string;
   type: Type10;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   started_at?: StartedAt;
 }
 /**
@@ -589,6 +611,8 @@ export interface SettingChangedData {
   public_id?: string;
   type: Type11;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   key: string;
   value: string;
   category: string;
@@ -614,6 +638,8 @@ export interface SignalData {
   public_id?: string;
   type: Type12;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   instrument: string;
   exchange: Exchange8;
   side: Side3;
@@ -637,6 +663,8 @@ export interface SymbolAliasUpdateData {
   public_id?: string;
   type: Type13;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   event: Event1;
   action: Action;
 }
@@ -658,6 +686,8 @@ export interface TickData {
   public_id?: string;
   type: Type14;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   instrument: string;
   exchange: Exchange9;
   volume: number;
@@ -683,6 +713,8 @@ export interface TradeData {
   public_id?: string;
   type: Type15;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   instrument: string;
   exchange: Exchange10;
   executed_at?: ExecutedAt;

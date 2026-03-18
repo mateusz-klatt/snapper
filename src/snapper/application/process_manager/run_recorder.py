@@ -21,6 +21,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import ProcessRun
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class ProcessRunRecorder:
@@ -41,6 +42,7 @@ class ProcessRunRecorder:
             settings: Application settings for database URL.
         """
         self.settings = settings
+        self._tracker = SequenceTracker()
 
     async def create_run_record(
         self,
@@ -69,6 +71,8 @@ class ProcessRunRecorder:
                 tags=list(config.tags),
                 started_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence("db.process_runs"),
             )
             session.add(run)
             await session.commit()
@@ -120,6 +124,8 @@ class ProcessRunRecorder:
                 completed_at=datetime.now(UTC),
                 timestamp=now,
                 known_to=KNOWN_TO_MAX,
+                session_id=process_run.session_id,
+                sequence_id=self._tracker.next_sequence("db.process_runs"),
             )
             session.add(new_run)
             await session.commit()

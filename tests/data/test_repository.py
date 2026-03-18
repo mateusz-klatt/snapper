@@ -812,6 +812,8 @@ class DummyRepository(Repository):
         updated_at: datetime,
         exchange_order_id: str | None = None,
         err: str | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> int:
         """Update order - no-op returning 0."""
         return 0
@@ -1690,6 +1692,8 @@ class _MinimalRepository(Repository):
         updated_at: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> int:
         """Update order - no-op returning 0."""
         return 0

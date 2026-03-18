@@ -25,6 +25,8 @@ type TradeSide = 'buy' | 'sell'
 export interface Candle {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   instrument: string
   exchange: MarketDataExchange
   timeframe: string
@@ -45,6 +47,8 @@ export interface Candle {
 export interface Execution {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   tradeId?: string | null
   exchangeOrderId?: string | null
   clientOrderId: string
@@ -66,6 +70,8 @@ export interface Execution {
 export interface Heartbeat {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   component: string
   sequence: number
   status: 'healthy' | 'warning' | 'error'
@@ -80,6 +86,8 @@ export interface Heartbeat {
 export interface OrderCancel {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
@@ -93,6 +101,8 @@ export interface OrderCancel {
 export interface Order {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
@@ -118,6 +128,8 @@ export interface Order {
 export interface OrderEvent {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   exchangeOrderId: string
   clientOrderId: string
   exchange: OrderExchange
@@ -133,6 +145,8 @@ export interface OrderEvent {
 export interface OrderReplace {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
@@ -148,6 +162,8 @@ export interface OrderReplace {
 export interface OrderRequest {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   strategyId: string
   exchange: OrderExchange
   instrument: string
@@ -167,6 +183,8 @@ export interface OrderRequest {
 export interface Position {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   instrument: string
   exchange: OrderExchange
   quantity: number
@@ -182,6 +200,8 @@ export interface Position {
 export interface ReplayEnd {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
 }
 
 /**
@@ -191,6 +211,8 @@ export interface ReplayEnd {
 export interface ReplayStart {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   startedAt?: Date | null
 }
 
@@ -201,6 +223,8 @@ export interface ReplayStart {
 export interface SettingChanged {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   key: string
   value: string
   category: string
@@ -214,6 +238,8 @@ export interface SettingChanged {
 export interface Signal {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   instrument: string
   exchange: OrderExchange
   side: TradeSide
@@ -231,6 +257,8 @@ export interface Signal {
 export interface SymbolAliasUpdate {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   event: string
   action: string
 }
@@ -242,6 +270,8 @@ export interface SymbolAliasUpdate {
 export interface Tick {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   instrument: string
   exchange: MarketDataExchange
   volume: number
@@ -257,6 +287,8 @@ export interface Tick {
 export interface Trade {
   publicId?: string
   timestamp?: Date
+  sessionId?: string
+  sequenceId?: number
   instrument: string
   exchange: MarketDataExchange
   executedAt?: Date | null

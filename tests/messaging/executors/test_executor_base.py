@@ -87,6 +87,9 @@ async def test_start_with_websocket_client(monkeypatch: pytest.MonkeyPatch) -> N
     class WebsocketClient:
         supports_websocket_executions = True
 
+        def set_tracker(self, tracker: Any) -> None:
+            """No-op tracker injection for tests."""
+
         async def __aenter__(self) -> WebsocketClient:
             return self
 
@@ -150,6 +153,9 @@ async def test_start_without_websocket_client(monkeypatch: pytest.MonkeyPatch) -
 
     class NoWebsocketClient:
         supports_websocket_executions = False
+
+        def set_tracker(self, tracker: Any) -> None:
+            """No-op tracker injection for tests."""
 
         async def __aenter__(self) -> NoWebsocketClient:
             return self
@@ -335,10 +341,10 @@ async def test_publish_order_status_skips_when_not_running() -> None:
     Then: No message is sent via publisher.
     """
     ex: Any = MergedDummyExecutor()
-    ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
+    ex.msg_publisher = AsyncMock()
     ex.running = False
     await ex._publish_order_status(make_order(), "submitted")
-    ex.publisher.send_multipart.assert_not_awaited()
+    ex.msg_publisher.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -579,7 +585,7 @@ async def test_order_handler_non_order_message(monkeypatch: pytest.MonkeyPatch) 
     )
     monkeypatch.setattr(
         "snapper.messaging.executors.base.parse_message",
-        lambda _payload: SimpleNamespace(type="other"),
+        lambda _payload: SimpleNamespace(type="other", session_id="", sequence_id=0),
     )
     await ex._order_handler()
 
@@ -953,10 +959,10 @@ async def test_publish_heartbeat_skips_when_not_running() -> None:
     """
     ex: Any = MergedDummyExecutor()
     ex.running = False
-    ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
+    ex.msg_publisher = SimpleNamespace(publish=AsyncMock())
     msg = SimpleNamespace(to_json=lambda: "{}", component="c")
-    await ex._publish_heartbeat("topic", cast(Any, msg))
-    ex.publisher.send_multipart.assert_not_awaited()
+    await ex._publish_heartbeat(cast(Any, msg))
+    ex.msg_publisher.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1036,10 +1042,10 @@ class TestExecutorNonWebSocketMode:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        mock_exchange_client = AsyncMock()
+        mock_exchange_client = MagicMock()
         mock_exchange_client.supports_websocket_executions = False
-        mock_exchange_client.__aenter__.return_value = mock_exchange_client
-        mock_exchange_client.__aexit__.return_value = None
+        mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
+        mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
         start_called = asyncio.Event()
 
         async def mock_order_handler() -> None:
@@ -1579,7 +1585,7 @@ class TestHeartbeat:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        service_any.publisher = None
+        service_any.msg_publisher = None
         service_any.running = True
         hb = HeartbeatData(
             component="test",
@@ -1587,7 +1593,7 @@ class TestHeartbeat:
             status="healthy",
             lag_ms=0,
         )
-        await service_any._publish_heartbeat("system.heartbeats.test", hb)
+        await service_any._publish_heartbeat(hb)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1603,16 +1609,16 @@ class TestHeartbeat:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        mock_publisher = MagicMock()
-        mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Send failed"))
-        service_any.publisher = mock_publisher
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.publish = AsyncMock(side_effect=Exception("Send failed"))
+        service_any.msg_publisher = mock_msg_publisher
         hb = HeartbeatData(
             component="test",
             sequence=1,
             status="healthy",
             lag_ms=0,
         )
-        await service_any._publish_heartbeat("system.heartbeats.test", hb)
+        await service_any._publish_heartbeat(hb)
 
 
 class TestSymbolAliasUpdate:
@@ -1768,7 +1774,7 @@ class TestPublishOrderStatus:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        service_any.publisher = None
+        service_any.msg_publisher = None
         service_any.running = True
         order = OrderRequestData(
             strategy_id="test",
@@ -1874,6 +1880,9 @@ class MockExchangeClientWithAenter:
     def __init__(self) -> None:
         """Initialize client stub."""
         self._entered = False
+
+    def set_tracker(self, tracker: Any) -> None:
+        """No-op tracker injection for tests."""
 
     async def __aenter__(self) -> MockExchangeClientWithAenter:
         """Enter async context manager.
@@ -2542,7 +2551,7 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         mock_publisher = AsyncMock()
-        service_any.publisher = mock_publisher
+        service_any.msg_publisher = mock_publisher
         service_any.running = True
         fill_msg = ExecutionData(
             trade_id="trade-1",
@@ -2558,7 +2567,7 @@ class TestExecutorCoverage:
             status="filled",
         )
         await service_any._publish_execution(fill_msg)
-        mock_publisher.send_multipart.assert_awaited_once()
+        mock_publisher.publish.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2627,9 +2636,9 @@ class TestExecutorCoverage:
         mock_settings_with_db = self._create_mock_settings()
         mock_settings_with_db.kraken_api_key = "test_api_key"
         mock_settings_with_db.kraken_api_secret = "test_api_secret"
-        mock_exchange_client = AsyncMock()
-        mock_exchange_client.__aenter__.return_value = mock_exchange_client
-        mock_exchange_client.__aexit__.return_value = None
+        mock_exchange_client = MagicMock()
+        mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
+        mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
         with (
             patch.object(service, "_order_handler", new=AsyncMock(return_value=None)),
             patch.object(service, "_execution_handler", new=AsyncMock(return_value=None)),
@@ -2701,10 +2710,10 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any.publisher = AsyncMock()
+        service_any.msg_publisher = AsyncMock()
         order = self._create_order()
         await service_any._publish_order_status(order, "submitted")
-        service_any.publisher.send_multipart.assert_awaited_once()
+        service_any.msg_publisher.publish.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2872,9 +2881,8 @@ class TestExecutorCoverage:
         service_any.running = True
         publish_heartbeat_mock = AsyncMock()
 
-        async def publish_side_effect(topic: str, message: HeartbeatData) -> None:
-            assert topic == "system.heartbeats.executor.kraken"
-            assert message.component == "executor_kraken"
+        async def publish_side_effect(message: HeartbeatData) -> None:
+            assert message.component == "executor.kraken"
             service_any.running = False
 
         publish_heartbeat_mock.side_effect = publish_side_effect
@@ -2902,10 +2910,10 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any.publisher = AsyncMock()
-        hb = HeartbeatData(component="executor", sequence=1, status="healthy", lag_ms=0)
-        await service_any._publish_heartbeat("system.heartbeats", hb)
-        service_any.publisher.send_multipart.assert_awaited_once()
+        service_any.msg_publisher = AsyncMock()
+        hb = HeartbeatData(component="executor.kraken", sequence=1, status="healthy", lag_ms=0)
+        await service_any._publish_heartbeat(hb)
+        service_any.msg_publisher.publish.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2950,6 +2958,9 @@ class TestExecutorCoverage:
 
         class MockExchangeClient:
             supports_websocket_executions = False
+
+            def set_tracker(self, tracker: Any) -> None:
+                """No-op tracker injection for tests."""
 
             async def __aenter__(self) -> MockExchangeClient:
                 return self
@@ -3172,11 +3183,11 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any.publisher = AsyncMock()
-        service_any.publisher.send_multipart.side_effect = RuntimeError("send failed")
+        service_any.msg_publisher = AsyncMock()
+        service_any.msg_publisher.publish.side_effect = RuntimeError("send failed")
         order = self._create_order()
         await service_any._publish_order_status(order, "submitted")
-        service_any.publisher.send_multipart.assert_awaited_once()
+        service_any.msg_publisher.publish.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3195,8 +3206,8 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any.publisher = AsyncMock()
-        service_any.publisher.send_multipart.side_effect = RuntimeError("fill failed")
+        service_any.msg_publisher = AsyncMock()
+        service_any.msg_publisher.publish.side_effect = RuntimeError("fill failed")
         fill_msg = ExecutionData(
             trade_id="trade-1",
             exchange_order_id="one",
@@ -3211,7 +3222,7 @@ class TestExecutorCoverage:
             status="filled",
         )
         await service_any._publish_execution(fill_msg)
-        service_any.publisher.send_multipart.assert_awaited_once()
+        service_any.msg_publisher.publish.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3414,7 +3425,7 @@ class TestExecutorWebSocketExecutions:
         """
         mock_settings = self._create_mock_settings(with_credentials=True)
         mock_get_settings.return_value = mock_settings
-        mock_exchange_client = AsyncMock()
+        mock_exchange_client = MagicMock()
         mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
         mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
         service = KrakenOrderExecutor()
@@ -3469,7 +3480,7 @@ class TestExecutorWebSocketExecutions:
         """
         mock_settings = self._create_mock_settings(with_credentials=False)
         mock_get_settings.return_value = mock_settings
-        mock_exchange_client = AsyncMock()
+        mock_exchange_client = MagicMock()
         mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
         mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
         service = KrakenOrderExecutor()
@@ -4401,7 +4412,7 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         mock_publisher = AsyncMock()
-        service_any.publisher = mock_publisher
+        service_any.msg_publisher = mock_publisher
         cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -4409,9 +4420,11 @@ class TestCancelReplaceHandlers:
             client_order_id="client_456",
         )
         await service_any._publish_cancel_event(cancel_envelope, "cancelled")
-        mock_publisher.send_multipart.assert_awaited_once()
-        call_args = mock_publisher.send_multipart.call_args
-        assert call_args[0][0] == "orders.events.kraken.BTC-USD.cancelled"
+        mock_publisher.publish.assert_awaited_once()
+        published_data = mock_publisher.publish.call_args[0][0]
+        assert published_data.event == "cancelled"
+        assert published_data.instrument == "BTC-USD"
+        assert published_data.exchange == "kraken"
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4430,7 +4443,7 @@ class TestCancelReplaceHandlers:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any.publisher = None
+        service_any.msg_publisher = None
         cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -4457,8 +4470,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         mock_publisher = AsyncMock()
-        mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Network error"))
-        service_any.publisher = mock_publisher
+        mock_publisher.publish = AsyncMock(side_effect=Exception("Network error"))
+        service_any.msg_publisher = mock_publisher
         cancel_envelope = OrderCancelData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -4485,7 +4498,7 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         mock_publisher = AsyncMock()
-        service_any.publisher = mock_publisher
+        service_any.msg_publisher = mock_publisher
         replace_envelope = OrderReplaceData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -4495,9 +4508,11 @@ class TestCancelReplaceHandlers:
             new_price=48000.0,
         )
         await service_any._publish_replace_event(replace_envelope, "rejected")
-        mock_publisher.send_multipart.assert_awaited_once()
-        call_args = mock_publisher.send_multipart.call_args
-        assert call_args[0][0] == "orders.events.kraken.BTC-USD.rejected"
+        mock_publisher.publish.assert_awaited_once()
+        published_data = mock_publisher.publish.call_args[0][0]
+        assert published_data.event == "rejected"
+        assert published_data.instrument == "BTC-USD"
+        assert published_data.exchange == "kraken"
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4516,7 +4531,7 @@ class TestCancelReplaceHandlers:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
-        service_any.publisher = None
+        service_any.msg_publisher = None
         replace_envelope = OrderReplaceData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -4543,8 +4558,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         mock_publisher = AsyncMock()
-        mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Network error"))
-        service_any.publisher = mock_publisher
+        mock_publisher.publish = AsyncMock(side_effect=Exception("Network error"))
+        service_any.msg_publisher = mock_publisher
         replace_envelope = OrderReplaceData(
             exchange="kraken",
             instrument="BTC-USD",

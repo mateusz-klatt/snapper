@@ -25,6 +25,7 @@ from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class DummyExchangeClient(ExchangeClientBase):
@@ -472,6 +473,29 @@ async def test_log_order_update_to_db_returns_new_order_id() -> None:
     assert call_args["status"] == "filled"
     assert call_args["exchange_order_id"] == "order_123"
     assert call_args["error"] is None
+
+
+@pytest.mark.asyncio()
+async def test_log_order_update_to_db_stamps_provenance_from_tracker() -> None:
+    """Log order update passes provenance from injected SequenceTracker.
+
+    Given: Client with a SequenceTracker injected,
+    When: _log_order_update_to_db is called,
+    Then: update_order receives session_id and sequence_id from the tracker.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.update_order = AsyncMock(return_value=55)
+    tracker = SequenceTracker()
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(tracker)
+    result = await client._log_order_update_to_db(
+        db_order_id=10,
+        status=OrderStatusEnum.FILLED,
+    )
+    assert result == 55
+    call_kwargs = mock_repo.update_order.call_args[1]
+    assert call_kwargs["session_id"] == tracker.session_id
+    assert call_kwargs["sequence_id"] == 1
 
 
 @pytest.mark.asyncio()

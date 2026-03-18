@@ -19,7 +19,7 @@ from snapper.data.models import Signal
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
-from snapper.strategies.base import StrategySignal
+from snapper.strategies.models import StrategySignal
 
 
 class SignalReadService:
@@ -36,6 +36,10 @@ class SignalReadService:
         exchange: str,
         strategy_name: str | None = None,
         price: float | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
+        public_id: str | None = None,
+        timestamp: datetime | None = None,
     ) -> str:
         """Store a trading signal in the database.
 
@@ -44,6 +48,12 @@ class SignalReadService:
             exchange: Exchange where the signal was generated.
             strategy_name: Name of the strategy that generated the signal.
             price: Current price at signal generation time.
+            session_id: Producer session UUID for provenance tracking.
+            sequence_id: Sequence number within the producer session.
+            public_id: Stable public identity from the published envelope.
+                When provided, the DB row carries the same public_id as the
+                WS/ZMQ message so REST and WS represent the same event.
+            timestamp: Known-at time from the published envelope.
 
         Returns:
             Signal event UUID or empty string on error.
@@ -83,16 +93,21 @@ class SignalReadService:
                     )
                 else:
                     inst_id = inst.id
-                signal_event = Signal(
-                    instrument_id=inst_id,
-                    timestamp=datetime.now(UTC),
-                    fired_at=signal.timestamp or datetime.now(UTC),
-                    side=signal.side,
-                    strength=signal.strength,
-                    reason=signal.reason,
-                    strategy_name=strategy_name,
-                    price=price,
-                )
+                init_kwargs: dict[str, Any] = {
+                    "instrument_id": inst_id,
+                    "timestamp": timestamp or datetime.now(UTC),
+                    "fired_at": signal.timestamp or datetime.now(UTC),
+                    "side": signal.side,
+                    "strength": signal.strength,
+                    "reason": signal.reason,
+                    "strategy_name": strategy_name,
+                    "price": price,
+                    "session_id": session_id or "",
+                    "sequence_id": sequence_id or 0,
+                }
+                if public_id is not None:
+                    init_kwargs["public_id"] = public_id
+                signal_event = Signal(**init_kwargs)
                 session.add(signal_event)
                 await session.commit()
                 await session.refresh(signal_event)

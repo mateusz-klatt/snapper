@@ -37,8 +37,10 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 from typing import Literal
+from typing import Self
 
 from pydantic import Field
+from pydantic import model_validator
 
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import MarketDataExchange
@@ -159,6 +161,16 @@ class SignalData(StrictDataSchema):
     price: float | None = None
     strategy_name: str | None = None
     fired_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @model_validator(mode="after")
+    def _paper_requires_strategy_name(self) -> Self:
+        """Paper signals require strategy_name for topic derivation."""
+        if self.exchange == "paper" and not self.strategy_name:
+            raise ValueError(
+                "Paper signals require strategy_name to be set "
+                "for topic derivation (signals.paper.{instrument}.{strategy_name})"
+            )
+        return self
 
 
 class ExecutionData(StrictDataSchema):

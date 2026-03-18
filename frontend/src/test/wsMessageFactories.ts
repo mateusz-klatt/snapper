@@ -131,6 +131,8 @@ export function createCandle(
 
   return {
     type: 'candle' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? now,
     open_at: overrides.open_at ?? now,
     exchange: overrides.exchange ?? 'kraken',
@@ -161,6 +163,8 @@ export function createTick(
 
   return {
     type: 'tick' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? now,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
@@ -186,6 +190,8 @@ export function createTrade(
 
   return {
     type: 'trade' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? now,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
@@ -213,6 +219,8 @@ export function createSignal(
 
   return {
     type: 'signal' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? now,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
@@ -239,6 +247,8 @@ export function createHeartbeat(
 
   return {
     type: 'heartbeat' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? now,
     component: overrides.component ?? 'bridge',
     sequence: overrides.sequence ?? 0,
@@ -273,6 +283,8 @@ export function createOrder(
 
   return {
     type: 'order' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? now,
     client_order_id: overrides.client_order_id ?? 'order-1',
     exchange_order_id: overrides.exchange_order_id ?? null,
@@ -314,6 +326,8 @@ export function createExecution(
 
   return {
     type: 'execution' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? now,
     trade_id: overrides.trade_id ?? null,
     exchange_order_id: overrides.exchange_order_id ?? null,

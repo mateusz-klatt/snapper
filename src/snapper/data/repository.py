@@ -297,6 +297,8 @@ class Repository(ABC):
         size: float,
         status: str,
         time_in_force: str | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> tuple[int, str]:
         """Insert new order record, returning (id, public_id) tuple."""
         ...
@@ -311,6 +313,8 @@ class Repository(ABC):
         error: str | None = None,
         filled_size: float | None = None,
         average_price: float | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> int:
         """Close old order version and insert new one (SCD Type 2).
 
@@ -333,6 +337,8 @@ class Repository(ABC):
         exec_id: str | None = None,
         trade_id: str | None = None,
         executed_at: datetime | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> int:
         """Insert execution record, returning execution ID."""
         ...
@@ -667,6 +673,8 @@ class SQLAlchemyRepository(Repository):
         size: float,
         status: str,
         time_in_force: str | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> tuple[int, str]:
         """Insert new order record and return (id, public_id) tuple."""
         async with self.session() as s:
@@ -686,6 +694,8 @@ class SQLAlchemyRepository(Repository):
                 status=status,
                 time_in_force=time_in_force,
                 error=None,
+                session_id=session_id or "",
+                sequence_id=sequence_id or 0,
             )
             s.add(order)
             await s.commit()
@@ -701,6 +711,8 @@ class SQLAlchemyRepository(Repository):
         error: str | None = None,
         filled_size: float | None = None,
         average_price: float | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> int:
         """Close old order version and insert new one (SCD Type 2)."""
         async with self.session() as s:
@@ -730,6 +742,8 @@ class SQLAlchemyRepository(Repository):
                 status=status,
                 time_in_force=old_order.time_in_force,
                 error=error,
+                session_id=session_id or "",
+                sequence_id=sequence_id or 0,
             )
             s.add(new_order)
             await s.commit()
@@ -750,6 +764,8 @@ class SQLAlchemyRepository(Repository):
         exec_id: str | None = None,
         trade_id: str | None = None,
         executed_at: datetime | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
     ) -> int:
         """Insert execution record and return generated ID."""
         async with self.session() as s:
@@ -766,6 +782,8 @@ class SQLAlchemyRepository(Repository):
                 size=size,
                 fee=fee,
                 fee_asset=fee_asset,
+                session_id=session_id or "",
+                sequence_id=sequence_id or 0,
             )
             s.add(execution)
             await s.commit()

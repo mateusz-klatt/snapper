@@ -174,6 +174,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             stats["skipped"] += 1
             return None
         asset_type = self._determine_polygon_asset_type(ticker)
+        sid = self._tracker.session_id
         symbol_public_id = self._upsert_symbol(
             session,
             native_symbol,
@@ -181,6 +182,8 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             quote,
             asset_type,
             now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("db.symbols"),
         )
         alias_result = self._upsert_alias(
             session,
@@ -189,6 +192,8 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             "rest",
             ticker,
             now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("db.aliases"),
         )
         self._upsert_capability(
             session,
@@ -199,6 +204,8 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             "polygon_updater",
             None,
             now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("db.capabilities"),
         )
         if alias_result == "created":
             stats["inserted"] += 1
@@ -237,7 +244,13 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                         session.commit()
                         logger.info(f"Committed batch: {stats}")
                 deactivated = self._reconcile_capabilities(
-                    session, "polygon", processed_symbol_public_ids, "polygon_updater", now
+                    session,
+                    "polygon",
+                    processed_symbol_public_ids,
+                    "polygon_updater",
+                    now,
+                    session_id=self._tracker.session_id,
+                    next_sequence_fn=lambda: self._tracker.next_sequence("db.capabilities"),
                 )
                 session.commit()
                 stats["deactivated"] = deactivated

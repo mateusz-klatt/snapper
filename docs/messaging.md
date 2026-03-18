@@ -99,16 +99,33 @@ Topic format varies by category (see per-category tables below).
 
 | Topic | Description |
 | ----- | ----------- |
-| `system.heartbeats.{component}.{name}[.{source}]` | Component heartbeats (e.g. `feed.kraken`, `feed.paper.kraken`) |
+| `system.heartbeats.executor.{exchange}` | Executor heartbeat (e.g. `executor.kraken`) |
+| `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
+| `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
 | `system.settings` | Configuration change notifications |
 | `system.symbol_aliases` | Symbol cache invalidation |
 | `system.replay.start` | Data replay start |
 | `system.replay.end` | Replay end |
 
+Heartbeat `component` values use dot notation matching the topic path after
+`system.heartbeats.`: `executor.kraken`, `strategy.rsi_btc_1h`, `feed.kraken`,
+`feed.paper.kraken`.
+
 ## Message Data Classes
 
 All messages use typed Data classes (Pydantic) from `snapper.messaging.schemas.data`.
-Every Data class carries `public_id: str` (UUID7), `type: Literal[...]`, and `timestamp: datetime`.
+Every Data class inherits from `StrictDataSchema` and carries:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `public_id` | string | UUID7 external identifier, stable across REST and WS |
+| `type` | string | Literal type discriminator |
+| `timestamp` | datetime | Message creation time |
+| `session_id` | string | UUID7 of the producer process session (empty for unstamped messages) |
+| `sequence_id` | int | Monotonic counter per topic within the session (0 for unstamped messages) |
+
+`session_id` and `sequence_id` are stream-provenance fields stamped automatically by
+`MessagePublisher`. Consumers can use them to detect message loss and producer restarts.
 
 The old `messaging.schemas.messages` module still exists but only contains `parse_message()` and `MessageParseError`.
 
@@ -141,6 +158,8 @@ tick = TickData(
 | `last` | float \| None | Last traded price |
 | `volume` | float | Volume |
 | `timestamp` | datetime | Timestamp |
+| `session_id` | string | Producer session (inherited) |
+| `sequence_id` | int | Per-topic counter (inherited) |
 
 ### CandleData
 
@@ -208,10 +227,13 @@ signal = SignalData(
 | `side` | string | `"buy"` or `"sell"` |
 | `strength` | float | Signal strength 0.0-1.0 |
 | `reason` | string | Reason |
-| `strategy_name` | string | Strategy name |
+| `strategy_name` | string | Strategy name (required for paper exchange signals) |
 | `price` | float | Price |
 | `fired_at` | datetime | Domain time when signal was generated |
 | `timestamp` | datetime | System timestamp |
+
+Paper signals (`exchange == "paper"`) require `strategy_name` to be set. The schema
+enforces this invariant at construction time so invalid paper signals cannot be created.
 
 ### OrderRequestData
 
@@ -284,7 +306,43 @@ heartbeat = HeartbeatData(
 
 ## Publisher
 
-Publishing messages via validated socket wrapper around a raw ZMQ PUB socket:
+### MessagePublisher (recommended)
+
+`MessagePublisher` stamps `session_id` and `sequence_id` on each outgoing message and
+derives the ZMQ topic automatically from the message type. It wraps a `ValidatedPublisher`
+and a `SequenceTracker`.
+
+```python
+import zmq.asyncio
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher, apply_hwm, HWM_MARKET_DATA
+from snapper.messaging.infrastructure.publisher import MessagePublisher, SequenceTracker
+
+ctx = zmq.asyncio.Context()
+raw_socket = ctx.socket(zmq.PUB)
+apply_hwm(raw_socket, sndhwm=HWM_MARKET_DATA)
+raw_socket.connect("tcp://127.0.0.1:7500")
+
+tracker = SequenceTracker()
+publisher = MessagePublisher(ValidatedPublisher(raw_socket), tracker)
+
+await publisher.publish(candle_data)
+publisher.close()
+```
+
+One `SequenceTracker` per component process; all `MessagePublisher` instances within that
+component share it. Counters survive socket reconnects — only a full component restart
+creates a new session.
+
+For paper market data or other cases where the topic cannot be derived from the payload
+alone, pass an explicit `topic` override:
+
+```python
+await publisher.publish(tick_data, topic="market.paper.kraken.BTC-USD.ticks")
+```
+
+### ValidatedPublisher (low-level)
+
+Direct access to the socket wrapper without provenance stamping:
 
 ```python
 import zmq.asyncio
@@ -293,7 +351,7 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 ctx = zmq.asyncio.Context()
 raw_socket = ctx.socket(zmq.PUB)
 apply_hwm(raw_socket, sndhwm=HWM_MARKET_DATA)
-raw_socket.connect("tcp://127.0.0.1:7500")  # broker XSUB
+raw_socket.connect("tcp://127.0.0.1:7500")
 publisher = ValidatedPublisher(raw_socket)
 
 topic = "market.kraken.BTC-USD.candles.1h"
@@ -371,11 +429,39 @@ flowchart TB
 Bridge automatically:
 
 - Subscribes to ZMQ topics when WebSocket client subscribes
+- Validates each inbound ZMQ message as JSON and runs `GapDetector.check()` before forwarding
+- Drops messages with malformed JSON (logged as `WARNING`; counted in `invalid_messages` per topic)
 - Forwards messages via `_forward_to_clients` with per-subscription backpressure
 - Throttles market data per subscriber (configurable `throttle_ms`)
 - Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
 - Disconnects slow clients on trade topics when exceeding `MAX_PENDING_MESSAGES_TRADE` (1000)
 - Unsubscribes when last client disconnects
+
+## Gap Detection
+
+`GapDetector` tracks `session_id` and `sequence_id` per received ZMQ topic and emits log
+messages when it finds sequence gaps or producer session resets.
+
+```python
+from snapper.messaging.infrastructure.gap_detector import GapDetector
+
+detector = GapDetector()
+detector.check(received_topic, session_id, sequence_id)
+```
+
+Rules:
+
+- Messages with `session_id == ""` or `sequence_id == 0` are skipped (backward-compatible
+  with unstamped messages).
+- First message on a topic: sets baseline. If `sequence_id > 1` the subscriber joined
+  mid-stream (logged `INFO`).
+- Same topic, new `session_id`: producer restarted (logged `INFO`, counter resets).
+- In-order message (`sequence_id == expected`): accepted silently.
+- Gap (`sequence_id > expected`): logs `WARNING` with the missing range, then advances.
+- Duplicate / reorder (`sequence_id < expected`): logs `DEBUG`, state unchanged.
+
+`GapDetector` is wired into the ZMQ-WebSocket bridge and into subscriber loops inside the
+executor, trader coordinator, and strategy `_listen_loop()`.
 
 ## Message Logger
 
@@ -450,10 +536,28 @@ Sockets automatically:
 - LINGER=0 on close (discard pending)
 - HWM applied before connect/bind (see above)
 
+## Topic Derivation
+
+`topic_for_message()` in `snapper.messaging.topics.builders` derives the canonical ZMQ
+topic from a typed Data class. `MessagePublisher.publish()` calls it automatically.
+
+```python
+from snapper.messaging.topics.builders import topic_for_message
+
+topic = topic_for_message(candle_data)
+```
+
+Paper market data topics include a `source_exchange` segment that is not carried in the
+payload, so they must always be published with an explicit topic override.
+
 ## Best Practices
 
 1.  **One broker per system** — All components connect to the same broker
 2.  **Topic hierarchy** — Use hierarchy for filtering (`market.kraken.*`)
 3.  **Data types** — Always use typed Data classes from `messaging.schemas.data`
-4.  **Heartbeats** — Keep component-specific heartbeat cadences small and regular
-5.  **Graceful shutdown** — Close sockets with LINGER=0
+4.  **Provenance** — Use `MessagePublisher` (not `ValidatedPublisher` directly) so every
+    message carries `session_id` and `sequence_id` for gap detection
+5.  **One `SequenceTracker` per component** — Create it once at `start()` and share across
+    all publisher instances; restart creates a new session
+6.  **Heartbeats** — Keep component-specific heartbeat cadences small and regular
+7.  **Graceful shutdown** — Close sockets with LINGER=0

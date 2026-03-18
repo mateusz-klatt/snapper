@@ -78,6 +78,7 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
             for instrument in symbols:
                 native_symbol = instrument["native_symbol"]
                 now = datetime.now(UTC)
+                sid = self._tracker.session_id
                 symbol_public_id = self._upsert_symbol(
                     session,
                     native_symbol,
@@ -85,6 +86,8 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     instrument["quote"],
                     "forex",
                     now,
+                    session_id=sid,
+                    sequence_id=self._tracker.next_sequence("db.symbols"),
                 )
                 processed_symbol_public_ids.add(symbol_public_id)
                 ws_result = self._upsert_alias(
@@ -94,6 +97,8 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     "ws",
                     instrument["symbol"],
                     now,
+                    session_id=sid,
+                    sequence_id=self._tracker.next_sequence("db.aliases"),
                 )
                 if ws_result == "created":
                     created_count += 1
@@ -106,6 +111,8 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     "rest",
                     instrument["walutomat_rest_symbol"],
                     now,
+                    session_id=sid,
+                    sequence_id=self._tracker.next_sequence("db.aliases"),
                 )
                 if rest_result == "created":
                     created_count += 1
@@ -120,10 +127,18 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     "walutomat_updater",
                     None,
                     now,
+                    session_id=sid,
+                    sequence_id=self._tracker.next_sequence("db.capabilities"),
                 )
             now = datetime.now(UTC)
             deactivated = self._reconcile_capabilities(
-                session, "walutomat", processed_symbol_public_ids, "walutomat_updater", now
+                session,
+                "walutomat",
+                processed_symbol_public_ids,
+                "walutomat_updater",
+                now,
+                session_id=self._tracker.session_id,
+                next_sequence_fn=lambda: self._tracker.next_sequence("db.capabilities"),
             )
             session.commit()
         logger.info(

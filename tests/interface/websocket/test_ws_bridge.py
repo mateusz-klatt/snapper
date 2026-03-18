@@ -1417,6 +1417,7 @@ class TestGetTopicStats:
         bridge.topic_metrics[topic].dropped_count = 2
         bridge.topic_metrics[topic].timeout_count = 1
         bridge.topic_metrics[topic].error_count = 0
+        bridge.topic_metrics[topic].invalid_messages = 3
         stats = bridge.get_topic_stats()
         assert topic in stats
         assert isinstance(stats[topic], TopicMetricSnapshot)
@@ -1426,6 +1427,7 @@ class TestGetTopicStats:
         assert stats[topic].dropped == 2
         assert stats[topic].timeout == 1
         assert stats[topic].errors == 0
+        assert stats[topic].invalid_messages == 3
         assert stats[topic].active_subscribers == 1
 
     def test_get_topic_stats_empty(self, bridge: ZmqWebSocketBridgeService) -> None:
@@ -1536,11 +1538,11 @@ class TestZMQSubscriptionLoop:
     async def test_zmq_subscription_loop_json_parse_error(
         self, bridge: ZmqWebSocketBridgeService
     ) -> None:
-        """Verify subscription loop forwards invalid JSON as-is.
+        """Verify subscription loop drops invalid JSON in strict mode.
 
         Given: A ZMQ socket returning message with invalid JSON payload,
         When: Processing message in subscription loop,
-        Then: Forwards raw payload string and updates metrics.
+        Then: Message is dropped, received_count not incremented, invalid_messages incremented.
         """
         topic = "market.prices"
         mock_socket = AsyncMock()
@@ -1552,6 +1554,7 @@ class TestZMQSubscriptionLoop:
         bridge.topic_metrics[topic].received_count = 0
         bridge.topic_metrics[topic].error_count = 0
         bridge.topic_metrics[topic].last_message_ts = 0
+        bridge.topic_metrics[topic].invalid_messages = 0
         forwarded_messages: list[tuple[str, str, str]] = []
 
         async def mock_forward(topic_name: str, received_topic: str, payload_str: str) -> None:
@@ -1560,13 +1563,9 @@ class TestZMQSubscriptionLoop:
         bridge._forward_to_clients = mock_forward
         with pytest.raises(asyncio.CancelledError):
             await bridge._zmq_subscription_loop(topic, mock_socket)
-        assert len(forwarded_messages) == 1
-        forwarded_topic, received_topic, payload_str = forwarded_messages[0]
-        assert forwarded_topic == topic
-        assert received_topic == "market.prices"
-        assert payload_str == "invalid_json{"
-        assert bridge.topic_metrics[topic].received_count == 1
-        assert bridge.topic_metrics[topic].last_message_ts > 0
+        assert len(forwarded_messages) == 0
+        assert bridge.topic_metrics[topic].received_count == 0
+        assert bridge.topic_metrics[topic].invalid_messages == 1
 
     @pytest.mark.asyncio
     async def test_zmq_subscription_loop_zmq_error_recovery(

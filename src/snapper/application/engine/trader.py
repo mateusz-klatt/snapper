@@ -38,6 +38,9 @@ from snapper.data.repository import get_repository
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.messaging.infrastructure.gap_detector import GapDetector
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -108,6 +111,9 @@ class TraderCoordinator(RegisterableProcess):
         self.last_signal_time: dict[str, float] = {}
         self.execution_context: zmq.Context[Any] | None = None
         self.execution_publisher: ValidatedPublisher | None = None
+        self.msg_publisher: MessagePublisher | None = None
+        self._tracker: SequenceTracker = SequenceTracker()
+        self._gap_detector: GapDetector = GapDetector("trader")
         self._current_topic: str = ""
 
     @staticmethod
@@ -371,6 +377,7 @@ class TraderCoordinator(RegisterableProcess):
         apply_hwm(raw_pub_socket, sndhwm=HWM_ORDER_FLOW)
         raw_pub_socket.connect(self.settings.zmq_broker_xsub)
         self.execution_publisher = ValidatedPublisher(raw_pub_socket)
+        self.msg_publisher = MessagePublisher(self.execution_publisher, self._tracker)
         logger.info(
             f"ZMQTrader: Connected to broker for order publishing: {self.settings.zmq_broker_xsub}"
         )
@@ -450,6 +457,7 @@ class TraderCoordinator(RegisterableProcess):
                     self._dispatch_order_event(topic_str, msg_bytes)
                     continue
                 signal = SignalData.from_json(msg_bytes.decode())
+                self._gap_detector.check(topic_str, signal.session_id, signal.sequence_id)
                 logger.info(f"ZMQTrader: Received signal from {topic_str}: {signal}")
                 self._current_topic = topic_str
                 await self._on_signal(signal)
@@ -511,9 +519,10 @@ class TraderCoordinator(RegisterableProcess):
             specs_map: dict[str, dict[str, float]] = {
                 instrument: {"tick_size": 0.01, "lot_size": 0.0001}
             }
+            assert self.msg_publisher is not None, "MessagePublisher not initialized"
             self.engines[engine_key] = TradingEngineService(
                 instrument,
-                execution_socket=self.execution_publisher,
+                execution_socket=self.msg_publisher,
                 risk=risk,
                 cfg=EngineConfigModel(),
                 instrument_specs=specs_map,

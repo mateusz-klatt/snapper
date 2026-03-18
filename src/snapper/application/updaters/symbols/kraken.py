@@ -628,9 +628,19 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         """
         created = 0
         updated = 0
+        sid = self._tracker.session_id
         ws_symbol = symbol_data.get("kraken_websocket_symbol", "")
         if ws_symbol:
-            result = self._upsert_alias(session, symbol_public_id, "kraken", "ws", ws_symbol, now)
+            result = self._upsert_alias(
+                session,
+                symbol_public_id,
+                "kraken",
+                "ws",
+                ws_symbol,
+                now,
+                session_id=sid,
+                sequence_id=self._tracker.next_sequence("db.aliases"),
+            )
             if result == "created":
                 created += 1
             elif result == "updated":
@@ -644,6 +654,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "kraken_updater",
             "WS-only, not in REST markets",
             now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("db.capabilities"),
         )
         return created, updated
 
@@ -663,6 +675,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         """
         created = 0
         updated = 0
+        sid = self._tracker.session_id
         alias_mappings: tuple[tuple[str, AliasChannel, str], ...] = (
             ("kraken", "ws", "kraken_websocket_symbol"),
             ("kraken", "rest", "kraken_rest_symbol"),
@@ -679,6 +692,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 channel,
                 exchange_symbol,
                 now,
+                session_id=sid,
+                sequence_id=self._tracker.next_sequence("db.aliases"),
             )
             if result == "created":
                 created += 1
@@ -693,6 +708,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "kraken_updater",
             None,
             now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("db.capabilities"),
         )
         return created, updated
 
@@ -732,6 +749,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                         symbol_data["quote_currency"],
                         asset_type,
                         now,
+                        session_id=self._tracker.session_id,
+                        sequence_id=self._tracker.next_sequence("db.symbols"),
                     )
                     processed_symbol_public_ids.add(symbol_public_id)
                     is_ws_only = symbol_data.get("ws_only") == "true"
@@ -748,7 +767,13 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     updated_count += u
                 now = datetime.now(UTC)
                 deactivated = self._reconcile_capabilities(
-                    session, "kraken", processed_symbol_public_ids, "kraken_updater", now
+                    session,
+                    "kraken",
+                    processed_symbol_public_ids,
+                    "kraken_updater",
+                    now,
+                    session_id=self._tracker.session_id,
+                    next_sequence_fn=lambda: self._tracker.next_sequence("db.capabilities"),
                 )
                 session.commit()
                 logger.info(

@@ -6,6 +6,7 @@ trading strategy instances with output conflict detection.
 
 from typing import Any
 
+from snapper.messaging.topics.builders import signal_topic
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
 
@@ -163,9 +164,9 @@ class StrategyFactory:
         for config in configs:
             for instrument in config.outputs:
                 if config.exchange == "paper":
-                    topic = f"signals.paper.{instrument}.{config.name}"
+                    topic = signal_topic(config.exchange, instrument, config.name)
                 else:
-                    topic = f"signals.{config.exchange}.{instrument}.live"
+                    topic = signal_topic(config.exchange, instrument, "live")
                 if topic in outputs_seen:
                     errors.append(
                         f"Output topic conflict: '{config.name}' and '{outputs_seen[topic]}' "

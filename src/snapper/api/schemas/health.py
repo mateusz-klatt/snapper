@@ -44,6 +44,7 @@ class TopicMetricSnapshotSchema(StrictApiSchema):
         dropped: Messages dropped due to backpressure.
         timeout: Messages that timed out during send.
         errors: Number of errors encountered.
+        invalid_messages: Messages that could not be parsed as a typed envelope.
         last_message_ts: Timestamp of last received message.
         throttle_ms: Configured throttle interval (None if unconfigured).
         pattern: ZMQ subscription pattern (None if unconfigured).
@@ -56,6 +57,7 @@ class TopicMetricSnapshotSchema(StrictApiSchema):
     dropped: int = Field(default=0, description="Messages dropped by backpressure")
     timeout: int = Field(default=0, description="Messages timed out during send")
     errors: int = Field(default=0, description="Errors encountered")
+    invalid_messages: int = Field(default=0, description="Messages with unparseable envelope")
     last_message_ts: float = Field(default=0.0, description="Last message timestamp")
     throttle_ms: int | None = Field(default=None, description="Throttle interval ms")
     pattern: str | None = Field(default=None, description="ZMQ subscription pattern")

@@ -21,7 +21,12 @@ from typing import Any
 import zmq
 import zmq.asyncio
 
+from snapper.api.schemas.base import StrictDataSchema
+from snapper.application.services.signals.service import signal_service
 from snapper.config.settings import get_bootstrap_settings
+from snapper.messaging.infrastructure.gap_detector import GapDetector
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -31,7 +36,10 @@ from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.data import TradeData
+from snapper.messaging.schemas.messages import MessageParseError
+from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import parse_market_topic
+from snapper.messaging.topics.builders import signal_topic
 from snapper.strategies.health import StrategyHealthMonitor
 from snapper.strategies.models import StrategyConfig
 from snapper.strategies.models import StrategySignal
@@ -105,16 +113,18 @@ class BaseStrategy(ABC):
         self.output_topics: list[str] = []
         for instrument in self.outputs:
             if self.exchange == "paper":
-                topic = f"signals.paper.{instrument}.{self.name}"
+                self.output_topics.append(signal_topic(self.exchange, instrument, self.name))
             else:
-                topic = f"signals.{self.exchange}.{instrument}.live"
-            self.output_topics.append(topic)
+                self.output_topics.append(signal_topic(self.exchange, instrument, "live"))
         logger.info(
             f"Strategy {self.name} initialized with {len(self.output_topics)} output topics: {self.output_topics}"
         )
         self.zmq_context: zmq.asyncio.Context | None = None
         self.subscriber: ValidatedSubscriber | None = None
         self.publisher: ValidatedPublisher | None = None
+        self.msg_publisher: MessagePublisher | None = None
+        self._tracker: SequenceTracker = SequenceTracker()
+        self._gap_detector: GapDetector = GapDetector(f"strategy.{config.name}")
         self.candle_buffer: dict[str, list[CandleData]] = {}
         self._listen_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -189,6 +199,7 @@ class BaseStrategy(ABC):
             logger.info(f"Strategy {self.name}: Connecting publisher to broker {broker_addr}")
             raw_pub_socket.connect(broker_addr)
             self.publisher = ValidatedPublisher(raw_pub_socket)
+            self.msg_publisher = MessagePublisher(self.publisher, self._tracker)
             logger.info(f"Strategy {self.name}: Publisher initialized successfully")
         await asyncio.sleep(0)
 
@@ -380,6 +391,18 @@ class BaseStrategy(ABC):
         elif topic_str == "system.replay.end":
             self._handle_replay_end(payload_str)
 
+    def _check_gap_parsed(self, topic: str, payload_str: str) -> None:
+        """Run gap detection using typed message parsing.
+
+        Parses the payload via parse_message to get session_id and sequence_id.
+        Silently skips messages that fail parsing (e.g. unknown types).
+        """
+        try:
+            msg = parse_message(payload_str)
+            self._gap_detector.check(topic, msg.session_id, msg.sequence_id)
+        except MessageParseError:
+            pass
+
     async def _listen_loop(self) -> None:
         """Main loop for receiving and processing market data."""
         if not self.subscriber:
@@ -391,6 +414,7 @@ class BaseStrategy(ABC):
                 topic_str, payload = await self.subscriber.recv_multipart()
                 payload_str = payload.decode()
                 self.last_data_timestamp = time.time()
+                self._check_gap_parsed(topic_str, payload_str)
                 if topic_str.startswith("system."):
                     await self._handle_system_message(topic_str, payload_str)
                     continue
@@ -469,16 +493,16 @@ class BaseStrategy(ABC):
             ts = self._last_data_ts or time.time()
             signal.timestamp = datetime.fromtimestamp(ts, tz=UTC)
         if self.exchange == "paper":
-            topic = f"signals.paper.{signal.instrument}.{self.name}"
+            topic = signal_topic(self.exchange, signal.instrument, self.name)
         else:
-            topic = f"signals.{self.exchange}.{signal.instrument}.live"
+            topic = signal_topic(self.exchange, signal.instrument, "live")
         if topic not in self.output_topics:
             raise ValueError(
                 f"Strategy {self.name}: Signal for instrument '{signal.instrument}' not allowed. "
                 f"Instrument not in configured outputs: {self.outputs}. "
                 f"Generated topic: {topic}"
             )
-        if not self.publisher:
+        if not self.msg_publisher:
             await self._setup_publisher()
         signal_envelope = SignalData(
             instrument=signal.instrument,
@@ -490,9 +514,20 @@ class BaseStrategy(ABC):
             strategy_name=self.name,
             fired_at=signal.timestamp or datetime.now(UTC),
         )
-        payload_bytes = signal_envelope.to_json().encode("utf-8")
-        if self.publisher is not None:
-            await self.publisher.send_multipart(topic, payload_bytes)
+
+        stamped: StrictDataSchema | None = None
+        if self.msg_publisher is not None:
+            stamped = await self.msg_publisher.publish(signal_envelope)
+        await signal_service.store_signal(
+            signal,
+            exchange=self.exchange,
+            strategy_name=self.name,
+            price=signal.price,
+            session_id=stamped.session_id if stamped else None,
+            sequence_id=stamped.sequence_id if stamped else None,
+            public_id=stamped.public_id if stamped else None,
+            timestamp=stamped.timestamp if stamped else None,
+        )
         logger.debug(
             f"Strategy {self.name}: Signal {signal.side.upper()} {signal.instrument} "
             f"(strength={signal.strength:.2f}, price={signal.price:.2f}) -> {topic}"

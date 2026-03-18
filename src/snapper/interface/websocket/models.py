@@ -110,6 +110,7 @@ class TopicMetricsModel:
         error_count: Number of errors encountered.
         dropped_count: Messages dropped due to backpressure.
         timeout_count: Messages that timed out during send.
+        invalid_messages: Messages that could not be parsed as a typed envelope.
         last_message_ts: Timestamp of last received message.
         active_subscribers: Current number of subscribers.
     """
@@ -120,6 +121,7 @@ class TopicMetricsModel:
     error_count: int = 0
     dropped_count: int = 0
     timeout_count: int = 0
+    invalid_messages: int = 0
     last_message_ts: float = 0.0
     active_subscribers: int = 0
 
@@ -155,6 +157,7 @@ class TopicMetricSnapshot:
         dropped: Messages dropped due to backpressure.
         timeout: Messages that timed out during send.
         errors: Number of errors encountered.
+        invalid_messages: Messages that could not be parsed as a typed envelope.
         last_message_ts: Timestamp of last received message.
         throttle_ms: Configured throttle interval (None if unconfigured).
         pattern: ZMQ subscription pattern (None if unconfigured).
@@ -167,6 +170,7 @@ class TopicMetricSnapshot:
     dropped: int = 0
     timeout: int = 0
     errors: int = 0
+    invalid_messages: int = 0
     last_message_ts: float = 0.0
     throttle_ms: int | None = None
     pattern: str | None = None

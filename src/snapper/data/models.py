@@ -111,11 +111,14 @@ class TemporalMixin:
     """Mixin providing standard temporal columns for all entity tables.
 
     Every entity table inherits: autoincrement integer id, UUID7 public_id,
-    bus-time timestamp, and SCD2 known_to with KNOWN_TO_MAX default.
+    provenance fields (session_id, sequence_id), bus-time timestamp,
+    and SCD2 known_to with KNOWN_TO_MAX default.
     """
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
+    sequence_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 

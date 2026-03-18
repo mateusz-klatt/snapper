@@ -18,7 +18,7 @@ from snapper.application.risk.models import RiskEvaluator
 from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
-from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.schemas.data import OrderRequestData
 
 
@@ -50,7 +50,7 @@ class TradingEngineService:
     """
 
     instrument: str
-    execution_socket: ValidatedPublisher
+    execution_socket: MessagePublisher
     exchange: OrderExchange
     cfg: EngineConfigModel
     portfolio: PortfolioTracker
@@ -63,7 +63,7 @@ class TradingEngineService:
     def __init__(
         self,
         instrument: str,
-        execution_socket: ValidatedPublisher,
+        execution_socket: MessagePublisher,
         risk: RiskEvaluator | None = None,
         cfg: EngineConfigModel | None = None,
         *,
@@ -74,7 +74,7 @@ class TradingEngineService:
 
         Args:
             instrument: Symbol to trade (e.g., "BTC-USD").
-            execution_socket: ZMQ publisher for order requests.
+            execution_socket: Message publisher for order requests.
             risk: Risk evaluator instance. Defaults to standard RiskEvaluator.
             cfg: Engine configuration. Defaults to EngineConfigModel defaults.
             instrument_specs: Dict mapping symbol to lot_size/tick_size specs.
@@ -191,10 +191,8 @@ class TradingEngineService:
             exchange=self.exchange,
             signaled_at=signaled_at_dt,
         )
-        topic = f"orders.commands.{self.exchange}.{self.instrument}.submit"
-        payload = order.model_dump_json().encode("utf-8")
-        await self.execution_socket.send_multipart(topic, payload, flags=zmq.NOBLOCK)
-        logger.debug(f"Published order command to topic '{topic}': {order.client_order_id}")
+        await self.execution_socket.publish(order, flags=zmq.NOBLOCK)
+        logger.debug(f"Published order command: {order.client_order_id}")
 
     async def execute_desired_units(
         self, desired_units: float, current_price: float, signaled_at: float | None = None

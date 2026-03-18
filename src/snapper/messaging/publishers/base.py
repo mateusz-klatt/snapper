@@ -26,11 +26,14 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AllExchange
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
+from snapper.core.types import OrderExchange
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -41,6 +44,7 @@ from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.data import TradeData
 from snapper.messaging.schemas.messages import MarketDataMessage
+from snapper.messaging.topics.builders import market_topic
 from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
@@ -66,6 +70,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.pub_endpoint = self.settings.zmq_broker_xsub
         self.context: zmq.asyncio.Context | None = None
         self.publisher: ValidatedPublisher | None = None
+        self.msg_publisher: MessagePublisher | None = None
+        self._tracker: SequenceTracker = SequenceTracker()
         self.subscriber: ValidatedSubscriber | None = None
         self.running = False
         self.heartbeat_seq = 0
@@ -152,6 +158,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
         raw_pub_socket.connect(self.pub_endpoint)
         self.publisher = ValidatedPublisher(raw_pub_socket)
+        self.msg_publisher = MessagePublisher(self.publisher, self._tracker)
         logger.info(f"{process_name}: Connected to broker: {self.pub_endpoint}")
         raw_sub_socket = self.context.socket(zmq.SUB)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
@@ -235,10 +242,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Returns:
             Fully-qualified ZMQ topic string.
         """
-        exchange = self._get_exchange_name()
-        if timeframe:
-            return f"market.{exchange}.{symbol}.{data_type}.{timeframe}"
-        return f"market.{exchange}.{symbol}.{data_type}"
+        exchange = cast(OrderExchange, self._get_exchange_name())
+        return market_topic(exchange, symbol, data_type, timeframe=timeframe)
 
     def _get_data_exchange(self) -> MarketDataExchange:
         """Return exchange name for market data envelopes.
@@ -354,9 +359,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     trades=candle.trades,
                 )
                 topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
-                await self._publish_message(topic, candle_msg)
+                published = await self._publish_message(topic, candle_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
-                await self._save_to_db(native_symbol, candle_msg)
+                await self._save_to_db(
+                    native_symbol, cast(CandleData, published) if published else candle_msg
+                )
         except Exception as e:
             logger.error(f"Candle loop error for {symbols}: {e}")
 
@@ -418,20 +425,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         except Exception as e:
             logger.error(f"Trade loop error for {symbols}: {e}")
 
-    async def _publish_message(self, topic: str, message: MarketDataMessage) -> None:
+    async def _publish_message(
+        self, topic: str, message: MarketDataMessage
+    ) -> MarketDataMessage | None:
         """Publish market data message to ZMQ topic.
 
         Args:
             topic: ZMQ topic string for message routing.
             message: Market data message to publish.
+
+        Returns:
+            The stamped message copy with provenance fields, or None if not published.
         """
-        if not self.publisher or not self.running:
-            return
+        if not self.msg_publisher or not self.running:
+            return None
         try:
-            await self.publisher.send_multipart(topic, message.to_json().encode("utf-8"))
+            stamped = await self.msg_publisher.publish(message, topic=topic)
             logger.debug(f"Published {message.type} for {topic}")
+            return cast(MarketDataMessage, stamped)
         except Exception as e:
             logger.error(f"Error publishing message: {e}")
+            return None
 
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat messages with status."""
@@ -459,22 +473,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                         "running": self.running,
                     },
                 )
-                topic = f"system.heartbeats.{component_name}"
-                await self._publish_heartbeat(topic, hb_msg)
+                await self._publish_heartbeat(hb_msg)
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
 
-    async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
-        """Publish heartbeat message to ZMQ.
+    async def _publish_heartbeat(self, message: HeartbeatData) -> None:
+        """Publish heartbeat message to ZMQ via MessagePublisher.
 
         Args:
-            topic: ZMQ topic string for heartbeat routing.
             message: HeartbeatData containing status information.
         """
-        if not self.publisher or not self.running:
+        if not self.msg_publisher or not self.running:
             return
         try:
-            await self.publisher.send_multipart(topic, message.to_json().encode("utf-8"))
+            await self.msg_publisher.publish(message)
         except Exception as e:
             logger.error(f"Error publishing heartbeat: {e}")
 
@@ -512,6 +524,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 "volume": float(candle_msg.volume),
                 "vwap": vwap_price,
                 "trades": trades,
+                "session_id": candle_msg.session_id or "",
+                "sequence_id": candle_msg.sequence_id or 0,
             }
             assert self.repository is not None, "Repository not initialized"
             await self.repository.upsert_candles([candle_row])

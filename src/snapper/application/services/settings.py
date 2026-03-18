@@ -27,6 +27,8 @@ from snapper.data.repository import where_active
 from snapper.infrastructure.security.encryption import decrypt_if_encrypted
 from snapper.infrastructure.security.encryption import encrypt_if_sensitive
 from snapper.infrastructure.security.encryption import force_encrypt_if_cleartext
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
@@ -97,7 +99,8 @@ class SettingsService:
         self._cache: dict[str, Any] = {}
         self._loaded = False
         self._zmq_context: zmq.asyncio.Context | None = None
-        self._publisher: ValidatedPublisher | None = None
+        self._tracker: SequenceTracker = SequenceTracker()
+        self._msg_publisher: MessagePublisher | None = None
         self._initialized = True
 
     async def initialize(self) -> None:
@@ -107,12 +110,12 @@ class SettingsService:
 
     async def shutdown(self) -> None:
         """Shutdown the service and cleanup resources."""
-        if self._publisher:
+        if self._msg_publisher:
             with contextlib.suppress(Exception):
-                self._publisher.setsockopt(zmq.LINGER, 0)
+                self._msg_publisher.setsockopt(zmq.LINGER, 0)
             with contextlib.suppress(Exception):
-                self._publisher.close()
-            self._publisher = None
+                self._msg_publisher.close()
+            self._msg_publisher = None
         if self._zmq_context:
             with contextlib.suppress(Exception):
                 self._zmq_context.term()
@@ -185,7 +188,7 @@ class SettingsService:
         raw_pub_socket = self._zmq_context.socket(zmq.PUB)
         apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
         raw_pub_socket.connect(self.zmq_broker_xpub)
-        self._publisher = ValidatedPublisher(raw_pub_socket)
+        self._msg_publisher = MessagePublisher(ValidatedPublisher(raw_pub_socket), self._tracker)
         logger.info(f"Settings service connected to ZMQ broker: {self.zmq_broker_xpub}")
         await asyncio.sleep(0)
 
@@ -228,6 +231,8 @@ class SettingsService:
                     "description": description,
                     "is_encrypted": is_encrypted,
                     "updated_by": updated_by,
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence("db.settings"),
                 },
                 bus_time=now,
             )
@@ -285,7 +290,7 @@ class SettingsService:
             category: Setting category.
             updated_by: Optional user identifier.
         """
-        if not self._publisher:
+        if not self._msg_publisher:
             logger.warning("ZMQ publisher not available, skipping broadcast")
             return
         envelope = SettingChangedData(
@@ -295,9 +300,7 @@ class SettingsService:
             updated_by=updated_by,
         )
         try:
-            await self._publisher.send_multipart(
-                "system.settings", envelope.to_json().encode("utf-8")
-            )
+            await self._msg_publisher.publish(envelope)
             logger.debug(f"Broadcasted setting change: {key}")
         except Exception as e:
             logger.error(f"Failed to broadcast setting change: {e}")

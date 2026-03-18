@@ -79,7 +79,7 @@ class StrategyHealthMonitor:
             Heartbeat data ready for publishing.
         """
         return HeartbeatData(
-            component=f"strategy_{self.strategy.name}",
+            component=f"strategy.{self.strategy.name}",
             sequence=self.strategy.heartbeat_seq,
             status=self.classify_health_status(lag_ms),
             lag_ms=lag_ms,
@@ -102,10 +102,8 @@ class StrategyHealthMonitor:
                     self.strategy.heartbeat_seq += 1
                     lag_ms = int((time.time() - self.strategy.last_data_timestamp) * 1000)
                     hb_msg = self.build_heartbeat_envelope(lag_ms)
-                    if self.strategy.publisher:
-                        topic = f"system.heartbeats.strategy.{self.strategy.name}"
-                        payload = hb_msg.to_json().encode()
-                        await self.strategy.publisher.send_multipart(topic, payload)
+                    if self.strategy.msg_publisher:
+                        await self.strategy.msg_publisher.publish(hb_msg)
                 except Exception as e:
                     logger.error(f"Strategy {self.strategy.name}: Heartbeat error: {e}")
         except asyncio.CancelledError:

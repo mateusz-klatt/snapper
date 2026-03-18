@@ -495,6 +495,8 @@ def _create_candles_signals_router() -> APIRouter:
                     CandleData(
                         public_id=candle.public_id,
                         timestamp=candle.timestamp,
+                        session_id=candle.session_id or "",
+                        sequence_id=candle.sequence_id or 0,
                         instrument=instrument,
                         exchange=exchange,
                         timeframe=candle.timeframe,
@@ -544,6 +546,8 @@ def _create_candles_signals_router() -> APIRouter:
                     SignalData(
                         public_id=signal.public_id,
                         timestamp=signal.timestamp,
+                        session_id=signal.session_id or "",
+                        sequence_id=signal.sequence_id or 0,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
                         side=signal.side,
@@ -684,6 +688,8 @@ def _create_orders_executions_router() -> APIRouter:
                     OrderData(
                         public_id=order.public_id,
                         timestamp=order.timestamp,
+                        session_id=order.session_id or "",
+                        sequence_id=order.sequence_id or 0,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
                         client_order_id=order.client_order_id or "",
@@ -739,6 +745,8 @@ def _create_orders_executions_router() -> APIRouter:
                     ExecutionData(
                         public_id=execution.public_id,
                         timestamp=execution.timestamp,
+                        session_id=execution.session_id or "",
+                        sequence_id=execution.sequence_id or 0,
                         trade_id=execution.trade_id,
                         exchange_order_id=order.exchange_order_id,
                         client_order_id=order.client_order_id or "",
@@ -778,13 +786,15 @@ def _create_orders_executions_router() -> APIRouter:
                 return [
                     PositionData(
                         public_id=position.public_id,
+                        timestamp=position.timestamp,
+                        session_id=position.session_id or "",
+                        sequence_id=position.sequence_id or 0,
                         instrument=inst.symbol,
                         exchange=inst.exchange,
                         quantity=position.quantity,
                         average_price=position.average_price,
                         unrealized_pnl=position.unrealized_pnl,
                         realized_pnl=position.realized_pnl,
-                        timestamp=position.timestamp,
                     )
                     for position, inst in positions_with_instruments
                 ]

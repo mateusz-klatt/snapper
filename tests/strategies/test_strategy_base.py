@@ -24,6 +24,7 @@ import pytest
 import zmq
 from _pytest.logging import LogCaptureFixture
 
+from snapper.application.services.signals.service import signal_service
 from snapper.cli.app import _alembic_cfg
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
@@ -33,6 +34,7 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedSubscribe
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
+from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.data import TradeData
 from snapper.messaging.topics.validation import _validate_admin_topic
@@ -49,6 +51,16 @@ from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
 from snapper.strategies.macd import MACDCrossover
 from snapper.strategies.rsi import RSIReversion
+
+
+@pytest.fixture(autouse=True)
+def mock_signal_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace signal_service.store_signal with a no-op for all strategy tests.
+
+    All emit_signal tests use mock publishers; calling real store_signal would
+    attempt a live database write that is out of scope for unit tests.
+    """
+    monkeypatch.setattr(signal_service, "store_signal", AsyncMock(return_value=""))
 
 
 def make_candle_envelope(
@@ -615,8 +627,8 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
         _strategy_config(exchange="paper", inputs=["market.paper.kraken.BTC-USD.candles.1h"])
     )
     strategy._running = True
-    publisher = DummyPublisher()
-    strategy.publisher = cast(ValidatedPublisher, publisher)
+    mock_msg_publisher = AsyncMock()
+    strategy.msg_publisher = mock_msg_publisher
     strategy.subscriber = cast(ValidatedSubscriber, DummySubscriber(strategy, messages))
     await strategy._listen_loop()
     assert invalidate_calls == ["False"]
@@ -624,11 +636,10 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
     assert strategy._feed_heartbeats["kraken"]["status"] == "healthy"
     assert strategy._last_data_ts == pytest.approx(123.0)
     assert strategy.received[0][0] == "BTC-USD"
-    sent_topic, payload, _ = publisher.sent[0]
-    assert sent_topic == strategy.output_topics[0]
-    payload_data = json.loads(payload)
-    assert payload_data["instrument"] == "BTC-USD"
-    assert datetime.fromisoformat(payload_data["fired_at"]).timestamp() == pytest.approx(123.0)
+    mock_msg_publisher.publish.assert_called_once()
+    published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+    assert published_signal.instrument == "BTC-USD"
+    assert published_signal.fired_at.timestamp() == pytest.approx(123.0)
 
 
 @pytest.mark.asyncio
@@ -688,8 +699,8 @@ async def test_emit_signal_validates_outputs(monkeypatch: pytest.MonkeyPatch) ->
     Then: StrategySignal is published without error.
     """
     strategy = FakeStrategy(_strategy_config(exchange="paper"))
-    publisher = DummyPublisher()
-    strategy.publisher = cast(ValidatedPublisher, publisher)
+    mock_msg_publisher = AsyncMock()
+    strategy.msg_publisher = mock_msg_publisher
     strategy._last_data_ts = 321.0
     await strategy.emit_signal(
         StrategySignal(
@@ -700,6 +711,68 @@ async def test_emit_signal_validates_outputs(monkeypatch: pytest.MonkeyPatch) ->
             price=10.0,
         )
     )
+    mock_msg_publisher.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_emit_signal_persists_with_stamped_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify emit_signal persists signal with provenance from the stamped publish result.
+
+    Given: Strategy with a mock publisher that returns a stamped SignalData,
+    When: emit_signal is called,
+    Then: signal_service.store_signal is called with the stamped session_id and sequence_id.
+    """
+    strategy = FakeStrategy(_strategy_config(exchange="paper"))
+    stamped = SignalData(
+        instrument="BTC-USD",
+        exchange="paper",
+        strategy_name="test",
+        side="buy",
+        strength=0.5,
+        reason="test",
+        session_id="test-session-123",
+        sequence_id=7,
+    )
+    mock_publisher = AsyncMock()
+    mock_publisher.publish = AsyncMock(return_value=stamped)
+    strategy.msg_publisher = mock_publisher
+    strategy._last_data_ts = 100.0
+
+    captured: list[dict[str, Any]] = []
+
+    async def capture_store(
+        sig: StrategySignal,
+        exchange: str,
+        strategy_name: str | None = None,
+        price: float | None = None,
+        session_id: str | None = None,
+        sequence_id: int | None = None,
+        public_id: str | None = None,
+        timestamp: datetime | None = None,
+    ) -> str:
+        captured.append(
+            {
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+                "public_id": public_id,
+                "timestamp": timestamp,
+            }
+        )
+        return "signal-pid"
+
+    monkeypatch.setattr(signal_service, "store_signal", capture_store)
+
+    await strategy.emit_signal(
+        StrategySignal(instrument="BTC-USD", side="buy", strength=0.5, reason="test", price=1.0)
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["session_id"] == "test-session-123"
+    assert captured[0]["sequence_id"] == 7
+    assert captured[0]["public_id"] == stamped.public_id
+    assert captured[0]["timestamp"] == stamped.timestamp
 
 
 @pytest.mark.asyncio
@@ -712,8 +785,8 @@ async def test_listen_loop_ignores_non_market_topics() -> None:
     """
     strategy = FakeStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]))
     strategy._running = True
-    publisher = DummyPublisher()
-    strategy.publisher = cast(ValidatedPublisher, publisher)
+    mock_msg_publisher = AsyncMock()
+    strategy.msg_publisher = mock_msg_publisher
     messages = [
         (
             "signals.paper.BTC-USD.other",
@@ -723,7 +796,7 @@ async def test_listen_loop_ignores_non_market_topics() -> None:
     strategy.subscriber = cast(ValidatedSubscriber, DummySubscriber(strategy, messages))
     await strategy._listen_loop()
     assert strategy._last_data_ts is None
-    assert len(publisher.sent) == 0
+    mock_msg_publisher.publish.assert_not_called()
     assert len(strategy.received) == 0
 
 
@@ -747,8 +820,8 @@ async def test_listen_loop_handles_tick_data() -> None:
 
     strategy = TickStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.ticks"]))
     strategy._running = True
-    publisher = DummyPublisher()
-    strategy.publisher = cast(ValidatedPublisher, publisher)
+    mock_msg_publisher = AsyncMock()
+    strategy.msg_publisher = mock_msg_publisher
     tick = TickData(
         instrument="BTC-USD",
         volume=100.0,
@@ -785,8 +858,8 @@ async def test_listen_loop_handles_trade_data() -> None:
 
     strategy = TradeStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.trades"]))
     strategy._running = True
-    publisher = DummyPublisher()
-    strategy.publisher = cast(ValidatedPublisher, publisher)
+    mock_msg_publisher = AsyncMock()
+    strategy.msg_publisher = mock_msg_publisher
     trade = TradeData(
         instrument="BTC-USD",
         price=50000.0,
@@ -828,10 +901,10 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
     strategy = FakeStrategy(_strategy_config())
     strategy._last_data_ts = None
     captured_time = 123.456
-    publisher = DummyPublisher()
+    mock_msg_publisher = AsyncMock()
 
     async def fake_setup(self: BaseStrategy) -> None:
-        self.publisher = cast(ValidatedPublisher, publisher)
+        self.msg_publisher = mock_msg_publisher
 
     monkeypatch.setattr(BaseStrategy, "_setup_publisher", fake_setup)
     monkeypatch.setattr(time, "time", lambda: captured_time)
@@ -844,11 +917,10 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
             price=200.0,
         )
     )
-    sent_topic, payload, _ = publisher.sent[0]
-    assert sent_topic == "signals.kraken.BTC-USD.live"
-    payload_data = json.loads(payload)
-    assert datetime.fromisoformat(payload_data["fired_at"]).timestamp() == captured_time
-    assert payload_data["instrument"] == "BTC-USD"
+    mock_msg_publisher.publish.assert_called_once()
+    published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+    assert published_signal.fired_at.timestamp() == captured_time
+    assert published_signal.instrument == "BTC-USD"
     with pytest.raises(ValueError, match="not allowed"):
         await strategy.emit_signal(
             StrategySignal(
@@ -965,13 +1037,15 @@ async def test_heartbeat_loop_emits_and_evaluates_health(monkeypatch: pytest.Mon
     """
     strategy = FakeStrategy(_strategy_config())
 
-    class AutoStopPublisher(DummyPublisher):
-        async def send_multipart(self, topic: str, payload: bytes, *, flags: int = 0) -> None:
-            await super().send_multipart(topic, payload, flags=flags)
-            strategy._running = False
+    published_messages: list[Any] = []
 
-    publisher = AutoStopPublisher()
-    strategy.publisher = cast(ValidatedPublisher, publisher)
+    async def capture_and_stop(data: Any, **kwargs: Any) -> None:
+        published_messages.append(data)
+        strategy._running = False
+
+    mock_msg_pub = AsyncMock(side_effect=capture_and_stop)
+    strategy.msg_publisher = MagicMock()
+    strategy.msg_publisher.publish = mock_msg_pub
     strategy._running = True
     strategy.last_data_timestamp = time.time() - 5
     strategy._feed_heartbeats = {
@@ -989,11 +1063,10 @@ async def test_heartbeat_loop_emits_and_evaluates_health(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
     await strategy._heartbeat_loop()
-    sent_topic, payload, _ = publisher.sent[0]
-    assert sent_topic == f"system.heartbeats.strategy.{strategy.name}"
-    heartbeat = json.loads(payload)
-    assert heartbeat["status"] == "warning"
-    assert heartbeat["meta"]["feed_health"]["kraken"]["healthy"] is True
+    hb_data = published_messages[0]
+    assert hb_data.component == f"strategy.{strategy.name}"
+    assert hb_data.status == "warning"
+    assert hb_data.meta["feed_health"]["kraken"]["healthy"] is True
 
 
 class SimpleTestStrategy(BaseStrategy):
@@ -2017,10 +2090,8 @@ class TestEmitSignal:
         Then: StrategySignal published to output topic.
         """
         strategy = SimpleTestStrategy(strategy_config)
-        mock_send_multipart = AsyncMock(return_value=None)
-        mock_socket = MagicMock()
-        mock_socket.send_multipart = mock_send_multipart
-        strategy.publisher = mock_socket
+        mock_msg_publisher = AsyncMock()
+        strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
@@ -2029,19 +2100,15 @@ class TestEmitSignal:
             reason="Test signal",
         )
         await strategy.emit_signal(signal)
-        mock_socket.send_multipart.assert_called_once()
-        call_args = mock_socket.send_multipart.call_args[0]
-        topic = call_args[0]
-        payload = call_args[1]
-        assert topic == "signals.paper.BTC-USD.test_strategy"
-        payload_data = json.loads(payload.decode())
-        assert payload_data["instrument"] == "BTC-USD"
-        assert payload_data["side"] == "buy"
-        assert payload_data["strength"] == pytest.approx(0.8)
-        assert payload_data["price"] == pytest.approx(50000.0)
-        assert payload_data["reason"] == "Test signal"
-        assert "timestamp" in payload_data
-        assert payload_data["strategy_name"] == "test_strategy"
+        mock_msg_publisher.publish.assert_called_once()
+        published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+        assert published_signal.instrument == "BTC-USD"
+        assert published_signal.side == "buy"
+        assert published_signal.strength == pytest.approx(0.8)
+        assert published_signal.price == pytest.approx(50000.0)
+        assert published_signal.reason == "Test signal"
+        assert published_signal.fired_at is not None
+        assert published_signal.strategy_name == "test_strategy"
 
     @pytest.mark.asyncio
     async def test_emit_signal_reuses_existing_publisher(
@@ -2054,10 +2121,8 @@ class TestEmitSignal:
         Then: Same publisher instance used.
         """
         strategy = SimpleTestStrategy(strategy_config)
-        mock_send_multipart = AsyncMock(return_value=None)
-        mock_socket = MagicMock()
-        mock_socket.send_multipart = mock_send_multipart
-        strategy.publisher = mock_socket
+        mock_msg_publisher = AsyncMock()
+        strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
             side="sell",
@@ -2066,7 +2131,7 @@ class TestEmitSignal:
             reason="Test",
         )
         await strategy.emit_signal(signal)
-        assert strategy.publisher is mock_socket
+        assert strategy.msg_publisher is mock_msg_publisher
 
     @pytest.mark.asyncio
     async def test_emit_signal_reuses_publisher_and_propagates_ts(
@@ -2080,9 +2145,8 @@ class TestEmitSignal:
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._last_data_ts = 1234.5
-        publisher_mock = MagicMock(spec=ValidatedPublisher)
-        publisher_mock.send_multipart = AsyncMock(return_value=None)
-        strategy.publisher = cast(ValidatedPublisher, publisher_mock)
+        mock_msg_publisher = AsyncMock()
+        strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
@@ -2092,13 +2156,11 @@ class TestEmitSignal:
         )
         await strategy.emit_signal(signal)
         assert signal.timestamp == datetime.fromtimestamp(1234.5, tz=UTC)
-        publisher_mock.send_multipart.assert_awaited_once()
-        topic_arg, payload_arg = publisher_mock.send_multipart.await_args.args
-        assert topic_arg == "signals.paper.BTC-USD.test_strategy"
-        payload = json.loads(payload_arg.decode())
-        assert payload["exchange"] == "paper"
-        assert payload["strategy_name"] == "test_strategy"
-        assert "T" in payload["timestamp"]
+        mock_msg_publisher.publish.assert_awaited_once()
+        published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+        assert published_signal.exchange == "paper"
+        assert published_signal.strategy_name == "test_strategy"
+        assert published_signal.fired_at is not None
 
     @pytest.mark.asyncio
     async def test_emit_signal_live_topic_and_timestamp(self) -> None:
@@ -2117,9 +2179,8 @@ class TestEmitSignal:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = 777.7
-        publisher_mock = MagicMock(spec=ValidatedPublisher)
-        publisher_mock.send_multipart = AsyncMock(return_value=None)
-        strategy.publisher = cast(ValidatedPublisher, publisher_mock)
+        mock_msg_publisher = AsyncMock()
+        strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
@@ -2129,11 +2190,9 @@ class TestEmitSignal:
         )
         await strategy.emit_signal(signal)
         assert signal.timestamp == datetime.fromtimestamp(777.7, tz=UTC)
-        publisher_mock.send_multipart.assert_awaited_once()
-        topic_arg, payload_arg = publisher_mock.send_multipart.await_args.args
-        assert topic_arg == "signals.kraken.BTC-USD.live"
-        payload = json.loads(payload_arg.decode())
-        assert payload["exchange"] == "kraken"
+        mock_msg_publisher.publish.assert_awaited_once()
+        published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+        assert published_signal.exchange == "kraken"
 
     @pytest.mark.asyncio
     async def test_emit_signal_preserves_existing_timestamp(self) -> None:
@@ -2151,9 +2210,8 @@ class TestEmitSignal:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = 999.0
-        publisher_mock = MagicMock(spec=ValidatedPublisher)
-        publisher_mock.send_multipart = AsyncMock(return_value=None)
-        strategy.publisher = cast(ValidatedPublisher, publisher_mock)
+        mock_msg_publisher = AsyncMock()
+        strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
@@ -2180,7 +2238,7 @@ class TestEmitSignal:
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
-        strategy.publisher = None
+        strategy.msg_publisher = None
 
         async def noop_setup() -> None:
             """Intentionally empty mock implementation."""
@@ -2645,22 +2703,31 @@ class TestHeartbeatLoop:
     async def _run_heartbeat(
         self, strategy: ReplayAwareStrategy, current_time: float
     ) -> tuple[str, dict[str, Any], list[float]]:
-        publisher = DummyPublisherV2(strategy)
-        strategy.publisher = cast(ValidatedPublisher, publisher)
-        strategy._running = True
+        published_messages: list[Any] = []
         sleep_calls: list[float] = []
+
+        async def capture_and_stop(data: Any, **kwargs: Any) -> None:
+            published_messages.append(data)
+            strategy._running = False
+
+        mock_msg_pub = AsyncMock(side_effect=capture_and_stop)
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.publish = mock_msg_pub
+        strategy.msg_publisher = mock_msg_publisher
+        strategy._running = True
 
         async def fake_sleep(duration: float) -> None:
             sleep_calls.append(duration)
 
         with (
-            patch("snapper.strategies.base.asyncio.sleep", new=fake_sleep),
-            patch("snapper.strategies.base.time.time", return_value=current_time),
+            patch("snapper.strategies.health.asyncio.sleep", new=fake_sleep),
+            patch("snapper.strategies.health.time.time", return_value=current_time),
         ):
             await strategy._heartbeat_loop()
-        assert len(publisher.sent) == 1
-        topic, payload = publisher.sent[0]
-        payload_data = json.loads(payload.decode())
+        assert len(published_messages) == 1
+        hb: HeartbeatData = published_messages[0]
+        topic = f"system.heartbeats.{hb.component}"
+        payload_data = json.loads(hb.to_json())
         return topic, payload_data, sleep_calls
 
     @pytest.mark.asyncio
@@ -2702,7 +2769,7 @@ class TestHeartbeatLoop:
         assert topic == f"system.heartbeats.strategy.{strategy.name}"
         assert payload["status"] == "healthy"
         assert payload["lag_ms"] == 1500
-        assert payload["component"] == f"strategy_{strategy.name}"
+        assert payload["component"] == f"strategy.{strategy.name}"
         assert sleep_calls == [1.0, 2.0]
 
     @pytest.mark.asyncio
@@ -2747,29 +2814,29 @@ class TestHeartbeatLoop:
         strategy.last_data_timestamp = 100.0
         strategy._running = True
 
-        class FailingPublisher:
+        class FailingMsgPublisher:
             def __init__(self, owner: ReplayAwareStrategy):
                 self.owner = owner
                 self.calls = 0
 
-            async def send_multipart(self, topic: str, payload: bytes) -> None:
+            async def publish(self, data: Any, **kwargs: Any) -> None:
                 self.calls += 1
                 self.owner._running = False
                 raise RuntimeError("publisher failure")
 
-        failing_publisher = FailingPublisher(strategy)
-        strategy.publisher = cast(ValidatedPublisher, failing_publisher)
+        failing_msg_publisher = FailingMsgPublisher(strategy)
+        strategy.msg_publisher = cast(Any, failing_msg_publisher)
 
         async def fake_sleep(duration: float) -> None:
             return None
 
         with (
             caplog.at_level("ERROR"),
-            patch("snapper.strategies.base.asyncio.sleep", new=fake_sleep),
-            patch("snapper.strategies.base.time.time", return_value=120.0),
+            patch("snapper.strategies.health.asyncio.sleep", new=fake_sleep),
+            patch("snapper.strategies.health.time.time", return_value=120.0),
         ):
             await strategy._heartbeat_loop()
-        assert failing_publisher.calls == 1
+        assert failing_msg_publisher.calls == 1
         assert strategy._running is False
         assert any("Heartbeat error" in message for message in caplog.messages)
 
@@ -2790,7 +2857,7 @@ class TestHeartbeatLoop:
 
         with (
             caplog.at_level("INFO"),
-            patch("snapper.strategies.base.asyncio.sleep", new=fast_sleep),
+            patch("snapper.strategies.health.asyncio.sleep", new=fast_sleep),
         ):
             task = asyncio.create_task(strategy._heartbeat_loop())
             await real_sleep(0)
@@ -2820,10 +2887,13 @@ class TestSetupPublisher:
         )
         strategy = SimpleTestStrategy(config)
         mock_publisher = MagicMock()
+        mock_msg_publisher = MagicMock()
         strategy.publisher = mock_publisher
+        strategy.msg_publisher = mock_msg_publisher
         strategy.zmq_context = MagicMock()
         await strategy._setup_publisher()
         assert strategy.publisher is mock_publisher
+        assert strategy.msg_publisher is mock_msg_publisher
 
 
 class TestSubscribeInputsBranches:
@@ -2962,23 +3032,23 @@ class TestHeartbeatWithFeedHealth:
                 "lag_ms": 50,
             }
         }
-        sent_payloads: list[bytes] = []
+        published_messages: list[Any] = []
 
-        class CapturingPublisher:
-            def __init__(self, strategy: SimpleTestStrategy) -> None:
-                self.strategy = strategy
+        class CapturingMsgPublisher:
+            def __init__(self, owner: SimpleTestStrategy) -> None:
+                self.owner = owner
 
-            async def send_multipart(self, topic: str, payload: bytes) -> None:
-                sent_payloads.append(payload)
-                self.strategy._running = False
+            async def publish(self, data: Any, **kwargs: Any) -> None:
+                published_messages.append(data)
+                self.owner._running = False
 
-        strategy.publisher = cast(ValidatedPublisher, CapturingPublisher(strategy))
-        with patch("snapper.strategies.base.asyncio.sleep", new_callable=AsyncMock):
+        strategy.msg_publisher = cast(Any, CapturingMsgPublisher(strategy))
+        with patch("snapper.strategies.health.asyncio.sleep", new_callable=AsyncMock):
             await strategy._heartbeat_loop()
-        assert len(sent_payloads) >= 1
-        msg = json.loads(sent_payloads[0].decode())
-        assert msg["meta"]["feed_health"] is not None
-        assert "kraken" in msg["meta"]["feed_health"]
+        assert len(published_messages) >= 1
+        hb: HeartbeatData = published_messages[0]
+        assert hb.meta["feed_health"] is not None
+        assert "kraken" in hb.meta["feed_health"]
 
 
 class TestHeartbeatNoPublisher:
@@ -3001,7 +3071,7 @@ class TestHeartbeatNoPublisher:
         strategy = SimpleTestStrategy(config)
         strategy._running = True
         strategy.last_data_timestamp = time.time()
-        strategy.publisher = None
+        strategy.msg_publisher = None
         iterations = 0
 
         async def count_and_stop(_duration: float) -> None:
@@ -3010,7 +3080,7 @@ class TestHeartbeatNoPublisher:
             if iterations >= 2:
                 strategy._running = False
 
-        with patch("snapper.strategies.base.asyncio.sleep", count_and_stop):
+        with patch("snapper.strategies.health.asyncio.sleep", count_and_stop):
             await strategy._heartbeat_loop()
         assert iterations >= 2
 
@@ -3319,9 +3389,8 @@ class TestEmitSignalTimestamp:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = 1700000000.0
-        mock_publisher = MagicMock()
-        mock_publisher.send_multipart = AsyncMock()
-        strategy.publisher = mock_publisher
+        mock_msg_publisher = AsyncMock()
+        strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
@@ -3349,9 +3418,8 @@ class TestEmitSignalTimestamp:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = None
-        mock_publisher = MagicMock()
-        mock_publisher.send_multipart = AsyncMock()
-        strategy.publisher = mock_publisher
+        mock_msg_publisher = AsyncMock()
+        strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
             side="buy",
@@ -3550,17 +3618,17 @@ class TestExecutorBasePhase4:
         with patch("snapper.config.settings.get_settings", return_value=mock_settings):
             executor = KrakenOrderExecutor()
             executor.running = True
-            mock_publisher = MagicMock()
-            mock_publisher.send_multipart = AsyncMock(side_effect=Exception("Connection failed"))
-            executor.publisher = mock_publisher
+            mock_msg_publisher = MagicMock()
+            mock_msg_publisher.publish = AsyncMock(side_effect=Exception("Connection failed"))
+            executor.msg_publisher = mock_msg_publisher
             heartbeat = HeartbeatData(
                 timestamp=datetime.now(UTC),
-                component="test_executor",
+                component="test.executor",
                 sequence=1,
                 status="healthy",
                 lag_ms=0,
             )
-            await executor._publish_heartbeat("test.topic", heartbeat)
+            await executor._publish_heartbeat(heartbeat)
 
 
 class TestCliAppPhase4:
@@ -3852,7 +3920,7 @@ class TestBaseStrategyEmitSignal:
         strategy.exchange = "paper"
         strategy.outputs = ["BTC-USD"]
         strategy.output_topics = ["signals.paper.BTC-USD.test"]
-        strategy.publisher = None
+        strategy.msg_publisher = None
         strategy._last_data_ts = None
         signal = StrategySignal(
             instrument="ETH-USD",
@@ -5754,3 +5822,29 @@ class TestStrategyFactory:
         assert strategy.name == "rsi_btc"
         assert strategy.inputs == ["market.kraken.BTC-USD.candles.1m"]
         assert strategy.output_topics == ["signals.paper.BTC-USD.rsi_btc"]
+
+
+def test_check_gap_parsed_handles_invalid_json() -> None:
+    """Verify _check_gap_parsed silently handles invalid JSON.
+
+    Given: A strategy instance,
+    When: _check_gap_parsed is called with non-JSON payload,
+    Then: No exception is raised.
+    """
+    strategy = FakeStrategy(_strategy_config())
+    strategy._check_gap_parsed("test.topic", "not-json")
+
+
+def test_check_gap_parsed_handles_valid_message() -> None:
+    """Verify _check_gap_parsed extracts provenance from a typed message.
+
+    Given: A strategy with a gap detector,
+    When: _check_gap_parsed receives valid TickData JSON,
+    Then: Gap detector processes the message.
+    """
+    strategy = FakeStrategy(_strategy_config())
+    tick = TickData(
+        instrument="BTC-USD", exchange="kraken", volume=1.0, session_id="abc", sequence_id=1
+    )
+    strategy._check_gap_parsed("market.kraken.BTC-USD.ticks", tick.to_json())
+    assert strategy._gap_detector.stats.mid_stream_joins == 0

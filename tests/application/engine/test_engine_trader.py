@@ -21,6 +21,7 @@ import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.engine.trader import run_zmq_trader
 from snapper.config.app import AppSettings
+from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
@@ -959,6 +960,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     publisher = _PublisherStub(_SocketStub())
     coord = TraderCoordinator()
     coord.execution_publisher = cast(Any, publisher)
+    coord.msg_publisher = cast(Any, SimpleNamespace(publish=AsyncMock()))
     repository = cast(_RepositoryStub, coord.repository)
     monkeypatch.setattr(trader_module, "TradingEngineService", _EngineStub, raising=True)
     coord_any = cast(Any, coord)
@@ -1972,6 +1974,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(trader_module, "TradingEngineService", StubEngine)
     coordinator = TraderCoordinator()
     coordinator.execution_publisher = cast(Any, SimpleNamespace())
+    coordinator.msg_publisher = cast(Any, SimpleNamespace(publish=AsyncMock()))
     coordinator._current_topic = "signals.paper.BTC-USD.live"
     signal = SignalData(
         instrument="BTC-USD",
@@ -1987,3 +1990,16 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-live"])
     assert engine.calls
     assert isinstance(engine.calls[0][1], float)
+
+
+def test_gap_detector_initialized_on_coordinator() -> None:
+    """Verify TraderCoordinator creates a gap detector at init.
+
+    Given: A new TraderCoordinator,
+    When: Inspecting _gap_detector attribute,
+    Then: GapDetector instance exists with zero stats.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord._gap_detector = GapDetector("trader")
+    coord._gap_detector.check("test.topic", "session-1", 1)
+    assert coord._gap_detector.stats.gaps_detected == 0

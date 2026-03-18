@@ -38,6 +38,7 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 __all__ = ["ExchangeClientBase"]
 
@@ -71,6 +72,18 @@ class ExchangeClientBase(ABC):
         """
         self.repository = repository
         self.exchange_name = exchange_name
+        self._tracker: SequenceTracker | None = None
+
+    def set_tracker(self, tracker: SequenceTracker) -> None:
+        """Inject the component-level SequenceTracker for provenance stamping.
+
+        Called once at executor start so that order and execution DB writes
+        share the same session_id and counter owner as the ZMQ publisher.
+
+        Args:
+            tracker: SequenceTracker owned by the parent executor component.
+        """
+        self._tracker = tracker
 
     @abstractmethod
     async def connect(self) -> None:
@@ -364,6 +377,7 @@ class ExchangeClientBase(ABC):
                 base=base,
                 quote=quote,
             )
+            seq = self._tracker.next_sequence("db.orders") if self._tracker else None
             return await self.repository.insert_order(
                 instrument_id=instrument_id,
                 client_order_id=order.client_order_id,
@@ -375,6 +389,8 @@ class ExchangeClientBase(ABC):
                 size=order.amount,
                 status=order.status.value,
                 time_in_force=None,
+                session_id=self._tracker.session_id if self._tracker else None,
+                sequence_id=seq,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log order to database: {e}")
@@ -406,12 +422,15 @@ class ExchangeClientBase(ABC):
         if self.repository is None:
             return None
         try:
+            seq = self._tracker.next_sequence("db.orders") if self._tracker else None
             return await self.repository.update_order(
                 order_id=db_order_id,
                 status=status.value,
                 updated_at=datetime.now(tz=UTC),
                 exchange_order_id=exchange_order_id,
                 error=error,
+                session_id=self._tracker.session_id if self._tracker else None,
+                sequence_id=seq,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log order update to database: {e}")
@@ -436,6 +455,7 @@ class ExchangeClientBase(ABC):
         if self.repository is None:
             return
         try:
+            seq = self._tracker.next_sequence("db.executions") if self._tracker else None
             await self.repository.insert_execution(
                 order_id=db_order_id,
                 order_public_id=order_public_id,
@@ -448,6 +468,8 @@ class ExchangeClientBase(ABC):
                 fee_asset="USD",
                 exec_id=execution.exec_id,
                 trade_id=str(execution.trade_id) if execution.trade_id is not None else None,
+                session_id=self._tracker.session_id if self._tracker else None,
+                sequence_id=seq,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log execution to database: {e}")

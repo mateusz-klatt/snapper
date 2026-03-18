@@ -223,6 +223,8 @@ struct CandleData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
+    let sessionId: String?
+    let sequenceId: Int?
     let instrument: String
     let exchange: String
     let timeframe: String
@@ -239,6 +241,8 @@ struct CandleData: Codable, Sendable {
         case publicId = "public_id"
         case type
         case timestamp
+        case sessionId = "session_id"
+        case sequenceId = "sequence_id"
         case instrument
         case exchange
         case timeframe
@@ -360,6 +364,8 @@ struct ExecutionData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
+    let sessionId: String?
+    let sequenceId: Int?
     let tradeId: String?
     let exchangeOrderId: String?
     let clientOrderId: String
@@ -377,6 +383,8 @@ struct ExecutionData: Codable, Sendable {
         case publicId = "public_id"
         case type
         case timestamp
+        case sessionId = "session_id"
+        case sequenceId = "sequence_id"
         case tradeId = "trade_id"
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
@@ -448,6 +456,8 @@ struct OrderData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
+    let sessionId: String?
+    let sequenceId: Int?
     let exchangeOrderId: String?
     let clientOrderId: String
     let instrument: String
@@ -469,6 +479,8 @@ struct OrderData: Codable, Sendable {
         case publicId = "public_id"
         case type
         case timestamp
+        case sessionId = "session_id"
+        case sequenceId = "sequence_id"
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
         case instrument
@@ -492,6 +504,8 @@ struct PositionData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
+    let sessionId: String?
+    let sequenceId: Int?
     let instrument: String
     let exchange: String
     let quantity: Double
@@ -503,6 +517,8 @@ struct PositionData: Codable, Sendable {
         case publicId = "public_id"
         case type
         case timestamp
+        case sessionId = "session_id"
+        case sequenceId = "sequence_id"
         case instrument
         case exchange
         case quantity
@@ -752,6 +768,8 @@ struct SignalData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
+    let sessionId: String?
+    let sequenceId: Int?
     let instrument: String
     let exchange: String
     let side: String
@@ -765,6 +783,8 @@ struct SignalData: Codable, Sendable {
         case publicId = "public_id"
         case type
         case timestamp
+        case sessionId = "session_id"
+        case sequenceId = "sequence_id"
         case instrument
         case exchange
         case side
@@ -862,6 +882,8 @@ struct TopicMetricSnapshotSchema: Codable, Sendable {
     let timeout: Int?
     /// Errors encountered
     let errors: Int?
+    /// Messages with unparseable envelope
+    let invalidMessages: Int?
     /// Last message timestamp
     let lastMessageTs: Double?
     /// Throttle interval ms
@@ -877,6 +899,7 @@ struct TopicMetricSnapshotSchema: Codable, Sendable {
         case dropped
         case timeout
         case errors
+        case invalidMessages = "invalid_messages"
         case lastMessageTs = "last_message_ts"
         case throttleMs = "throttle_ms"
         case pattern

@@ -138,6 +138,7 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
                     now = datetime.now(UTC)
+                    sid = self._tracker.session_id
                     symbol_public_id = self._upsert_symbol(
                         session,
                         native_symbol,
@@ -145,6 +146,8 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         symbol_data["quote"],
                         "crypto",
                         now,
+                        session_id=sid,
+                        sequence_id=self._tracker.next_sequence("db.symbols"),
                     )
                     processed_symbol_public_ids.add(symbol_public_id)
                     ws_result = self._upsert_alias(
@@ -154,6 +157,8 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         "ws",
                         symbol_data["zonda_symbol"],
                         now,
+                        session_id=sid,
+                        sequence_id=self._tracker.next_sequence("db.aliases"),
                     )
                     if ws_result == "created":
                         created_count += 1
@@ -168,6 +173,8 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                             "ccxt",
                             ccxt_symbol,
                             now,
+                            session_id=sid,
+                            sequence_id=self._tracker.next_sequence("db.aliases"),
                         )
                     self._upsert_capability(
                         session,
@@ -178,10 +185,18 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         "zonda_updater",
                         None,
                         now,
+                        session_id=sid,
+                        sequence_id=self._tracker.next_sequence("db.capabilities"),
                     )
                 now = datetime.now(UTC)
                 deactivated = self._reconcile_capabilities(
-                    session, "zonda", processed_symbol_public_ids, "zonda_updater", now
+                    session,
+                    "zonda",
+                    processed_symbol_public_ids,
+                    "zonda_updater",
+                    now,
+                    session_id=self._tracker.session_id,
+                    next_sequence_fn=lambda: self._tracker.next_sequence("db.capabilities"),
                 )
                 session.commit()
                 logger.info(

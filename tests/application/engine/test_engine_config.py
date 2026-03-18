@@ -1,6 +1,5 @@
 """Tests for TradingEngineService and EngineConfigModel."""
 
-import json
 import math
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -26,11 +25,11 @@ class FakeSocket:
 
     def __init__(self) -> None:
         """Initialize the instance."""
-        self.sent: list[tuple[str, bytes, int]] = []
+        self.sent: list[Any] = []
 
-    async def send_multipart(self, topic: str, payload: bytes, *, flags: int = 0) -> None:
-        """Collect sent message parts."""
-        self.sent.append((topic, payload, flags))
+    async def publish(self, data: Any, *, topic: str | None = None, flags: int = 0) -> None:
+        """Collect sent data objects."""
+        self.sent.append(data)
 
 
 class StubRisk(RiskEvaluator):
@@ -69,10 +68,6 @@ class StubRisk(RiskEvaluator):
         return result
 
 
-def _decode_payload(payload: bytes) -> dict[str, Any]:
-    return cast(dict[str, Any], json.loads(payload.decode("utf-8")))
-
-
 @pytest.mark.asyncio
 async def test_engine_execute_desired_units_buy_flow() -> None:
     """Verify buy order execution updates position and sends order message.
@@ -95,12 +90,10 @@ async def test_engine_execute_desired_units_buy_flow() -> None:
     engine.portfolio.cash = 1_000.0
     await engine.execute_desired_units(1.0, current_price=100.0)
     assert len(socket.sent) == 1
-    topic, payload, _flags = socket.sent[0]
-    assert topic == "orders.commands.kraken.BTC-USD.submit"
-    message = _decode_payload(payload)
-    assert message["side"] == "buy"
-    assert message["instrument"] == "BTC-USD"
-    assert message["strategy_id"] == "engine-buy"
+    order = socket.sent[0]
+    assert order.side == "buy"
+    assert order.instrument == "BTC-USD"
+    assert order.strategy_id == "engine-buy"
     assert engine.position_qty > 0.0
     assert engine.entry_price == pytest.approx(100.0)
     assert risk.can_open_calls
@@ -130,10 +123,9 @@ async def test_engine_maybe_stop_triggers_sell() -> None:
     assert engine.position_qty == pytest.approx(0.0)
     assert engine.entry_price is None
     assert len(socket.sent) == 1
-    _topic, payload, _flags = socket.sent[0]
-    message = _decode_payload(payload)
-    assert message["side"] == "sell"
-    assert message["strategy_id"] == "engine-stop"
+    order = socket.sent[0]
+    assert order.side == "sell"
+    assert order.strategy_id == "engine-stop"
 
 
 @pytest.mark.asyncio
@@ -159,21 +151,19 @@ async def test_engine_execute_desired_units_sell_flow() -> None:
     engine.portfolio.positions["BTC-USD"] = PositionStateModel(quantity=0.3, average_price=100.0)
     await engine.execute_desired_units(-1.0, current_price=120.0)
     assert len(socket.sent) == 1
-    topic, payload, _flags = socket.sent[0]
-    assert topic == "orders.commands.kraken.BTC-USD.submit"
-    message = _decode_payload(payload)
-    assert message["side"] == "sell"
-    assert message["instrument"] == "BTC-USD"
-    assert message["strategy_id"] == "engine-sell"
+    order = socket.sent[0]
+    assert order.side == "sell"
+    assert order.instrument == "BTC-USD"
+    assert order.strategy_id == "engine-sell"
     assert math.isclose(engine.position_qty, 0.0, abs_tol=1e-9)
     assert engine.entry_price is None
 
 
 def _replace_execution_publisher_with_async_stub(trader: TraderCoordinator) -> MagicMock:
     async_publisher = MagicMock()
-    async_publisher.send_multipart = AsyncMock(return_value=None)
+    async_publisher.publish = AsyncMock(return_value=None)
     async_publisher.close = MagicMock()
-    trader.execution_publisher = cast(Any, async_publisher)
+    trader.msg_publisher = cast(Any, async_publisher)
     return async_publisher
 
 
@@ -189,8 +179,7 @@ class TestEngineExecuteDesiredUnits:
         Then: Buy order is published with correct topic and quantity.
         """
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -202,18 +191,13 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.1
         current_price = 50000.0
         await engine.execute_desired_units(desired_units, current_price)
-        assert mock_socket.send_multipart.called
-        call_args = mock_socket.send_multipart.call_args
-        topic = call_args[0][0]
-        payload_bytes = call_args[0][1]
-        payload = payload_bytes.decode() if isinstance(payload_bytes, bytes) else payload_bytes
-        assert topic == "orders.commands.kraken.BTC-USD.submit"
-        order_msg = json.loads(payload)
-        assert order_msg["instrument"] == "BTC-USD"
-        assert order_msg["side"] == "buy"
-        assert order_msg["mode"] == "live"
-        assert order_msg["quantity"] > 0
-        assert order_msg["quantity"] <= desired_units
+        assert mock_socket.publish.called
+        order = mock_socket.publish.call_args[0][0]
+        assert order.instrument == "BTC-USD"
+        assert order.side == "buy"
+        assert order.mode == "live"
+        assert order.quantity > 0
+        assert order.quantity <= desired_units
         assert engine.portfolio.cash < 10000.0
         assert engine.position_qty > 0
         assert engine.entry_price == current_price
@@ -227,8 +211,7 @@ class TestEngineExecuteDesiredUnits:
         Then: Entire position is sold and entry price is cleared.
         """
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -243,16 +226,11 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.0
         current_price = 52000.0
         await engine.execute_desired_units(desired_units, current_price)
-        assert mock_socket.send_multipart.called
-        call_args = mock_socket.send_multipart.call_args
-        topic = call_args[0][0]
-        payload_bytes = call_args[0][1]
-        payload = payload_bytes.decode() if isinstance(payload_bytes, bytes) else payload_bytes
-        assert topic == "orders.commands.kraken.BTC-USD.submit"
-        order_msg = json.loads(payload)
-        assert order_msg["instrument"] == "BTC-USD"
-        assert order_msg["side"] == "sell"
-        assert order_msg["quantity"] == pytest.approx(0.1)
+        assert mock_socket.publish.called
+        order = mock_socket.publish.call_args[0][0]
+        assert order.instrument == "BTC-USD"
+        assert order.side == "sell"
+        assert order.quantity == pytest.approx(0.1)
         assert engine.position_qty == pytest.approx(0.0)
         assert engine.entry_price is None
 
@@ -265,8 +243,7 @@ class TestEngineExecuteDesiredUnits:
         Then: Cash never goes negative and position is constrained.
         """
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -291,8 +268,7 @@ class TestEngineExecuteDesiredUnits:
         Then: Position quantity increases.
         """
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -317,8 +293,7 @@ class TestEngineExecuteDesiredUnits:
         Then: No order is sent and position remains zero.
         """
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -331,7 +306,7 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.0
         current_price = 50000.0
         await engine.execute_desired_units(desired_units, current_price)
-        assert not mock_socket.send_string.called
+        assert not mock_socket.publish.called
         assert engine.position_qty == pytest.approx(0.0)
 
     @pytest.mark.asyncio
@@ -343,8 +318,7 @@ class TestEngineExecuteDesiredUnits:
         Then: Order quantity is rounded to valid lot size.
         """
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -356,11 +330,10 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.0123
         current_price = 50000.0
         await engine.execute_desired_units(desired_units, current_price)
-        if mock_socket.send_string.called:
-            call_args = mock_socket.send_string.call_args[0][0]
-            order_msg = json.loads(call_args)
+        if mock_socket.publish.called:
+            order = mock_socket.publish.call_args[0][0]
             lot_size = 0.001
-            qty = order_msg["quantity"]
+            qty = order.quantity
             assert qty % lot_size == pytest.approx(0.0) or abs(qty % lot_size) < 1e-10
 
 
@@ -393,8 +366,7 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -455,8 +427,7 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -510,8 +481,7 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -574,8 +544,7 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.send_multipart = AsyncMock()
-        mock_socket.send_string = MagicMock()
+        mock_socket.publish = AsyncMock()
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -599,13 +568,13 @@ class TestTraderSignalHandling:
 
 
 class _SocketStub:
-    """Test stub for ZMQ socket."""
+    """Test stub for MessagePublisher."""
 
     def __init__(self) -> None:
-        self.sent: list[tuple[str, bytes, int]] = []
+        self.sent: list[Any] = []
 
-    async def send_multipart(self, topic: str, payload: bytes, *, flags: int = 0) -> None:
-        self.sent.append((topic, payload, flags))
+    async def publish(self, data: Any, *, topic: str | None = None, flags: int = 0) -> None:
+        self.sent.append(data)
 
 
 @dataclass
@@ -837,6 +806,5 @@ async def test_send_order_converts_timestamp_to_datetime() -> None:
         signaled_at=ts,
     )
     assert socket.sent
-    _topic, payload_bytes, _flags = socket.sent[0]
-    payload = payload_bytes.decode()
-    assert "signaled_at" in payload
+    order = socket.sent[0]
+    assert order.signaled_at is not None

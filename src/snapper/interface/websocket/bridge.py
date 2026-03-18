@@ -23,8 +23,10 @@ from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
+from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.messages import GapEnvelope
 from snapper.messaging.topics.builders import is_order_topic
 from snapper.messaging.topics.schemas import TOPIC_REGISTRY
 from snapper.utils.logging import set_log_context
@@ -84,6 +86,7 @@ class ZmqWebSocketBridgeService:
         self.context: zmq.asyncio.Context | None = None
         self.settings = get_settings()
         self.topic_metrics: dict[str, TopicMetricsModel] = {}
+        self._gap_detector: GapDetector = GapDetector("bridge")
         self.available_topics: dict[str, TopicConfigurationModel] = self._build_topic_config()
         self._shutdown_event: asyncio.Event | None = None
 
@@ -251,8 +254,38 @@ class ZmqWebSocketBridgeService:
             del self.zmq_subscribers[topic]
         logger.info(f"ZMQ subscription stopped for topic: {topic}")
 
+    def _check_gap(self, topic: str, received_topic: str, payload_str: str) -> bool:
+        """Run gap detection on a received message.
+
+        Parses the payload as a GapEnvelope to extract session_id and
+        sequence_id. Returns False and increments the invalid_messages
+        counter when the payload cannot be parsed as JSON; the caller
+        must drop the message in that case (Phase 1.3 strict mode).
+
+        Args:
+            topic: Subscription topic key used for metrics lookup.
+            received_topic: Exact topic from the ZMQ frame, used as the
+                gap detector stream key.
+            payload_str: Raw JSON payload string.
+
+        Returns:
+            True if the payload is valid JSON and gap detection ran,
+            False if the payload is malformed and the message must be dropped.
+        """
+        try:
+            envelope = GapEnvelope.model_validate_json(payload_str)
+            self._gap_detector.check(received_topic, envelope.session_id, envelope.sequence_id)
+            return True
+        except Exception:
+            logger.warning("Dropping malformed message on topic %s", received_topic)
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].invalid_messages += 1
+            return False
+
     async def _process_zmq_message(self, topic: str, message_parts: list[bytes]) -> None:
         """Process a single received ZMQ multipart message.
+
+        Drops messages whose payload is not valid JSON (strict mode).
 
         Args:
             topic: The topic being subscribed to.
@@ -267,6 +300,8 @@ class ZmqWebSocketBridgeService:
         topic_bytes, payload_bytes = message_parts
         received_topic = topic_bytes.decode("utf-8")
         payload_str = payload_bytes.decode("utf-8")
+        if not self._check_gap(topic, received_topic, payload_str):
+            return
         if topic in self.topic_metrics:
             self.topic_metrics[topic].received_count += 1
             self.topic_metrics[topic].last_message_ts = time.time()
@@ -693,6 +728,7 @@ class ZmqWebSocketBridgeService:
                 dropped=metrics.dropped_count,
                 timeout=metrics.timeout_count,
                 errors=metrics.error_count,
+                invalid_messages=metrics.invalid_messages,
                 last_message_ts=metrics.last_message_ts,
                 throttle_ms=config.throttle_ms if config else None,
                 pattern=config.pattern if config else None,

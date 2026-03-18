@@ -181,7 +181,7 @@ async def test_tick_loop_handles_unknown_symbol(monkeypatch: pytest.MonkeyPatch)
     """
     pub: Any = DummyPublisher(symbols=["KNOWN"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace()
     pub._exchange_client = SimpleNamespace()
 
@@ -203,7 +203,7 @@ async def test_tick_loop_handles_exception(monkeypatch: pytest.MonkeyPatch) -> N
     """
     pub: Any = DummyPublisher(symbols=["KNOWN"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace()
     pub._exchange_client = SimpleNamespace()
 
@@ -226,7 +226,7 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace()
     pub._exchange_client = SimpleNamespace()
 
@@ -242,7 +242,7 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
-    pub.publisher.send_multipart.assert_awaited()
+    pub.msg_publisher.publish.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -255,7 +255,7 @@ async def test_candle_loop_handles_errors(monkeypatch: pytest.MonkeyPatch) -> No
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace()
     pub._exchange_client = SimpleNamespace()
 
@@ -278,7 +278,7 @@ async def test_publish_message_skips_when_not_running() -> None:
     Then: Message is not sent.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.running = False
     await pub._publish_message(
         "topic",
@@ -294,7 +294,7 @@ async def test_publish_message_skips_when_not_running() -> None:
             open_at=datetime.now(UTC),
         ),
     )
-    pub.publisher.send_multipart.assert_not_awaited()
+    pub.msg_publisher.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -306,9 +306,9 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
     Then: Error is logged.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    failing = StubValidatedPublisher()
-    failing.send_multipart.side_effect = RuntimeError("boom")
-    pub.publisher = failing
+    failing = AsyncMock()
+    failing.publish.side_effect = RuntimeError("boom")
+    pub.msg_publisher = failing
     pub.running = True
     await pub._publish_message(
         "topic",
@@ -324,7 +324,7 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
             open_at=datetime.now(UTC),
         ),
     )
-    failing.send_multipart.assert_awaited_once()
+    failing.publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -336,11 +336,11 @@ async def test_publish_heartbeat_when_running() -> None:
     Then: Message is sent.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.running = True
     msg = HeartbeatData(component="c", sequence=1, status="healthy", lag_ms=0)
-    await pub._publish_heartbeat("hb", msg)
-    pub.publisher.send_multipart.assert_awaited()
+    await pub._publish_heartbeat(msg)
+    pub.msg_publisher.publish.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -570,7 +570,7 @@ async def test_tick_loop_breaks_when_stopped(monkeypatch: pytest.MonkeyPatch) ->
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = False
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
@@ -578,7 +578,7 @@ async def test_tick_loop_breaks_when_stopped(monkeypatch: pytest.MonkeyPatch) ->
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
-    pub.publisher.send_multipart.assert_not_awaited()
+    pub.msg_publisher.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -591,7 +591,7 @@ async def test_tick_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> N
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
@@ -600,7 +600,7 @@ async def test_tick_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> N
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
-    pub.publisher.send_multipart.assert_awaited_once()
+    pub.msg_publisher.publish.assert_awaited_once()
     assert pub._last_data_timestamps["BTC-USD"] > 0
 
 
@@ -614,7 +614,7 @@ async def test_trade_loop_handles_exception(monkeypatch: pytest.MonkeyPatch) -> 
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
@@ -640,9 +640,9 @@ async def test_heartbeat_loop_runs_once(monkeypatch: pytest.MonkeyPatch) -> None
     pub._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000
     publish = AsyncMock()
 
-    async def publish_and_stop(topic: str, message: HeartbeatData) -> None:
+    async def publish_and_stop(message: HeartbeatData) -> None:
         pub.running = False
-        await publish(topic, message)
+        await publish(message)
 
     monkeypatch.setattr(pub, "_publish_heartbeat", publish_and_stop)
     await pub._heartbeat_loop()
@@ -659,13 +659,12 @@ async def test_publish_heartbeat_skips_when_not_running() -> None:
     Then: Message is not sent.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.running = False
     await pub._publish_heartbeat(
-        "hb",
         HeartbeatData(component="c", sequence=1, status="healthy", lag_ms=0),
     )
-    pub.publisher.send_multipart.assert_not_awaited()
+    pub.msg_publisher.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -677,15 +676,14 @@ async def test_publish_heartbeat_logs_errors() -> None:
     Then: Error is logged.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    failing = StubValidatedPublisher()
-    failing.send_multipart.side_effect = RuntimeError("boom")
-    pub.publisher = failing
+    failing = AsyncMock()
+    failing.publish.side_effect = RuntimeError("boom")
+    pub.msg_publisher = failing
     pub.running = True
     await pub._publish_heartbeat(
-        "hb",
         HeartbeatData(component="c", sequence=1, status="healthy", lag_ms=0),
     )
-    failing.send_multipart.assert_awaited_once()
+    failing.publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -811,7 +809,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
         upsert_instrument=AsyncMock(return_value=1),
         upsert_candles=AsyncMock(),
@@ -835,7 +833,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
     pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
-    pub.publisher.send_multipart.assert_awaited_once()
+    pub.msg_publisher.publish.assert_awaited_once()
     pub._ensure_instrument.assert_awaited()
     pub.repository.upsert_candles.assert_awaited_once()
     assert pub._last_data_timestamps["BTC-USD"] > 0
@@ -851,7 +849,7 @@ async def test_trade_loop_breaks_when_not_running(monkeypatch: pytest.MonkeyPatc
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = False
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
@@ -861,7 +859,7 @@ async def test_trade_loop_breaks_when_not_running(monkeypatch: pytest.MonkeyPatc
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
-    pub.publisher.send_multipart.assert_not_awaited()
+    pub.msg_publisher.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -997,7 +995,7 @@ async def test_candle_loop_breaks_when_stopped() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
         upsert_instrument=AsyncMock(return_value=1),
         upsert_candles=AsyncMock(),
@@ -1033,7 +1031,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = False
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
         upsert_instrument=AsyncMock(return_value=1),
         upsert_candles=AsyncMock(),
@@ -1056,7 +1054,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
     pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
-    pub.publisher.send_multipart.assert_not_awaited()
+    pub.msg_publisher.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1388,7 +1386,7 @@ class TestFeedPublisherCoverage:
 
         Given: A running publisher with mock socket,
         When: _publish_message is called,
-        Then: Message is sent via send_multipart.
+        Then: Message is sent via msg_publisher.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -1396,10 +1394,10 @@ class TestFeedPublisherCoverage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher_any = cast(Any, publisher)
         publisher_any.running = True
-        publisher_any.publisher = AsyncMock()
+        publisher_any.msg_publisher = AsyncMock()
         message = TickData(instrument="BTC-USD", exchange="kraken", volume=1.0, last=100.0)
         await publisher_any._publish_message("market.kraken.BTC-USD.ticks", message)
-        publisher_any.publisher.send_multipart.assert_awaited_once()
+        publisher_any.msg_publisher.publish.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1416,10 +1414,10 @@ class TestFeedPublisherCoverage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher_any = cast(Any, publisher)
         publisher_any.running = False
-        publisher_any.publisher = AsyncMock()
+        publisher_any.msg_publisher = AsyncMock()
         message = TickData(instrument="BTC-USD", exchange="kraken", volume=1.0, last=100.0)
         await publisher_any._publish_message("market.kraken.BTC-USD.ticks", message)
-        publisher_any.publisher.send_multipart.assert_not_called()
+        publisher_any.msg_publisher.publish.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("asyncio.sleep", new_callable=AsyncMock)
@@ -1446,8 +1444,7 @@ class TestFeedPublisherCoverage:
         publisher_any._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000 - 25
         publish_heartbeat_mock = AsyncMock()
 
-        async def publish_side_effect(topic: str, message: HeartbeatData) -> None:
-            assert topic.startswith("system.heartbeats.feed.")
+        async def publish_side_effect(message: HeartbeatData) -> None:
             assert "symbols" in message.meta
             assert "BTC-USD" in message.meta["symbols"]
             assert message.meta["symbol_count"] == 1
@@ -1471,7 +1468,7 @@ class TestFeedPublisherCoverage:
 
         Given: A running publisher with mock socket,
         When: _publish_heartbeat is called,
-        Then: Heartbeat message is sent via send_multipart.
+        Then: Heartbeat message is sent via msg_publisher.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -1479,12 +1476,12 @@ class TestFeedPublisherCoverage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher_any = cast(Any, publisher)
         publisher_any.running = True
-        publisher_any.publisher = AsyncMock()
+        publisher_any.msg_publisher = AsyncMock()
         heartbeat = HeartbeatData(
             component="feed.kraken.BTC-USD", sequence=1, status="healthy", lag_ms=0
         )
-        await publisher_any._publish_heartbeat("system.heartbeats", heartbeat)
-        publisher_any.publisher.send_multipart.assert_awaited_once()
+        await publisher_any._publish_heartbeat(heartbeat)
+        publisher_any.msg_publisher.publish.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1858,6 +1855,21 @@ class PublisherSocketStub:
         self.calls.append((topic, payload))
 
 
+class MessagePublisherStub:
+    """Test stub for MessagePublisher wrapper."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        """Initialize the instance."""
+        self.calls: list[tuple[Any, str | None]] = []
+        self.error = error
+
+    async def publish(self, message: Any, topic: str | None = None) -> None:
+        """Publish a message."""
+        if self.error is not None:
+            raise self.error
+        self.calls.append((message, topic))
+
+
 @pytest.mark.asyncio
 class TestFeedPublisherCandleLoop:
     """Tests for FeedPublisher candle loop functionality."""
@@ -2056,8 +2068,8 @@ class TestFeedPublisherPublishMessage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.running = True
         publisher_any = cast(Any, publisher)
-        pub_socket = PublisherSocketStub()
-        publisher_any.publisher = pub_socket
+        msg_pub = MessagePublisherStub()
+        publisher_any.msg_publisher = msg_pub
         message = CandleData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -2073,11 +2085,11 @@ class TestFeedPublisherPublishMessage:
             "market.kraken.BTC-USD.candles.1m",
             message,
         )
-        assert len(pub_socket.calls) == 1
-        topic_str, payload_bytes = pub_socket.calls[0]
-        assert topic_str == "market.kraken.BTC-USD.candles.1m"
-        assert b'"type":"candle"' in payload_bytes
-        assert b'"instrument":"BTC-USD"' in payload_bytes
+        assert len(msg_pub.calls) == 1
+        sent_message, sent_topic = msg_pub.calls[0]
+        assert sent_topic == "market.kraken.BTC-USD.candles.1m"
+        assert sent_message.type == "candle"
+        assert sent_message.instrument == "BTC-USD"
 
     @patch("snapper.config.settings.get_settings")
     async def test_publish_message_not_running(self, mock_get_settings: MagicMock) -> None:
@@ -2093,8 +2105,8 @@ class TestFeedPublisherPublishMessage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.running = False
         publisher_any = cast(Any, publisher)
-        pub_socket = PublisherSocketStub()
-        publisher_any.publisher = pub_socket
+        msg_pub = MessagePublisherStub()
+        publisher_any.msg_publisher = msg_pub
         message = CandleData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -2110,7 +2122,7 @@ class TestFeedPublisherPublishMessage:
             "market.kraken.BTC-USD.candles.1m",
             message,
         )
-        assert not pub_socket.calls
+        assert not msg_pub.calls
 
     @patch("snapper.config.settings.get_settings")
     async def test_publish_message_no_socket(self, mock_get_settings: MagicMock) -> None:
@@ -2125,7 +2137,7 @@ class TestFeedPublisherPublishMessage:
         mock_get_settings.return_value = mock_settings
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.running = True
-        publisher.publisher = None
+        publisher.msg_publisher = None
         publisher_any = cast(Any, publisher)
         message = CandleData(
             exchange="kraken",
@@ -2157,8 +2169,8 @@ class TestFeedPublisherPublishMessage:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.running = True
         publisher_any = cast(Any, publisher)
-        pub_socket = PublisherSocketStub(error=RuntimeError("Send failed"))
-        publisher_any.publisher = pub_socket
+        msg_pub = MessagePublisherStub(error=RuntimeError("Send failed"))
+        publisher_any.msg_publisher = msg_pub
         message = CandleData(
             exchange="kraken",
             instrument="BTC-USD",
@@ -2174,7 +2186,7 @@ class TestFeedPublisherPublishMessage:
             "market.kraken.BTC-USD.candles.1m",
             message,
         )
-        assert pub_socket.calls == []
+        assert msg_pub.calls == []
 
 
 @pytest.mark.asyncio
@@ -2219,7 +2231,7 @@ async def test_candle_loop_skips_publish_when_ensure_instrument_returns_none() -
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub.publisher = StubValidatedPublisher()
+    pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace()
     pub._exchange_client = SimpleNamespace()
 

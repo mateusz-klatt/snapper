@@ -139,6 +139,49 @@ class TestSignalService:
             assert stored_signal is not None
             assert stored_signal.price is None
 
+    async def test_store_signal_with_envelope_identity(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: StrategySignal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify store_signal uses public_id and timestamp from published envelope.
+
+        Given: Repository with BTCUSD instrument and an explicit public_id and timestamp,
+        When: store_signal called with public_id and timestamp,
+        Then: DB row carries the exact same public_id and timestamp as the published envelope.
+        """
+        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
+        assert spid is not None
+        await test_repository.upsert_instrument(
+            symbol_public_id=spid,
+            symbol="BTCUSD",
+            exchange="testexchange",
+            base="BTC",
+            quote="USD",
+            tick_size=0.01,
+            lot_size=0.001,
+        )
+        envelope_public_id = "envelope-public-id-abc"
+        envelope_timestamp = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal,
+            exchange="testexchange",
+            strategy_name="test_strategy",
+            price=50000.0,
+            public_id=envelope_public_id,
+            timestamp=envelope_timestamp,
+        )
+        assert signal_id == envelope_public_id
+        async with test_repository.session() as session:
+            result = await session.execute(
+                select(Signal).where(Signal.public_id == envelope_public_id)
+            )
+            stored_signal = result.scalars().first()
+            assert stored_signal is not None
+            assert stored_signal.public_id == envelope_public_id
+            assert stored_signal.timestamp == envelope_timestamp
+
     async def test_get_recent_signals(
         self,
         signal_service: SignalReadService,
