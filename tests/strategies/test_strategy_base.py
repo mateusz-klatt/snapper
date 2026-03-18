@@ -751,6 +751,7 @@ async def test_emit_signal_persists_with_stamped_provenance(
         sequence_id: int | None = None,
         public_id: str | None = None,
         timestamp: datetime | None = None,
+        tracker: object = None,
     ) -> str:
         captured.append(
             {
@@ -758,6 +759,7 @@ async def test_emit_signal_persists_with_stamped_provenance(
                 "sequence_id": sequence_id,
                 "public_id": public_id,
                 "timestamp": timestamp,
+                "tracker": tracker,
             }
         )
         return "signal-pid"
@@ -773,6 +775,7 @@ async def test_emit_signal_persists_with_stamped_provenance(
     assert captured[0]["sequence_id"] == 7
     assert captured[0]["public_id"] == stamped.public_id
     assert captured[0]["timestamp"] == stamped.timestamp
+    assert captured[0]["tracker"] is strategy._tracker
 
 
 @pytest.mark.asyncio

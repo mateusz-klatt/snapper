@@ -19,6 +19,7 @@ from snapper.data.models import Signal
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.strategies.models import StrategySignal
 
 
@@ -40,6 +41,7 @@ class SignalReadService:
         sequence_id: int | None = None,
         public_id: str | None = None,
         timestamp: datetime | None = None,
+        tracker: SequenceTracker | None = None,
     ) -> str:
         """Store a trading signal in the database.
 
@@ -54,6 +56,9 @@ class SignalReadService:
                 When provided, the DB row carries the same public_id as the
                 WS/ZMQ message so REST and WS represent the same event.
             timestamp: Known-at time from the published envelope.
+            tracker: Strategy-owned SequenceTracker used when a lazy
+                instrument upsert is needed. Keeps the instrument row in
+                the same session as the owning strategy component.
 
         Returns:
             Signal event UUID or empty string on error.
@@ -90,6 +95,10 @@ class SignalReadService:
                         quote=quote,
                         tick_size=0.01,
                         lot_size=0.0001,
+                        session_id=tracker.session_id if tracker is not None else "",
+                        sequence_id=(
+                            tracker.next_sequence("db.instruments") if tracker is not None else 0
+                        ),
                     )
                 else:
                     inst_id = inst.id

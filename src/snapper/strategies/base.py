@@ -527,6 +527,7 @@ class BaseStrategy(ABC):
             sequence_id=stamped.sequence_id if stamped else None,
             public_id=stamped.public_id if stamped else None,
             timestamp=stamped.timestamp if stamped else None,
+            tracker=self._tracker,
         )
         logger.debug(
             f"Strategy {self.name}: Signal {signal.side.upper()} {signal.instrument} "

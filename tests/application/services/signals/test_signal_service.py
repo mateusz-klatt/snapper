@@ -18,6 +18,7 @@ from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.strategies.base import StrategySignal
 
 
@@ -687,3 +688,34 @@ class TestSignalServiceCoverage:
             assert signals == []
             mock_logger.error.assert_called_once()
             assert "Error retrieving signals" in str(mock_logger.error.call_args)
+
+    @pytest.mark.asyncio
+    async def test_store_signal_creates_instrument_with_tracker_provenance(
+        self, signal_service: SignalReadService, sample_signal: StrategySignal
+    ) -> None:
+        """Verify store_signal uses tracker provenance for lazy instrument upsert.
+
+        Given: No existing instrument and a tracker passed by the caller,
+        When: store_signal is called with tracker,
+        Then: Instrument row carries the tracker session_id and a non-zero sequence_id.
+        """
+        tracker = SequenceTracker()
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal,
+            exchange="testexchange",
+            strategy_name="test_strategy",
+            price=50000.0,
+            tracker=tracker,
+        )
+        assert len(signal_id) == 36
+        async with signal_service.repo.session() as session:
+            inst_query = await session.execute(
+                select(Instrument).where(
+                    Instrument.symbol == "BTC-USD",
+                    Instrument.exchange == "testexchange",
+                )
+            )
+            inst = inst_query.scalar_one_or_none()
+            assert inst is not None
+            assert inst.session_id == tracker.session_id
+            assert inst.sequence_id == 1
