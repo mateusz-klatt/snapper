@@ -526,8 +526,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 "volume": float(candle_msg.volume),
                 "vwap": vwap_price,
                 "trades": trades,
-                "session_id": candle_msg.session_id or "",
-                "sequence_id": candle_msg.sequence_id or 0,
+                "session_id": candle_msg.session_id,
+                "sequence_id": candle_msg.sequence_id,
             }
             assert self.repository is not None, "Repository not initialized"
             await self.repository.upsert_candles([candle_row])

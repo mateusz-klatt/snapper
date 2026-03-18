@@ -320,8 +320,8 @@ class TestCreateApiRouter:
         mock_candle.volume = 1000.0
         mock_candle.vwap = 50250.0
         mock_candle.trades = 10
-        mock_candle.session_id = None
-        mock_candle.sequence_id = None
+        mock_candle.session_id = ""
+        mock_candle.sequence_id = 0
         mock_candles_result = MagicMock()
         mock_candles_result.scalars.return_value.all.return_value = [mock_candle]
 
@@ -1294,8 +1294,8 @@ class MockOrder:
         self.average_price = 50000.0
         self.time_in_force = "GTC"
         self.error = None
-        self.session_id = None
-        self.sequence_id = None
+        self.session_id = ""
+        self.sequence_id = 0
 
 
 class MockSignal:
@@ -1313,8 +1313,8 @@ class MockSignal:
         self.reason = "RSI oversold"
         self.strategy_name = "rsi_strategy"
         self.price = 49500.0
-        self.session_id = None
-        self.sequence_id = None
+        self.session_id = ""
+        self.sequence_id = 0
 
 
 class MockExecution:
@@ -1336,8 +1336,8 @@ class MockExecution:
         self.size = 1.0
         self.fee = 10.0
         self.fee_asset = "USD"
-        self.session_id = None
-        self.sequence_id = None
+        self.session_id = ""
+        self.sequence_id = 0
 
 
 class MockPosition:
@@ -1353,8 +1353,8 @@ class MockPosition:
         self.unrealized_pnl = 3000.0
         self.realized_pnl = 500.0
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
-        self.session_id = None
-        self.sequence_id = None
+        self.session_id = ""
+        self.sequence_id = 0
 
 
 class MockRepositoryV2:

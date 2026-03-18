@@ -80,6 +80,7 @@ from snapper.messaging.executors.walutomat import WalutomatOrderExecutor
 from snapper.messaging.executors.zonda import ZondaOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.server.app import create_app
 
@@ -727,6 +728,7 @@ async def _rotate_single_setting(
     new_encryption: SettingsEncryptionService,
     dry_run: bool,
     session: Any,
+    tracker: SequenceTracker,
 ) -> bool:
     """Re-encrypt a single setting from old to new encryption.
 
@@ -736,6 +738,7 @@ async def _rotate_single_setting(
         new_encryption: New encryption service.
         dry_run: If True, skip writing back the new value.
         session: Active async database session.
+        tracker: SequenceTracker for stamping session_id and sequence_id.
 
     Returns:
         True if the setting was rotated, False if skipped.
@@ -763,6 +766,8 @@ async def _rotate_single_setting(
                     "description": setting.description,
                     "is_encrypted": setting.is_encrypted,
                     "updated_by": setting.updated_by,
+                    "session_id": tracker.session_id,
+                    "sequence_id": tracker.next_sequence("db.settings"),
                 },
                 bus_time=now,
             )
@@ -829,6 +834,7 @@ async def _run_encryption_rotation(
         poolclass = NullPool if "sqlite" in bootstrap.db_url else None
         engine = create_async_engine(bootstrap.db_url, poolclass=poolclass)
         session_factory = async_sessionmaker(engine)
+        rotation_tracker = SequenceTracker()
         async with session_factory() as session:
             result = await session.execute(
                 sa.select(Setting).where(Setting.is_encrypted, *where_active(Setting))
@@ -841,7 +847,7 @@ async def _run_encryption_rotation(
             changes_made = 0
             for s in encrypted_settings:
                 if await _rotate_single_setting(
-                    s, old_encryption, new_encryption, dry_run, session
+                    s, old_encryption, new_encryption, dry_run, session, rotation_tracker
                 ):
                     changes_made += 1
             await _commit_rotation_results(

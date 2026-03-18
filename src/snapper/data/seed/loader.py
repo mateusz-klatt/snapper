@@ -34,6 +34,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import get_encryption_service
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 @dataclass
@@ -183,7 +184,7 @@ def _timestamp_value(conn: Connection) -> datetime | str:
     return now
 
 
-def seed_users(conn: Connection, users: list[SeedUser]) -> int:
+def seed_users(conn: Connection, users: list[SeedUser], tracker: SequenceTracker) -> int:
     """Seed user accounts into the database.
 
     If any user already exists in the database the entire seed is
@@ -194,6 +195,7 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
     Args:
         conn: Active SQLAlchemy connection.
         users: List of user seed entries.
+        tracker: SequenceTracker for stamping session_id and sequence_id.
 
     Returns:
         Number of users inserted (0 when table is non-empty or list is empty).
@@ -210,8 +212,10 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
         conn.execute(
             text(
                 "INSERT INTO users"
-                " (public_id, username, email, password_hash, role, is_active, created_at, timestamp, known_to)"
-                " VALUES (:public_id, :username, :email, :password_hash, :role, 1, :created_at, :timestamp, :known_to)"
+                " (public_id, username, email, password_hash, role, is_active,"
+                "  created_at, timestamp, known_to, session_id, sequence_id)"
+                " VALUES (:public_id, :username, :email, :password_hash, :role, 1,"
+                "  :created_at, :timestamp, :known_to, :session_id, :sequence_id)"
             ),
             {
                 "public_id": str(uuid7()),
@@ -222,13 +226,15 @@ def seed_users(conn: Connection, users: list[SeedUser]) -> int:
                 "created_at": now,
                 "timestamp": now,
                 "known_to": _known_to_value(conn),
+                "session_id": tracker.session_id,
+                "sequence_id": tracker.next_sequence("db.users"),
             },
         )
     logger.info(f"Seeded {len(users)} users")
     return len(users)
 
 
-def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
+def seed_settings(conn: Connection, settings: list[SeedSetting], tracker: SequenceTracker) -> int:
     """Seed application settings into the database.
 
     Sensitive settings (detected by key pattern) are encrypted
@@ -239,6 +245,7 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
     Args:
         conn: Active SQLAlchemy connection.
         settings: List of setting seed entries.
+        tracker: SequenceTracker for stamping session_id and sequence_id.
 
     Returns:
         Number of new settings inserted (skips existing keys).
@@ -255,8 +262,10 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
         result = conn.execute(
             text(
                 "INSERT INTO settings"
-                " (public_id, key, value, category, description, is_encrypted, timestamp, known_to)"
-                " SELECT :public_id, :key, :value, :category, :description, :is_encrypted, :timestamp, :known_to"
+                " (public_id, key, value, category, description, is_encrypted,"
+                "  timestamp, known_to, session_id, sequence_id)"
+                " SELECT :public_id, :key, :value, :category, :description, :is_encrypted,"
+                "  :timestamp, :known_to, :session_id, :sequence_id"
                 " WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = :key)"
             ),
             {
@@ -268,6 +277,8 @@ def seed_settings(conn: Connection, settings: list[SeedSetting]) -> int:
                 "is_encrypted": is_encrypted,
                 "timestamp": now,
                 "known_to": _known_to_value(conn),
+                "session_id": tracker.session_id,
+                "sequence_id": tracker.next_sequence("db.settings"),
             },
         )
         inserted += result.rowcount
@@ -304,9 +315,10 @@ def run_seed(profile: str) -> tuple[int, int]:
     seed_data = load_seed_profile(profile)
     db_url = _sync_db_url(BootstrapSettingsLoader().db_url)
     engine = create_engine(db_url, poolclass=NullPool)
+    tracker = SequenceTracker()
     with engine.connect() as conn:
-        users_count = seed_users(conn, seed_data.users)
-        settings_count = seed_settings(conn, seed_data.settings)
+        users_count = seed_users(conn, seed_data.users, tracker)
+        settings_count = seed_settings(conn, seed_data.settings, tracker)
         conn.commit()
     engine.dispose()
     return users_count, settings_count

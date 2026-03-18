@@ -53,6 +53,9 @@ from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+_SETTINGS_TOPIC = "db.settings"
 
 
 class ProcessLauncherService:
@@ -95,6 +98,7 @@ class ProcessLauncherService:
         self.expected_terminations: set[str] = set()
         self._run_recorder = ProcessRunRecorder(settings)
         self._registry_syncer = ProcessRegistrySyncer(settings)
+        self._tracker = SequenceTracker()
 
     async def _create_process_run_record(
         self,
@@ -824,6 +828,8 @@ class ProcessLauncherService:
                     "key": config_key,
                     "value": json.dumps(persisted_config),
                     "category": "process",
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
                 },
                 bus_time=now,
             )
@@ -941,6 +947,8 @@ class ProcessLauncherService:
                         "description": setting.description,
                         "is_encrypted": setting.is_encrypted,
                         "updated_by": setting.updated_by,
+                        "session_id": self._tracker.session_id,
+                        "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
                     },
                     bus_time=now,
                 )

@@ -28,6 +28,9 @@ from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+_SETTINGS_TOPIC = "db.settings"
 
 
 class ProcessRegistrySyncer:
@@ -47,6 +50,7 @@ class ProcessRegistrySyncer:
             settings: Application settings for database URL.
         """
         self.settings = settings
+        self._tracker = SequenceTracker()
 
     def _get_defaults_from_entry(self, entry: ProcessRegistryEntry) -> dict[str, Any]:
         """Extract default configuration values from registry entry.
@@ -110,6 +114,8 @@ class ProcessRegistrySyncer:
                 value=json.dumps(config_dict),
                 category="process",
                 timestamp=datetime.now(UTC),
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_SETTINGS_TOPIC),
             )
             session.add(setting)
             await session.commit()
@@ -270,6 +276,8 @@ class ProcessRegistrySyncer:
                     "description": existing.description,
                     "is_encrypted": existing.is_encrypted,
                     "updated_by": "sync_registry",
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
                 },
                 bus_time=now,
             )
@@ -365,6 +373,8 @@ class ProcessRegistrySyncer:
                 value=json.dumps(config_dict, indent=4),
                 category="process",
                 timestamp=datetime.now(UTC),
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_SETTINGS_TOPIC),
             )
             session.add(setting)
             await session.commit()

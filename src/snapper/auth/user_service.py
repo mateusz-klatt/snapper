@@ -22,6 +22,10 @@ from snapper.data.models import UserLoginEvent
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+_USERS_TOPIC = "db.users"
+_LOGIN_EVENTS_TOPIC = "db.login_events"
 
 
 class UserService:
@@ -48,6 +52,7 @@ class UserService:
         self._initialized = True
         settings = get_settings()
         self.repository = get_repository(settings.db_url)
+        self._tracker = SequenceTracker()
 
     def hash_password(self, password: str) -> str:
         """Hash password using bcrypt.
@@ -118,6 +123,8 @@ class UserService:
                 user_public_id=db_user.public_id,
                 logged_at=now,
                 timestamp=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_LOGIN_EVENTS_TOPIC),
             )
             session.add(login_event)
             await session.commit()
@@ -214,6 +221,8 @@ class UserService:
                 is_active=is_active,
                 created_at=now,
                 timestamp=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_USERS_TOPIC),
             )
             session.add(db_user)
             await session.commit()
@@ -259,6 +268,8 @@ class UserService:
                 "role": role.value if role is not None else db_user.role,
                 "is_active": is_active if is_active is not None else db_user.is_active,
                 "created_at": db_user.created_at,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
             new_row = await close_and_insert(
                 session=session,
@@ -297,6 +308,8 @@ class UserService:
                 "role": db_user.role,
                 "is_active": False,
                 "created_at": db_user.created_at,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
             await close_and_insert(
                 session=session,
@@ -337,6 +350,8 @@ class UserService:
                 "role": db_user.role,
                 "is_active": db_user.is_active,
                 "created_at": db_user.created_at,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
             await close_and_insert(
                 session=session,
@@ -375,6 +390,8 @@ class UserService:
                 "role": db_user.role,
                 "is_active": db_user.is_active,
                 "created_at": db_user.created_at,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
             await close_and_insert(
                 session=session,
@@ -412,6 +429,8 @@ class UserService:
                 "role": db_user.role,
                 "is_active": db_user.is_active,
                 "created_at": db_user.created_at,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
             await close_and_insert(
                 session=session,

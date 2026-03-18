@@ -27,6 +27,7 @@ from snapper.data.seed.loader import resolve_seed_path
 from snapper.data.seed.loader import run_seed
 from snapper.data.seed.loader import seed_settings
 from snapper.data.seed.loader import seed_users
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class TestResolveSeedPath:
@@ -376,7 +377,9 @@ class TestSeedUsers:
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
@@ -388,7 +391,7 @@ class TestSeedUsers:
                     role="admin",
                 ),
             ]
-            count = seed_users(conn, users)
+            count = seed_users(conn, users, SequenceTracker())
             conn.commit()
             assert count == 1
             row = conn.execute(text("SELECT * FROM users WHERE username = 'testadmin'")).fetchone()
@@ -414,7 +417,9 @@ class TestSeedUsers:
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
@@ -423,7 +428,7 @@ class TestSeedUsers:
                 SeedUser(username="operator", email="o@t.com", password="P2!", role="operator"),
                 SeedUser(username="viewer", email="v@t.com", password="P3!", role="viewer"),
             ]
-            seed_users(conn, dev_users)
+            seed_users(conn, dev_users, SequenceTracker())
             conn.commit()
             assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 3
             original_hash = conn.execute(
@@ -432,7 +437,7 @@ class TestSeedUsers:
             prod_users = [
                 SeedUser(username="prodadmin", email="prod@t.com", password="P4!", role="admin"),
             ]
-            count = seed_users(conn, prod_users)
+            count = seed_users(conn, prod_users, SequenceTracker())
             conn.commit()
             assert count == 0
             assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 3
@@ -459,17 +464,19 @@ class TestSeedUsers:
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
             users = [
                 SeedUser(username="admin", email="a@t.com", password="P1!", role="admin"),
             ]
-            first_count = seed_users(conn, users)
+            first_count = seed_users(conn, users, SequenceTracker())
             conn.commit()
             assert first_count == 1
-            second_count = seed_users(conn, users)
+            second_count = seed_users(conn, users, SequenceTracker())
             conn.commit()
             assert second_count == 0
             rows = conn.execute(text("SELECT * FROM users")).fetchall()
@@ -493,17 +500,19 @@ class TestSeedUsers:
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
             users = [
                 SeedUser(username="admin", email="a@t.com", password="P!", role="admin"),
             ]
-            seed_users(conn, users)
+            seed_users(conn, users, SequenceTracker())
             conn.commit()
             assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 1
-            count = seed_users(conn, [])
+            count = seed_users(conn, [], SequenceTracker())
             conn.commit()
             assert count == 0
             assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 1
@@ -526,13 +535,16 @@ class TestSeedUsers:
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
             seed_users(
                 conn,
                 [SeedUser(username="admin", email="a@t.com", password="P1!", role="admin")],
+                SequenceTracker(),
             )
             conn.commit()
             count = seed_users(
@@ -541,6 +553,7 @@ class TestSeedUsers:
                     SeedUser(username="admin", email="a@t.com", password="P1!", role="admin"),
                     SeedUser(username="viewer", email="v@t.com", password="P2!", role="viewer"),
                 ],
+                SequenceTracker(),
             )
             conn.commit()
             assert count == 0
@@ -567,7 +580,9 @@ class TestSeedSettings:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
                     "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
@@ -579,7 +594,7 @@ class TestSeedSettings:
                     description="UI origin",
                 ),
             ]
-            count = seed_settings(conn, settings)
+            count = seed_settings(conn, settings, SequenceTracker())
             conn.commit()
             assert count == 1
             row = conn.execute(text("SELECT * FROM settings WHERE key = 'ui_origin'")).fetchone()
@@ -604,7 +619,9 @@ class TestSeedSettings:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
                     "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
@@ -616,7 +633,7 @@ class TestSeedSettings:
                     description="Polygon API key",
                 ),
             ]
-            count = seed_settings(conn, settings)
+            count = seed_settings(conn, settings, SequenceTracker())
             conn.commit()
             assert count == 1
             row = conn.execute(
@@ -644,7 +661,9 @@ class TestSeedSettings:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
                     "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
@@ -656,7 +675,7 @@ class TestSeedSettings:
                     description="Old origin",
                 ),
             ]
-            seed_settings(conn, settings_v1)
+            seed_settings(conn, settings_v1, SequenceTracker())
             conn.commit()
             settings_v2 = [
                 SeedSetting(
@@ -666,7 +685,7 @@ class TestSeedSettings:
                     description="New origin",
                 ),
             ]
-            count = seed_settings(conn, settings_v2)
+            count = seed_settings(conn, settings_v2, SequenceTracker())
             conn.commit()
             assert count == 0
             rows = conn.execute(text("SELECT * FROM settings")).fetchall()
@@ -690,11 +709,13 @@ class TestSeedSettings:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
                     "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
-            count = seed_settings(conn, [])
+            count = seed_settings(conn, [], SequenceTracker())
             assert count == 0
         engine.dispose()
 
@@ -720,7 +741,9 @@ class TestRunSeed:
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.execute(
@@ -729,7 +752,9 @@ class TestRunSeed:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
                     "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
@@ -769,7 +794,9 @@ class TestRunSeed:
                     "username TEXT UNIQUE, email TEXT,"
                     "password_hash TEXT, role TEXT, is_active INTEGER,"
                     "created_at TIMESTAMP, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.execute(
@@ -778,7 +805,9 @@ class TestRunSeed:
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
                     "key TEXT UNIQUE, value TEXT, category TEXT,"
                     "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
-                    "known_to DATETIME NOT NULL)"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
             conn.commit()
