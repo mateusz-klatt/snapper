@@ -100,8 +100,8 @@ importers:
         specifier: ^2.7.0
         version: 2.7.0
       knip:
-        specifier: ^5.87.0
-        version: 5.87.0(@types/node@25.5.0)(typescript@5.9.3)
+        specifier: ^5.88.0
+        version: 5.88.0(@types/node@25.5.0)(typescript@5.9.3)
       openapi-typescript:
         specifier: ^7.13.0
         version: 7.13.0(typescript@5.9.3)
@@ -2363,8 +2363,8 @@ packages:
   khroma@2.1.0:
     resolution: {integrity: sha512-Ls993zuzfayK269Svk9hzpeGUKob/sIgZzyHYdjQoAdQetRKpOLj+k/QQQ/6Qi0Yz65mlROrfd+Ev+1+7dz9Kw==}
 
-  knip@5.87.0:
-    resolution: {integrity: sha512-oJBrwd4/Mt5E6817vcdQLaPpejxZTxpASauYLkp6HaT0HN1seHnpF96KEjza9O8yARvHEQ9+So9AFUjkPci7dQ==}
+  knip@5.88.0:
+    resolution: {integrity: sha512-FZjQYLYwUbVrtC3C1cKyEMMqR4K2ZlkQLZszJgF5cfDo4GUSBZAdAV0P3eyzZrkssRoghLJQA9HTQUW7G+Tc8Q==}
     engines: {node: '>=18.18.0'}
     hasBin: true
     peerDependencies:
@@ -5735,7 +5735,7 @@ snapshots:
 
   khroma@2.1.0: {}
 
-  knip@5.87.0(@types/node@25.5.0)(typescript@5.9.3):
+  knip@5.88.0(@types/node@25.5.0)(typescript@5.9.3):
     dependencies:
       '@nodelib/fs.walk': 1.2.8
       '@types/node': 25.5.0
