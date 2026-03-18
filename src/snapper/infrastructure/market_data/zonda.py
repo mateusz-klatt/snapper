@@ -148,12 +148,19 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
             return None
 
     @staticmethod
-    def _build_zonda_snapshot(native_symbol: str, ticker_data: TickerUpdate) -> MarketSnapshot:
+    def _build_zonda_snapshot(
+        native_symbol: str,
+        ticker_data: TickerUpdate,
+        session_id: str = "",
+        sequence_id: int = 0,
+    ) -> MarketSnapshot:
         """Build a MarketSnapshot from Zonda ticker data.
 
         Args:
             native_symbol: Native symbol string.
             ticker_data: Parsed ticker update from exchange.
+            session_id: Session identifier for provenance stamping.
+            sequence_id: Sequence number for provenance stamping.
 
         Returns:
             MarketSnapshot instance populated with ticker values.
@@ -180,6 +187,8 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
             spread=spread,
             spread_pct=spread_pct,
             timestamp=datetime.now(UTC),
+            session_id=session_id,
+            sequence_id=sequence_id,
         )
 
     async def _collect_snapshots_loop(
@@ -199,7 +208,12 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
                 native_symbol = self._resolve_native_symbol(ticker_data.symbol)
                 if native_symbol is None:
                     continue
-                snapshots[native_symbol] = self._build_zonda_snapshot(native_symbol, ticker_data)
+                snapshots[native_symbol] = self._build_zonda_snapshot(
+                    native_symbol,
+                    ticker_data,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence("db.snapshots"),
+                )
                 if len(snapshots) % 10 == 0:
                     logger.debug(f"Collected {len(snapshots)} unique Zonda snapshots...")
                 if len(snapshots) >= len(all_symbols):

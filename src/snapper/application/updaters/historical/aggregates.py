@@ -8,6 +8,7 @@ from Polygon.io API. It supports:
 - Resume capability for interrupted downloads
 """
 
+from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.utils.logging import set_log_context
 
 __all__ = ["PolygonAggregatesBackfillService", "_timeframe_label"]
@@ -171,6 +173,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         self._loader: PolygonHistoricalLoader | None = None
         self._instrument_cache: dict[str, int] = {}
         self._symbol_mapper = SymbolMapperService.get_instance()
+        self._tracker: SequenceTracker = SequenceTracker()
 
     async def start(self) -> None:
         """Start the backfill process.
@@ -494,7 +497,13 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 symbol=context.polygon_symbol,
             )
             return
-        rows = self._build_candle_rows(candles, instrument_id, timeframe)
+        rows = self._build_candle_rows(
+            candles,
+            instrument_id,
+            timeframe,
+            self._tracker.session_id,
+            lambda: self._tracker.next_sequence("db.candles"),
+        )
         total_inserted = 0
         for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
             batch = rows[i : i + self.BATCH_COMMIT_SIZE]
@@ -746,15 +755,19 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             quote=quote_value,
             tick_size=0.0,
             lot_size=0.0,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("db.instruments"),
         )
         self._instrument_cache[context.native_symbol] = instrument_id
         return instrument_id
 
-    @staticmethod
     def _build_candle_rows(
+        self,
         candles: Iterable[AggregateCandle],
         instrument_id: int,
         timeframe: str,
+        session_id: str,
+        sequence_id_fn: Callable[[], int],
     ) -> list[dict[str, object]]:
         """Build database row dicts from candle objects.
 
@@ -762,6 +775,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             candles: Iterable of AggregateCandle objects.
             instrument_id: Database instrument ID.
             timeframe: Timeframe label string.
+            session_id: Session identifier for provenance stamping.
+            sequence_id_fn: Callable returning next sequence number per row.
 
         Returns:
             List of row dicts ready for database insertion.
@@ -779,6 +794,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 "volume": float(candle.volume),
                 "vwap": float(candle.vwap) if candle.vwap is not None else None,
                 "trades": candle.transactions,
+                "session_id": session_id,
+                "sequence_id": sequence_id_fn(),
             }
             for candle in candles
         ]

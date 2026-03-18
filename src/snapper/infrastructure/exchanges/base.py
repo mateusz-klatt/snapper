@@ -376,6 +376,8 @@ class ExchangeClientBase(ABC):
                 exchange=self.exchange_name,
                 base=base,
                 quote=quote,
+                session_id=self._tracker.session_id if self._tracker else "",
+                sequence_id=self._tracker.next_sequence("db.instruments") if self._tracker else 0,
             )
             seq = self._tracker.next_sequence("db.orders") if self._tracker else None
             return await self.repository.insert_order(

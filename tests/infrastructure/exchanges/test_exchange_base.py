@@ -284,13 +284,14 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
     mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
-    mock_repo.upsert_instrument.assert_awaited_once_with(
-        symbol_public_id="fake-spid",
-        symbol="BTC-USD",
-        exchange="dummy",
-        base="BTC",
-        quote="USD",
-    )
+    call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
+    assert call_kwargs["symbol_public_id"] == "fake-spid"
+    assert call_kwargs["symbol"] == "BTC-USD"
+    assert call_kwargs["exchange"] == "dummy"
+    assert call_kwargs["base"] == "BTC"
+    assert call_kwargs["quote"] == "USD"
+    assert call_kwargs["session_id"] == ""
+    assert call_kwargs["sequence_id"] == 0
     mock_repo.insert_order.assert_awaited_once()
 
 
@@ -382,13 +383,14 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
     _mock_resolve.assert_awaited_once_with(mock_repo, "BTCUSD")
-    mock_repo.upsert_instrument.assert_awaited_once_with(
-        symbol_public_id="fake-spid",
-        symbol="BTCUSD",
-        exchange="dummy",
-        base="BTCUSD",
-        quote="USD",
-    )
+    call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
+    assert call_kwargs["symbol_public_id"] == "fake-spid"
+    assert call_kwargs["symbol"] == "BTCUSD"
+    assert call_kwargs["exchange"] == "dummy"
+    assert call_kwargs["base"] == "BTCUSD"
+    assert call_kwargs["quote"] == "USD"
+    assert call_kwargs["session_id"] == ""
+    assert call_kwargs["sequence_id"] == 0
 
 
 @pytest.mark.asyncio()
@@ -672,3 +674,52 @@ async def test_log_execution_to_db_handles_exception() -> None:
     await client._log_execution_to_db(
         db_order_id=42, order_public_id="order-pub-4", execution=execution
     )
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_passes_provenance_when_tracker_set(
+    mock_resolve: AsyncMock,
+) -> None:
+    """Log order passes session_id and sequence_id when tracker is injected.
+
+    Given: Client with mock repository and an injected SequenceTracker,
+    When: _log_order_to_db is called,
+    Then: upsert_instrument receives non-empty session_id and sequence_id >= 1.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.upsert_instrument = AsyncMock(return_value=42)
+    mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-99"))
+    client = DummyExchangeClient(repository=mock_repo)
+    tracker = SequenceTracker()
+    client.set_tracker(tracker)
+    request = ExchangeOrderRequest(
+        client_order_id="client_prov",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_prov",
+        client_order_id="client_prov",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        filled=0.0,
+        remaining=0.0,
+        status=OrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result == (99, "order-uuid-99")
+    call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
+    assert call_kwargs["session_id"] == tracker.session_id
+    assert call_kwargs["sequence_id"] >= 1

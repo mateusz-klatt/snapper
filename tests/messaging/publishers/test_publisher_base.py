@@ -406,15 +406,16 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
     )
     await pub._save_to_db("BTC-USD", candle)
     resolve_mock.assert_awaited_once_with(repo, "BTC-USD")
-    repo.upsert_instrument.assert_awaited_once_with(
-        symbol_public_id="fake-spid",
-        symbol="BTC-USD",
-        exchange="kraken",
-        base="BTC",
-        quote="USD",
-        tick_size=0.0,
-        lot_size=0.0,
-    )
+    call_kwargs = repo.upsert_instrument.call_args.kwargs
+    assert call_kwargs["symbol_public_id"] == "fake-spid"
+    assert call_kwargs["symbol"] == "BTC-USD"
+    assert call_kwargs["exchange"] == "kraken"
+    assert call_kwargs["base"] == "BTC"
+    assert call_kwargs["quote"] == "USD"
+    assert call_kwargs["tick_size"] == 0.0
+    assert call_kwargs["lot_size"] == 0.0
+    assert call_kwargs["session_id"] != ""
+    assert call_kwargs["sequence_id"] >= 1
     repo.upsert_candles.assert_awaited_once()
 
 
@@ -1685,15 +1686,16 @@ class TestFeedPublisherCoverage:
         )
         await publisher_any._save_to_db("BTC-USD", bar_message)
         resolve_mock.assert_awaited_once_with(mock_repository, "BTC-USD")
-        mock_repository.upsert_instrument.assert_awaited_once_with(
-            symbol_public_id="fake-spid",
-            symbol="BTC-USD",
-            exchange="kraken",
-            base="BTC",
-            quote="USD",
-            tick_size=0.0,
-            lot_size=0.0,
-        )
+        call_kwargs = mock_repository.upsert_instrument.call_args.kwargs
+        assert call_kwargs["symbol_public_id"] == "fake-spid"
+        assert call_kwargs["symbol"] == "BTC-USD"
+        assert call_kwargs["exchange"] == "kraken"
+        assert call_kwargs["base"] == "BTC"
+        assert call_kwargs["quote"] == "USD"
+        assert call_kwargs["tick_size"] == 0.0
+        assert call_kwargs["lot_size"] == 0.0
+        assert call_kwargs["session_id"] != ""
+        assert call_kwargs["sequence_id"] >= 1
         mock_repository.upsert_candles.assert_awaited_once()
         await publisher_any._save_to_db("BTC-USD", bar_message)
         mock_repository.upsert_instrument.assert_awaited_once()
@@ -1792,17 +1794,17 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     bar_message = _build_bar_message("EUR-USD")
     await publisher._save_to_db("EUR-USD", bar_message)
     resolve_mock.assert_awaited_once_with(repo, "EUR-USD")
-    assert repo.instrument_calls == [
-        {
-            "symbol_public_id": "fake-spid",
-            "symbol": "EUR-USD",
-            "exchange": "kraken",
-            "base": "EUR",
-            "quote": "USD",
-            "tick_size": 0.0,
-            "lot_size": 0.0,
-        }
-    ]
+    assert len(repo.instrument_calls) == 1
+    call = repo.instrument_calls[0]
+    assert call["symbol_public_id"] == "fake-spid"
+    assert call["symbol"] == "EUR-USD"
+    assert call["exchange"] == "kraken"
+    assert call["base"] == "EUR"
+    assert call["quote"] == "USD"
+    assert call["tick_size"] == 0.0
+    assert call["lot_size"] == 0.0
+    assert call["session_id"] == publisher._tracker.session_id
+    assert call["sequence_id"] == 1
     assert len(repo.candle_calls) == 1
     assert repo.candle_calls[0][0]["instrument_id"] == 100
     cache = publisher._instrument_cache
@@ -2290,15 +2292,16 @@ async def test_ensure_instrument_resolves_and_caches(
     assert first == 42
     assert second == 42
     resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
-    mock_upsert.assert_awaited_once_with(
-        symbol_public_id="fake-spid",
-        symbol="BTC-USD",
-        exchange="kraken",
-        base="BTC",
-        quote="USD",
-        tick_size=0.0,
-        lot_size=0.0,
-    )
+    call_kwargs = mock_upsert.call_args.kwargs
+    assert call_kwargs["symbol_public_id"] == "fake-spid"
+    assert call_kwargs["symbol"] == "BTC-USD"
+    assert call_kwargs["exchange"] == "kraken"
+    assert call_kwargs["base"] == "BTC"
+    assert call_kwargs["quote"] == "USD"
+    assert call_kwargs["tick_size"] == 0.0
+    assert call_kwargs["lot_size"] == 0.0
+    assert call_kwargs["session_id"] != ""
+    assert call_kwargs["sequence_id"] >= 1
 
 
 @pytest.mark.asyncio

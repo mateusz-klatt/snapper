@@ -194,3 +194,45 @@ async def test_collect_ticker_snapshots_timeout() -> None:
     assert len(snapshots) == 1
     assert snapshots[0].symbol == "BTC-USD"
     mock_exchange.disconnect_websocket.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_collect_ticker_snapshots_stamps_provenance() -> None:
+    """Snapshot collection stamps session_id and sequence_id on each snapshot.
+
+    Given a ticker stream yielding two distinct symbols,
+    When _collect_ticker_snapshots completes,
+    Then each snapshot has a non-empty session_id and monotonically increasing sequence_id.
+    """
+    mock_exchange = MagicMock(spec=KrakenExchangeClient)
+    mock_exchange.disconnect_websocket = AsyncMock()
+
+    async def _two_tickers(symbols: list[str]) -> AsyncIterator[TickerUpdate]:
+        """Yield two tickers for provenance verification."""
+        for sym in ("BTC-USD", "ETH-USD"):
+            yield TickerUpdate(
+                symbol=sym,
+                bid=1000.0,
+                bid_qty=1.0,
+                ask=1001.0,
+                ask_qty=1.0,
+                last=1000.5,
+                volume=50.0,
+                vwap=1000.2,
+                low=999.0,
+                high=1002.0,
+                change=1.0,
+                change_pct=0.1,
+            )
+
+    mock_exchange.subscribe_ticks = _two_tickers
+    mock_repo = MagicMock(spec=DatabaseRepository)
+    service = KrakenSnapshotUpdaterService(mock_exchange, mock_repo)
+    snapshots, count = await service._collect_ticker_snapshots()
+    assert count == 2
+    assert len(snapshots) == 2
+    session_ids = {s.session_id for s in snapshots}
+    assert len(session_ids) == 1
+    assert "" not in session_ids
+    sequence_ids = sorted(s.sequence_id for s in snapshots)
+    assert sequence_ids == [1, 2]

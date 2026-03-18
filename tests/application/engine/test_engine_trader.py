@@ -588,6 +588,8 @@ class _RepositoryStub:
         quote: str,
         tick_size: float,
         lot_size: float,
+        session_id: str = "",
+        sequence_id: int = 0,
     ) -> None:
         self.calls.append(
             {
@@ -598,6 +600,8 @@ class _RepositoryStub:
                 "quote": quote,
                 "tick_size": tick_size,
                 "lot_size": lot_size,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
             }
         )
 
@@ -862,6 +866,9 @@ async def test_ensure_instrument_handles_delimiters(monkeypatch: pytest.MonkeyPa
     assert symbols["BTC-USD"]["exchange"] == "kraken"
     assert symbols["ETH/EUR"]["quote"] == "EUR"
     assert symbols["ETH/EUR"]["exchange"] == "binance"
+    assert symbols["BTC-USD"]["session_id"] != ""
+    assert symbols["BTC-USD"]["sequence_id"] >= 1
+    assert symbols["ETH/EUR"]["sequence_id"] >= 2
 
 
 @pytest.mark.asyncio

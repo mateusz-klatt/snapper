@@ -16,6 +16,7 @@ from abc import abstractmethod
 from loguru import logger
 
 from snapper.data.repository import DatabaseRepository
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class MarketSnapshotUpdaterService(ABC):
@@ -45,6 +46,7 @@ class MarketSnapshotUpdaterService(ABC):
         """
         self.exchange_client = exchange_client
         self.repository = repository
+        self._tracker: SequenceTracker = SequenceTracker()
 
     @abstractmethod
     async def update_market_snapshots(self, **kwargs: object) -> int:

@@ -290,6 +290,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             quote=quote_currency,
             tick_size=0.0,
             lot_size=0.0,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("db.instruments"),
         )
         self._instrument_cache[native_symbol] = instrument_id
         return instrument_id

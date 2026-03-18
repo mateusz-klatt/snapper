@@ -23,6 +23,7 @@ from snapper.infrastructure.market_data import walutomat as module
 from snapper.infrastructure.market_data.walutomat import WalutomatSnapshotUpdaterService
 from snapper.infrastructure.market_data.walutomat import _async_update_snapshots
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class DummyTicker(SimpleNamespace):
@@ -509,6 +510,7 @@ class _TimeoutUpdater(WalutomatSnapshotUpdaterService):
     def __init__(self) -> None:
         self.exchange_client = cast(Any, _DummyClient())
         self.repository = cast(Any, SimpleNamespace())
+        self._tracker = SequenceTracker()
 
     async def _collect_snapshots_loop(
         self, all_symbols: list[str], snapshots: dict[str, Any]
@@ -577,6 +579,7 @@ class _FaultyUpdater(WalutomatSnapshotUpdaterService):
     def __init__(self) -> None:
         self.exchange_client = cast(Any, _FaultyClient())
         self.repository = cast(Any, SimpleNamespace())
+        self._tracker = SequenceTracker()
 
     async def load_all_symbols(self) -> list[str]:
         return self.exchange_client.get_supported_pairs()
@@ -630,6 +633,7 @@ class _HappyUpdater(WalutomatSnapshotUpdaterService):
     def __init__(self) -> None:
         self.exchange_client = cast(Any, _HappyClient())
         self.repository = cast(Any, SimpleNamespace())
+        self._tracker = SequenceTracker()
 
     async def load_all_symbols(self) -> list[str]:
         return self.exchange_client.get_supported_pairs()
@@ -690,6 +694,7 @@ class _MultiUpdater(WalutomatSnapshotUpdaterService):
     def __init__(self, symbols: list[str]) -> None:
         self.exchange_client = cast(Any, _MultiClient(symbols))
         self.repository = cast(Any, SimpleNamespace())
+        self._tracker = SequenceTracker()
 
     async def load_all_symbols(self) -> list[str]:
         return self.exchange_client.get_supported_pairs()
@@ -708,3 +713,24 @@ async def test_collect_snapshots_loop_logs_progress_and_continues() -> None:
     snapshots: dict[str, Any] = {}
     await updater._collect_snapshots_loop(symbols, snapshots)
     assert set(snapshots) == set(symbols)
+
+
+@pytest.mark.asyncio()
+async def test_collect_snapshots_loop_stamps_provenance() -> None:
+    """Snapshot collection stamps session_id and sequence_id on each snapshot.
+
+    Given: Client yielding tickers for two symbols,
+    When: _collect_snapshots_loop completes,
+    Then: Each snapshot has a non-empty session_id and distinct monotonically
+    increasing sequence_id values starting from 1.
+    """
+    symbols = ["EUR-PLN", "USD-PLN"]
+    updater = _MultiUpdater(symbols)
+    snapshots: dict[str, MarketSnapshot] = {}
+    await updater._collect_snapshots_loop(symbols, snapshots)
+    assert len(snapshots) == 2
+    session_ids = {s.session_id for s in snapshots.values()}
+    assert len(session_ids) == 1
+    assert "" not in session_ids
+    sequence_ids = sorted(s.sequence_id for s in snapshots.values())
+    assert sequence_ids == [1, 2]

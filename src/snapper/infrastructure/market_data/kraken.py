@@ -58,11 +58,17 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
         self.exchange_client: KrakenExchangeClient = exchange_client
 
     @staticmethod
-    def _build_kraken_snapshot(ticker_data: TickerUpdate) -> MarketSnapshot:
+    def _build_kraken_snapshot(
+        ticker_data: TickerUpdate,
+        session_id: str = "",
+        sequence_id: int = 0,
+    ) -> MarketSnapshot:
         """Build a MarketSnapshot from Kraken ticker data.
 
         Args:
             ticker_data: Parsed ticker update from exchange.
+            session_id: Session identifier for provenance stamping.
+            sequence_id: Sequence number for provenance stamping.
 
         Returns:
             MarketSnapshot instance populated with ticker values.
@@ -88,6 +94,8 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
             spread=spread,
             spread_pct=spread_pct,
             timestamp=datetime.now(UTC),
+            session_id=session_id,
+            sequence_id=sequence_id,
         )
 
     _COLLECTION_TIMEOUT_SECONDS = 120.0
@@ -109,7 +117,13 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
                 async for ticker_data in self.exchange_client.subscribe_ticks(["*"]):
                     if not ticker_data.symbol:
                         continue
-                    snapshots_batch.append(self._build_kraken_snapshot(ticker_data))
+                    snapshots_batch.append(
+                        self._build_kraken_snapshot(
+                            ticker_data,
+                            session_id=self._tracker.session_id,
+                            sequence_id=self._tracker.next_sequence("db.snapshots"),
+                        )
+                    )
                     count += 1
                     if count % 100 == 0:
                         logger.debug(f"Collected {count} market snapshots...")

@@ -101,7 +101,7 @@ class _StubAsyncRepo:
         self.return_value = 42
 
     async def upsert_instrument(self, **kwargs: Any) -> int:
-        self.calls.append(kwargs)
+        self.calls.append(dict(kwargs))
         return self.return_value
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
@@ -269,6 +269,8 @@ async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfil
     call = async_repo.calls[0]
     assert call["symbol"] == "ETH-USD"
     assert call["quote"] == "USD"
+    assert call["session_id"] != ""
+    assert call["sequence_id"] >= 1
 
 
 @pytest.mark.asyncio
@@ -299,12 +301,12 @@ async def test_ensure_instrument_raises_when_symbol_not_resolved(
         await ensure_instrument(context)
 
 
-def test_build_candle_rows() -> None:
-    """Verify _build_candle_rows converts candles to row dicts.
+def test_build_candle_rows(service: PolygonAggregatesBackfillService) -> None:
+    """Verify _build_candle_rows converts candles to row dicts with provenance.
 
-    Given: List of AggregateCandle objects,
-    When: _build_candle_rows called,
-    Then: List of dicts with correct fields returned.
+    Given: List of AggregateCandle objects and a service with a tracker,
+    When: _build_candle_rows called with session_id and sequence_id_fn,
+    Then: List of dicts with correct fields and provenance values returned.
     """
     candles = [
         AggregateCandle(
@@ -330,15 +332,21 @@ def test_build_candle_rows() -> None:
             transactions=None,
         ),
     ]
-    build_rows = cast(
-        Callable[[Any, int, str], list[dict[str, object]]],
-        PolygonAggregatesBackfillService._build_candle_rows,
-    )
-    rows = build_rows(candles, 7, "1m")
+    seq_counter = [0]
+
+    def _seq_fn() -> int:
+        seq_counter[0] += 1
+        return seq_counter[0]
+
+    tracker_any = cast(Any, service)._tracker
+    rows = service._build_candle_rows(candles, 7, "1m", tracker_any.session_id, _seq_fn)
     assert rows[0]["instrument_id"] == 7
     assert rows[0]["vwap"] == pytest.approx(101.5)
     assert rows[1]["vwap"] is None
     assert rows[1]["trades"] is None
+    assert rows[0]["session_id"] == tracker_any.session_id
+    assert rows[0]["sequence_id"] == 1
+    assert rows[1]["sequence_id"] == 2
 
 
 class DummySettings(SimpleNamespace):
@@ -468,9 +476,8 @@ def test_build_candle_rows_converts_values() -> None:
             ticker="X:BTCUSD",
         )
     ]
-    rows = PolygonAggregatesBackfillService._build_candle_rows(
-        candles, instrument_id=1, timeframe="1m"
-    )
+    svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
+    rows = svc._build_candle_rows(candles, 1, "1m", "", lambda: 0)
     assert rows[0]["instrument_id"] == 1
     assert rows[0]["vwap"] is None
 
@@ -1275,7 +1282,8 @@ async def test_build_candle_rows_with_vwap_none() -> None:
             transactions=10,
         )
     ]
-    rows = PolygonAggregatesBackfillService._build_candle_rows(candles, 1, "1m")
+    svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
+    rows = svc._build_candle_rows(candles, 1, "1m", "", lambda: 0)
     assert len(rows) == 1
     assert rows[0]["vwap"] is None
 
@@ -2188,12 +2196,8 @@ def test_build_candle_rows_converts_values_decimal() -> None:
         vwap=None,
         transactions=10,
     )
-    service_class_private = cast(Any, PolygonAggregatesBackfillService)
-    rows = service_class_private._build_candle_rows(
-        [candle],
-        instrument_id=7,
-        timeframe="1m",
-    )
+    svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
+    rows = svc._build_candle_rows([candle], 7, "1m", "", lambda: 0)
     assert len(rows) == 1
     row = rows[0]
     assert row["instrument_id"] == 7

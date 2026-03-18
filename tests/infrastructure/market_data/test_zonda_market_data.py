@@ -564,3 +564,58 @@ async def test_collect_snapshots_loop_stops_when_all_collected(
     assert "A-PLN" in snapshots
     assert "B-PLN" in snapshots
     assert "C-PLN" in snapshots
+
+
+@pytest.mark.asyncio
+async def test_collect_snapshots_loop_stamps_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshots built in _collect_snapshots_loop carry session_id and sequence_id.
+
+    Given: Client yielding two tickers and a valid symbol resolver,
+    When: _collect_snapshots_loop completes,
+    Then: Each snapshot has a non-empty session_id and sequence_ids are 1 and 2.
+    """
+    tickers = [
+        DummyTicker(
+            symbol="BTC-PLN",
+            bid=100.0,
+            ask=101.0,
+            last=100.5,
+            high=102.0,
+            low=99.0,
+            volume=10.0,
+            change=0.1,
+            vwap=100.0,
+            bid_qty=1.0,
+            ask_qty=1.0,
+        ),
+        DummyTicker(
+            symbol="ETH-PLN",
+            bid=200.0,
+            ask=201.0,
+            last=200.5,
+            high=202.0,
+            low=199.0,
+            volume=5.0,
+            change=0.05,
+            vwap=200.0,
+            bid_qty=1.0,
+            ask_qty=1.0,
+        ),
+    ]
+    client = DummyZondaClient(tickers)
+    repo: Any = DummyRepo()
+    svc = ZondaSnapshotUpdaterService(client, repo)
+    monkeypatch.setattr(
+        "snapper.infrastructure.market_data.zonda.zonda_ws_to_native",
+        lambda s: s,
+    )
+    snapshots: dict[str, Any] = {}
+    await svc._collect_snapshots_loop(["BTC-PLN", "ETH-PLN"], snapshots)
+    assert len(snapshots) == 2
+    session_ids = {s.session_id for s in snapshots.values()}
+    assert len(session_ids) == 1
+    assert "" not in session_ids
+    sequence_ids = sorted(s.sequence_id for s in snapshots.values())
+    assert sequence_ids == [1, 2]
