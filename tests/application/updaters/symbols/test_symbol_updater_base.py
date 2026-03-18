@@ -1,6 +1,6 @@
 """Tests for symbol updater base class."""
 
-import json as _json
+import json
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -455,7 +455,7 @@ async def test_broadcast_cache_invalidation_stamped_envelope(
     topic: str = call_args.args[0]
     raw: bytes = call_args.args[1]
     assert topic == "system.symbol_aliases"
-    data = _json.loads(raw.decode())
+    data = json.loads(raw.decode())
     assert data["type"] == "symbol_alias_update"
     assert data["event"] == "symbol_aliases_updated"
     assert data["session_id"] == tracker.session_id
