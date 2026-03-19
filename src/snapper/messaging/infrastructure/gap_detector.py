@@ -29,6 +29,7 @@ class GapDetectorStats:
     session_resets: int = 0
     duplicates: int = 0
     mid_stream_joins: int = 0
+    rejected_unstamped: int = 0
 
 
 class GapDetector:
@@ -41,7 +42,8 @@ class GapDetector:
     - mid-stream joins (subscriber started after producer)
 
     Messages without provenance metadata (empty session_id or
-    sequence_id == 0) are silently skipped for backward compatibility.
+    sequence_id == 0) are rejected with a warning log and counter
+    increment so the condition is observable.
     """
 
     def __init__(self, name: str = "") -> None:
@@ -54,16 +56,26 @@ class GapDetector:
         self._streams: dict[str, _StreamState] = {}
         self.stats: GapDetectorStats = GapDetectorStats()
 
-    def check(self, received_topic: str, session_id: str, sequence_id: int) -> None:
+    def check(self, received_topic: str, session_id: str, sequence_id: int) -> bool:
         """Check a received message for sequence gaps.
 
         Args:
             received_topic: The ZMQ topic the message arrived on.
             session_id: Producer session UUID from the message payload.
             sequence_id: Sequence number from the message payload.
+
+        Returns:
+            True if the message carries valid provenance and was processed,
+            False if the message was rejected as unstamped.
         """
         if not session_id or sequence_id == 0:
-            return
+            log_prefix = f"[GapDetector:{self._name}]" if self._name else "[GapDetector]"
+            logger.warning(
+                f"{log_prefix} Rejected unstamped message on {received_topic} "
+                f"(session_id={session_id!r}, sequence_id={sequence_id})"
+            )
+            self.stats.rejected_unstamped += 1
+            return False
 
         log_prefix = f"[GapDetector:{self._name}]" if self._name else "[GapDetector]"
 
@@ -80,7 +92,7 @@ class GapDetector:
                     f"{log_prefix} Joined mid-stream on {received_topic} "
                     f"at seq={sequence_id} (session={session_id[:8]})"
                 )
-            return
+            return True
 
         if state.last_session_id != session_id:
             self.stats.session_resets += 1
@@ -91,11 +103,11 @@ class GapDetector:
             )
             state.last_session_id = session_id
             state.expected_sequence_id = sequence_id + 1
-            return
+            return True
 
         if sequence_id == state.expected_sequence_id:
             state.expected_sequence_id = sequence_id + 1
-            return
+            return True
 
         if sequence_id > state.expected_sequence_id:
             gap_size = sequence_id - state.expected_sequence_id
@@ -108,7 +120,7 @@ class GapDetector:
                 f"session={session_id[:8]})"
             )
             state.expected_sequence_id = sequence_id + 1
-            return
+            return True
 
         self.stats.duplicates += 1
         logger.debug(
@@ -117,3 +129,4 @@ class GapDetector:
             f"got seq={sequence_id} "
             f"(session={session_id[:8]})"
         )
+        return True

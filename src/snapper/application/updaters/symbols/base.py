@@ -131,8 +131,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         quote: str | None,
         asset_type: AssetType,
         now: datetime,
-        session_id: str | None = None,
-        sequence_id: int | None = None,
+        session_id: str,
+        sequence_id: int,
     ) -> str:
         """Upsert a Symbol row using SCD Type 2 close+insert.
 
@@ -168,8 +168,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 asset_type=asset_type,
                 created_at=now,
                 timestamp=now,
-                session_id=session_id or "",
-                sequence_id=sequence_id or 0,
+                session_id=session_id,
+                sequence_id=sequence_id,
             )
             session.add(sym)
             session.flush()
@@ -189,8 +189,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "quote": quote,
                     "asset_type": asset_type,
                     "created_at": existing.created_at,
-                    "session_id": session_id or "",
-                    "sequence_id": sequence_id or 0,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
                 },
                 bus_time=now,
             )
@@ -204,8 +204,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         channel: AliasChannel,
         exchange_symbol: str,
         now: datetime,
-        session_id: str | None = None,
-        sequence_id: int | None = None,
+        session_id: str,
+        sequence_id: int,
     ) -> UpsertResult:
         """Upsert a SymbolAlias row using SCD Type 2 close+insert.
 
@@ -240,8 +240,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     exchange_symbol=exchange_symbol,
                     created_at=now,
                     timestamp=now,
-                    session_id=session_id or "",
-                    sequence_id=sequence_id or 0,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
                 )
             )
             return "created"
@@ -260,8 +260,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "channel": channel,
                     "exchange_symbol": exchange_symbol,
                     "created_at": existing.created_at,
-                    "session_id": session_id or "",
-                    "sequence_id": sequence_id or 0,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
                 },
                 bus_time=now,
             )
@@ -278,8 +278,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         source: str | None,
         reason: str | None,
         now: datetime,
-        session_id: str | None = None,
-        sequence_id: int | None = None,
+        session_id: str,
+        sequence_id: int,
     ) -> UpsertResult:
         """Upsert a SymbolExchangeCapability row using SCD Type 2 close+insert.
 
@@ -317,8 +317,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     reason=reason,
                     created_at=now,
                     timestamp=now,
-                    session_id=session_id or "",
-                    sequence_id=sequence_id or 0,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
                 )
             )
             return "created"
@@ -344,8 +344,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "source": source,
                     "reason": reason,
                     "created_at": existing.created_at,
-                    "session_id": session_id or "",
-                    "sequence_id": sequence_id or 0,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
                 },
                 bus_time=now,
             )
@@ -359,8 +359,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         active_symbol_public_ids: set[str],
         source: str,
         now: datetime,
-        session_id: str | None = None,
-        next_sequence_fn: Callable[[], int] | None = None,
+        session_id: str,
+        next_sequence_fn: Callable[[], int],
     ) -> int:
         """Deactivate capabilities for symbols no longer seen on the exchange.
 
@@ -377,7 +377,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             now: Current UTC timestamp.
             session_id: Producer session identifier for provenance.
             next_sequence_fn: Callable returning the next sequence_id for each
-                row. When omitted the DB default (0) is used.
+                row.
 
         Returns:
             Number of deactivated capability rows.
@@ -410,8 +410,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "source": source,
                         "reason": "Delisted: not seen in updater run",
                         "created_at": cap.created_at,
-                        "session_id": session_id or "",
-                        "sequence_id": next_sequence_fn() if next_sequence_fn is not None else 0,
+                        "session_id": session_id,
+                        "sequence_id": next_sequence_fn(),
                     },
                     bus_time=now,
                 )
@@ -425,9 +425,9 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         active_symbol_public_ids: set[str],
         source: str,
         now: datetime,
+        session_id: str,
+        next_sequence_fn: Callable[[], int],
         min_active_ratio: float = 0.5,
-        session_id: str | None = None,
-        next_sequence_fn: Callable[[], int] | None = None,
     ) -> int:
         """Reconcile capabilities: deactivate stale rows with safety threshold.
 
@@ -474,7 +474,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             active_symbol_public_ids,
             source,
             now,
-            session_id=session_id or "",
+            session_id=session_id,
             next_sequence_fn=next_sequence_fn,
         )
         if deactivated > 0:
@@ -523,7 +523,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "category": "system",
                         "description": f"Timestamp of last {self._get_setting_key()} update",
                         "session_id": self._tracker.session_id,
-                        "sequence_id": self._tracker.next_sequence("db.settings"),
+                        "sequence_id": self._tracker.next_sequence("settings"),
                     },
                     bus_time=timestamp,
                 )

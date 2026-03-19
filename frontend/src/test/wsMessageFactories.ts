@@ -1,6 +1,8 @@
 export function createAuthRequired(overrides: { timeout?: number } = {}) {
   return {
     type: 'auth_required' as const,
+    session_id: '',
+    sequence_id: 0,
     timeout: overrides.timeout ?? 30,
   }
 }
@@ -8,6 +10,8 @@ export function createAuthRequired(overrides: { timeout?: number } = {}) {
 export function createAuthOk(overrides: { exp?: string } = {}) {
   return {
     type: 'auth_ok' as const,
+    session_id: '',
+    sequence_id: 0,
     exp: overrides.exp ?? new Date(Date.now() + 3600000).toISOString(),
   }
 }
@@ -22,6 +26,8 @@ export function createAuthComplete(
 ) {
   return {
     type: 'auth_complete' as const,
+    session_id: '',
+    sequence_id: 0,
     available_topics: overrides.available_topics ?? [],
     user_role: overrides.user_role ?? 'operator',
     ws_token_exp: overrides.ws_token_exp ?? new Date(Date.now() + 3600000).toISOString(),
@@ -33,6 +39,8 @@ export function createAuthComplete(
 export function createAuthFailed(overrides: { reason?: string | null } = {}) {
   return {
     type: 'auth_failed' as const,
+    session_id: '',
+    sequence_id: 0,
     reason: overrides.reason ?? null,
   }
 }
@@ -40,12 +48,16 @@ export function createAuthFailed(overrides: { reason?: string | null } = {}) {
 export function createAuthExpired() {
   return {
     type: 'auth_expired' as const,
+    session_id: '',
+    sequence_id: 0,
   }
 }
 
 export function createReauthRequired(overrides: { deadline?: string } = {}) {
   return {
     type: 'reauth_required' as const,
+    session_id: '',
+    sequence_id: 0,
     deadline: overrides.deadline ?? new Date(Date.now() + 60000).toISOString(),
   }
 }
@@ -53,6 +65,8 @@ export function createReauthRequired(overrides: { deadline?: string } = {}) {
 export function createReauthOk(overrides: { exp?: string } = {}) {
   return {
     type: 'reauth_ok' as const,
+    session_id: '',
+    sequence_id: 0,
     exp: overrides.exp ?? new Date(Date.now() + 3600000).toISOString(),
   }
 }
@@ -60,6 +74,8 @@ export function createReauthOk(overrides: { exp?: string } = {}) {
 export function createSubscribed(overrides: { topics?: string[] } = {}) {
   return {
     type: 'subscribed' as const,
+    session_id: '',
+    sequence_id: 0,
     topics: overrides.topics ?? ['market.test.BTC-USD'],
   }
 }
@@ -67,6 +83,8 @@ export function createSubscribed(overrides: { topics?: string[] } = {}) {
 export function createUnsubscribed(overrides: { topics?: string[] } = {}) {
   return {
     type: 'unsubscribed' as const,
+    session_id: '',
+    sequence_id: 0,
     topics: overrides.topics ?? ['market.test.BTC-USD'],
   }
 }
@@ -80,6 +98,8 @@ export function createSubscriptionsList(
 ) {
   return {
     type: 'subscriptions_list' as const,
+    session_id: '',
+    sequence_id: 0,
     subscriptions: overrides.subscriptions ?? [],
     available_topics: overrides.available_topics ?? [],
     total_available: overrides.total_available ?? 0,
@@ -91,6 +111,8 @@ export function createTopicSuggestions(
 ) {
   return {
     type: 'topic_suggestions' as const,
+    session_id: '',
+    sequence_id: 0,
     prefix: overrides.prefix ?? '',
     suggestions: overrides.suggestions ?? [],
   }
@@ -99,6 +121,8 @@ export function createTopicSuggestions(
 export function createPong(overrides: { timestamp?: string; active_connections?: number } = {}) {
   return {
     type: 'pong' as const,
+    session_id: '',
+    sequence_id: 0,
     timestamp: overrides.timestamp ?? new Date().toISOString(),
     active_connections: overrides.active_connections ?? 1,
   }
@@ -107,6 +131,8 @@ export function createPong(overrides: { timestamp?: string; active_connections?:
 export function createError(overrides: { message?: string } = {}) {
   return {
     type: 'error' as const,
+    session_id: '',
+    sequence_id: 0,
     message: overrides.message ?? 'Unknown error',
   }
 }

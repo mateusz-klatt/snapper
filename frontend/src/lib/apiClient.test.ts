@@ -7,6 +7,18 @@ vi.mock('./utils', () => ({
 vi.mock('./wsTicketCache', () => ({
   storeWsTicket: vi.fn(),
 }))
+
+let mockSeqCounter = 0
+
+vi.mock('uuid', () => ({
+  v7: vi.fn(() => `00000000-0000-7000-8000-${String(++mockSeqCounter).padStart(12, '0')}`),
+}))
+vi.mock('./sequenceTracker', () => ({
+  getTracker: vi.fn(() => ({
+    sessionId: 'test-session-id',
+    nextSequence: vi.fn(() => ++mockSeqCounter),
+  })),
+}))
 describe('APIClient', () => {
   let apiClient: typeof import('./apiClient').apiClient
   let mockFetch: ReturnType<typeof vi.fn>
@@ -1002,16 +1014,16 @@ describe('domain API methods', () => {
     const result = await apiClient.changePassword('testuser', 'oldPassword', 'newPassword')
 
     expect(result).toEqual({ message: 'Password changed successfully' })
-    expect(mockFetch).toHaveBeenCalledWith(
-      '/api/auth/users/testuser/change-password',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          current_password: 'oldPassword',
-          new_password: 'newPassword',
-        }),
-      })
-    )
+    const call = mockFetch.mock.calls[0]
+
+    expect(call[0]).toBe('/api/auth/users/testuser/change-password')
+    expect(call[1].method).toBe('POST')
+    const body = JSON.parse(call[1].body)
+
+    expect(body.current_password).toBe('oldPassword')
+    expect(body.new_password).toBe('newPassword')
+    expect(body.public_id).toBeDefined()
+    expect(body.session_id).toBe('test-session-id')
   })
 })
 describe('user management API methods', () => {
@@ -1249,5 +1261,69 @@ describe('cacheWsTicketFromResponse', () => {
       }),
     })
     await expect(apiClient.request('/test', { method: 'POST' })).rejects.toThrow()
+  })
+  describe('provenance stamping', () => {
+    beforeEach(() => {
+      mockSeqCounter = 0
+    })
+    it('stamps POST body with provenance fields', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.post('/api/test', { key: 'value' })
+      const call = mockFetch.mock.calls[0]
+      const body = JSON.parse(call[1].body)
+
+      expect(body.key).toBe('value')
+      expect(body.public_id).toBeDefined()
+      expect(body.session_id).toBe('test-session-id')
+      expect(body.sequence_id).toEqual(expect.any(Number))
+    })
+    it('stamps PUT body with provenance fields', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.put('/api/test', { key: 'value' })
+      const call = mockFetch.mock.calls[0]
+      const body = JSON.parse(call[1].body)
+
+      expect(body.key).toBe('value')
+      expect(body.public_id).toBeDefined()
+      expect(body.session_id).toBe('test-session-id')
+      expect(body.sequence_id).toEqual(expect.any(Number))
+    })
+    it('does not stamp GET requests', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/test')
+      const call = mockFetch.mock.calls[0]
+
+      expect(call[1].body).toBeUndefined()
+    })
+    it('does not stamp POST without body', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.post('/api/test')
+      const call = mockFetch.mock.calls[0]
+
+      expect(call[1].body).toBeUndefined()
+    })
+    it('does not stamp DELETE requests', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.delete('/api/test')
+      const call = mockFetch.mock.calls[0]
+
+      expect(call[1].body).toBeUndefined()
+    })
+    it('does not stamp array bodies', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.post('/api/test', [1, 2, 3])
+      const call = mockFetch.mock.calls[0]
+      const body = JSON.parse(call[1].body)
+
+      expect(Array.isArray(body)).toBe(true)
+      expect(body).toEqual([1, 2, 3])
+    })
+    it('does not stamp null bodies', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.post('/api/test', null)
+      const call = mockFetch.mock.calls[0]
+
+      expect(call[1].body).toBeUndefined()
+    })
   })
 })

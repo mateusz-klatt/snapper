@@ -27,6 +27,7 @@ from snapper.interface.websocket.schemas import WSAuthRequiredResponse
 from snapper.interface.websocket.schemas import WSReauthOkResponse
 from snapper.interface.websocket.schemas import WSReauthRequest
 from snapper.interface.websocket.schemas import WSReauthRequiredResponse
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 __all__ = [
     "AUTH_TIMEOUT_SECONDS",
@@ -86,6 +87,7 @@ class AuthResult:
 def create_deadline_tasks(
     websocket: WebSocket,
     exp_timestamp: int,
+    tracker: SequenceTracker,
 ) -> tuple[asyncio.Task[None], asyncio.Task[None]]:
     """Create background tasks for token expiration handling.
 
@@ -95,6 +97,7 @@ def create_deadline_tasks(
     Args:
         websocket: The WebSocket connection.
         exp_timestamp: Token expiration timestamp (Unix epoch seconds).
+        tracker: Sequence tracker for stamping outbound messages.
 
     Returns:
         Tuple of (warning_task, expiration_task).
@@ -106,7 +109,11 @@ def create_deadline_tasks(
             delay = (expiration - datetime.now(UTC) - REAUTH_WARN_OFFSET).total_seconds()
             if delay > 0:
                 await asyncio.sleep(delay)
-            reauth_msg = WSReauthRequiredResponse(deadline=expiration)
+            reauth_msg = WSReauthRequiredResponse(
+                deadline=expiration,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence("control"),
+            )
             await websocket.send_text(reauth_msg.model_dump_json())
         except asyncio.CancelledError:
             raise
@@ -118,7 +125,10 @@ def create_deadline_tasks(
             delay = (expiration - datetime.now(UTC) + REAUTH_GRACE_PERIOD).total_seconds()
             if delay > 0:
                 await asyncio.sleep(delay)
-            expired_msg = WSAuthExpiredResponse()
+            expired_msg = WSAuthExpiredResponse(
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence("control"),
+            )
             await websocket.send_text(expired_msg.model_dump_json())
             await asyncio.sleep(0.3)
             await websocket.close(code=4401, reason="Authorization expired")
@@ -134,6 +144,7 @@ async def authenticate_websocket(
     websocket: WebSocket,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
+    tracker: SequenceTracker,
 ) -> AuthResult:
     """Authenticate a new WebSocket connection.
 
@@ -147,32 +158,49 @@ async def authenticate_websocket(
         websocket: The WebSocket connection to authenticate.
         ws_auth_manager: Manager for WebSocket authentication state.
         ws_token_service: Service for verifying ws_tokens.
+        tracker: Sequence tracker for stamping outbound messages.
 
     Returns:
         AuthResult with success status and authentication details.
     """
     session_result = ws_auth_manager.verify_session_cookie(websocket)
     if session_result is None:
-        auth_failed = WSAuthFailedResponse(reason="missing_cookie")
+        auth_failed = WSAuthFailedResponse(
+            reason="missing_cookie",
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Authentication cookie missing")
         return AuthResult(success=False)
     user, token_data = session_result
     expected_sid_hash = compute_sid_hash(token_data.sid)
-    auth_required = WSAuthRequiredResponse(timeout=AUTH_TIMEOUT_SECONDS)
+    auth_required = WSAuthRequiredResponse(
+        timeout=AUTH_TIMEOUT_SECONDS,
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence("control"),
+    )
     await websocket.send_text(auth_required.model_dump_json())
     try:
         async with asyncio.timeout(AUTH_TIMEOUT_SECONDS):
             raw_message = await websocket.receive_text()
     except TimeoutError:
-        auth_failed = WSAuthFailedResponse(reason="timeout")
+        auth_failed = WSAuthFailedResponse(
+            reason="timeout",
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4408, reason="Authentication timeout")
         return AuthResult(success=False)
     try:
         auth_message = WSAuthenticateRequest.model_validate_json(raw_message)
     except ValidationError:
-        auth_failed = WSAuthFailedResponse(reason="invalid_json")
+        auth_failed = WSAuthFailedResponse(
+            reason="invalid_json",
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid auth payload")
         return AuthResult(success=False)
@@ -184,17 +212,23 @@ async def authenticate_websocket(
             expected_sid_hash=expected_sid_hash,
         )
     except WsTokenAlreadyUsedError:
-        auth_failed = WSAuthFailedResponse()
+        auth_failed = WSAuthFailedResponse(
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="ws_token replay")
         return AuthResult(success=False)
     except WsTokenError:
-        auth_failed = WSAuthFailedResponse()
+        auth_failed = WSAuthFailedResponse(
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid ws_token")
         return AuthResult(success=False)
     ws_token_service.mark_used(ws_payload)
-    warn_task, hard_task = create_deadline_tasks(websocket, ws_payload.exp)
+    warn_task, hard_task = create_deadline_tasks(websocket, ws_payload.exp, tracker)
     ws_auth_manager.register_connection(
         websocket,
         user,
@@ -218,6 +252,7 @@ async def handle_reauth(
     user: UserProfile,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
+    tracker: SequenceTracker,
 ) -> bool:
     """Handle re-authentication request for existing connection.
 
@@ -230,6 +265,7 @@ async def handle_reauth(
         user: Current authenticated user profile.
         ws_auth_manager: Manager for WebSocket authentication state.
         ws_token_service: Service for verifying ws_tokens.
+        tracker: Sequence tracker for stamping outbound messages.
 
     Returns:
         True if re-authentication successful, False otherwise.
@@ -237,7 +273,10 @@ async def handle_reauth(
     ws_token_candidate = message.ws_token
     state = ws_auth_manager.get_state(websocket)
     if state is None:
-        auth_failed = WSAuthFailedResponse()
+        auth_failed = WSAuthFailedResponse(
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Missing session state")
         return False
@@ -249,23 +288,33 @@ async def handle_reauth(
             expected_sid_hash=expected_hash,
         )
     except WsTokenAlreadyUsedError:
-        auth_failed = WSAuthFailedResponse()
+        auth_failed = WSAuthFailedResponse(
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="ws_token replay")
         return False
     except WsTokenError:
-        auth_failed = WSAuthFailedResponse()
+        auth_failed = WSAuthFailedResponse(
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid ws_token")
         return False
     ws_token_service.mark_used(new_payload)
-    warn_task, hard_task = create_deadline_tasks(websocket, new_payload.exp)
+    warn_task, hard_task = create_deadline_tasks(websocket, new_payload.exp, tracker)
     ws_auth_manager.update_ws_token_state(
         websocket,
         new_payload,
         warn_task=warn_task,
         hard_task=hard_task,
     )
-    reauth_ok = WSReauthOkResponse(exp=datetime.fromtimestamp(new_payload.exp, UTC))
+    reauth_ok = WSReauthOkResponse(
+        exp=datetime.fromtimestamp(new_payload.exp, UTC),
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence("control"),
+    )
     await websocket.send_text(reauth_ok.model_dump_json())
     return True

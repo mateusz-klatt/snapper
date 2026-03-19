@@ -7,8 +7,11 @@ import { z } from 'zod/v4'
 
 export const WsMessageBaseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.string(),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
   })
   .strict()
 
@@ -279,117 +282,162 @@ export const UserRoleSchema = z.enum(['viewer', 'operator', 'admin'])
 
 export const WSAuthExpiredResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('auth_expired'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
   })
   .strict()
 
 export const WSAuthFailedResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('auth_failed'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     reason: z.string().nullable(),
   })
   .strict()
 
 export const WSAuthOkResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('auth_ok'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     exp: z.iso.datetime(),
   })
   .strict()
 
 export const WSAuthRequiredResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('auth_required'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     timeout: z.number().int(),
   })
   .strict()
 
 export const WSAuthenticateRequestSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('authenticate'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     ws_token: z.string(),
   })
   .strict()
 
 export const WSErrorResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('error'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     message: z.string(),
   })
   .strict()
 
 export const WSGetSubscriptionsRequestSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('get_subscriptions'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
   })
   .strict()
 
 export const WSGetTopicSuggestionsRequestSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('get_topic_suggestions'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     prefix: z.string(),
   })
   .strict()
 
 export const WSPingRequestSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('ping'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
   })
   .strict()
 
 export const WSPongResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('pong'),
     timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     active_connections: z.number().int(),
   })
   .strict()
 
 export const WSReauthOkResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('reauth_ok'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     exp: z.iso.datetime(),
   })
   .strict()
 
 export const WSReauthRequestSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('reauth'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     ws_token: z.string(),
   })
   .strict()
 
 export const WSReauthRequiredResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('reauth_required'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     deadline: z.iso.datetime(),
   })
   .strict()
 
 export const WSSubscribeRequestSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('subscribe'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     topics: z.array(z.string()),
   })
   .strict()
 
 export const WSSubscriptionSuccessResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('subscription_success'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     action: z.enum(['subscribe', 'unsubscribe']),
     status: z.enum(['subscribed', 'unsubscribed', 'partial', 'denied', 'no_topics']),
     topics: z.array(z.string()),
@@ -402,8 +450,11 @@ export const WSSubscriptionSuccessResponseSchema = z
 
 export const WSSubscriptionsListResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('subscriptions_list'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     subscriptions: z.array(z.string()),
     available_topics: z.array(z.string()),
     total_available: z.number().int(),
@@ -412,8 +463,11 @@ export const WSSubscriptionsListResponseSchema = z
 
 export const WSTopicSuggestionsResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('topic_suggestions'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     prefix: z.string(),
     suggestions: z.array(z.string()),
   })
@@ -421,16 +475,22 @@ export const WSTopicSuggestionsResponseSchema = z
 
 export const WSUnsubscribeRequestSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('unsubscribe'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     topics: z.array(z.string()),
   })
   .strict()
 
 export const WSAuthCompleteResponseSchema = z
   .object({
+    public_id: z.string().optional(),
     type: z.literal('auth_complete'),
     timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     available_topics: z.array(z.string()),
     user_role: UserRoleSchema,
     session_expires_at: z.iso.datetime().nullable(),

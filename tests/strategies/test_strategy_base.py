@@ -745,10 +745,10 @@ async def test_emit_signal_persists_with_stamped_provenance(
     async def capture_store(
         sig: StrategySignal,
         exchange: str,
+        session_id: str = "",
+        sequence_id: int = 0,
         strategy_name: str | None = None,
         price: float | None = None,
-        session_id: str | None = None,
-        sequence_id: int | None = None,
         public_id: str | None = None,
         timestamp: datetime | None = None,
         tracker: object = None,

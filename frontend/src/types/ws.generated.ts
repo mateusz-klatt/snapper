@@ -250,18 +250,20 @@ export type Type34 = "unsubscribe";
 export type Topics2 = string[];
 
 /**
- * Base schema for WebSocket messages with timestamp.
+ * Base schema for WebSocket protocol payload items.
  *
- * All WebSocket messages include a type discriminator and timestamp.
- * The timestamp defaults to current UTC time if not provided.
+ * Inherits provenance fields (public_id, session_id, sequence_id, timestamp)
+ * from StrictDataSchema. Uses loose type coercion (strict=False) to handle
+ * JavaScript clients that may send numbers as strings.
  *
- * Attributes:
- *     type: Message type discriminator for routing.
- *     timestamp: When the message was created (UTC).
+ * Subclasses MUST override type with a Literal default.
  */
 export interface WsMessageSchema {
+  public_id?: string;
   type: string;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
 }
 /**
  * OHLCV candlestick data for technical analysis.
@@ -735,8 +737,11 @@ export interface TradeData {
  *     ws_token_exp: WebSocket token expiration (ISO 8601).
  */
 export interface WSAuthCompleteResponse {
+  public_id?: string;
   type: Type16;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   available_topics: AvailableTopics;
   user_role: UserRole;
   session_expires_at?: SessionExpiresAt;
@@ -754,8 +759,11 @@ export interface WSAuthCompleteResponse {
  *     type: Message type discriminator ('auth_expired').
  */
 export interface WSAuthExpiredResponse {
+  public_id?: string;
   type: Type17;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
 }
 /**
  * Authentication failure message.
@@ -767,8 +775,11 @@ export interface WSAuthExpiredResponse {
  *     reason: Optional failure reason code.
  */
 export interface WSAuthFailedResponse {
+  public_id?: string;
   type: Type18;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   reason?: Reason2;
 }
 /**
@@ -781,8 +792,11 @@ export interface WSAuthFailedResponse {
  *     exp: Token expiration timestamp (ISO 8601).
  */
 export interface WSAuthOkResponse {
+  public_id?: string;
   type: Type19;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * Token expiration (ISO 8601)
    */
@@ -798,8 +812,11 @@ export interface WSAuthOkResponse {
  *     timeout: Seconds until authentication timeout.
  */
 export interface WSAuthRequiredResponse {
+  public_id?: string;
   type: Type20;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * Authentication timeout in seconds
    */
@@ -815,8 +832,11 @@ export interface WSAuthRequiredResponse {
  *     ws_token: WebSocket authentication token.
  */
 export interface WSAuthenticateRequest {
+  public_id?: string;
   type: Type21;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * WebSocket authentication token
    */
@@ -832,8 +852,11 @@ export interface WSAuthenticateRequest {
  *     message: Human-readable error description.
  */
 export interface WSErrorResponse {
+  public_id?: string;
   type: Type22;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * Error description
    */
@@ -846,8 +869,11 @@ export interface WSErrorResponse {
  *     type: Message type discriminator ('get_subscriptions').
  */
 export interface WSGetSubscriptionsRequest {
+  public_id?: string;
   type: Type23;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
 }
 /**
  * Request topic name suggestions for autocomplete.
@@ -857,8 +883,11 @@ export interface WSGetSubscriptionsRequest {
  *     prefix: Search prefix for filtering topics.
  */
 export interface WSGetTopicSuggestionsRequest {
+  public_id?: string;
   type: Type24;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * Search prefix for topics
    */
@@ -873,8 +902,11 @@ export interface WSGetTopicSuggestionsRequest {
  *     type: Message type discriminator ('ping').
  */
 export interface WSPingRequest {
+  public_id?: string;
   type: Type25;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
 }
 /**
  * Pong response to ping request.
@@ -887,11 +919,14 @@ export interface WSPingRequest {
  *     active_connections: Number of active WebSocket connections.
  */
 export interface WSPongResponse {
+  public_id?: string;
   type: Type26;
   /**
    * Server timestamp (ISO 8601)
    */
   timestamp: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * Number of active WebSocket connections
    */
@@ -907,8 +942,11 @@ export interface WSPongResponse {
  *     exp: New token expiration timestamp (ISO 8601).
  */
 export interface WSReauthOkResponse {
+  public_id?: string;
   type: Type27;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * New token expiration (ISO 8601)
    */
@@ -924,8 +962,11 @@ export interface WSReauthOkResponse {
  *     ws_token: New WebSocket authentication token.
  */
 export interface WSReauthRequest {
+  public_id?: string;
   type: Type28;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * New WebSocket authentication token
    */
@@ -941,8 +982,11 @@ export interface WSReauthRequest {
  *     deadline: Deadline for reauthentication (ISO 8601).
  */
 export interface WSReauthRequiredResponse {
+  public_id?: string;
   type: Type29;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * Deadline for reauthentication (ISO 8601)
    */
@@ -956,8 +1000,11 @@ export interface WSReauthRequiredResponse {
  *     topics: List of topics to subscribe to.
  */
 export interface WSSubscribeRequest {
+  public_id?: string;
   type: Type30;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   topics: Topics;
 }
 /**
@@ -976,8 +1023,11 @@ export interface WSSubscribeRequest {
  *     message: Optional additional details.
  */
 export interface WSSubscriptionSuccessResponse {
+  public_id?: string;
   type: Type31;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   action: Action1;
   status: Status2;
   topics: Topics1;
@@ -998,8 +1048,11 @@ export interface WSSubscriptionSuccessResponse {
  *     total_available: Total number of available topics.
  */
 export interface WSSubscriptionsListResponse {
+  public_id?: string;
   type: Type32;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   subscriptions: Subscriptions;
   available_topics: AvailableTopics1;
   /**
@@ -1018,8 +1071,11 @@ export interface WSSubscriptionsListResponse {
  *     suggestions: Matching topic names.
  */
 export interface WSTopicSuggestionsResponse {
+  public_id?: string;
   type: Type33;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   /**
    * Search prefix that was used
    */
@@ -1034,7 +1090,10 @@ export interface WSTopicSuggestionsResponse {
  *     topics: List of topics to unsubscribe from.
  */
 export interface WSUnsubscribeRequest {
+  public_id?: string;
   type: Type34;
   timestamp?: string;
+  session_id?: string;
+  sequence_id?: number;
   topics: Topics2;
 }

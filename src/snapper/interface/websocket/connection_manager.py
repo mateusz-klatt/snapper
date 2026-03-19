@@ -13,6 +13,7 @@ from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.interface.websocket.schemas import WSErrorResponse
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,16 @@ class WebSocketConnectionManager:
         self.client_subscriptions: dict[WebSocket, set[str]] = {}
         self.topic_subscribers: dict[str, set[WebSocket]] = {}
         self.zmq_bridge = ZmqWebSocketBridgeService(self)
+        self._tracker: SequenceTracker = SequenceTracker()
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Sequence tracker for stamping outbound WS messages.
+
+        Returns:
+            SequenceTracker instance shared across all WS handlers.
+        """
+        return self._tracker
 
     async def connect(self, websocket: WebSocket, *, accept: bool = True) -> None:
         """Register a new WebSocket connection.
@@ -219,7 +230,11 @@ class WebSocketConnectionManager:
             websocket: The target WebSocket connection.
             error_message: The error message string.
         """
-        error = WSErrorResponse(message=error_message)
+        error = WSErrorResponse(
+            message=error_message,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("control"),
+        )
         await self.send_response(websocket, error)
 
     def get_stats(self) -> WsStatsSnapshot:

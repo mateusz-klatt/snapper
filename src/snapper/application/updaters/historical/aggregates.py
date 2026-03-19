@@ -502,7 +502,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             instrument_id,
             timeframe,
             self._tracker.session_id,
-            lambda: self._tracker.next_sequence("db.candles"),
+            lambda: self._tracker.next_sequence("candles"),
         )
         total_inserted = 0
         for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
@@ -756,7 +756,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             tick_size=0.0,
             lot_size=0.0,
             session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence("db.instruments"),
+            sequence_id=self._tracker.next_sequence("instruments"),
         )
         self._instrument_cache[context.native_symbol] = instrument_id
         return instrument_id

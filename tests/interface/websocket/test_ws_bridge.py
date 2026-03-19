@@ -12,6 +12,7 @@ from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import PropertyMock
 from unittest.mock import patch
 
 import pytest
@@ -28,6 +29,7 @@ from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 
@@ -37,8 +39,10 @@ def bridge() -> ZmqWebSocketBridgeService:
     """Provide ZmqWebSocketBridgeService with mock settings."""
     mock_settings = MagicMock()
     mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+    mock_cm = MagicMock()
+    type(mock_cm).tracker = PropertyMock(return_value=SequenceTracker())
     with patch("snapper.interface.websocket.bridge.get_settings", return_value=mock_settings):
-        instance = ZmqWebSocketBridgeService(MagicMock())
+        instance = ZmqWebSocketBridgeService(mock_cm)
     instance.context = MagicMock()
     instance.available_topics = {
         "market.candles.": TopicConfigurationModel(
@@ -652,7 +656,9 @@ class TestZMQBridgeRemainingCoverage:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -893,7 +899,9 @@ class TestSubscribeWebsocket:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -957,10 +965,10 @@ class TestSubscribeWebsocket:
         result = await bridge.subscribe_websocket(mock_websocket, topic)
         assert result is False
         assert topic not in bridge.topic_subscriptions
-        mock_websocket.send_json.assert_called_once()
-        call_args = mock_websocket.send_json.call_args[0][0]
-        assert call_args["type"] == "error"
-        assert call_args["topic"] == topic
+        mock_websocket.send_text.assert_called_once()
+        sent_json = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert sent_json["type"] == "error"
+        assert topic in sent_json["message"]
 
     @pytest.mark.asyncio
     async def test_subscribe_websocket_invalid_topic_send_error_fails(
@@ -973,7 +981,7 @@ class TestSubscribeWebsocket:
         Then: Returns False without raising exception.
         """
         topic = "invalid.unknown.topic"
-        mock_websocket.send_json = AsyncMock(side_effect=Exception("Connection closed"))
+        mock_websocket.send_text = AsyncMock(side_effect=Exception("Connection closed"))
         result = await bridge.subscribe_websocket(mock_websocket, topic)
         assert result is False
 
@@ -1040,7 +1048,9 @@ class TestUnsubscribeWebsocket:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -1175,7 +1185,9 @@ class TestUnsubscribeWebsocketAll:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -1272,7 +1284,9 @@ class TestGetSubscriptionStats:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -1337,7 +1351,9 @@ class TestGetAvailableTopics:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -1384,7 +1400,9 @@ class TestGetTopicStats:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -1447,7 +1465,9 @@ class TestGetConnectionStats:
     @pytest.fixture
     def connection_manager(self) -> MagicMock:
         """Provide mock connection manager."""
-        return MagicMock()
+        mgr = MagicMock()
+        type(mgr).tracker = PropertyMock(return_value=SequenceTracker())
+        return mgr
 
     @pytest.fixture
     def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
@@ -1581,7 +1601,7 @@ class TestZMQSubscriptionLoop:
         mock_socket = AsyncMock()
         mock_socket.recv_multipart.side_effect = [
             zmq.ZMQError(),
-            [b"market.prices", b'{"price": 100}'],
+            [b"market.prices", b'{"price": 100, "session_id": "test-session", "sequence_id": 1}'],
             asyncio.CancelledError(),
         ]
         bridge.topic_metrics[topic] = MagicMock()

@@ -15,6 +15,7 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import String
+from sqlalchemy import Text
 from sqlalchemy import UniqueConstraint
 from sqlalchemy import text
 from sqlalchemy import types
@@ -95,6 +96,8 @@ __all__ = [
     "ProcessRun",
     "InstrumentSpec",
     "MarketSnapshot",
+    "Control",
+    "Telemetry",
 ]
 
 
@@ -117,8 +120,8 @@ class TemporalMixin:
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
-    session_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
-    sequence_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sequence_id: Mapped[int] = mapped_column(Integer, nullable=False)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
@@ -732,3 +735,53 @@ class MarketSnapshot(TemporalMixin, Base):
     spread_pct: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="Spread as percentage of mid price"
     )
+
+
+class Control(TemporalMixin, Base):
+    """Temporal log of control-plane messages (commands, responses, errors).
+
+    Each row captures a single inbound or outbound control message with its
+    transport, discriminator, outcome, and optional redacted payload.
+    """
+
+    __tablename__ = "control"
+    __table_args__ = (
+        Index(
+            "ix_control_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+    )
+    transport: Mapped[str] = mapped_column(String(10))
+    direction: Mapped[str] = mapped_column(String(10))
+    message_type: Mapped[str] = mapped_column(String(128))
+    outcome: Mapped[str] = mapped_column(String(16))
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    client_public_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class Telemetry(TemporalMixin, Base):
+    """Temporal log of data-plane messages (market data, order updates).
+
+    Each row captures a single inbound or outbound data message with its
+    transport, discriminator, and optional payload snapshot.
+    """
+
+    __tablename__ = "telemetry"
+    __table_args__ = (
+        Index(
+            "ix_telemetry_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+    )
+    transport: Mapped[str] = mapped_column(String(10))
+    direction: Mapped[str] = mapped_column(String(10))
+    message_type: Mapped[str] = mapped_column(String(128))
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)

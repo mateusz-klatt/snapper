@@ -488,6 +488,8 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
                 asset_type="crypto",
                 created_at=now,
                 timestamp=now,
+                session_id="test-session",
+                sequence_id=1,
             )
             session.add(btc_sym)
             session.flush()
@@ -501,6 +503,8 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
                     exchange_symbol="OLD/WS",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -511,6 +515,8 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
                     exchange_symbol="OLDREST",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -521,6 +527,8 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
                     exchange_symbol="OLD/CCXT",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.commit()
@@ -1820,6 +1828,8 @@ class TestKrakenUpdateDatabaseBranches:
                     asset_type="crypto",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
 
@@ -1831,6 +1841,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="OLD/WS",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -1841,6 +1853,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="XXBTZUSD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -1851,6 +1865,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="BTC/USD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.commit()
@@ -1910,6 +1926,8 @@ class TestKrakenUpdateDatabaseBranches:
                     asset_type="crypto",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
 
@@ -1921,6 +1939,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="BTC/USD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -1931,6 +1951,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="OLDREST",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -1941,6 +1963,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="BTC/USD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.commit()
@@ -2000,6 +2024,8 @@ class TestKrakenUpdateDatabaseBranches:
                     asset_type="crypto",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
 
@@ -2011,6 +2037,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="BTC/USD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -2021,6 +2049,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="XXBTZUSD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -2031,6 +2061,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="OLD/CCXT",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.commit()
@@ -2090,6 +2122,8 @@ class TestKrakenUpdateDatabaseBranches:
                     asset_type="crypto",
                     created_at=original_updated_at,
                     timestamp=original_updated_at,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             sym = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
@@ -2101,6 +2135,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="BTC/USD",
                     created_at=original_updated_at,
                     timestamp=original_updated_at,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -2111,6 +2147,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="XXBTZUSD",
                     created_at=original_updated_at,
                     timestamp=original_updated_at,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.add(
@@ -2121,6 +2159,8 @@ class TestKrakenUpdateDatabaseBranches:
                     exchange_symbol="BTC/USD",
                     created_at=original_updated_at,
                     timestamp=original_updated_at,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.commit()
@@ -2678,6 +2718,8 @@ class TestKrakenPersistHelpers:
                     asset_type="crypto",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
 
@@ -2735,6 +2777,8 @@ class TestKrakenPersistHelpers:
                     asset_type="crypto",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
 
@@ -2789,6 +2833,8 @@ class TestKrakenPersistHelpers:
                 asset_type="crypto",
                 created_at=now,
                 timestamp=now,
+                session_id="test-session",
+                sequence_id=1,
             )
             session.add(sym)
             session.flush()
@@ -2800,6 +2846,8 @@ class TestKrakenPersistHelpers:
                     exchange_symbol="OLD/USD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.commit()
@@ -2850,6 +2898,8 @@ class TestKrakenPersistHelpers:
                 asset_type="crypto",
                 created_at=now,
                 timestamp=now,
+                session_id="test-session",
+                sequence_id=1,
             )
             session.add(sym)
             session.flush()
@@ -2861,6 +2911,8 @@ class TestKrakenPersistHelpers:
                     exchange_symbol="BTGOx/USD",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             session.commit()
@@ -2899,6 +2951,8 @@ class TestKrakenPersistHelpers:
                     asset_type="crypto",
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
 

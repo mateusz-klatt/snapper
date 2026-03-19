@@ -23,6 +23,8 @@ from snapper.core.types import AssetType
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
+_SEQ_KEY_CAPABILITIES = "capabilities"
+
 
 @register_process(
     "kraken_symbol_updater",
@@ -639,7 +641,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 ws_symbol,
                 now,
                 session_id=sid,
-                sequence_id=self._tracker.next_sequence("db.aliases"),
+                sequence_id=self._tracker.next_sequence("aliases"),
             )
             if result == "created":
                 created += 1
@@ -655,7 +657,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "WS-only, not in REST markets",
             now,
             session_id=sid,
-            sequence_id=self._tracker.next_sequence("db.capabilities"),
+            sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
         )
         return created, updated
 
@@ -693,7 +695,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 exchange_symbol,
                 now,
                 session_id=sid,
-                sequence_id=self._tracker.next_sequence("db.aliases"),
+                sequence_id=self._tracker.next_sequence("aliases"),
             )
             if result == "created":
                 created += 1
@@ -709,7 +711,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             None,
             now,
             session_id=sid,
-            sequence_id=self._tracker.next_sequence("db.capabilities"),
+            sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
         )
         return created, updated
 
@@ -750,7 +752,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                         asset_type,
                         now,
                         session_id=self._tracker.session_id,
-                        sequence_id=self._tracker.next_sequence("db.symbols"),
+                        sequence_id=self._tracker.next_sequence("symbols"),
                     )
                     processed_symbol_public_ids.add(symbol_public_id)
                     is_ws_only = symbol_data.get("ws_only") == "true"
@@ -773,7 +775,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     "kraken_updater",
                     now,
                     session_id=self._tracker.session_id,
-                    next_sequence_fn=lambda: self._tracker.next_sequence("db.capabilities"),
+                    next_sequence_fn=lambda: self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                 )
                 session.commit()
                 logger.info(

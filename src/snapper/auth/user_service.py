@@ -24,8 +24,8 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
-_USERS_TOPIC = "db.users"
-_LOGIN_EVENTS_TOPIC = "db.login_events"
+_USERS_TOPIC = "users"
+_LOGIN_EVENTS_TOPIC = "login_events"
 
 
 class UserService:

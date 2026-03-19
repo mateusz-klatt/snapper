@@ -183,7 +183,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             asset_type,
             now,
             session_id=sid,
-            sequence_id=self._tracker.next_sequence("db.symbols"),
+            sequence_id=self._tracker.next_sequence("symbols"),
         )
         alias_result = self._upsert_alias(
             session,
@@ -193,7 +193,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             ticker,
             now,
             session_id=sid,
-            sequence_id=self._tracker.next_sequence("db.aliases"),
+            sequence_id=self._tracker.next_sequence("aliases"),
         )
         self._upsert_capability(
             session,
@@ -205,7 +205,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             None,
             now,
             session_id=sid,
-            sequence_id=self._tracker.next_sequence("db.capabilities"),
+            sequence_id=self._tracker.next_sequence("capabilities"),
         )
         if alias_result == "created":
             stats["inserted"] += 1
@@ -250,7 +250,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                     "polygon_updater",
                     now,
                     session_id=self._tracker.session_id,
-                    next_sequence_fn=lambda: self._tracker.next_sequence("db.capabilities"),
+                    next_sequence_fn=lambda: self._tracker.next_sequence("capabilities"),
                 )
                 session.commit()
                 stats["deactivated"] = deactivated

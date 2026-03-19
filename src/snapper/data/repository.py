@@ -296,9 +296,9 @@ class Repository(ABC):
         price: float | None,
         size: float,
         status: str,
+        session_id: str,
+        sequence_id: int,
         time_in_force: str | None = None,
-        session_id: str = "",
-        sequence_id: int = 0,
     ) -> tuple[int, str]:
         """Insert new order record, returning (id, public_id) tuple."""
         ...
@@ -309,12 +309,12 @@ class Repository(ABC):
         order_id: int,
         status: str,
         updated_at: datetime,
+        session_id: str,
+        sequence_id: int,
         exchange_order_id: str | None = None,
         error: str | None = None,
         filled_size: float | None = None,
         average_price: float | None = None,
-        session_id: str = "",
-        sequence_id: int = 0,
     ) -> int:
         """Close old order version and insert new one (SCD Type 2).
 
@@ -334,11 +334,10 @@ class Repository(ABC):
         size: float,
         fee: float,
         fee_asset: str,
+        session_id: str,
+        sequence_id: int,
         exec_id: str | None = None,
         trade_id: str | None = None,
-        executed_at: datetime | None = None,
-        session_id: str = "",
-        sequence_id: int = 0,
     ) -> int:
         """Insert execution record, returning execution ID."""
         ...
@@ -672,9 +671,9 @@ class SQLAlchemyRepository(Repository):
         price: float | None,
         size: float,
         status: str,
+        session_id: str,
+        sequence_id: int,
         time_in_force: str | None = None,
-        session_id: str = "",
-        sequence_id: int = 0,
     ) -> tuple[int, str]:
         """Insert new order record and return (id, public_id) tuple."""
         async with self.session() as s:
@@ -707,12 +706,12 @@ class SQLAlchemyRepository(Repository):
         order_id: int,
         status: str,
         updated_at: datetime,
+        session_id: str,
+        sequence_id: int,
         exchange_order_id: str | None = None,
         error: str | None = None,
         filled_size: float | None = None,
         average_price: float | None = None,
-        session_id: str = "",
-        sequence_id: int = 0,
     ) -> int:
         """Close old order version and insert new one (SCD Type 2)."""
         async with self.session() as s:
@@ -761,11 +760,10 @@ class SQLAlchemyRepository(Repository):
         size: float,
         fee: float,
         fee_asset: str,
+        session_id: str,
+        sequence_id: int,
         exec_id: str | None = None,
         trade_id: str | None = None,
-        executed_at: datetime | None = None,
-        session_id: str = "",
-        sequence_id: int = 0,
     ) -> int:
         """Insert execution record and return generated ID."""
         async with self.session() as s:
@@ -777,7 +775,6 @@ class SQLAlchemyRepository(Repository):
                 timestamp=timestamp,
                 side=side,
                 status=status,
-                executed_at=executed_at,
                 price=price,
                 size=size,
                 fee=fee,

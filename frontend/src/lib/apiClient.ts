@@ -1,7 +1,9 @@
 import { z } from 'zod'
+import { v7 as uuid7 } from 'uuid'
 import { getCookie } from './utils'
 import { storeWsTicket } from './wsTicketCache'
 import { validateResponse } from './schemas/api'
+import { getTracker } from './sequenceTracker'
 import {
   CandleDataSchema,
   OrderDataSchema,
@@ -182,14 +184,14 @@ class APIClient {
     return this.request(url, {
       ...options,
       method: 'POST',
-      body: body ? JSON.stringify(body) : undefined,
+      body: body ? JSON.stringify(stampProvenance(body)) : undefined,
     })
   }
   public async put(url: string, body?: unknown, options: RequestOptions = {}): Promise<Response> {
     return this.request(url, {
       ...options,
       method: 'PUT',
-      body: body ? JSON.stringify(body) : undefined,
+      body: body ? JSON.stringify(stampProvenance(body)) : undefined,
     })
   }
   public async delete(url: string, options: RequestOptions = {}): Promise<Response> {
@@ -498,6 +500,19 @@ class APIClient {
 }
 
 export const apiClient = APIClient.getInstance()
+
+function stampProvenance(body: unknown): unknown {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return body
+
+  const tracker = getTracker()
+
+  return {
+    ...(body as Record<string, unknown>),
+    public_id: uuid7(),
+    session_id: tracker.sessionId,
+    sequence_id: tracker.nextSequence('control'),
+  }
+}
 
 async function cacheWsTicketFromResponse(response: Response): Promise<void> {
   try {

@@ -366,7 +366,7 @@ class TraderCoordinator(RegisterableProcess):
             tick_size=0.01,
             lot_size=0.0001,
             session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence("db.instruments"),
+            sequence_id=self._tracker.next_sequence("instruments"),
         )
 
     def _setup_external_execution(self) -> None:

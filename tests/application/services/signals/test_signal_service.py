@@ -32,6 +32,7 @@ class TestSignalService:
         url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
         repo = SQLAlchemyRepository(url)
         await repo.create_all()
+        tracker = SequenceTracker()
         async with repo.session() as s:
             for sym, base, quote in [("BTCUSD", "BTC", "USD"), ("ETHUSD", "ETH", "USD")]:
                 s.add(
@@ -42,6 +43,8 @@ class TestSignalService:
                         asset_type="crypto",
                         created_at=datetime.now(UTC),
                         timestamp=datetime.now(UTC),
+                        session_id=tracker.session_id,
+                        sequence_id=tracker.next_sequence("symbols"),
                     )
                 )
             await s.commit()
@@ -87,12 +90,18 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
+        tracker = SequenceTracker()
         signal_id = await signal_service.store_signal(
             signal=sample_signal,
             exchange="testexchange",
             strategy_name="test_strategy",
             price=50000.0,
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
         )
         assert signal_id is not None
         assert isinstance(signal_id, str)
@@ -129,9 +138,18 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
+        tracker = SequenceTracker()
         signal_id = await signal_service.store_signal(
-            signal=sample_signal, exchange="testexchange", strategy_name="test_strategy", price=None
+            signal=sample_signal,
+            exchange="testexchange",
+            strategy_name="test_strategy",
+            price=None,
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
         )
         assert signal_id is not None
         async with test_repository.session() as session:
@@ -162,14 +180,20 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
         envelope_public_id = "envelope-public-id-abc"
         envelope_timestamp = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
+        tracker = SequenceTracker()
         signal_id = await signal_service.store_signal(
             signal=sample_signal,
             exchange="testexchange",
             strategy_name="test_strategy",
             price=50000.0,
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
             public_id=envelope_public_id,
             timestamp=envelope_timestamp,
         )
@@ -205,7 +229,10 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
+        tracker = SequenceTracker()
         signal_ids = []
         for i in range(3):
             signal_id = await signal_service.store_signal(
@@ -213,6 +240,9 @@ class TestSignalService:
                 exchange="testexchange",
                 strategy_name=f"strategy_{i}",
                 price=50000.0 + i * 100,
+                session_id="",
+                sequence_id=0,
+                tracker=tracker,
             )
             signal_ids.append(signal_id)
         recent_signals = await signal_service.get_recent_signals(limit=2)
@@ -242,10 +272,37 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
-        await signal_service.store_signal(sample_signal, "testexchange", "strategy_a", 50000.0)
-        await signal_service.store_signal(sample_signal, "testexchange", "strategy_b", 51000.0)
-        await signal_service.store_signal(sample_signal, "testexchange", "strategy_a", 52000.0)
+        tracker = SequenceTracker()
+        await signal_service.store_signal(
+            sample_signal,
+            "testexchange",
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+            strategy_name="strategy_a",
+            price=50000.0,
+        )
+        await signal_service.store_signal(
+            sample_signal,
+            "testexchange",
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+            strategy_name="strategy_b",
+            price=51000.0,
+        )
+        await signal_service.store_signal(
+            sample_signal,
+            "testexchange",
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+            strategy_name="strategy_a",
+            price=52000.0,
+        )
         strategy_b_signals = await signal_service.get_recent_signals(
             strategy="strategy_b", limit=10
         )
@@ -272,6 +329,8 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
         spid_eth = await resolve_symbol_public_id(test_repository, "ETHUSD")
         assert spid_eth is not None
@@ -283,6 +342,8 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
         btc_signal = StrategySignal(
             instrument="BTCUSD",
@@ -298,8 +359,25 @@ class TestSignalService:
             reason="ETH signal",
             price=3000.0,
         )
-        await signal_service.store_signal(btc_signal, "testexchange", "strategy_a", 50000.0)
-        await signal_service.store_signal(eth_signal, "testexchange", "strategy_a", 3000.0)
+        tracker = SequenceTracker()
+        await signal_service.store_signal(
+            btc_signal,
+            "testexchange",
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+            strategy_name="strategy_a",
+            price=50000.0,
+        )
+        await signal_service.store_signal(
+            eth_signal,
+            "testexchange",
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+            strategy_name="strategy_a",
+            price=3000.0,
+        )
         btc_signals = await signal_service.get_recent_signals(instrument="BTCUSD", limit=10)
         assert len(btc_signals) == 1
         assert isinstance(btc_signals[0]["public_id"], str)
@@ -324,6 +402,8 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
         await test_repository.upsert_instrument(
             symbol_public_id=spid,
@@ -333,6 +413,8 @@ class TestSignalService:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
         btc_signal = StrategySignal(
             instrument="BTCUSD",
@@ -341,8 +423,25 @@ class TestSignalService:
             reason="BTC signal",
             price=50000.0,
         )
-        await signal_service.store_signal(btc_signal, "exchange_a", "strategy_a", 50000.0)
-        await signal_service.store_signal(btc_signal, "exchange_b", "strategy_a", 51000.0)
+        tracker = SequenceTracker()
+        await signal_service.store_signal(
+            btc_signal,
+            "exchange_a",
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+            strategy_name="strategy_a",
+            price=50000.0,
+        )
+        await signal_service.store_signal(
+            btc_signal,
+            "exchange_b",
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+            strategy_name="strategy_a",
+            price=51000.0,
+        )
         exchange_b_signals = await signal_service.get_recent_signals(
             exchange="exchange_b", limit=10
         )
@@ -382,6 +481,7 @@ class TestSignalServiceCoverage:
         url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
         repo = SQLAlchemyRepository(url)
         await repo.create_all()
+        tracker = SequenceTracker()
         async with repo.session() as s:
             s.add(
                 Symbol(
@@ -391,6 +491,8 @@ class TestSignalServiceCoverage:
                     asset_type="crypto",
                     created_at=datetime.now(UTC),
                     timestamp=datetime.now(UTC),
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("symbols"),
                 )
             )
             await s.commit()
@@ -428,6 +530,9 @@ class TestSignalServiceCoverage:
             exchange="testexchange",
             strategy_name="test_strategy",
             price=50000.0,
+            session_id="",
+            sequence_id=0,
+            tracker=SequenceTracker(),
         )
         assert len(signal_id) == 36
         async with signal_service.repo.session() as session:
@@ -455,11 +560,15 @@ class TestSignalServiceCoverage:
             ),
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
+            tracker = SequenceTracker()
             signal_id = await signal_service.store_signal(
                 signal=sample_signal,
                 exchange="testexchange",
                 strategy_name="test_strategy",
                 price=50000.0,
+                session_id="",
+                sequence_id=0,
+                tracker=tracker,
             )
             assert signal_id == ""
             mock_logger.error.assert_called_once()
@@ -481,11 +590,15 @@ class TestSignalServiceCoverage:
             ),
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
+            tracker = SequenceTracker()
             signal_id = await signal_service.store_signal(
                 signal=sample_signal,
                 exchange="testexchange",
                 strategy_name="test_strategy",
                 price=50000.0,
+                session_id="",
+                sequence_id=0,
+                tracker=tracker,
             )
             assert signal_id == ""
             mock_logger.error.assert_called_once()
@@ -513,6 +626,9 @@ class TestSignalServiceCoverage:
                 exchange="testexchange",
                 strategy_name="test_strategy",
                 price=50000.0,
+                session_id="",
+                sequence_id=0,
+                tracker=SequenceTracker(),
             )
             assert signal_id == ""
             mock_logger.error.assert_called_once()
@@ -583,6 +699,8 @@ class TestSignalServiceCoverage:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
         mock_session = MagicMock()
         mock_execute_result = MagicMock()
@@ -598,11 +716,15 @@ class TestSignalServiceCoverage:
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
             mock_session_manager.return_value.__aenter__.return_value = mock_session
+            tracker = SequenceTracker()
             signal_id = await signal_service.store_signal(
                 signal=sample_signal,
                 exchange="testexchange",
                 strategy_name="test_strategy",
                 price=50000.0,
+                session_id="",
+                sequence_id=0,
+                tracker=tracker,
             )
             assert signal_id == ""
             mock_logger.error.assert_called_once()
@@ -617,6 +739,7 @@ class TestSignalServiceCoverage:
         When: store_signal called with instrument='GOLD' (no dash),
         Then: Instrument created with base='GOLD' and quote='USD'.
         """
+        tracker = SequenceTracker()
         async with test_repository.session() as s:
             s.add(
                 Symbol(
@@ -626,6 +749,8 @@ class TestSignalServiceCoverage:
                     asset_type="crypto",
                     created_at=datetime.now(UTC),
                     timestamp=datetime.now(UTC),
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("symbols"),
                 )
             )
             await s.commit()
@@ -641,6 +766,9 @@ class TestSignalServiceCoverage:
             exchange="testexchange",
             strategy_name="test_strategy",
             price=2000.0,
+            session_id="",
+            sequence_id=0,
+            tracker=SequenceTracker(),
         )
         assert len(signal_id) == 36
         async with signal_service.repo.session() as session:
@@ -672,6 +800,8 @@ class TestSignalServiceCoverage:
             quote="USD",
             tick_size=0.01,
             lot_size=0.001,
+            session_id="test-session",
+            sequence_id=1,
         )
         mock_session = AsyncMock()
         mock_result = MagicMock()
@@ -705,6 +835,8 @@ class TestSignalServiceCoverage:
             exchange="testexchange",
             strategy_name="test_strategy",
             price=50000.0,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("signals"),
             tracker=tracker,
         )
         assert len(signal_id) == 36

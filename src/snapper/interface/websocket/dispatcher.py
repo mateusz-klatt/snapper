@@ -1,7 +1,9 @@
 """WebSocket message dispatcher.
 
 This module handles incoming WebSocket messages, routing them to
-appropriate handlers based on message type.
+appropriate handlers based on message type.  After handling each
+message, a control record is written to the ``control`` table for
+audit purposes (auth, subscribe, error events).
 """
 
 from collections.abc import Awaitable
@@ -21,7 +23,11 @@ from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.core.redact import redact
+from snapper.data.models import Control
+from snapper.data.repository import get_repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
+from snapper.interface.websocket.gap_detection import WsClientGapDetector
 from snapper.interface.websocket.handlers.auth import handle_reauth
 from snapper.interface.websocket.handlers.ping import handle_ping
 from snapper.interface.websocket.handlers.subscribe import handle_get_subscriptions
@@ -38,6 +44,7 @@ from snapper.interface.websocket.schemas import WSPingRequest
 from snapper.interface.websocket.schemas import WSReauthRequest
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 WSClientMessage = Annotated[
     WSSubscribeRequest
@@ -55,12 +62,60 @@ __all__ = [
 ]
 
 
+async def _record_ws_control(
+    db_url: str | None,
+    tracker: SequenceTracker,
+    message_type: str,
+    outcome: str,
+    detail: str | None = None,
+    raw_payload: str | None = None,
+) -> None:
+    """Write a control row for a WebSocket event (non-blocking).
+
+    Any DB failure is logged and swallowed so the WebSocket handler
+    is never disrupted.
+
+    Args:
+        db_url: Database URL; skip recording when None.
+        tracker: Sequence tracker for provenance fields.
+        message_type: Discriminator (e.g. ``auth``, ``subscribe``, ``error``).
+        outcome: ``ok``, ``error``, or ``exception``.
+        detail: Optional error detail message.
+        raw_payload: Optional raw message payload (will be redacted).
+    """
+    if db_url is None:
+        return
+    try:
+        redacted = redact(raw_payload)
+        repo = get_repository(db_url)
+        now = datetime.now(UTC)
+        row = Control(
+            transport="ws",
+            direction="inbound",
+            message_type=message_type,
+            outcome=outcome,
+            detail=detail,
+            payload=redacted,
+            client_session_id=None,
+            client_public_id=None,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+            timestamp=now,
+        )
+        async with repo.session() as session:
+            session.add(row)
+            await session.commit()
+    except Exception as exc:
+        logger.warning("WS control record write failed (non-blocking): {}", exc)
+
+
 async def send_auth_complete(
     websocket: WebSocket,
-    _manager: WebSocketConnectionManager,
+    manager: WebSocketConnectionManager,
     user: UserProfile,
     ws_payload: WsTokenPayload,
     ws_auth_manager: WebSocketAuthManager,
+    db_url: str | None = None,
 ) -> None:
     """Send authentication completion messages to client.
 
@@ -69,12 +124,17 @@ async def send_auth_complete(
 
     Args:
         websocket: The authenticated WebSocket connection.
-        _manager: WebSocket connection manager (reserved for interface compatibility).
+        manager: WebSocket connection manager.
         user: Authenticated user profile.
         ws_payload: WebSocket token payload with expiration.
         ws_auth_manager: Manager for WebSocket authentication state.
+        db_url: Optional database URL for control recording.
     """
-    auth_ok = WSAuthOkResponse(exp=datetime.fromtimestamp(ws_payload.exp, UTC))
+    auth_ok = WSAuthOkResponse(
+        exp=datetime.fromtimestamp(ws_payload.exp, UTC),
+        session_id=manager.tracker.session_id,
+        sequence_id=manager.tracker.next_sequence("control"),
+    )
     await websocket.send_text(auth_ok.model_dump_json())
     allowed_topics = get_allowed_topics_for_role(user.role)
     session_expires_at_dt = ws_auth_manager.get_connection_expiration(websocket)
@@ -83,15 +143,21 @@ async def send_auth_complete(
         user_role=user.role,
         session_expires_at=session_expires_at_dt,
         ws_token_exp=datetime.fromtimestamp(ws_payload.exp, UTC),
+        session_id=manager.tracker.session_id,
+        sequence_id=manager.tracker.next_sequence("control"),
     )
     await websocket.send_text(auth_complete.model_dump_json())
+    await _record_ws_control(db_url, manager.tracker, "auth", "ok")
 
 
-def _try_parse_message(raw_message: str) -> WSClientMessage | WSErrorResponse:
+def _try_parse_message(
+    raw_message: str, manager: WebSocketConnectionManager
+) -> WSClientMessage | WSErrorResponse:
     """Attempt to parse a raw WebSocket message into a typed client message.
 
     Args:
         raw_message: Raw JSON string from WebSocket.
+        manager: WebSocket connection manager for provenance stamping.
 
     Returns:
         Parsed client message on success, or WSErrorResponse on validation failure.
@@ -99,7 +165,11 @@ def _try_parse_message(raw_message: str) -> WSClientMessage | WSErrorResponse:
     try:
         return _client_message_adapter.validate_json(raw_message)
     except ValidationError as e:
-        return WSErrorResponse(message=f"Invalid message format: {e.error_count()} errors")
+        return WSErrorResponse(
+            message=f"Invalid message format: {e.error_count()} errors",
+            session_id=manager.tracker.session_id,
+            sequence_id=manager.tracker.next_sequence("control"),
+        )
 
 
 async def _handle_one_message(
@@ -109,6 +179,8 @@ async def _handle_one_message(
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     raw_message: str,
+    client_gap_detector: WsClientGapDetector,
+    db_url: str | None = None,
 ) -> bool:
     """Process a single incoming WebSocket message.
 
@@ -119,18 +191,46 @@ async def _handle_one_message(
         ws_auth_manager: Manager for WebSocket authentication state.
         ws_token_service: Service for verifying ws_tokens.
         raw_message: Raw JSON string received from the client.
+        client_gap_detector: Per-connection gap detector for client provenance.
+        db_url: Optional database URL for control recording.
 
     Returns:
         True to continue the dispatch loop, False to break.
     """
-    parsed = _try_parse_message(raw_message)
+    client_gap_detector.inspect(raw_message)
+    parsed = _try_parse_message(raw_message, manager)
     if isinstance(parsed, WSErrorResponse):
         await websocket.send_text(parsed.model_dump_json())
+        await _record_ws_control(
+            db_url,
+            manager.tracker,
+            "error",
+            "error",
+            detail=parsed.message,
+            raw_payload=raw_message,
+        )
         return True
+    msg_type = type(parsed).__name__
     if isinstance(parsed, WSReauthRequest):
-        success = await handle_reauth(websocket, parsed, user, ws_auth_manager, ws_token_service)
+        success = await handle_reauth(
+            websocket, parsed, user, ws_auth_manager, ws_token_service, manager.tracker
+        )
+        await _record_ws_control(
+            db_url,
+            manager.tracker,
+            "reauth",
+            "ok" if success else "error",
+            raw_payload=raw_message,
+        )
         return success
     await _dispatch_single_message(websocket, parsed, manager, user)
+    await _record_ws_control(
+        db_url,
+        manager.tracker,
+        msg_type,
+        "ok",
+        raw_payload=raw_message,
+    )
     return True
 
 
@@ -140,6 +240,7 @@ async def dispatch_messages(
     user: UserProfile,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
+    db_url: str | None = None,
 ) -> None:
     """Main message dispatch loop for WebSocket connection.
 
@@ -152,12 +253,21 @@ async def dispatch_messages(
         user: Authenticated user profile.
         ws_auth_manager: Manager for WebSocket authentication state.
         ws_token_service: Service for verifying ws_tokens.
+        db_url: Optional database URL for control recording.
     """
+    client_gap_detector = WsClientGapDetector()
     try:
         while True:
             raw_message = await websocket.receive_text()
             should_continue = await _handle_one_message(
-                websocket, manager, user, ws_auth_manager, ws_token_service, raw_message
+                websocket,
+                manager,
+                user,
+                ws_auth_manager,
+                ws_token_service,
+                raw_message,
+                client_gap_detector,
+                db_url,
             )
             if not should_continue:
                 break
@@ -165,8 +275,19 @@ async def dispatch_messages(
         logger.info(f"WebSocket disconnected for user {user.username}")
     except Exception as exc:
         logger.exception("WebSocket error: {}", exc)
-        error_msg = WSErrorResponse(message="Internal server error")
+        error_msg = WSErrorResponse(
+            message="Internal server error",
+            session_id=manager.tracker.session_id,
+            sequence_id=manager.tracker.next_sequence("control"),
+        )
         await websocket.send_text(error_msg.model_dump_json())
+        await _record_ws_control(
+            db_url,
+            manager.tracker,
+            "error",
+            "exception",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def _build_dispatch_table(

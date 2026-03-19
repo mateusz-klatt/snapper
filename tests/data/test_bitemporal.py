@@ -72,6 +72,8 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
                 asset_type="crypto",
                 created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         await s.commit()
@@ -85,6 +87,8 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
         exchange="kraken",
         tick_size=0.01,
         lot_size=0.001,
+        session_id="test-session",
+        sequence_id=1,
     )
     return repo, inst_id
 
@@ -118,6 +122,8 @@ def _candle_row(
         "volume": 10.0,
         "vwap": None,
         "trades": 1,
+        "session_id": "test-session",
+        "sequence_id": 1,
     }
 
 
@@ -393,12 +399,16 @@ class TestOrderBitemporal:
             price=50000.0,
             size=1.0,
             status="new",
+            session_id="",
+            sequence_id=0,
         )
 
         order_v2 = await repo.update_order(
             order_id=order_id,
             status="partially_filled",
             updated_at=base_ts + timedelta(seconds=10),
+            session_id="",
+            sequence_id=0,
             filled_size=0.5,
             average_price=50050.0,
         )
@@ -407,6 +417,8 @@ class TestOrderBitemporal:
             order_id=order_v2,
             status="filled",
             updated_at=base_ts + timedelta(seconds=20),
+            session_id="",
+            sequence_id=0,
             exchange_order_id="ex-001",
             filled_size=1.0,
             average_price=50025.0,
@@ -447,6 +459,8 @@ class TestSettingBitemporal:
                 description="Test setting",
                 is_encrypted=False,
                 timestamp=now,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(v1)
             await s.commit()
@@ -464,6 +478,8 @@ class TestSettingBitemporal:
                 description="Test setting",
                 is_encrypted=False,
                 timestamp=t2,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(v2)
             await s.commit()
@@ -480,6 +496,8 @@ class TestSettingBitemporal:
                 description="Test setting",
                 is_encrypted=False,
                 timestamp=t3,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(v3)
             await s.commit()
@@ -519,12 +537,16 @@ class TestExecutionDedup:
             price=50000.0,
             size=1.0,
             status="new",
+            session_id="",
+            sequence_id=0,
         )
 
         new_order_id = await repo.update_order(
             order_id=order_id,
             status="filled",
             updated_at=base_ts + timedelta(seconds=5),
+            session_id="",
+            sequence_id=0,
             exchange_order_id="ex-dedup",
         )
 
@@ -538,6 +560,8 @@ class TestExecutionDedup:
             size=1.0,
             fee=5.0,
             fee_asset="USD",
+            session_id="",
+            sequence_id=0,
             exec_id="E1",
         )
 
@@ -552,6 +576,8 @@ class TestExecutionDedup:
                 size=1.0,
                 fee=5.0,
                 fee_asset="USD",
+                session_id="",
+                sequence_id=0,
                 exec_id="E1",
             )
 
@@ -638,6 +664,8 @@ async def _upsert_symbol_pattern(
                     asset_type=asset_type,
                     created_at=now,
                     timestamp=now,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
         else:
@@ -652,6 +680,8 @@ async def _upsert_symbol_pattern(
                         "quote": quote,
                         "asset_type": asset_type,
                         "created_at": existing.created_at,
+                        "session_id": "test-session",
+                        "sequence_id": 1,
                     },
                     bus_time=now,
                 )
@@ -982,6 +1012,8 @@ async def _create_user(
             is_active=True,
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         s.add(user)
         await s.commit()
@@ -1018,6 +1050,8 @@ class TestUserBitemporal:
                     "role": "viewer",
                     "is_active": True,
                     "created_at": user_v1.created_at,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 bus_time=t2,
             )
@@ -1061,6 +1095,8 @@ class TestUserBitemporal:
                     "role": "viewer",
                     "is_active": True,
                     "created_at": user_v1.created_at,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 bus_time=t2,
             )
@@ -1078,6 +1114,8 @@ class TestUserBitemporal:
                     "role": "operator",
                     "is_active": True,
                     "created_at": user_v1.created_at,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 bus_time=t3,
             )
@@ -1136,6 +1174,8 @@ class TestUserBitemporal:
                 user_public_id=user.public_id,
                 logged_at=login_time,
                 timestamp=login_time,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(login_event)
             await s.commit()
@@ -1173,8 +1213,20 @@ class TestUserBitemporal:
         user = await _create_user(repo, "eve", "hash_v1", t1)
 
         async with repo.session() as s:
-            evt1 = UserLoginEvent(user_public_id=user.public_id, logged_at=t1, timestamp=t1)
-            evt2 = UserLoginEvent(user_public_id=user.public_id, logged_at=t2, timestamp=t2)
+            evt1 = UserLoginEvent(
+                user_public_id=user.public_id,
+                logged_at=t1,
+                timestamp=t1,
+                session_id="test-session",
+                sequence_id=1,
+            )
+            evt2 = UserLoginEvent(
+                user_public_id=user.public_id,
+                logged_at=t2,
+                timestamp=t2,
+                session_id="test-session",
+                sequence_id=1,
+            )
             s.add(evt1)
             s.add(evt2)
             await s.commit()
@@ -1227,7 +1279,13 @@ class TestUserBitemporal:
         user = await _create_user(repo, "frank", "hash_v1", t1)
 
         async with repo.session() as s:
-            evt = UserLoginEvent(user_public_id=user.public_id, logged_at=t1, timestamp=t1)
+            evt = UserLoginEvent(
+                user_public_id=user.public_id,
+                logged_at=t1,
+                timestamp=t1,
+                session_id="test-session",
+                sequence_id=1,
+            )
             s.add(evt)
             await s.commit()
             await s.refresh(evt)
@@ -1287,7 +1345,11 @@ class TestUserBitemporal:
 
         async with repo.session() as s:
             evt = UserLoginEvent(
-                user_public_id=user.public_id, logged_at=login_time, timestamp=login_time
+                user_public_id=user.public_id,
+                logged_at=login_time,
+                timestamp=login_time,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(evt)
             await s.commit()
@@ -1320,6 +1382,8 @@ class TestSettingsApiBitemporal:
                 description="Theme setting",
                 is_encrypted=False,
                 timestamp=t1,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(v1)
             await s.commit()
@@ -1335,6 +1399,8 @@ class TestSettingsApiBitemporal:
                     "category": "ui",
                     "description": "Theme setting",
                     "is_encrypted": False,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 bus_time=t2,
             )
@@ -1351,6 +1417,8 @@ class TestSettingsApiBitemporal:
                     "category": "ui",
                     "description": "Theme setting",
                     "is_encrypted": False,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 bus_time=t3,
             )
@@ -1394,6 +1462,8 @@ class TestSettingsApiBitemporal:
                 description="Cache TTL",
                 is_encrypted=False,
                 timestamp=t1,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(setting)
             await s.commit()
@@ -1443,6 +1513,8 @@ class TestInstrumentBitemporal:
             base="BTC",
             quote="USD",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert inst_id2 == inst_id
         async with repo.session() as s:
@@ -1466,6 +1538,8 @@ class TestInstrumentBitemporal:
             base="BITCOIN",
             quote="USD",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert new_id != inst_id
 
@@ -1503,6 +1577,8 @@ class TestInstrumentBitemporal:
                 base="BTC",
                 quote=suffix,
                 exchange="kraken",
+                session_id="test-session",
+                sequence_id=1,
             )
 
         async with repo.session() as s:
@@ -1527,6 +1603,8 @@ class TestInstrumentBitemporal:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
 
         async with repo.session() as s:
@@ -1547,10 +1625,22 @@ class TestInstrumentBitemporal:
         assert spid is not None
 
         await repo.upsert_instrument(
-            symbol_public_id=spid, symbol="BTC-V2", base="BTC", quote="V2", exchange="kraken"
+            symbol_public_id=spid,
+            symbol="BTC-V2",
+            base="BTC",
+            quote="V2",
+            exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
         await repo.upsert_instrument(
-            symbol_public_id=spid, symbol="BTC-V3", base="BTC", quote="V3", exchange="kraken"
+            symbol_public_id=spid,
+            symbol="BTC-V3",
+            base="BTC",
+            quote="V3",
+            exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
 
         async with repo.session() as s:
@@ -1583,6 +1673,8 @@ class TestInstrumentBitemporal:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert new_id != inst_id
 
@@ -1621,6 +1713,8 @@ class TestInstrumentBitemporal:
                 asset_type="crypto",
                 created_at=t1,
                 timestamp=t1,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(sym)
             await s.commit()
@@ -1638,6 +1732,8 @@ class TestInstrumentBitemporal:
                     "quote": "USDT",
                     "asset_type": "crypto",
                     "created_at": t1,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 t2,
             )
@@ -1672,6 +1768,8 @@ class TestInstrumentBitemporal:
                 reason="test signal",
                 strategy_name="test",
                 price=100.0,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(signal)
             await s.commit()
@@ -1684,6 +1782,8 @@ class TestInstrumentBitemporal:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert new_id != inst_id
 
@@ -1733,6 +1833,8 @@ class TestInstrumentRenameSemantics:
             price=50000.0,
             size=1.0,
             status="new",
+            session_id="",
+            sequence_id=0,
         )
 
         new_inst_id = await repo.upsert_instrument(
@@ -1741,6 +1843,8 @@ class TestInstrumentRenameSemantics:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert new_inst_id != inst_id
 
@@ -1776,6 +1880,8 @@ class TestInstrumentRenameSemantics:
             price=50000.0,
             size=1.0,
             status="filled",
+            session_id="",
+            sequence_id=0,
         )
 
         exec_id = await repo.insert_execution(
@@ -1788,6 +1894,8 @@ class TestInstrumentRenameSemantics:
             size=1.0,
             fee=5.0,
             fee_asset="USD",
+            session_id="",
+            sequence_id=0,
             exec_id="E-RENAME",
         )
 
@@ -1797,6 +1905,8 @@ class TestInstrumentRenameSemantics:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
 
         async with repo.session() as s:
@@ -1830,6 +1940,8 @@ class TestInstrumentRenameSemantics:
                 unrealized_pnl=100.0,
                 realized_pnl=0.0,
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(pos)
             await s.commit()
@@ -1842,6 +1954,8 @@ class TestInstrumentRenameSemantics:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
 
         async with repo.session() as s:
@@ -1873,6 +1987,8 @@ class TestInstrumentRenameSemantics:
                 base="BTC",
                 quote="USD",
                 exchange="kraken",
+                session_id="test-session",
+                sequence_id=1,
             )
             assert returned_id == inst_id
 
@@ -1905,6 +2021,8 @@ class TestInstrumentRenameSemantics:
                 asset_type="crypto",
                 created_at=t1,
                 timestamp=t1,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(sym)
             await s.commit()
@@ -1922,6 +2040,8 @@ class TestInstrumentRenameSemantics:
                     "quote": "USDT",
                     "asset_type": "crypto",
                     "created_at": t1,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 t2,
             )
@@ -1959,6 +2079,8 @@ class TestInstrumentRenameSemantics:
             price=50000.0,
             size=1.0,
             status="new",
+            session_id="",
+            sequence_id=0,
         )
 
         async with repo.session() as s:
@@ -1971,6 +2093,8 @@ class TestInstrumentRenameSemantics:
                 reason="cross-test",
                 strategy_name="test",
                 price=50000.0,
+                session_id="test-session",
+                sequence_id=1,
             )
             pos = Position(
                 instrument_id=inst_id,
@@ -1979,6 +2103,8 @@ class TestInstrumentRenameSemantics:
                 unrealized_pnl=0.0,
                 realized_pnl=0.0,
                 timestamp=now,
+                session_id="test-session",
+                sequence_id=1,
             )
             s.add(signal)
             s.add(pos)
@@ -1990,6 +2116,8 @@ class TestInstrumentRenameSemantics:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert new_inst_id != inst_id
 
@@ -2047,6 +2175,8 @@ class TestInstrumentRenameSemantics:
             price=50000.0,
             size=1.0,
             status="new",
+            session_id="",
+            sequence_id=0,
         )
 
         await repo.upsert_instrument(
@@ -2055,6 +2185,8 @@ class TestInstrumentRenameSemantics:
             base="BTC",
             quote="RENAMED",
             exchange="kraken",
+            session_id="test-session",
+            sequence_id=1,
         )
 
         async with repo.session() as s:

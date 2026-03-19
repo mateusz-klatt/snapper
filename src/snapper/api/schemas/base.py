@@ -1,13 +1,19 @@
 """Base Pydantic schemas for REST API, WebSocket messages, and ZMQ data payloads.
 
 This module defines foundational schema classes and configuration objects used throughout
-the API layer for request/response validation. All API schemas inherit from these base
-classes to ensure consistent validation behavior.
+the API layer for request/response validation. All event payload items inherit from
+StrictDataSchema to ensure mandatory provenance fields.
 
 Configuration variants:
     - STRICT_API_CONFIG: Forbids extra fields, uses strict type coercion
     - STRICT_WS_CONFIG: Forbids extra fields but allows loose type coercion for WebSocket
     - STRICT_DATA_CONFIG: Forbids extra fields, loose coercion for ZMQ data payloads
+
+Schema hierarchy:
+    BaseModel
+    └── StrictDataSchema       → ALL event payload items (provenance required)
+        ├── WsMessageSchema    → WS control (strict=False for JS coercion)
+        └── StrictApiSchema    → REST operational responses (strict=True)
 """
 
 from datetime import UTC
@@ -26,53 +32,12 @@ STRICT_API_CONFIG = ConfigDict(
     populate_by_name=True,
 )
 
-
-class StrictApiSchema(BaseModel):
-    """Base schema for REST API request/response models.
-
-    Inherits Pydantic BaseModel with strict validation:
-    - Extra fields are forbidden (HTTP 422 on unknown fields)
-    - Strict type coercion (no implicit conversions)
-    - Default values are validated
-    - Field aliases are populated by name
-    """
-
-    model_config = STRICT_API_CONFIG
-
-
 STRICT_WS_CONFIG = ConfigDict(
     extra="forbid",
     strict=False,
     validate_default=True,
     populate_by_name=True,
 )
-
-
-class StrictWsSchema(BaseModel):
-    """Base schema for WebSocket message models.
-
-    Similar to StrictApiSchema but with relaxed type coercion (strict=False)
-    to handle JavaScript clients that may send numbers as strings.
-    Extra fields are still forbidden to catch protocol errors.
-    """
-
-    model_config = STRICT_WS_CONFIG
-
-
-class WsMessageSchema(StrictWsSchema):
-    """Base schema for WebSocket messages with timestamp.
-
-    All WebSocket messages include a type discriminator and timestamp.
-    The timestamp defaults to current UTC time if not provided.
-
-    Attributes:
-        type: Message type discriminator for routing.
-        timestamp: When the message was created (UTC).
-    """
-
-    type: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
 
 STRICT_DATA_CONFIG = ConfigDict(
     extra="forbid",
@@ -83,19 +48,23 @@ STRICT_DATA_CONFIG = ConfigDict(
 
 
 class StrictDataSchema(BaseModel):
-    """Base schema for all ZMQ data payloads and message entities.
+    """Base schema for all event payload items across ZMQ, WebSocket, and REST.
 
-    Every entity on the messaging bus inherits from this base, gaining a unique
-    UUID7 identifier, a type discriminator for routing/parsing, and a bus timestamp
-    recording when the entity was created. Subclasses MUST override type with a
-    Literal default (e.g. type: Literal["candle"] = "candle").
+    Every event payload item inherits from this base, gaining a unique UUID7
+    identifier, a type discriminator for routing/parsing, provenance fields
+    for gap detection, and a bus timestamp recording when the item was created.
+
+    Subclasses MUST override type with a Literal default
+    (e.g. type: Literal["candle"] = "candle").
 
     Also provides to_json/from_json for ZMQ serialization.
 
     Attributes:
         public_id: Unique identifier (UUID7), generated at creation time.
-        type: Message type discriminator for routing and deserialization.
+        type: Payload item type discriminator for routing and deserialization.
         timestamp: Bus arrival timestamp (UTC), generated once at creation.
+        session_id: Producer session identifier for provenance tracking.
+        sequence_id: Per-table monotonic counter for gap detection.
     """
 
     model_config = STRICT_DATA_CONFIG
@@ -125,6 +94,42 @@ class StrictDataSchema(BaseModel):
             Typed instance.
         """
         return cls.model_validate_json(data)
+
+
+class WsMessageSchema(StrictDataSchema):
+    """Base schema for WebSocket protocol payload items.
+
+    Inherits provenance fields (public_id, session_id, sequence_id, timestamp)
+    from StrictDataSchema. Uses loose type coercion (strict=False) to handle
+    JavaScript clients that may send numbers as strings.
+
+    Subclasses MUST override type with a Literal default.
+    """
+
+    model_config = STRICT_WS_CONFIG
+
+
+class StrictApiSchema(BaseModel):
+    """Base schema for REST API request/response models.
+
+    Inherits Pydantic BaseModel with strict validation:
+    - Extra fields are forbidden (HTTP 422 on unknown fields)
+    - Strict type coercion (no implicit conversions)
+    - Default values are validated
+    - Field aliases are populated by name
+    """
+
+    model_config = STRICT_API_CONFIG
+
+
+class StrictWsSchema(BaseModel):
+    """Legacy base schema for WebSocket message models.
+
+    Kept for backward compatibility during migration. New code should use
+    WsMessageSchema (which inherits from StrictDataSchema) instead.
+    """
+
+    model_config = STRICT_WS_CONFIG
 
 
 class MessageResponse(StrictApiSchema):

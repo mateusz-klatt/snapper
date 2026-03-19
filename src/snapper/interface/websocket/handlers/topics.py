@@ -48,5 +48,10 @@ async def handle_get_topic_suggestions(
         if suggestion in allowed_topics
         or determine_topic_category(suggestion) in allowed_categories
     ]
-    response = WSTopicSuggestionsResponse(prefix=prefix, suggestions=filtered)
+    response = WSTopicSuggestionsResponse(
+        prefix=prefix,
+        suggestions=filtered,
+        session_id=_manager.tracker.session_id,
+        sequence_id=_manager.tracker.next_sequence("control"),
+    )
     await websocket.send_text(response.model_dump_json())

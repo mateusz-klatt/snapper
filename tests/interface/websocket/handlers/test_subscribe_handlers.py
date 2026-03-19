@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import PropertyMock
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class TestHandleSubscribeEdgeCases:
@@ -36,6 +38,7 @@ class TestHandleSubscribeEdgeCases:
         manager.zmq_bridge.remove_subscription = AsyncMock()
         manager.topic_manager = MagicMock()
         manager.topic_manager.get_all_topics = MagicMock(return_value=[])
+        type(manager).tracker = PropertyMock(return_value=SequenceTracker())
         return manager
 
     @pytest.mark.asyncio
@@ -143,6 +146,7 @@ class TestHandleUnsubscribeEdgeCases:
         manager.unsubscribe_client = MagicMock()
         manager.zmq_bridge = MagicMock()
         manager.zmq_bridge.remove_subscription = AsyncMock()
+        type(manager).tracker = PropertyMock(return_value=SequenceTracker())
         return manager
 
     @pytest.mark.asyncio

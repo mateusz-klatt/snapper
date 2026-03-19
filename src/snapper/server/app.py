@@ -122,6 +122,7 @@ from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.topics.schemas import get_all_topic_names
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.process_routes import router as process_router
+from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
 from snapper.server.strategy_routes import router as strategy_router
 from snapper.utils.logging import set_log_context
@@ -300,6 +301,7 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, handle_rate_limit_exceeded)
     app.add_middleware(SlowAPIMiddleware)
+    app.add_middleware(ClientProvenanceMiddleware, db_url=settings.db_url)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,

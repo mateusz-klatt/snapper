@@ -341,6 +341,8 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
                 asset_type="crypto",
                 created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         await s.commit()
@@ -355,6 +357,8 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
         tick_size=0.1,
         lot_size=0.0001,
         timestamp=datetime.now(UTC),
+        session_id="test-session",
+        sequence_id=1,
     )
     assert inst_id > 0
     inserted = await repo.upsert_candles(
@@ -371,6 +375,8 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
                 "volume": 10.0,
                 "vwap": None,
                 "trades": 1,
+                "session_id": "test-session",
+                "sequence_id": 1,
             }
         ]
     )
@@ -430,6 +436,8 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
                 asset_type="crypto",
                 created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         await s.commit()
@@ -443,6 +451,8 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
         exchange="kraken",
         tick_size=0.01,
         lot_size=0.001,
+        session_id="test-session",
+        sequence_id=1,
     )
     rows = [
         {
@@ -452,6 +462,8 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
             "price": 100.0,
             "size": 0.5,
             "side": "buy",
+            "session_id": "test-session",
+            "sequence_id": 1,
         },
         {
             "trade_id": "2",
@@ -460,6 +472,8 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
             "price": 101.0,
             "size": 0.25,
             "side": "sell",
+            "session_id": "test-session",
+            "sequence_id": 2,
         },
     ]
     inserted = await repo.upsert_trades(rows)

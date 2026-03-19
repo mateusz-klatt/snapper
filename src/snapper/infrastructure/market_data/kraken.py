@@ -60,8 +60,8 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
     @staticmethod
     def _build_kraken_snapshot(
         ticker_data: TickerUpdate,
-        session_id: str = "",
-        sequence_id: int = 0,
+        session_id: str,
+        sequence_id: int,
     ) -> MarketSnapshot:
         """Build a MarketSnapshot from Kraken ticker data.
 
@@ -121,7 +121,7 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
                         self._build_kraken_snapshot(
                             ticker_data,
                             session_id=self._tracker.session_id,
-                            sequence_id=self._tracker.next_sequence("db.snapshots"),
+                            sequence_id=self._tracker.next_sequence("snapshots"),
                         )
                     )
                     count += 1

@@ -151,9 +151,49 @@ REST endpoints return the same Data schemas used by WebSocket messages
 from `messaging.schemas.data`). This means the wire format is identical
 whether data arrives via REST or the WebSocket feed.
 
-All Data objects carry `session_id` (UUID7 string) and `sequence_id` (int) provenance
-fields stamped by the producer. These are empty string / 0 for rows written before stream
-provenance was wired up or for write paths not yet connected to a `SequenceTracker`.
+### REST = Bulk WS
+
+REST responses are JSON arrays of payload items. Each item carries its own
+per-item provenance (`public_id`, `session_id`, `sequence_id`) — there is
+no wrapper-level `public_id` and no custom HTTP headers for provenance.
+The shape of each array element is identical to what the WebSocket feed
+delivers for the same data type.
+
+### Provenance on Reads vs. Mutations
+
+- **GET reads** — No client provenance is expected. The server records the
+  request in the `telemetry` table for observability but does not stamp
+  provenance onto the response items beyond what was stored at write time.
+
+- **Mutations (POST/PUT/DELETE/PATCH)** — Clients carry provenance in the
+  JSON request body (`public_id`, `session_id`, `sequence_id` inherited
+  from `StrictDataSchema`). The server-side `ClientProvenanceMiddleware`
+  extracts these fields, emits a structured info log, and runs a
+  per-session `GapDetector` to warn on sequence gaps. Gaps are logged as
+  warnings but never reject requests.
+
+### ClientProvenanceMiddleware
+
+`ClientProvenanceMiddleware` is an ASGI middleware that processes every
+mutation request:
+
+1. Intercepts the request body transparently (replays chunks to
+   downstream handlers).
+2. Extracts `session_id`, `sequence_id`, and `public_id` from the JSON
+   body when present.
+3. Emits a structured log with `client_session_id`, `client_sequence_id`,
+   `client_public_id`, and the request path.
+4. Runs a per-session `GapDetector` to detect sequence gaps from the
+   client.
+5. Records the mutation in the `control` table via a `finally` block,
+   so the row is persisted whether the request succeeded or failed.
+
+The control recording is non-blocking: any DB failure is logged and
+swallowed so the response already sent to the client is never invalidated.
+The control row includes the redacted request payload, HTTP method, path,
+outcome (`ok`, `error`, or `exception`), and server-side provenance
+(`session_id` and `sequence_id` from the middleware's own
+`SequenceTracker`).
 
 All data endpoints support bitemporal querying via the optional `as_of`
 parameter (UTC datetime). When provided, the query returns data as it was
@@ -1158,7 +1198,9 @@ There is no `"data"` wrapper. Messages with malformed JSON are dropped by the br
 before forwarding and are counted in the `invalid_messages` metric for the topic.
 
 All data messages carry `session_id` and `sequence_id` provenance fields (see REST section
-above). Clients can use these to detect gaps without server-side replay support.
+above). `WsMessageSchema` inherits from `StrictDataSchema`, so WebSocket control messages
+(auth, subscribe, ping/pong, errors) also carry the same provenance envelope. Clients can
+use these fields to detect gaps without server-side replay support.
 
 #### Candle
 

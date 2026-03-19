@@ -734,6 +734,8 @@ async def test_update_existing_symbols_when_insert_disabled(
                 asset_type="crypto",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 
@@ -795,6 +797,8 @@ async def test_update_existing_alias_exchange_symbol(
                 asset_type="crypto",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 
@@ -811,6 +815,8 @@ async def test_update_existing_alias_exchange_symbol(
                 exchange_symbol="X:BTCOLD",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -863,6 +869,8 @@ async def test_existing_alias_unchanged_when_same_symbol(
                 asset_type="crypto",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 
@@ -879,6 +887,8 @@ async def test_existing_alias_unchanged_when_same_symbol(
                 exchange_symbol="X:BTCUSD",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1240,6 +1250,8 @@ async def test_update_database_creates_capability_rows(
                 asset_type="crypto",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 

@@ -360,7 +360,7 @@ class ExchangeClientBase(ABC):
             Tuple of (order_id, public_id) if successful, None if repository
             is not configured or operation fails.
         """
-        if self.repository is None:
+        if self.repository is None or self._tracker is None:
             return None
         try:
             parts = request.symbol.split("-") if "-" in request.symbol else [request.symbol]
@@ -376,10 +376,10 @@ class ExchangeClientBase(ABC):
                 exchange=self.exchange_name,
                 base=base,
                 quote=quote,
-                session_id=self._tracker.session_id if self._tracker else "",
-                sequence_id=self._tracker.next_sequence("db.instruments") if self._tracker else 0,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence("instruments"),
             )
-            seq = self._tracker.next_sequence("db.orders") if self._tracker else 0
+            seq = self._tracker.next_sequence("orders")
             return await self.repository.insert_order(
                 instrument_id=instrument_id,
                 client_order_id=order.client_order_id,
@@ -391,7 +391,7 @@ class ExchangeClientBase(ABC):
                 size=order.amount,
                 status=order.status.value,
                 time_in_force=None,
-                session_id=self._tracker.session_id if self._tracker else "",
+                session_id=self._tracker.session_id,
                 sequence_id=seq,
             )
         except SQLAlchemyError as e:
@@ -421,17 +421,17 @@ class ExchangeClientBase(ABC):
             New order version's integer id, or None if repository is
             not configured or operation fails.
         """
-        if self.repository is None:
+        if self.repository is None or self._tracker is None:
             return None
         try:
-            seq = self._tracker.next_sequence("db.orders") if self._tracker else 0
+            seq = self._tracker.next_sequence("orders")
             return await self.repository.update_order(
                 order_id=db_order_id,
                 status=status.value,
                 updated_at=datetime.now(tz=UTC),
                 exchange_order_id=exchange_order_id,
                 error=error,
-                session_id=self._tracker.session_id if self._tracker else "",
+                session_id=self._tracker.session_id,
                 sequence_id=seq,
             )
         except SQLAlchemyError as e:
@@ -454,10 +454,10 @@ class ExchangeClientBase(ABC):
             order_public_id: Logical order identity (stable across versions).
             execution: Execution details including price, size, and fees.
         """
-        if self.repository is None:
+        if self.repository is None or self._tracker is None:
             return
         try:
-            seq = self._tracker.next_sequence("db.executions") if self._tracker else 0
+            seq = self._tracker.next_sequence("executions")
             await self.repository.insert_execution(
                 order_id=db_order_id,
                 order_public_id=order_public_id,
@@ -470,7 +470,7 @@ class ExchangeClientBase(ABC):
                 fee_asset="USD",
                 exec_id=execution.exec_id,
                 trade_id=str(execution.trade_id) if execution.trade_id is not None else None,
-                session_id=self._tracker.session_id if self._tracker else "",
+                session_id=self._tracker.session_id,
                 sequence_id=seq,
             )
         except SQLAlchemyError as e:

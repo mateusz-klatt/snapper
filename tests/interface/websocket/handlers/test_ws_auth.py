@@ -70,6 +70,7 @@ from snapper.interface.websocket.schemas import WSGetTopicSuggestionsRequest
 from snapper.interface.websocket.schemas import WSReauthRequest
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import app
 from snapper.server.app import create_app
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
@@ -746,6 +747,12 @@ class ConnectionManagerStub:
         self.attached_bridge: Any | None = None
         self.connected: list[tuple[Any, bool]] = []
         self.disconnected: list[Any] = []
+        self._tracker = SequenceTracker()
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Provide sequence tracker for provenance stamping."""
+        return self._tracker
 
     def attach_bridge(self, bridge: Any) -> None:
         """Attach ZMQ bridge to manager."""
@@ -966,6 +973,7 @@ async def test_handshake_success_dispatches_and_sends_payload(
         user: Any,
         ws_payload: Any,
         ws_auth_manager: Any,
+        db_url: str | None = None,
     ) -> None:
         send_calls.append(ws_payload)
 
@@ -1408,6 +1416,12 @@ class EndpointManagerStub:
         self.attached_bridge: Any | None = None
         self.connected: list[tuple[Any, bool]] = []
         self.disconnected: list[Any] = []
+        self._tracker = SequenceTracker()
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Provide sequence tracker for provenance stamping."""
+        return self._tracker
 
     def attach_bridge(self, bridge: Any) -> None:
         """Attach ZMQ bridge to manager."""
@@ -1512,6 +1526,7 @@ def endpoint_factory(monkeypatch: pytest.MonkeyPatch) -> Any:
             server_port=1234,
             ui_origin="",
             session_domain="",
+            db_url="sqlite+aiosqlite:///test.db",
         )
         monkeypatch.setattr(auth_ws, "get_ws_auth_manager", lambda: auth_instance)
         monkeypatch.setattr(auth_ws, "get_ws_token_service", lambda: token_instance)
@@ -1937,6 +1952,12 @@ class ManagerStub:
         self.active_connections: list[Any] = [object()]
         self._subscriptions: dict[Any, set[str]] = {}
         self.zmq_bridge = BridgeStub()
+        self._tracker = SequenceTracker()
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Provide sequence tracker for provenance stamping."""
+        return self._tracker
 
     def set_subscriptions(self, websocket: Any, topics: set[str]) -> None:
         """Set subscriptions for a WebSocket."""
@@ -2270,6 +2291,12 @@ def mock_ws_token_service() -> MagicMock:
     return service
 
 
+@pytest.fixture
+def tracker() -> SequenceTracker:
+    """Provide a SequenceTracker for provenance stamping."""
+    return SequenceTracker()
+
+
 class TestAuthResult:
     """Tests for AuthResult data class."""
 
@@ -2316,7 +2343,9 @@ class TestCreateDeadlineTasks:
     """Tests for deadline task creation."""
 
     @pytest.mark.asyncio
-    async def test_creates_warning_and_deadline_tasks(self, mock_websocket: MagicMock) -> None:
+    async def test_creates_warning_and_deadline_tasks(
+        self, mock_websocket: MagicMock, tracker: SequenceTracker
+    ) -> None:
         """Create deadline tasks returns both warn and hard tasks.
 
         Given: A WebSocket and future expiration timestamp,
@@ -2324,7 +2353,7 @@ class TestCreateDeadlineTasks:
         Then: Returns both asyncio tasks that can be cancelled.
         """
         exp_timestamp = int((datetime.now(UTC) + timedelta(hours=1)).timestamp())
-        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp)
+        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp, tracker)
         assert isinstance(warn_task, asyncio.Task)
         assert isinstance(hard_task, asyncio.Task)
         warn_task.cancel()
@@ -2335,7 +2364,9 @@ class TestCreateDeadlineTasks:
             await hard_task
 
     @pytest.mark.asyncio
-    async def test_warning_task_sends_reauth_required(self, mock_websocket: MagicMock) -> None:
+    async def test_warning_task_sends_reauth_required(
+        self, mock_websocket: MagicMock, tracker: SequenceTracker
+    ) -> None:
         """Warning task sends reauth_required message.
 
         Given: An expiration timestamp in the past,
@@ -2343,7 +2374,7 @@ class TestCreateDeadlineTasks:
         Then: Sends reauth_required message to WebSocket.
         """
         exp_timestamp = int((datetime.now(UTC) - timedelta(seconds=30)).timestamp())
-        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp)
+        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp, tracker)
         await asyncio.sleep(0.05)
         assert mock_websocket.send_text.called
         sent_data = json.loads(mock_websocket.send_text.call_args_list[0][0][0])
@@ -2356,7 +2387,9 @@ class TestCreateDeadlineTasks:
             await hard_task
 
     @pytest.mark.asyncio
-    async def test_deadline_task_closes_connection(self, mock_websocket: MagicMock) -> None:
+    async def test_deadline_task_closes_connection(
+        self, mock_websocket: MagicMock, tracker: SequenceTracker
+    ) -> None:
         """Deadline task closes connection after grace period.
 
         Given: An expiration well past grace period,
@@ -2366,7 +2399,7 @@ class TestCreateDeadlineTasks:
         exp_timestamp = int(
             (datetime.now(UTC) - REAUTH_GRACE_PERIOD - timedelta(seconds=5)).timestamp()
         )
-        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp)
+        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp, tracker)
         await asyncio.sleep(0.5)
         calls = [call[0][0] for call in mock_websocket.send_text.call_args_list]
         has_expired = any('"type":"auth_expired"' in call for call in calls)
@@ -2390,6 +2423,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate fails with missing session cookie.
 
@@ -2399,7 +2433,7 @@ class TestAuthenticateWebsocket:
         """
         mock_ws_auth_manager.verify_session_cookie.return_value = None
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is False
         mock_websocket.send_text.assert_called()
@@ -2416,6 +2450,7 @@ class TestAuthenticateWebsocket:
         mock_ws_token_service: MagicMock,
         mock_user: UserProfile,
         mock_token_data: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate fails on client timeout.
 
@@ -2429,7 +2464,7 @@ class TestAuthenticateWebsocket:
         )
         mock_websocket.receive_text.side_effect = TimeoutError()
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is False
         calls = mock_websocket.send_text.call_args_list
@@ -2445,6 +2480,7 @@ class TestAuthenticateWebsocket:
         mock_ws_token_service: MagicMock,
         mock_user: UserProfile,
         mock_token_data: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate fails with invalid JSON message.
 
@@ -2458,7 +2494,7 @@ class TestAuthenticateWebsocket:
         )
         mock_websocket.receive_text.return_value = "not valid json{"
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is False
         calls = mock_websocket.send_text.call_args_list
@@ -2474,6 +2510,7 @@ class TestAuthenticateWebsocket:
         mock_ws_token_service: MagicMock,
         mock_user: UserProfile,
         mock_token_data: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate fails with invalid message type.
 
@@ -2487,7 +2524,7 @@ class TestAuthenticateWebsocket:
         )
         mock_websocket.receive_text.return_value = json.dumps({"type": "subscribe"})
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid auth payload")
@@ -2500,6 +2537,7 @@ class TestAuthenticateWebsocket:
         mock_ws_token_service: MagicMock,
         mock_user: UserProfile,
         mock_token_data: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate fails when ws_token missing.
 
@@ -2513,7 +2551,7 @@ class TestAuthenticateWebsocket:
         )
         mock_websocket.receive_text.return_value = json.dumps({"type": "authenticate"})
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid auth payload")
@@ -2526,6 +2564,7 @@ class TestAuthenticateWebsocket:
         mock_ws_token_service: MagicMock,
         mock_user: UserProfile,
         mock_token_data: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate fails with already-used ws_token.
 
@@ -2542,7 +2581,7 @@ class TestAuthenticateWebsocket:
         )
         mock_ws_token_service.verify.side_effect = WsTokenAlreadyUsedError("Token replay")
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="ws_token replay")
@@ -2555,6 +2594,7 @@ class TestAuthenticateWebsocket:
         mock_ws_token_service: MagicMock,
         mock_user: UserProfile,
         mock_token_data: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate fails with invalid ws_token.
 
@@ -2571,7 +2611,7 @@ class TestAuthenticateWebsocket:
         )
         mock_ws_token_service.verify.side_effect = WsTokenError("Invalid token")
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid ws_token")
@@ -2585,6 +2625,7 @@ class TestAuthenticateWebsocket:
         mock_user: UserProfile,
         mock_token_data: MagicMock,
         mock_ws_payload: WsTokenPayload,
+        tracker: SequenceTracker,
     ) -> None:
         """Authenticate succeeds with valid credentials.
 
@@ -2601,7 +2642,7 @@ class TestAuthenticateWebsocket:
         )
         mock_ws_token_service.verify.return_value = mock_ws_payload
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
         assert result.success is True
         assert result.user == mock_user
@@ -2628,6 +2669,7 @@ class TestHandleReauth:
         mock_user: UserProfile,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Reauth fails with missing session state.
 
@@ -2643,6 +2685,7 @@ class TestHandleReauth:
             mock_user,
             mock_ws_auth_manager,
             mock_ws_token_service,
+            tracker,
         )
         assert result is False
         mock_websocket.close.assert_called_with(code=4401, reason="Missing session state")
@@ -2654,6 +2697,7 @@ class TestHandleReauth:
         mock_user: UserProfile,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Reauth fails on ws_token replay attack.
 
@@ -2672,6 +2716,7 @@ class TestHandleReauth:
             mock_user,
             mock_ws_auth_manager,
             mock_ws_token_service,
+            tracker,
         )
         assert result is False
         mock_websocket.close.assert_called_with(code=4401, reason="ws_token replay")
@@ -2683,6 +2728,7 @@ class TestHandleReauth:
         mock_user: UserProfile,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
+        tracker: SequenceTracker,
     ) -> None:
         """Reauth fails with invalid ws_token.
 
@@ -2701,6 +2747,7 @@ class TestHandleReauth:
             mock_user,
             mock_ws_auth_manager,
             mock_ws_token_service,
+            tracker,
         )
         assert result is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid ws_token")
@@ -2713,6 +2760,7 @@ class TestHandleReauth:
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
         mock_ws_payload: WsTokenPayload,
+        tracker: SequenceTracker,
     ) -> None:
         """Reauth succeeds with valid new token.
 
@@ -2731,6 +2779,7 @@ class TestHandleReauth:
             mock_user,
             mock_ws_auth_manager,
             mock_ws_token_service,
+            tracker,
         )
         assert result is True
         mock_ws_token_service.mark_used.assert_called_once_with(mock_ws_payload)
@@ -2775,7 +2824,9 @@ class TestDeadlineTasksErrorHandling:
     """Tests for deadline task error handling."""
 
     @pytest.mark.asyncio
-    async def test_warning_task_handles_send_error(self, mock_websocket: MagicMock) -> None:
+    async def test_warning_task_handles_send_error(
+        self, mock_websocket: MagicMock, tracker: SequenceTracker
+    ) -> None:
         """Warning task handles send_text error gracefully.
 
         Given: A WebSocket that raises on send_text,
@@ -2784,7 +2835,7 @@ class TestDeadlineTasksErrorHandling:
         """
         exp_timestamp = int((datetime.now(UTC) - timedelta(seconds=30)).timestamp())
         mock_websocket.send_text = AsyncMock(side_effect=RuntimeError("Connection closed"))
-        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp)
+        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp, tracker)
         await asyncio.sleep(0.05)
         assert warn_task.done()
         assert warn_task.exception() is None
@@ -2793,7 +2844,9 @@ class TestDeadlineTasksErrorHandling:
             await hard_task
 
     @pytest.mark.asyncio
-    async def test_deadline_task_handles_send_error(self, mock_websocket: MagicMock) -> None:
+    async def test_deadline_task_handles_send_error(
+        self, mock_websocket: MagicMock, tracker: SequenceTracker
+    ) -> None:
         """Deadline task handles send_text error gracefully.
 
         Given: A WebSocket that raises on send_text,
@@ -2804,7 +2857,7 @@ class TestDeadlineTasksErrorHandling:
             (datetime.now(UTC) - REAUTH_GRACE_PERIOD - timedelta(seconds=5)).timestamp()
         )
         mock_websocket.send_text = AsyncMock(side_effect=RuntimeError("Connection closed"))
-        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp)
+        warn_task, hard_task = create_deadline_tasks(mock_websocket, exp_timestamp, tracker)
         await asyncio.sleep(0.5)
         assert hard_task.done()
         assert hard_task.exception() is None

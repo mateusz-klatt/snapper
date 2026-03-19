@@ -73,6 +73,8 @@ async def test_update_database_creates_and_updates_mappings(
                 asset_type="forex",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 
@@ -89,6 +91,8 @@ async def test_update_database_creates_and_updates_mappings(
                 exchange_symbol="EUR_PLN_OLD",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         _spid_eur_pln = session.execute(
@@ -104,6 +108,8 @@ async def test_update_database_creates_and_updates_mappings(
                 exchange_symbol="EURNOT",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -218,6 +224,8 @@ async def test_update_database_skips_when_mapping_unchanged(
                 asset_type="crypto",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 
@@ -234,6 +242,8 @@ async def test_update_database_skips_when_mapping_unchanged(
                 exchange_symbol="EUR_PLN",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         _spid_eur_pln = session.execute(
@@ -249,6 +259,8 @@ async def test_update_database_skips_when_mapping_unchanged(
                 exchange_symbol="EURPLN",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()

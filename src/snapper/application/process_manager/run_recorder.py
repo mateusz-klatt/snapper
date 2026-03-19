@@ -72,7 +72,7 @@ class ProcessRunRecorder:
                 started_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
                 session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence("db.process_runs"),
+                sequence_id=self._tracker.next_sequence("process_runs"),
             )
             session.add(run)
             await session.commit()
@@ -125,7 +125,7 @@ class ProcessRunRecorder:
                 timestamp=now,
                 known_to=KNOWN_TO_MAX,
                 session_id=process_run.session_id,
-                sequence_id=self._tracker.next_sequence("db.process_runs"),
+                sequence_id=self._tracker.next_sequence("process_runs"),
             )
             session.add(new_run)
             await session.commit()

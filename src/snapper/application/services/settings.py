@@ -232,7 +232,7 @@ class SettingsService:
                     "is_encrypted": is_encrypted,
                     "updated_by": updated_by,
                     "session_id": self._tracker.session_id,
-                    "sequence_id": self._tracker.next_sequence("db.settings"),
+                    "sequence_id": self._tracker.next_sequence("settings"),
                 },
                 bus_time=now,
             )

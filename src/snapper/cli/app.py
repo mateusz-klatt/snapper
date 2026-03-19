@@ -767,7 +767,7 @@ async def _rotate_single_setting(
                     "is_encrypted": setting.is_encrypted,
                     "updated_by": setting.updated_by,
                     "session_id": tracker.session_id,
-                    "sequence_id": tracker.next_sequence("db.settings"),
+                    "sequence_id": tracker.next_sequence("settings"),
                 },
                 bus_time=now,
             )

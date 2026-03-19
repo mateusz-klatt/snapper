@@ -260,6 +260,8 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     mock_repo.upsert_instrument = AsyncMock(return_value=42)
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
+    tracker = SequenceTracker()
+    client.set_tracker(tracker)
     request = ExchangeOrderRequest(
         client_order_id="client_123",
         symbol="BTC-USD",
@@ -290,8 +292,8 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     assert call_kwargs["exchange"] == "dummy"
     assert call_kwargs["base"] == "BTC"
     assert call_kwargs["quote"] == "USD"
-    assert call_kwargs["session_id"] == ""
-    assert call_kwargs["sequence_id"] == 0
+    assert call_kwargs["session_id"] == tracker.session_id
+    assert call_kwargs["sequence_id"] >= 1
     mock_repo.insert_order.assert_awaited_once()
 
 
@@ -314,6 +316,7 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
     mock_repo.upsert_instrument = AsyncMock(return_value=42)
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     request = ExchangeOrderRequest(
         client_order_id="client_123",
         symbol="BTC-USD",
@@ -359,6 +362,8 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     mock_repo.upsert_instrument = AsyncMock(return_value=42)
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
+    tracker = SequenceTracker()
+    client.set_tracker(tracker)
     request = ExchangeOrderRequest(
         client_order_id="client_456",
         symbol="BTCUSD",
@@ -389,8 +394,8 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     assert call_kwargs["exchange"] == "dummy"
     assert call_kwargs["base"] == "BTCUSD"
     assert call_kwargs["quote"] == "USD"
-    assert call_kwargs["session_id"] == ""
-    assert call_kwargs["sequence_id"] == 0
+    assert call_kwargs["session_id"] == tracker.session_id
+    assert call_kwargs["sequence_id"] >= 1
 
 
 @pytest.mark.asyncio()
@@ -409,6 +414,7 @@ async def test_log_order_to_db_handles_exception(_mock_resolve: AsyncMock) -> No
     mock_repo = MagicMock(spec=Repository)
     mock_repo.upsert_instrument = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     request = ExchangeOrderRequest(
         client_order_id="client_123",
         symbol="BTC-USD",
@@ -462,6 +468,7 @@ async def test_log_order_update_to_db_returns_new_order_id() -> None:
     mock_repo = MagicMock(spec=Repository)
     mock_repo.update_order = AsyncMock(return_value=99)
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     result = await client._log_order_update_to_db(
         db_order_id=42,
         status=OrderStatusEnum.FILLED,
@@ -511,6 +518,7 @@ async def test_log_order_update_to_db_handles_exception() -> None:
     mock_repo = MagicMock(spec=Repository)
     mock_repo.update_order = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     result = await client._log_order_update_to_db(
         db_order_id=42,
         status=OrderStatusEnum.FILLED,
@@ -554,6 +562,7 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     mock_repo = MagicMock(spec=Repository)
     mock_repo.insert_execution = AsyncMock()
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     execution = ExecutionUpdate(
         order_id="order_123",
         exec_type="trade",
@@ -595,6 +604,7 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
     mock_repo = MagicMock(spec=Repository)
     mock_repo.insert_execution = AsyncMock()
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     execution = ExecutionUpdate(
         order_id="order_123",
         exec_type="trade",
@@ -631,6 +641,7 @@ async def test_log_execution_to_db_partial_fill_status() -> None:
     mock_repo = MagicMock(spec=Repository)
     mock_repo.insert_execution = AsyncMock()
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     execution = ExecutionUpdate(
         order_id="order_456",
         exec_type="trade",
@@ -662,6 +673,7 @@ async def test_log_execution_to_db_handles_exception() -> None:
     mock_repo = MagicMock(spec=Repository)
     mock_repo.insert_execution = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
     execution = ExecutionUpdate(
         order_id="order_123",
         exec_type="trade",

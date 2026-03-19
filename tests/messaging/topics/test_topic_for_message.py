@@ -1,4 +1,4 @@
-"""Tests for topic_for_message() and heartbeat_topic_from_component()."""
+"""Tests for topic_for_message(), table_for_message(), and heartbeat_topic_from_component()."""
 
 from datetime import UTC
 from datetime import datetime
@@ -22,6 +22,7 @@ from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.data import TradeData
 from snapper.messaging.topics.builders import heartbeat_topic_from_component
+from snapper.messaging.topics.builders import table_for_message
 from snapper.messaging.topics.builders import topic_for_message
 
 
@@ -326,3 +327,151 @@ class TestHeartbeatTopicFromComponent:
         assert (
             heartbeat_topic_from_component("executor.kraken") == "system.heartbeats.executor.kraken"
         )
+
+
+class TestTableForMessage:
+    """Tests for table_for_message() dispatch function."""
+
+    def test_candle_data(self) -> None:
+        """CandleData maps to candles table."""
+        data = CandleData(
+            exchange="kraken",
+            instrument="BTC-USD",
+            timeframe="1m",
+            open=100.0,
+            high=110.0,
+            low=90.0,
+            close=105.0,
+            volume=500.0,
+            open_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        assert table_for_message(data) == "candles"
+
+    def test_tick_data(self) -> None:
+        """TickData maps to candles table."""
+        data = TickData(exchange="kraken", instrument="BTC-USD", volume=1.0)
+        assert table_for_message(data) == "candles"
+
+    def test_trade_data(self) -> None:
+        """TradeData maps to trades table."""
+        data = TradeData(exchange="zonda", instrument="BTC-PLN", price=200000.0, volume=0.5)
+        assert table_for_message(data) == "trades"
+
+    def test_order_request_data(self) -> None:
+        """OrderRequestData maps to orders table."""
+        data = OrderRequestData(
+            strategy_id="strat-1",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            side="buy",
+            order_type="limit",
+            quantity=1.0,
+            price=50000.0,
+            client_order_id="ord-001",
+        )
+        assert table_for_message(data) == "orders"
+
+    def test_order_cancel_data(self) -> None:
+        """OrderCancelData maps to orders table."""
+        data = OrderCancelData(
+            exchange="kraken",
+            instrument="ETH-USD",
+            exchange_order_id="exch-123",
+            client_order_id="ord-001",
+        )
+        assert table_for_message(data) == "orders"
+
+    def test_order_replace_data(self) -> None:
+        """OrderReplaceData maps to orders table."""
+        data = OrderReplaceData(
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="exch-456",
+            client_order_id="ord-002",
+            new_price=51000.0,
+        )
+        assert table_for_message(data) == "orders"
+
+    def test_order_data(self) -> None:
+        """OrderData maps to orders table."""
+        data = OrderData(
+            client_order_id="ord-001",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="submitted",
+            order_type="limit",
+            size=1.0,
+            filled_size=0.0,
+            price=50000.0,
+        )
+        assert table_for_message(data) == "orders"
+
+    def test_order_event_data(self) -> None:
+        """OrderEventData maps to orders table."""
+        data = OrderEventData(
+            exchange_order_id="exch-789",
+            client_order_id="ord-003",
+            exchange="kraken",
+            instrument="BTC-USD",
+            event="cancelled",
+        )
+        assert table_for_message(data) == "orders"
+
+    def test_execution_data(self) -> None:
+        """ExecutionData maps to executions table."""
+        data = ExecutionData(
+            client_order_id="ord-001",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            size=1.0,
+            price=50000.0,
+            fee=5.0,
+            fee_asset="USD",
+            status="filled",
+        )
+        assert table_for_message(data) == "executions"
+
+    def test_signal_data(self) -> None:
+        """SignalData maps to signals table."""
+        data = SignalData(
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            strength=0.8,
+            reason="breakout",
+        )
+        assert table_for_message(data) == "signals"
+
+    def test_heartbeat_data(self) -> None:
+        """HeartbeatData maps to telemetry table."""
+        data = HeartbeatData(component="executor.kraken", sequence=1, status="healthy", lag_ms=5)
+        assert table_for_message(data) == "telemetry"
+
+    def test_setting_changed_data(self) -> None:
+        """SettingChangedData maps to settings table."""
+        data = SettingChangedData(key="some.setting", value="val", category="general")
+        assert table_for_message(data) == "settings"
+
+    def test_symbol_alias_update_data(self) -> None:
+        """SymbolAliasUpdateData maps to symbol_aliases table."""
+        data = SymbolAliasUpdateData()
+        assert table_for_message(data) == "symbol_aliases"
+
+    def test_replay_start_data(self) -> None:
+        """ReplayStartData maps to control table."""
+        data = ReplayStartData()
+        assert table_for_message(data) == "control"
+
+    def test_replay_end_data(self) -> None:
+        """ReplayEndData maps to control table."""
+        data = ReplayEndData()
+        assert table_for_message(data) == "control"
+
+    def test_unknown_type_raises(self) -> None:
+        """Unknown StrictDataSchema subclass raises ValueError."""
+        data = StrictDataSchema(type="unknown_thing")
+        with pytest.raises(ValueError, match="No table mapping"):
+            table_for_message(data)

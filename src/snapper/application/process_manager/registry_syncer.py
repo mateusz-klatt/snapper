@@ -30,7 +30,7 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
-_SETTINGS_TOPIC = "db.settings"
+_SETTINGS_TOPIC = "settings"
 
 
 class ProcessRegistrySyncer:

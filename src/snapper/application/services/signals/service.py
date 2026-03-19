@@ -31,17 +31,66 @@ class SignalReadService:
         self.settings = get_settings()
         self.repo = get_repository(self.settings.db_url)
 
+    async def _resolve_instrument_id(
+        self,
+        signal: StrategySignal,
+        exchange: str,
+        tracker: SequenceTracker,
+    ) -> int | None:
+        """Look up or lazily create the instrument row for a signal.
+
+        Args:
+            signal: Signal carrying the instrument symbol.
+            exchange: Exchange name to look up / create for.
+            tracker: SequenceTracker for provenance on upsert.
+
+        Returns:
+            Integer instrument id, or ``None`` when the symbol cannot
+            be resolved.
+        """
+        async with self.repo.session() as session:
+            i_ts, i_kt = where_active(Instrument)
+            inst_query = await session.execute(
+                select(Instrument).where(
+                    Instrument.symbol == signal.instrument,
+                    Instrument.exchange == exchange,
+                    i_ts,
+                    i_kt,
+                )
+            )
+            inst = inst_query.scalars().first()
+        if inst:
+            return inst.id
+        parts = signal.instrument.split("-") if "-" in signal.instrument else [signal.instrument]
+        base = parts[0]
+        quote = parts[1] if len(parts) > 1 else "USD"
+        symbol_pid = await resolve_symbol_public_id(self.repo, signal.instrument)
+        if symbol_pid is None:
+            logger.error(f"No active Symbol row for {signal.instrument}")
+            return None
+        return await self.repo.upsert_instrument(
+            symbol_public_id=symbol_pid,
+            symbol=signal.instrument,
+            exchange=exchange,
+            base=base,
+            quote=quote,
+            tick_size=0.01,
+            lot_size=0.0001,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("instruments"),
+        )
+
     async def store_signal(
         self,
         signal: StrategySignal,
         exchange: str,
+        session_id: str,
+        sequence_id: int,
+        tracker: SequenceTracker,
         strategy_name: str | None = None,
         price: float | None = None,
-        session_id: str | None = None,
-        sequence_id: int | None = None,
         public_id: str | None = None,
         timestamp: datetime | None = None,
-        tracker: SequenceTracker | None = None,
     ) -> str:
         """Store a trading signal in the database.
 
@@ -64,44 +113,10 @@ class SignalReadService:
             Signal event UUID or empty string on error.
         """
         try:
+            inst_id = await self._resolve_instrument_id(signal, exchange, tracker)
+            if inst_id is None:
+                return ""
             async with self.repo.session() as session:
-                i_ts, i_kt = where_active(Instrument)
-                inst_query = await session.execute(
-                    select(Instrument).where(
-                        Instrument.symbol == signal.instrument,
-                        Instrument.exchange == exchange,
-                        i_ts,
-                        i_kt,
-                    )
-                )
-                inst = inst_query.scalars().first()
-                if not inst:
-                    parts = (
-                        signal.instrument.split("-")
-                        if "-" in signal.instrument
-                        else [signal.instrument]
-                    )
-                    base = parts[0]
-                    quote = parts[1] if len(parts) > 1 else "USD"
-                    symbol_pid = await resolve_symbol_public_id(self.repo, signal.instrument)
-                    if symbol_pid is None:
-                        logger.error(f"No active Symbol row for {signal.instrument}")
-                        return ""
-                    inst_id = await self.repo.upsert_instrument(
-                        symbol_public_id=symbol_pid,
-                        symbol=signal.instrument,
-                        exchange=exchange,
-                        base=base,
-                        quote=quote,
-                        tick_size=0.01,
-                        lot_size=0.0001,
-                        session_id=tracker.session_id if tracker is not None else "",
-                        sequence_id=(
-                            tracker.next_sequence("db.instruments") if tracker is not None else 0
-                        ),
-                    )
-                else:
-                    inst_id = inst.id
                 init_kwargs: dict[str, Any] = {
                     "instrument_id": inst_id,
                     "timestamp": timestamp or datetime.now(UTC),
@@ -111,8 +126,8 @@ class SignalReadService:
                     "reason": signal.reason,
                     "strategy_name": strategy_name,
                     "price": price,
-                    "session_id": session_id or "",
-                    "sequence_id": sequence_id or 0,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
                 }
                 if public_id is not None:
                     init_kwargs["public_id"] = public_id

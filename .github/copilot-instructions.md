@@ -28,6 +28,13 @@ the complete quality gate using the consolidated Makefile targets before creatin
 - Put rationale, guidance, and decisions into docstrings (module/class/function/test pydoc)
 - Enforced via `make check-no-comments` (checks COMMENT tokens; `#` inside strings/docstrings is allowed)
 
+**Test Warnings (MANDATORY):**
+
+- Tests MUST produce ZERO pytest warnings (RuntimeWarning, DeprecationWarning, etc.)
+- Common pitfall: `AsyncMock()` makes ALL attributes async, including synchronous methods like `session.add()`. Fix: `AsyncMock(add=MagicMock())` for synchronous methods on async mocks.
+- Run `python -m pytest tests/ -W error::RuntimeWarning` to verify no coroutine warnings.
+- Warnings degrade signal quality and mask real issues. Fix immediately, never leave for later.
+
 **Language Requirements (MANDATORY):**
 
 - Keep all content inside source code files (identifiers, docstrings, comments, log messages, UI strings, CLI output, runtime content) in English.

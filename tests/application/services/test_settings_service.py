@@ -282,6 +282,8 @@ class TestSettingsService:
                     category="test",
                     is_encrypted=False,
                     timestamp=datetime.now(UTC),
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             await session.commit()
@@ -495,6 +497,8 @@ class TestSettingsService:
                     category="test",
                     is_encrypted=False,
                     timestamp=datetime.now(UTC),
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             await session.commit()
@@ -565,6 +569,8 @@ class TestSettingsService:
                     category="auth",
                     is_encrypted=False,
                     timestamp=datetime.now(UTC),
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             )
             await session.commit()

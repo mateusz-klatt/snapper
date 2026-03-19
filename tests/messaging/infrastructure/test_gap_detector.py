@@ -8,28 +8,44 @@ from snapper.messaging.infrastructure.gap_detector import GapDetector
 class TestGapDetector:
     """Tests for GapDetector sequence tracking and gap reporting."""
 
-    def test_skip_when_session_id_empty(self) -> None:
-        """Check is skipped when session_id is empty.
+    def test_reject_when_session_id_empty(self) -> None:
+        """Unstamped message with empty session_id is rejected with warning.
 
         Given: A GapDetector,
         When: Checking with empty session_id,
-        Then: No state is initialized and stats remain zero.
+        Then: Returns False, increments rejected_unstamped, logs warning.
         """
-        gd = GapDetector()
-        gd.check("topic.a", "", 1)
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="WARNING")
+        try:
+            gd = GapDetector()
+            result = gd.check("topic.a", "", 1)
+        finally:
+            logger.remove(sink_id)
+        assert result is False
+        assert gd.stats.rejected_unstamped == 1
         assert gd.stats.gaps_detected == 0
         assert gd.stats.session_resets == 0
+        assert any("Rejected unstamped" in m for m in messages)
 
-    def test_skip_when_sequence_id_zero(self) -> None:
-        """Check is skipped when sequence_id is 0.
+    def test_reject_when_sequence_id_zero(self) -> None:
+        """Unstamped message with sequence_id 0 is rejected with warning.
 
         Given: A GapDetector,
         When: Checking with sequence_id of 0,
-        Then: No state is initialized and stats remain zero.
+        Then: Returns False, increments rejected_unstamped, logs warning.
         """
-        gd = GapDetector()
-        gd.check("topic.a", "session-abc", 0)
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="WARNING")
+        try:
+            gd = GapDetector()
+            result = gd.check("topic.a", "session-abc", 0)
+        finally:
+            logger.remove(sink_id)
+        assert result is False
+        assert gd.stats.rejected_unstamped == 1
         assert gd.stats.gaps_detected == 0
+        assert any("Rejected unstamped" in m for m in messages)
 
     def test_first_message_initializes_state(self) -> None:
         """First message on a new topic initializes tracking state.

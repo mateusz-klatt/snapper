@@ -256,6 +256,8 @@ def test_get_last_update_timestamp_handles_invalid_value(
                 category="system",
                 description="Invalid value for testing",
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -815,6 +817,8 @@ def test_get_last_update_timestamp_returns_none_for_null_value(
                 category="system",
                 description="Null value for testing",
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -841,6 +845,8 @@ def test_get_last_update_timestamp_returns_none_for_empty_value(
                 category="system",
                 description="Empty value for testing",
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -862,7 +868,7 @@ def test_upsert_symbol_creates_new_entry(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_symbol(
-            session, "BTC-USD", "BTC", "USD", "crypto", now
+            session, "BTC-USD", "BTC", "USD", "crypto", now, session_id="", sequence_id=0
         )
         session.commit()
     assert isinstance(result, str) and len(result) == 36
@@ -898,6 +904,8 @@ def test_upsert_symbol_updates_base_currency(
                 asset_type="crypto",
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -905,7 +913,7 @@ def test_upsert_symbol_updates_base_currency(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_symbol(
-            session, "BTC-USD", "XBT", "USD", "crypto", update_time
+            session, "BTC-USD", "XBT", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
         session.commit()
     assert isinstance(result, str) and len(result) == 36
@@ -943,6 +951,8 @@ def test_upsert_symbol_updates_quote_currency(
                 asset_type="crypto",
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -950,7 +960,7 @@ def test_upsert_symbol_updates_quote_currency(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_symbol(
-            session, "BTC-USD", "BTC", "USDT", "crypto", update_time
+            session, "BTC-USD", "BTC", "USDT", "crypto", update_time, session_id="", sequence_id=0
         )
         session.commit()
     assert isinstance(result, str) and len(result) == 36
@@ -988,6 +998,8 @@ def test_upsert_symbol_updates_asset_type(
                 asset_type="crypto",
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -995,7 +1007,7 @@ def test_upsert_symbol_updates_asset_type(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_symbol(
-            session, "EUR-USD", "EUR", "USD", "forex", update_time
+            session, "EUR-USD", "EUR", "USD", "forex", update_time, session_id="", sequence_id=0
         )
         session.commit()
     assert isinstance(result, str) and len(result) == 36
@@ -1033,6 +1045,8 @@ def test_upsert_symbol_preserves_timestamp_when_unchanged(
                 asset_type="crypto",
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1040,7 +1054,7 @@ def test_upsert_symbol_preserves_timestamp_when_unchanged(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_symbol(
-            session, "BTC-USD", "BTC", "USD", "crypto", update_time
+            session, "BTC-USD", "BTC", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
         session.commit()
     assert isinstance(result, str) and len(result) == 36
@@ -1070,6 +1084,8 @@ def _seed_catalog(updater: DummySymbolUpdater, native_symbol: str, now: datetime
             asset_type="crypto",
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         session.add(sym)
         session.flush()
@@ -1094,7 +1110,16 @@ def test_upsert_capability_creates_new_entry(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, True, "kraken_updater", "Ticker list", now
+            session,
+            _spid,
+            "kraken",
+            True,
+            True,
+            "kraken_updater",
+            "Ticker list",
+            now,
+            session_id="",
+            sequence_id=0,
         )
         session.commit()
     assert result == "created"
@@ -1137,6 +1162,8 @@ def test_upsert_capability_updates_can_trade(
                 reason=None,
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1144,7 +1171,16 @@ def test_upsert_capability_updates_can_trade(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, True, "seed", None, update_time
+            session,
+            _spid,
+            "kraken",
+            True,
+            True,
+            "seed",
+            None,
+            update_time,
+            session_id="",
+            sequence_id=0,
         )
         session.commit()
     assert result == "updated"
@@ -1186,6 +1222,8 @@ def test_upsert_capability_updates_can_market_data(
                 reason=None,
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1193,7 +1231,16 @@ def test_upsert_capability_updates_can_market_data(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, True, "seed", None, update_time
+            session,
+            _spid,
+            "kraken",
+            True,
+            True,
+            "seed",
+            None,
+            update_time,
+            session_id="",
+            sequence_id=0,
         )
         session.commit()
     assert result == "updated"
@@ -1235,6 +1282,8 @@ def test_upsert_capability_updates_source(
                 reason=None,
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1242,7 +1291,16 @@ def test_upsert_capability_updates_source(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, True, "kraken_updater", None, update_time
+            session,
+            _spid,
+            "kraken",
+            True,
+            True,
+            "kraken_updater",
+            None,
+            update_time,
+            session_id="",
+            sequence_id=0,
         )
         session.commit()
     assert result == "updated"
@@ -1284,6 +1342,8 @@ def test_upsert_capability_updates_reason(
                 reason=None,
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1291,7 +1351,16 @@ def test_upsert_capability_updates_reason(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, True, "kraken_updater", "WS-only", update_time
+            session,
+            _spid,
+            "kraken",
+            True,
+            True,
+            "kraken_updater",
+            "WS-only",
+            update_time,
+            session_id="",
+            sequence_id=0,
         )
         session.commit()
     assert result == "updated"
@@ -1333,6 +1402,8 @@ def test_upsert_capability_unchanged(
                 reason="Ticker list",
                 created_at=original_time,
                 timestamp=original_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1340,7 +1411,16 @@ def test_upsert_capability_unchanged(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, True, "kraken_updater", "Ticker list", update_time
+            session,
+            _spid,
+            "kraken",
+            True,
+            True,
+            "kraken_updater",
+            "Ticker list",
+            update_time,
+            session_id="",
+            sequence_id=0,
         )
         session.commit()
     assert result == "unchanged"
@@ -1381,6 +1461,8 @@ def _seed_capability(
                 reason=None,
                 created_at=now,
                 timestamp=now,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -1406,7 +1488,13 @@ def test_deactivate_stale_capabilities_deactivates_removed(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
-            session, "kraken", {btc_spid}, "kraken_updater", deactivation_time
+            session,
+            "kraken",
+            {btc_spid},
+            "kraken_updater",
+            deactivation_time,
+            session_id="",
+            next_sequence_fn=lambda: 0,
         )
         session.commit()
     assert count == 1
@@ -1452,7 +1540,13 @@ def test_deactivate_stale_capabilities_leaves_active_untouched(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
-            session, "kraken", {btc_spid, eth_spid}, "kraken_updater", now
+            session,
+            "kraken",
+            {btc_spid, eth_spid},
+            "kraken_updater",
+            now,
+            session_id="",
+            next_sequence_fn=lambda: 0,
         )
         session.commit()
     assert count == 0
@@ -1477,7 +1571,13 @@ def test_deactivate_stale_skips_already_inactive(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
-            session, "kraken", {btc_spid}, "kraken_updater", now
+            session,
+            "kraken",
+            {btc_spid},
+            "kraken_updater",
+            now,
+            session_id="",
+            next_sequence_fn=lambda: 0,
         )
         session.commit()
     assert count == 0
@@ -1502,7 +1602,14 @@ def test_reconcile_capabilities_proceeds_above_threshold(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._reconcile_capabilities(
-            session, "kraken", {btc_spid}, "kraken_updater", now, min_active_ratio=0.5
+            session,
+            "kraken",
+            {btc_spid},
+            "kraken_updater",
+            now,
+            min_active_ratio=0.5,
+            session_id="",
+            next_sequence_fn=lambda: 0,
         )
         session.commit()
     assert count == 1
@@ -1527,7 +1634,14 @@ def test_reconcile_capabilities_skips_below_threshold(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._reconcile_capabilities(
-            session, "kraken", {spids["BTC-USD"]}, "kraken_updater", now, min_active_ratio=0.5
+            session,
+            "kraken",
+            {spids["BTC-USD"]},
+            "kraken_updater",
+            now,
+            min_active_ratio=0.5,
+            session_id="",
+            next_sequence_fn=lambda: 0,
         )
         session.commit()
     assert count == 0
@@ -1560,7 +1674,13 @@ def test_reconcile_capabilities_empty_existing(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._reconcile_capabilities(
-            session, "kraken", {"BTC-USD"}, "kraken_updater", now
+            session,
+            "kraken",
+            {"BTC-USD"},
+            "kraken_updater",
+            now,
+            session_id="",
+            next_sequence_fn=lambda: 0,
         )
         session.commit()
     assert count == 0
@@ -1584,7 +1704,13 @@ def test_deactivate_stale_different_exchange_not_touched(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
-            session, "kraken", set(), "kraken_updater", now
+            session,
+            "kraken",
+            set(),
+            "kraken_updater",
+            now,
+            session_id="",
+            next_sequence_fn=lambda: 0,
         )
         session.commit()
     assert count == 1
@@ -1629,6 +1755,8 @@ def test_close_and_insert_sync_creates_fresh_row_when_no_existing(
                 "source": "test",
                 "reason": None,
                 "created_at": now,
+                "session_id": "test-session",
+                "sequence_id": 1,
             },
             bus_time=now,
         )
@@ -1688,6 +1816,8 @@ def test_close_and_insert_sync_closes_existing_and_inserts_new(
                 "source": "updated",
                 "reason": "test update",
                 "created_at": original_time,
+                "session_id": "test-session",
+                "sequence_id": 2,
             },
             bus_time=update_time,
         )
@@ -1748,7 +1878,9 @@ def test_real_updater_catalog_reingest_same_payload_is_noop(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        SymbolUpdaterService._upsert_symbol(session, "BTC-USD", "BTC", "USD", "crypto", t1)
+        SymbolUpdaterService._upsert_symbol(
+            session, "BTC-USD", "BTC", "USD", "crypto", t1, session_id="", sequence_id=0
+        )
         session.commit()
 
     with updater.repository.get_session() as session:
@@ -1761,7 +1893,9 @@ def test_real_updater_catalog_reingest_same_payload_is_noop(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        SymbolUpdaterService._upsert_symbol(session, "BTC-USD", "BTC", "USD", "crypto", t2)
+        SymbolUpdaterService._upsert_symbol(
+            session, "BTC-USD", "BTC", "USD", "crypto", t2, session_id="", sequence_id=0
+        )
         session.commit()
 
     with updater.repository.get_session() as session:
@@ -1793,7 +1927,9 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result1 = SymbolUpdaterService._upsert_alias(session, _spid, "kraken", "ws", "XBT/USD", t1)
+        result1 = SymbolUpdaterService._upsert_alias(
+            session, _spid, "kraken", "ws", "XBT/USD", t1, session_id="", sequence_id=0
+        )
         session.commit()
     assert result1 == "created"
 
@@ -1816,7 +1952,9 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
-        result2 = SymbolUpdaterService._upsert_alias(session, _spid, "kraken", "ws", "XBT/USD", t2)
+        result2 = SymbolUpdaterService._upsert_alias(
+            session, _spid, "kraken", "ws", "XBT/USD", t2, session_id="", sequence_id=0
+        )
         session.commit()
     assert result2 == "unchanged"
 
@@ -1858,7 +1996,7 @@ def test_real_updater_capability_change_closes_old_inserts_new(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result1 = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, False, "seed", None, t1
+            session, _spid, "kraken", True, False, "seed", None, t1, session_id="", sequence_id=0
         )
         session.commit()
     assert result1 == "created"
@@ -1866,7 +2004,16 @@ def test_real_updater_capability_change_closes_old_inserts_new(
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         result2 = SymbolUpdaterService._upsert_capability(
-            session, _spid, "kraken", True, True, "kraken_updater", "Promoted", t2
+            session,
+            _spid,
+            "kraken",
+            True,
+            True,
+            "kraken_updater",
+            "Promoted",
+            t2,
+            session_id="",
+            sequence_id=0,
         )
         session.commit()
     assert result2 == "updated"

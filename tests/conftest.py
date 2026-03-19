@@ -243,6 +243,7 @@ def _build_mock_settings() -> Mock:
     mock_settings.server_api_only = bootstrap.server_api_only
     mock_settings.zmq_broker_xsub = bootstrap.zmq_broker_xsub
     mock_settings.zmq_broker_xpub = bootstrap.zmq_broker_xpub
+    mock_settings.telemetry_recording_enabled = bootstrap.telemetry_recording_enabled
     mock_settings.kraken_api_key = ""
     mock_settings.kraken_api_secret = ""
     mock_settings.polygon_api_key = ""

@@ -151,8 +151,8 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
     def _build_zonda_snapshot(
         native_symbol: str,
         ticker_data: TickerUpdate,
-        session_id: str = "",
-        sequence_id: int = 0,
+        session_id: str,
+        sequence_id: int,
     ) -> MarketSnapshot:
         """Build a MarketSnapshot from Zonda ticker data.
 
@@ -212,7 +212,7 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
                     native_symbol,
                     ticker_data,
                     session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence("db.snapshots"),
+                    sequence_id=self._tracker.next_sequence("snapshots"),
                 )
                 if len(snapshots) % 10 == 0:
                     logger.debug(f"Collected {len(snapshots)} unique Zonda snapshots...")

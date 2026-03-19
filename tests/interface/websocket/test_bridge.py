@@ -237,7 +237,7 @@ class TestBridgeMissingBranches:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return [b"test_topic", b'{"data": "value"}']
+                return [b"test_topic", b'{"data": "value", "session_id": "s1", "sequence_id": 1}']
             if call_count == 2:
                 raise RuntimeError("Unexpected ZMQ failure")
             raise asyncio.CancelledError()
@@ -1309,14 +1309,17 @@ class TestZmqSubscriptionLoopBranchCoverage:
         """Verify message processing works without metrics.
 
         Given: A bridge with no topic metrics initialized,
-        When: Receiving a valid ZMQ message,
+        When: Receiving a valid stamped ZMQ message,
         Then: Message is forwarded without error.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge._forward_to_clients = AsyncMock()
         topic = "market.candles.BTC"
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
-        valid_message = [topic.encode(), b'{"type": "candle", "open": 100}']
+        valid_message = [
+            topic.encode(),
+            b'{"type": "candle", "open": 100, "session_id": "s1", "sequence_id": 1}',
+        ]
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[valid_message, asyncio.CancelledError()]
         )
@@ -1427,21 +1430,32 @@ class TestCheckGap:
         assert bridge.topic_metrics["market.ticks"].invalid_messages == 0
         assert result is True
 
-    def test_missing_provenance_fields_skips_gap_detection(self) -> None:
-        """Envelope without provenance fields defaults to empty session_id and zero sequence.
+    def test_missing_provenance_fields_rejects_unstamped(self) -> None:
+        """Envelope without provenance fields is rejected as unstamped.
 
         Given: A valid JSON payload without session_id or sequence_id,
         When: _check_gap is called,
-        Then: GapDetector.check receives empty defaults, True is returned (valid JSON).
+        Then: GapDetector.check rejects the message, False is returned,
+            and invalid_messages is incremented.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge.topic_metrics["market.ticks"] = TopicMetricsModel()
         payload = '{"type":"tick"}'
-        with patch.object(bridge._gap_detector, "check") as mock_check:
-            result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", payload)
-        mock_check.assert_called_once_with("market.kraken.BTC-USD.ticks", "", 0)
-        assert bridge.topic_metrics["market.ticks"].invalid_messages == 0
-        assert result is True
+        result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", payload)
+        assert result is False
+        assert bridge.topic_metrics["market.ticks"].invalid_messages == 1
+
+    def test_unstamped_without_metrics_does_not_raise(self) -> None:
+        """Unstamped message without metrics entry does not raise, returns False.
+
+        Given: A valid JSON payload without provenance and no metrics entry,
+        When: _check_gap is called,
+        Then: False is returned without exception.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        payload = '{"type":"tick"}'
+        result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", payload)
+        assert result is False
 
     def test_malformed_json_logs_warning_and_increments_counter(self) -> None:
         """Malformed JSON logs a warning, increments the counter, and returns False.

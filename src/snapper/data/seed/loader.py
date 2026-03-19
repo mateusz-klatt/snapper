@@ -227,7 +227,7 @@ def seed_users(conn: Connection, users: list[SeedUser], tracker: SequenceTracker
                 "timestamp": now,
                 "known_to": _known_to_value(conn),
                 "session_id": tracker.session_id,
-                "sequence_id": tracker.next_sequence("db.users"),
+                "sequence_id": tracker.next_sequence("users"),
             },
         )
     logger.info(f"Seeded {len(users)} users")
@@ -278,7 +278,7 @@ def seed_settings(conn: Connection, settings: list[SeedSetting], tracker: Sequen
                 "timestamp": now,
                 "known_to": _known_to_value(conn),
                 "session_id": tracker.session_id,
-                "sequence_id": tracker.next_sequence("db.settings"),
+                "sequence_id": tracker.next_sequence("settings"),
             },
         )
         inserted += result.rowcount

@@ -172,7 +172,7 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
                     spread_pct=spread_pct,
                     timestamp=datetime.now(UTC),
                     session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence("db.snapshots"),
+                    sequence_id=self._tracker.next_sequence("snapshots"),
                 )
                 snapshots[native_symbol] = snapshot
                 if len(snapshots) % 10 == 0:

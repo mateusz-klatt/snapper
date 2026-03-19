@@ -17,6 +17,7 @@ from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.executors.paper import PaperOrderExecutor
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 def _make_repo_mock() -> MagicMock:
@@ -109,6 +110,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
@@ -135,6 +137,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         request = ExchangeOrderRequest(
             symbol="ETH-USD",
@@ -162,6 +165,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
@@ -185,6 +189,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         result = await client.get_order("paper_order_123", symbol="BTC-USD")
         assert result.id == "paper_order_123"
@@ -202,6 +207,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         result = await client.get_order("non_existent_id", symbol="ETH-USD")
         assert result.id == "non_existent_id"
@@ -218,6 +224,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         result = await client.cancel_order("paper_order_789", symbol="BTC-USD")
         assert result.id == "paper_order_789"
@@ -235,6 +242,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         results = await client.get_orders(symbol="BTC-USD", limit=10)
         assert results == []
@@ -250,6 +258,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         result = await client.get_balance("USD")
         assert "USD" in result
@@ -267,6 +276,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         result = await client.get_balance()
         assert "USD" in result
@@ -284,6 +294,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         result = await client.get_balance("XYZ")
         assert "XYZ" in result
@@ -301,6 +312,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         await client.create_order(
             ExchangeOrderRequest(
@@ -340,6 +352,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo, fill_delay=0.01)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         await client.create_order(
             ExchangeOrderRequest(
@@ -367,6 +380,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         pairs = client.get_supported_pairs()
         assert "BTC/USD" in pairs
         assert "ETH/USD" in pairs
@@ -382,6 +396,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo, fill_delay=0.01)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         await client.create_order(
             ExchangeOrderRequest(
@@ -403,7 +418,9 @@ class TestPaperOrderClientCoverage:
         Then: Client is connected inside context and disconnected after.
         """
         mock_repo = _make_repo_mock()
-        async with PaperExchangeClient(repository=mock_repo) as client:
+        paper_client = PaperExchangeClient(repository=mock_repo)
+        paper_client.set_tracker(SequenceTracker())
+        async with paper_client as client:
             assert client._running
             order = await client.create_order(
                 ExchangeOrderRequest(
@@ -426,6 +443,7 @@ class TestPaperOrderClientCoverage:
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
+        client.set_tracker(SequenceTracker())
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
@@ -449,6 +467,7 @@ class TestPaperMarketDataMethods:
         """
         mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
+        client.set_tracker(SequenceTracker())
         await client.connect()
         ticker = await client.get_ticker("BTC-USD")
         assert ticker.symbol == "BTC-USD"
@@ -466,6 +485,7 @@ class TestPaperMarketDataMethods:
         Then: RuntimeError is raised.
         """
         client = PaperExchangeClient(repository=None)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         with pytest.raises(RuntimeError, match="Repository required"):
             await client.get_ticker("BTC-USD")
@@ -481,6 +501,7 @@ class TestPaperMarketDataMethods:
         """
         mock_repo = SimpleNamespace(get_candles=fake_get_candles)
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
+        client.set_tracker(SequenceTracker())
         await client.connect()
         candles = await client.get_ohlcv("BTC-USD", "1m", limit=10)
         assert len(candles) == 1
@@ -497,6 +518,7 @@ class TestPaperMarketDataMethods:
         Then: RuntimeError is raised.
         """
         client = PaperExchangeClient(repository=None)
+        client.set_tracker(SequenceTracker())
         await client.connect()
         with pytest.raises(RuntimeError, match="Repository required"):
             await client.get_ohlcv("BTC-USD", "1m")
@@ -519,6 +541,7 @@ class TestPaperMarketDataMethods:
             end_time=end_ts,
             source_exchange="kraken",
         )
+        client.set_tracker(SequenceTracker())
         await client.connect()
         async for ticker in client.subscribe_ticker(["BTC-USD"]):
             assert ticker.symbol == "BTC-USD"
@@ -536,6 +559,7 @@ class TestPaperMarketDataMethods:
         """
         mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
+        client.set_tracker(SequenceTracker())
         await client.connect()
         with pytest.raises(ValueError, match="Time range"):
             async for _ in client.subscribe_ticker(["BTC-USD"]):
@@ -556,6 +580,7 @@ class TestPaperMarketDataMethods:
             start_time=time.time() - 3600,
             end_time=time.time(),
         )
+        client.set_tracker(SequenceTracker())
         await client.connect()
         with pytest.raises(ValueError, match="source_exchange required"):
             async for _ in client.subscribe_ticker(["BTC-USD"]):
@@ -579,6 +604,7 @@ class TestPaperMarketDataMethods:
             end_time=end_ts,
             source_exchange="kraken",
         )
+        client.set_tracker(SequenceTracker())
         await client.connect()
         async for candle in client.subscribe_candles(["BTC-USD"], "1m"):
             assert candle.symbol == "BTC-USD"
@@ -603,6 +629,7 @@ class TestPaperMarketDataMethods:
             end_time=end_ts,
             source_exchange="kraken",
         )
+        client.set_tracker(SequenceTracker())
         await client.connect()
         async for trade in client.subscribe_trades(["BTC-USD"]):
             assert trade.symbol == "BTC-USD"
@@ -669,6 +696,7 @@ class TestPaperMarketDataMethods:
             end_time=end_ts,
             source_exchange="kraken",
         )
+        client.set_tracker(SequenceTracker())
         await client.connect()
         candles: list[tuple[str, datetime]] = []
         async for candle in client.subscribe_candles(["BTC-USD", "ETH-USD"], "1m"):
@@ -726,6 +754,7 @@ class TestPaperMarketDataMethods:
             end_time=end_ts,
             source_exchange="kraken",
         )
+        client.set_tracker(SequenceTracker())
         await client.connect()
         trades: list[tuple[str, datetime]] = []
         async for trade in client.subscribe_trades(["BTC-USD", "ETH-USD"]):

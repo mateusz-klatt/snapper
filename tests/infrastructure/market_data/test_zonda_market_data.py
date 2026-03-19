@@ -234,6 +234,8 @@ async def test_update_market_snapshots_persists_results(
         spread=1.0,
         spread_pct=1.0 / 100.5 * 100,
         timestamp=datetime.now(UTC),
+        session_id="test-session",
+        sequence_id=1,
     )
 
     async def fake_collect(_timeout: int) -> list[MarketSnapshot]:

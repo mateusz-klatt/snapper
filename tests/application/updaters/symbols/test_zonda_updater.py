@@ -236,6 +236,8 @@ async def test_update_database_handles_inserts_and_updates(
                 asset_type="crypto",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 
@@ -252,6 +254,8 @@ async def test_update_database_handles_inserts_and_updates(
                 exchange_symbol="BTC-USD-OLD",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -330,6 +334,8 @@ async def test_update_database_skips_unchanged_mapping(
                 asset_type="crypto",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
 
@@ -346,6 +352,8 @@ async def test_update_database_skips_unchanged_mapping(
                 exchange_symbol="BTC-USD",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         _spid_btc_usd = session.execute(
@@ -361,6 +369,8 @@ async def test_update_database_skips_unchanged_mapping(
                 exchange_symbol="BTC/USD",
                 created_at=original_timestamp,
                 timestamp=original_timestamp,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()
@@ -542,6 +552,8 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 asset_type="crypto",
                 created_at=seed_time,
                 timestamp=seed_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.flush()
@@ -555,6 +567,8 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 exchange_symbol="OLD",
                 created_at=seed_time,
                 timestamp=seed_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         _spid_btc_usd = session.execute(
@@ -570,6 +584,8 @@ async def test_update_database_updates_existing(monkeypatch: pytest.MonkeyPatch)
                 exchange_symbol="OLD/USDT",
                 created_at=seed_time,
                 timestamp=seed_time,
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         session.commit()

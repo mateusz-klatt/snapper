@@ -62,6 +62,18 @@ vi.mock('./auth', () => ({
   ),
 }))
 
+let mockSeqCounter = 0
+
+vi.mock('uuid', () => ({
+  v7: vi.fn(() => `00000000-0000-7000-8000-${String(++mockSeqCounter).padStart(12, '0')}`),
+}))
+vi.mock('../sequenceTracker', () => ({
+  getTracker: vi.fn(() => ({
+    sessionId: 'test-session-id',
+    nextSequence: vi.fn(() => ++mockSeqCounter),
+  })),
+}))
+
 class MockWebSocket {
   static readonly CONNECTING = 0
   static readonly OPEN = 1
@@ -94,6 +106,7 @@ describe('WebSocketClient', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.useFakeTimers()
+    mockSeqCounter = 0
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     originalWebSocket = globalThis.WebSocket
@@ -314,9 +327,14 @@ describe('WebSocketClient', () => {
       await vi.advanceTimersByTimeAsync(50)
       client.subscribe(['topic1', 'topic2'])
       await Promise.resolve()
-      expect((client as any).ws.send).toHaveBeenCalledWith(
-        JSON.stringify({ type: 'subscribe', topics: ['topic1', 'topic2'] })
-      )
+      const sent = (client as any).ws.send.mock.calls[0][0]
+      const parsed = JSON.parse(sent)
+
+      expect(parsed.type).toBe('subscribe')
+      expect(parsed.topics).toEqual(['topic1', 'topic2'])
+      expect(parsed.public_id).toBeDefined()
+      expect(parsed.session_id).toBe('test-session-id')
+      expect(parsed.sequence_id).toEqual(expect.any(Number))
     })
     it('tracks subscribed topics', async () => {
       client.connect()
@@ -362,9 +380,13 @@ describe('WebSocketClient', () => {
       ;(client as any).ws.send.mockClear()
       client.unsubscribe(['topic1'])
       await Promise.resolve()
-      expect((client as any).ws.send).toHaveBeenCalledWith(
-        JSON.stringify({ type: 'unsubscribe', topics: ['topic1'] })
-      )
+      const sent = (client as any).ws.send.mock.calls[0][0]
+      const parsed = JSON.parse(sent)
+
+      expect(parsed.type).toBe('unsubscribe')
+      expect(parsed.topics).toEqual(['topic1'])
+      expect(parsed.public_id).toBeDefined()
+      expect(parsed.session_id).toBe('test-session-id')
       expect(client.getSubscribedTopics()).not.toContain('topic1')
       expect(client.getSubscribedTopics()).toContain('topic2')
     })
@@ -945,7 +967,7 @@ describe('WebSocketClient', () => {
       client.connect()
       await vi.advanceTimersByTimeAsync(50)
       expect((client as any).ws.send).toHaveBeenCalledWith(
-        JSON.stringify({ type: 'subscribe', topics: ['topic1', 'topic2'] })
+        expect.stringContaining('"type":"subscribe"')
       )
     })
     it('does not reconnect if isReconnecting is set to false', async () => {
@@ -1577,7 +1599,12 @@ describe('WebSocketClient secure mode', () => {
     const pastExpiration = new Date(Date.now() - 60000).toISOString()
 
     mockWs.onmessage?.({
-      data: JSON.stringify({ type: 'auth_ok', exp: pastExpiration }),
+      data: JSON.stringify({
+        type: 'auth_ok',
+        session_id: '',
+        sequence_id: 0,
+        exp: pastExpiration,
+      }),
     })
     expect((client as any).reauthScheduledAt).toBe(null)
   })
@@ -1972,9 +1999,79 @@ describe('WebSocketClient secure mode', () => {
     localClient.subscribe(['topic1'])
     localClient.unsubscribe(['topic1'])
     await Promise.resolve()
-    expect(mockWs.send).toHaveBeenCalledWith(
-      JSON.stringify({ type: 'unsubscribe', topics: ['topic1'] })
-    )
+    const sent = mockWs.send.mock.calls.find((c: string[]) => c[0].includes('"unsubscribe"'))
+
+    expect(sent).toBeDefined()
+    const parsed = JSON.parse((sent as string[])[0])
+
+    expect(parsed.type).toBe('unsubscribe')
+    expect(parsed.topics).toEqual(['topic1'])
     localClient.disconnect()
+  })
+  describe('provenance stamping', () => {
+    it('stamps subscribe messages with provenance fields', async () => {
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      client.subscribe(['test.topic'])
+      await Promise.resolve()
+      const sent = (client as any).ws.send.mock.calls[0][0]
+      const parsed = JSON.parse(sent)
+
+      expect(parsed.type).toBe('subscribe')
+      expect(parsed.public_id).toBeDefined()
+      expect(parsed.session_id).toBe('test-session-id')
+      expect(parsed.sequence_id).toEqual(expect.any(Number))
+    })
+    it('stamps ping messages as telemetry', async () => {
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      client.send({ type: 'ping' })
+      const sent = (client as any).ws.send.mock.calls[0][0]
+      const parsed = JSON.parse(sent)
+
+      expect(parsed.type).toBe('ping')
+      expect(parsed.public_id).toBeDefined()
+      expect(parsed.session_id).toBe('test-session-id')
+      expect(parsed.sequence_id).toEqual(expect.any(Number))
+    })
+    it('stamps authenticate messages as control', async () => {
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      client.send({ type: 'authenticate', ws_token: 'tok' })
+      const sent = (client as any).ws.send.mock.calls[0][0]
+      const parsed = JSON.parse(sent)
+
+      expect(parsed.type).toBe('authenticate')
+      expect(parsed.public_id).toBeDefined()
+      expect(parsed.session_id).toBe('test-session-id')
+    })
+    it('does not stamp unknown message types', async () => {
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      client.send({ type: 'custom_event', data: 'value' })
+      const sent = (client as any).ws.send.mock.calls[0][0]
+      const parsed = JSON.parse(sent)
+
+      expect(parsed.type).toBe('custom_event')
+      expect(parsed.public_id).toBeUndefined()
+      expect(parsed.session_id).toBeUndefined()
+      expect(parsed.sequence_id).toBeUndefined()
+    })
+    it('does not stamp string messages', async () => {
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      client.send('raw string')
+      expect((client as any).ws.send).toHaveBeenCalledWith('raw string')
+    })
+    it('does not stamp messages without type field', async () => {
+      client.connect()
+      await vi.advanceTimersByTimeAsync(50)
+      client.send({ data: 'no-type' })
+      const sent = (client as any).ws.send.mock.calls[0][0]
+      const parsed = JSON.parse(sent)
+
+      expect(parsed.public_id).toBeUndefined()
+      expect(parsed.session_id).toBeUndefined()
+    })
   })
 })

@@ -151,6 +151,18 @@ class AppSettings:
         """
         return self._bootstrap.zmq_broker_xpub
 
+    @property
+    def telemetry_recording_enabled(self) -> bool:
+        """Return whether data-plane telemetry recording is enabled.
+
+        When False (default), telemetry counters still increment but
+        rows are not persisted to the telemetry table.
+
+        Returns:
+            True if telemetry recording is enabled, False otherwise.
+        """
+        return self._bootstrap.telemetry_recording_enabled
+
     def _get_db_setting[T](self, key: str, default: T) -> T:
         """Retrieve a setting value from database with fallback to default.
 

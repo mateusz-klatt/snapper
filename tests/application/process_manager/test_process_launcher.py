@@ -1470,7 +1470,9 @@ async def test_start_process_by_name_reports_start_error(
         "args": [],
         "kwargs": {},
     }
-    setting = Setting(key="process_worker", value=json.dumps(raw_config))
+    setting = Setting(
+        key="process_worker", value=json.dumps(raw_config), session_id="test-session", sequence_id=1
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -1520,7 +1522,9 @@ async def test_start_process_by_name_one_shot_message(
         "kwargs": {},
         "lifecycle": ProcessLifecycleEnum.ONE_SHOT.value,
     }
-    setting = Setting(key="process_once", value=json.dumps(raw_config))
+    setting = Setting(
+        key="process_once", value=json.dumps(raw_config), session_id="test-session", sequence_id=1
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -1559,7 +1563,9 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
         "role": "invalid",
         "tags": "oops",
     }
-    setting = Setting(key="process_worker", value=json.dumps(raw_config))
+    setting = Setting(
+        key="process_worker", value=json.dumps(raw_config), session_id="test-session", sequence_id=1
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -1624,7 +1630,12 @@ async def test_start_process_by_name_keeps_tags_when_present(
         "tags": ["keep"],
         "parameters_schema": {},
     }
-    setting = Setting(key="process_tagged", value=json.dumps(config_dict))
+    setting = Setting(
+        key="process_tagged",
+        value=json.dumps(config_dict),
+        session_id="test-session",
+        sequence_id=1,
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -1679,6 +1690,8 @@ async def test_stop_process_by_name_async_stop(
     setting = Setting(
         key="process_worker",
         value=json.dumps({"class": "x", "enabled": True, "kwargs": {}, "args": []}),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
@@ -1743,6 +1756,8 @@ async def test_stop_process_by_name_when_instance_missing_disables_autostart(
     setting = Setting(
         key="process_ghost",
         value=json.dumps({"class": "x", "enabled": True, "kwargs": {}, "args": []}),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
@@ -1783,6 +1798,8 @@ async def test_stop_process_by_name_when_stop_handler_removes_instance(
     setting = Setting(
         key="process_selfrem",
         value=json.dumps({"class": "x", "enabled": True, "kwargs": {}, "args": []}),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
@@ -2285,7 +2302,12 @@ async def test_get_process_configs_uses_metadata_parameters_schema(
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    setting = Setting(key="process_demo", value=json.dumps({"class": "module.Class"}))
+    setting = Setting(
+        key="process_demo",
+        value=json.dumps({"class": "module.Class"}),
+        session_id="test-session",
+        sequence_id=1,
+    )
     repo = _DummyRepository([setting])
     monkeypatch.setattr(
         "snapper.application.process_manager.config_resolver.get_repository", lambda _url: repo
@@ -2328,6 +2350,8 @@ async def test_get_process_configs_preserves_existing_parameters_schema(
     setting = Setting(
         key="process_demo",
         value=json.dumps({"class": "module.Class", "parameters_schema": {"own": True}}),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository([setting])
     monkeypatch.setattr(
@@ -2635,7 +2659,9 @@ async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
         "tags": [],
         "parameters_schema": {"p": 1},
     }
-    setting = Setting(key="process_clean", value=json.dumps(config_dict))
+    setting = Setting(
+        key="process_clean", value=json.dumps(config_dict), session_id="test-session", sequence_id=1
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -2672,7 +2698,9 @@ async def test_start_process_by_name_skips_persisting_schema_when_absent(
         "args": [],
         "kwargs": {},
     }
-    setting = Setting(key="process_plain", value=json.dumps(config_dict))
+    setting = Setting(
+        key="process_plain", value=json.dumps(config_dict), session_id="test-session", sequence_id=1
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -2709,7 +2737,12 @@ async def test_start_process_by_name_removes_stale_tags_without_schema(
         "kwargs": {},
         "tags": ["stale"],
     }
-    setting = Setting(key="process_drop_tags", value=json.dumps(config_dict))
+    setting = Setting(
+        key="process_drop_tags",
+        value=json.dumps(config_dict),
+        session_id="test-session",
+        sequence_id=1,
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -2745,7 +2778,12 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
         "args": [],
         "kwargs": {},
     }
-    setting = Setting(key="process_meta_drop", value=json.dumps(config_dict))
+    setting = Setting(
+        key="process_meta_drop",
+        value=json.dumps(config_dict),
+        session_id="test-session",
+        sequence_id=1,
+    )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
@@ -2805,6 +2843,8 @@ async def test_stop_process_by_name_cancels_task_and_terminates(
     setting = Setting(
         key="process_native",
         value=json.dumps({"class": "x", "enabled": True, "args": [], "kwargs": {}}),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(setting)
     monkeypatch.setattr(
@@ -3003,6 +3043,8 @@ async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.Mo
                 "role": ProcessRoleEnum.CORE.value,
             }
         ),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
@@ -3063,6 +3105,8 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
                 "role": ProcessRoleEnum.CORE.value,
             }
         ),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
@@ -3122,6 +3166,8 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
                 "role": ProcessRoleEnum.CORE.value,
             }
         ),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
@@ -3203,6 +3249,8 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
                 "role": ProcessRoleEnum.CORE.value,
             }
         ),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
@@ -3259,6 +3307,8 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
                 "role": ProcessRoleEnum.CORE.value,
             }
         ),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _TwoPhaseRepository(existing_setting)
     monkeypatch.setattr(
@@ -3297,7 +3347,7 @@ async def test_sync_registry_handles_invalid_json(monkeypatch: pytest.MonkeyPatc
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    bad_setting = Setting(key="process_bad", value="{")
+    bad_setting = Setting(key="process_bad", value="{", session_id="test-session", sequence_id=1)
     repo = _DummyRepository(bad_setting)
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
@@ -3357,6 +3407,8 @@ async def test_sync_registry_skips_tag_update_when_already_present(
                 "role": ProcessRoleEnum.CORE.value,
             }
         ),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
@@ -3413,6 +3465,8 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
                 "role": ProcessRoleEnum.CORE.value,
             }
         ),
+        session_id="test-session",
+        sequence_id=1,
     )
     repo = _DummyRepository(existing_setting)
     monkeypatch.setattr(
@@ -3563,7 +3617,7 @@ async def test_create_process_config_raises_if_exists(monkeypatch: pytest.Monkey
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    existing = Setting(key="process_dup", value="{}")
+    existing = Setting(key="process_dup", value="{}", session_id="test-session", sequence_id=1)
     repo = _DummyRepository(existing)
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo

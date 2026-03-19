@@ -60,6 +60,9 @@ class BootstrapSettingsLoader(BaseSettings):
             forwarded headers.
         zmq_broker_xsub: ZMQ XSUB endpoint (publishers connect here).
         zmq_broker_xpub: ZMQ XPUB endpoint (subscribers connect here).
+        telemetry_recording_enabled: When True, data-plane messages
+            (ping/pong, heartbeat, GET reads) are persisted to the
+            telemetry table. Default is False (counters still increment).
     """
 
     model_config = SettingsConfigDict(
@@ -77,3 +80,4 @@ class BootstrapSettingsLoader(BaseSettings):
     server_forwarded_allow_ips: str = Field(default="127.0.0.1", alias="SERVER_FORWARDED_ALLOW_IPS")
     zmq_broker_xsub: str = Field(default="tcp://127.0.0.1:7500", alias="ZMQ_BROKER_XSUB")
     zmq_broker_xpub: str = Field(default="tcp://127.0.0.1:7501", alias="ZMQ_BROKER_XPUB")
+    telemetry_recording_enabled: bool = Field(default=False, alias="TELEMETRY_RECORDING_ENABLED")

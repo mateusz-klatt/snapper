@@ -23,6 +23,7 @@ from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
+from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
@@ -274,7 +275,12 @@ class ZmqWebSocketBridgeService:
         """
         try:
             envelope = GapEnvelope.model_validate_json(payload_str)
-            self._gap_detector.check(received_topic, envelope.session_id, envelope.sequence_id)
+            if not self._gap_detector.check(
+                received_topic, envelope.session_id, envelope.sequence_id
+            ):
+                if topic in self.topic_metrics:
+                    self.topic_metrics[topic].invalid_messages += 1
+                return False
             return True
         except Exception:
             logger.warning("Dropping malformed message on topic %s", received_topic)
@@ -581,14 +587,13 @@ class ZmqWebSocketBridgeService:
             )
             logger.warning(error_msg)
             try:
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "message": "Invalid topic",
-                        "detail": error_msg,
-                        "topic": topic,
-                    }
+                tracker = self.connection_manager.tracker
+                error_response = WSErrorResponse(
+                    message=f"Invalid topic: {error_msg}",
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("control"),
                 )
+                await websocket.send_text(error_response.model_dump_json())
             except Exception as e:
                 logger.error(f"Failed to send error to client: {e}")
             return False

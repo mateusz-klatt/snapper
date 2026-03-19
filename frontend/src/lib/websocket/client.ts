@@ -19,6 +19,7 @@ import {
   TypedMessageHandler,
   WebSocketMessageType,
 } from './types'
+import { v7 as uuid7 } from 'uuid'
 import {
   getMessageTopic,
   shouldThrottle,
@@ -38,6 +39,17 @@ import {
   buildWebSocketUrl,
 } from './reconnect'
 import { getWsToken, isAuthControlMessage } from './auth'
+import { getTracker } from '../sequenceTracker'
+
+const TELEMETRY_TYPES = new Set(['ping'])
+const CONTROL_TYPES = new Set([
+  'authenticate',
+  'reauth',
+  'subscribe',
+  'unsubscribe',
+  'get_subscriptions',
+  'get_topic_suggestions',
+])
 
 class WebSocketClient {
   private ws: WebSocket | null = null
@@ -504,10 +516,43 @@ class WebSocketClient {
       return
     }
 
-    const data = typeof message === 'string' ? message : JSON.stringify(message)
+    let data: string
+
+    if (typeof message === 'string') {
+      data = message
+    } else {
+      const stamped = this.stampProvenance(message)
+
+      data = JSON.stringify(stamped)
+    }
 
     if (this.ws) {
       this.ws.send(data)
+    }
+  }
+  private stampProvenance(message: object): object {
+    const msg = message as { type?: string }
+    const type = msg.type
+
+    if (!type) return message
+
+    let counterKey: string | null = null
+
+    if (TELEMETRY_TYPES.has(type)) {
+      counterKey = 'telemetry'
+    } else if (CONTROL_TYPES.has(type)) {
+      counterKey = 'control'
+    }
+
+    if (!counterKey) return message
+
+    const tracker = getTracker()
+
+    return {
+      ...message,
+      public_id: uuid7(),
+      session_id: tracker.sessionId,
+      sequence_id: tracker.nextSequence(counterKey),
     }
   }
   subscribe(topics: string[]): void {

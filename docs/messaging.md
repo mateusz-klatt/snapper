@@ -122,10 +122,12 @@ Every Data class inherits from `StrictDataSchema` and carries:
 | `type` | string | Literal type discriminator |
 | `timestamp` | datetime | Message creation time |
 | `session_id` | string | UUID7 of the producer process session (empty for unstamped messages) |
-| `sequence_id` | int | Monotonic counter per topic within the session (0 for unstamped messages) |
+| `sequence_id` | int | Monotonic counter per destination table within the session (0 for unstamped messages) |
 
 `session_id` and `sequence_id` are stream-provenance fields stamped automatically by
-`MessagePublisher`. Consumers can use them to detect message loss and producer restarts.
+`MessagePublisher`. Counters are keyed by destination DB table (not ZMQ topic), so all
+messages landing in the same table share a gap-free sequence. Consumers can use these
+fields to detect message loss and producer restarts.
 
 The old `messaging.schemas.messages` module still exists but only contains `parse_message()` and `MessageParseError`.
 
@@ -159,7 +161,7 @@ tick = TickData(
 | `volume` | float | Volume |
 | `timestamp` | datetime | Timestamp |
 | `session_id` | string | Producer session (inherited) |
-| `sequence_id` | int | Per-topic counter (inherited) |
+| `sequence_id` | int | Per-table counter (inherited) |
 
 ### CandleData
 
@@ -333,6 +335,31 @@ One `SequenceTracker` per component process; all `MessagePublisher` instances wi
 component share it. Counters survive socket reconnects — only a full component restart
 creates a new session.
 
+#### Per-Table Counters
+
+`SequenceTracker` maintains monotonic counters keyed by **destination DB table name**,
+not by ZMQ topic. Multiple ZMQ topics that write to the same table share one counter.
+This guarantees that `GROUP BY session_id ORDER BY sequence_id` on any SQL table shows
+no gaps.
+
+`table_for_message()` in `snapper.messaging.topics.builders` maps each Data class to
+its destination table. `MessagePublisher.publish()` calls it automatically before
+incrementing the counter.
+
+Counter key convention uses bare table names:
+
+| Counter Key | Data Classes |
+| ----------- | ------------ |
+| `candles` | `CandleData`, `TickData` |
+| `trades` | `TradeData` |
+| `orders` | `OrderRequestData`, `OrderCancelData`, `OrderReplaceData`, `OrderData`, `OrderEventData` |
+| `executions` | `ExecutionData` |
+| `signals` | `SignalData` |
+| `settings` | `SettingChangedData` |
+| `symbol_aliases` | `SymbolAliasUpdateData` |
+| `control` | `ReplayStartData`, `ReplayEndData` |
+| `telemetry` | `HeartbeatData` |
+
 For paper market data or other cases where the topic cannot be derived from the payload
 alone, pass an explicit `topic` override:
 
@@ -451,14 +478,18 @@ detector.check(received_topic, session_id, sequence_id)
 
 Rules:
 
-- Messages with `session_id == ""` or `sequence_id == 0` are skipped (backward-compatible
-  with unstamped messages).
+- Messages without provenance (`session_id == ""` or `sequence_id == 0`) are **rejected**
+  with a `WARNING` log and a `rejected_unstamped` counter increment. This makes unstamped
+  traffic observable rather than silently passing through.
 - First message on a topic: sets baseline. If `sequence_id > 1` the subscriber joined
   mid-stream (logged `INFO`).
 - Same topic, new `session_id`: producer restarted (logged `INFO`, counter resets).
 - In-order message (`sequence_id == expected`): accepted silently.
 - Gap (`sequence_id > expected`): logs `WARNING` with the missing range, then advances.
 - Duplicate / reorder (`sequence_id < expected`): logs `DEBUG`, state unchanged.
+
+`GapDetector.check()` returns `True` when the message carries valid provenance and was
+processed, `False` when rejected as unstamped.
 
 `GapDetector` is wired into the ZMQ-WebSocket bridge and into subscriber loops inside the
 executor, trader coordinator, and strategy `_listen_loop()`.
@@ -549,6 +580,32 @@ topic = topic_for_message(candle_data)
 
 Paper market data topics include a `source_exchange` segment that is not carried in the
 payload, so they must always be published with an explicit topic override.
+
+## WebSocket Message Provenance
+
+`WsMessageSchema` inherits from `StrictDataSchema`, so all WebSocket protocol messages
+(authentication, subscription management, ping/pong, errors) carry the same provenance
+fields as ZMQ data payloads: `public_id`, `session_id`, `sequence_id`, and `timestamp`.
+This means every payload item in the system — whether it flows over ZMQ, REST, or
+WebSocket — has a uniform provenance envelope.
+
+## Audit Tables: Control and Telemetry
+
+Two destination tables provide always-available observability for non-domain traffic:
+
+- **control** — Always-on audit for commands, authentication events, subscribe/unsubscribe
+  messages, replay start/end, and REST mutation requests. Every mutation processed by
+  `ClientProvenanceMiddleware` writes a control row in a `finally` block so the record
+  is persisted regardless of whether the request succeeded or failed. The write is
+  non-blocking: any DB failure is logged and swallowed so the response already sent to
+  the client is never invalidated.
+
+- **telemetry** — Toggleable high-volume table for pings, heartbeats, pongs, and health
+  check payloads. Telemetry recording can be enabled or disabled without affecting the
+  control audit trail.
+
+The non-blocking audit invariant applies to both tables: audit writes never reject,
+delay, or invalidate the primary request/message flow.
 
 ## Best Practices
 

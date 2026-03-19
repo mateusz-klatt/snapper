@@ -344,16 +344,28 @@ def sample_aliases() -> list[SymbolAlias]:
     """Provide sample BTC-USD symbol aliases for kraken ws/rest/ccxt."""
     return [
         SymbolAlias(
-            symbol_public_id="BTC-USD", exchange="kraken", channel="ws", exchange_symbol="BTC/USD"
+            symbol_public_id="BTC-USD",
+            exchange="kraken",
+            channel="ws",
+            exchange_symbol="BTC/USD",
+            session_id="test-session",
+            sequence_id=1,
         ),
         SymbolAlias(
             symbol_public_id="BTC-USD",
             exchange="kraken",
             channel="rest",
             exchange_symbol="XXBTZUSD",
+            session_id="test-session",
+            sequence_id=1,
         ),
         SymbolAlias(
-            symbol_public_id="BTC-USD", exchange="kraken", channel="ccxt", exchange_symbol="BTC/USD"
+            symbol_public_id="BTC-USD",
+            exchange="kraken",
+            channel="ccxt",
+            exchange_symbol="BTC/USD",
+            session_id="test-session",
+            sequence_id=1,
         ),
     ]
 
@@ -622,36 +634,48 @@ class TestDatabaseSymbolMapperCore:
                 exchange="kraken",
                 channel="ws",
                 exchange_symbol="BTC/USD",
+                session_id="test-session",
+                sequence_id=1,
             ),
             SymbolAlias(
                 symbol_public_id="BTC-USD",
                 exchange="kraken",
                 channel="rest",
                 exchange_symbol="XXBTZUSD",
+                session_id="test-session",
+                sequence_id=1,
             ),
             SymbolAlias(
                 symbol_public_id="BTC-USD",
                 exchange="kraken",
                 channel="ccxt",
                 exchange_symbol="BTC/USD",
+                session_id="test-session",
+                sequence_id=1,
             ),
             SymbolAlias(
                 symbol_public_id="ETH-USD",
                 exchange="kraken",
                 channel="ws",
                 exchange_symbol="ETH/USD",
+                session_id="test-session",
+                sequence_id=1,
             ),
             SymbolAlias(
                 symbol_public_id="ETH-USD",
                 exchange="kraken",
                 channel="rest",
                 exchange_symbol="XETHZUSD",
+                session_id="test-session",
+                sequence_id=1,
             ),
             SymbolAlias(
                 symbol_public_id="ETH-USD",
                 exchange="kraken",
                 channel="ccxt",
                 exchange_symbol="ETH/USD",
+                session_id="test-session",
+                sequence_id=1,
             ),
         ]
 

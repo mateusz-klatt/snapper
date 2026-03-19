@@ -92,6 +92,7 @@ async def _authenticate_and_dispatch(
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     state: list[bool],
+    db_url: str | None = None,
 ) -> None:
     """Authenticate, connect, and run the WebSocket dispatch loop.
 
@@ -104,16 +105,26 @@ async def _authenticate_and_dispatch(
         ws_auth_manager: WebSocket authentication manager.
         ws_token_service: WebSocket token service.
         state: Single-element list; set to [True] once connected.
+        db_url: Optional database URL for control recording.
     """
-    auth_result = await authenticate_websocket(websocket, ws_auth_manager, ws_token_service)
+    auth_result = await authenticate_websocket(
+        websocket, ws_auth_manager, ws_token_service, manager.tracker
+    )
     if not auth_result.success or auth_result.user is None:
         return
     user = auth_result.user
     state[0] = True
     await manager.connect(websocket, accept=False)
     if auth_result.ws_payload is not None:
-        await send_auth_complete(websocket, manager, user, auth_result.ws_payload, ws_auth_manager)
-    await dispatch_messages(websocket, manager, user, ws_auth_manager, ws_token_service)
+        await send_auth_complete(
+            websocket,
+            manager,
+            user,
+            auth_result.ws_payload,
+            ws_auth_manager,
+            db_url,
+        )
+    await dispatch_messages(websocket, manager, user, ws_auth_manager, ws_token_service, db_url)
 
 
 def create_authenticated_websocket_router(manager: WebSocketConnectionManager) -> APIRouter:
@@ -139,13 +150,18 @@ def create_authenticated_websocket_router(manager: WebSocketConnectionManager) -
         allowed_origins = _resolve_allowed_origins(
             websocket, static_allowed_origins, settings.server_port
         )
-        if not await validate_origin(websocket, allowed_origins):
+        if not await validate_origin(websocket, allowed_origins, manager.tracker):
             return
         _ensure_zmq_bridge(manager)
         authenticated: list[bool] = [False]
         try:
             await _authenticate_and_dispatch(
-                websocket, manager, ws_auth_manager, ws_token_service, authenticated
+                websocket,
+                manager,
+                ws_auth_manager,
+                ws_token_service,
+                authenticated,
+                db_url=settings.db_url,
             )
         except WebSocketDisconnect:
             logger.info("WebSocket disconnected for user unauthenticated")

@@ -14,6 +14,7 @@ from snapper.auth.schemas.user import UserProfile
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.dispatcher import dispatch_messages
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class DummyWebSocket:
@@ -38,7 +39,14 @@ class DummyWebSocket:
 class DummyManager:
     """Placeholder connection manager for tests."""
 
-    pass
+    def __init__(self) -> None:
+        """Initialize the instance."""
+        self._tracker = SequenceTracker()
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Provide sequence tracker for provenance stamping."""
+        return self._tracker
 
 
 class DummyWsAuthManager:
@@ -178,6 +186,12 @@ class MockConnectionManager:
         """Initialize the instance."""
         self.active_connections: list[Any] = [object()]
         self._subscriptions: dict[Any, set[str]] = {}
+        self._tracker = SequenceTracker()
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Provide sequence tracker for provenance stamping."""
+        return self._tracker
 
     def get_client_subscriptions(self, websocket: Any) -> set[str]:
         """Return subscriptions for given websocket."""

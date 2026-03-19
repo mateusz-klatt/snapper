@@ -18,6 +18,8 @@ _INSTRUMENT_FK = "instruments.id"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 _KNOWN_TO_ACTIVE = "known_to = '9999-12-31T23:59:59+00:00'"
+_CK_SESSION_ID = "session_id != ''"
+_CK_SEQUENCE_ID = "sequence_id > 0"
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -100,7 +102,7 @@ def upgrade() -> None:
 
     Creates all tables for instruments, candles, trades, orders, executions,
     positions, signals, users, settings, symbols, symbol aliases,
-    process runs, instrument specs, and market snapshots.
+    process runs, instrument specs, market snapshots, control, and telemetry.
     Seeds symbols, aliases, and exchange capabilities.
     """
     op.create_table(
@@ -112,8 +114,8 @@ def upgrade() -> None:
         sa.Column("quote", sa.String(16), nullable=True),
         sa.Column("asset_type", sa.String(16), server_default="crypto", nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -125,6 +127,8 @@ def upgrade() -> None:
             "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
             name="ck_symbol_quote_required",
         ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_symbols_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_symbols_sequence_id"),
     )
     op.create_index(
         "uq_symbols_active_native",
@@ -151,8 +155,8 @@ def upgrade() -> None:
         sa.Column("channel", sa.String(10), nullable=False),
         sa.Column("exchange_symbol", sa.String(40), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -164,6 +168,8 @@ def upgrade() -> None:
             "channel IN ('ws', 'rest', 'ccxt')",
             name="ck_symbol_alias_channel",
         ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_symbol_aliases_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_symbol_aliases_sequence_id"),
     )
     op.create_index(
         "ix_symbol_aliases_public_id",
@@ -201,8 +207,8 @@ def upgrade() -> None:
         sa.Column("source", sa.String(50), nullable=True),
         sa.Column("reason", sa.String(1024), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -210,6 +216,8 @@ def upgrade() -> None:
             _CK_EXCHANGE_LOWER,
             name="ck_sec_exchange_lower",
         ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_symbol_exchange_capabilities_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_symbol_exchange_capabilities_sequence_id"),
     )
     op.create_index(
         "ix_symbol_exchange_capabilities_public_id",
@@ -254,12 +262,14 @@ def upgrade() -> None:
         sa.Column("exchange", sa.String(20), nullable=False),
         sa.Column("base", sa.String(16), nullable=False),
         sa.Column("quote", sa.String(16), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_instruments_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_instruments_sequence_id"),
     )
     op.create_index(
         "ix_instruments_public_id",
@@ -294,12 +304,14 @@ def upgrade() -> None:
         sa.Column("volume", sa.Float(), nullable=False),
         sa.Column("vwap", sa.Float(), nullable=True),
         sa.Column("trades", sa.Integer(), nullable=True),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_candles_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_candles_sequence_id"),
     )
     op.create_index(
         "ix_candles_public_id",
@@ -328,13 +340,15 @@ def upgrade() -> None:
         sa.Column("price", sa.Float(), nullable=False),
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("trade_id", name="uq_trade_trade_id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_trades_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_trades_sequence_id"),
     )
     op.create_index(
         "ix_trades_public_id",
@@ -365,12 +379,14 @@ def upgrade() -> None:
         sa.Column("error", sa.String(512), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_orders_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_orders_sequence_id"),
     )
     op.create_index(
         "ix_orders_public_id",
@@ -414,12 +430,14 @@ def upgrade() -> None:
         sa.Column("fee", sa.Float(), nullable=False),
         sa.Column("fee_asset", sa.String(16), nullable=False),
         sa.Column("executed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["order_id"], ["orders.id"]),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_executions_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_executions_sequence_id"),
     )
     op.create_index(
         "ix_executions_public_id",
@@ -454,12 +472,14 @@ def upgrade() -> None:
         sa.Column("average_price", sa.Float(), nullable=False),
         sa.Column("unrealized_pnl", sa.Float(), nullable=False),
         sa.Column("realized_pnl", sa.Float(), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_positions_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_positions_sequence_id"),
     )
     op.create_index(
         "ix_positions_public_id",
@@ -489,12 +509,14 @@ def upgrade() -> None:
         sa.Column("strategy_name", sa.String(64), nullable=True),
         sa.Column("price", sa.Float(), nullable=True),
         sa.Column("fired_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_signals_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_signals_sequence_id"),
     )
     op.create_index(
         "ix_signals_public_id",
@@ -516,11 +538,13 @@ def upgrade() -> None:
         sa.Column("role", sa.String(32), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_users_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_users_sequence_id"),
     )
     op.create_index(
         "ix_users_public_id",
@@ -544,11 +568,13 @@ def upgrade() -> None:
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("user_public_id", sa.String(36), nullable=False),
         sa.Column("logged_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_user_login_events_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_user_login_events_sequence_id"),
     )
     op.create_index("ix_user_login_events_user_public_id", "user_login_events", ["user_public_id"])
     op.create_index(
@@ -569,11 +595,13 @@ def upgrade() -> None:
         sa.Column("description", sa.String(256), nullable=True),
         sa.Column("is_encrypted", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column("updated_by", sa.String(64), nullable=True),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_settings_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_settings_sequence_id"),
     )
     op.create_index(
         "ix_settings_public_id",
@@ -605,11 +633,13 @@ def upgrade() -> None:
         sa.Column("tags", sa.JSON(), nullable=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_process_runs_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_process_runs_sequence_id"),
     )
     op.create_index(
         "ix_process_runs_public_id",
@@ -637,12 +667,14 @@ def upgrade() -> None:
         sa.Column("position_limit_long", sa.Integer(), nullable=True),
         sa.Column("position_limit_short", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(20), nullable=True),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_instrument_specs_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_instrument_specs_sequence_id"),
     )
     op.create_index(
         "ix_instrument_specs_public_id",
@@ -679,11 +711,13 @@ def upgrade() -> None:
         sa.Column("change_24h", sa.Float(), nullable=True),
         sa.Column("spread", sa.Float(), nullable=True),
         sa.Column("spread_pct", sa.Float(), nullable=True),
-        sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
-        sa.Column("sequence_id", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_market_snapshots_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_market_snapshots_sequence_id"),
     )
     op.create_index(
         "ix_market_snapshots_public_id",
@@ -701,18 +735,74 @@ def upgrade() -> None:
         "market_snapshots",
         ["exchange", "symbol", "timestamp"],
     )
+    op.create_table(
+        "control",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("transport", sa.String(10), nullable=False),
+        sa.Column("direction", sa.String(10), nullable=False),
+        sa.Column("message_type", sa.String(128), nullable=False),
+        sa.Column("outcome", sa.String(16), nullable=False),
+        sa.Column("detail", sa.Text(), nullable=True),
+        sa.Column("payload", sa.Text(), nullable=True),
+        sa.Column("client_session_id", sa.String(36), nullable=True),
+        sa.Column("client_public_id", sa.String(36), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_control_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_control_sequence_id"),
+    )
+    op.create_index(
+        "ix_control_public_id",
+        "control",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_table(
+        "telemetry",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("transport", sa.String(10), nullable=False),
+        sa.Column("direction", sa.String(10), nullable=False),
+        sa.Column("message_type", sa.String(128), nullable=False),
+        sa.Column("payload", sa.Text(), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_telemetry_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_telemetry_sequence_id"),
+    )
+    op.create_index(
+        "ix_telemetry_public_id",
+        "telemetry",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
+    )
     conn = op.get_bind()
     now = datetime.now(tz=UTC)
+    seed_session_id = str(uuid7())
+    seed_seq = 0
     symbol_public_ids: dict[str, str] = {}
     for entry in SYMBOL_CATALOG:
         spid = str(uuid7())
         symbol_public_ids[entry[0]] = spid
+        seed_seq += 1
         conn.execute(
             text("""
                 INSERT INTO symbols
-                (public_id, native_symbol, base, quote, asset_type, created_at, timestamp, known_to)
+                (public_id, native_symbol, base, quote, asset_type, created_at,
+                 session_id, sequence_id, timestamp, known_to)
                 VALUES (:public_id, :native_symbol, :base, :quote, :asset_type,
-                        :created_at, :timestamp, :known_to)
+                        :created_at, :session_id, :sequence_id, :timestamp, :known_to)
                 """),
             {
                 "public_id": spid,
@@ -721,18 +811,21 @@ def upgrade() -> None:
                 "quote": entry[2],
                 "asset_type": entry[3],
                 "created_at": now,
+                "session_id": seed_session_id,
+                "sequence_id": seed_seq,
                 "timestamp": now,
                 "known_to": _KNOWN_TO_MAX,
             },
         )
     for alias in SYMBOL_ALIASES:
+        seed_seq += 1
         conn.execute(
             text("""
                 INSERT INTO symbol_aliases
                 (public_id, symbol_public_id, exchange, channel, exchange_symbol,
-                 created_at, timestamp, known_to)
+                 created_at, session_id, sequence_id, timestamp, known_to)
                 VALUES (:public_id, :symbol_public_id, :exchange, :channel, :exchange_symbol,
-                        :created_at, :timestamp, :known_to)
+                        :created_at, :session_id, :sequence_id, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
@@ -741,18 +834,21 @@ def upgrade() -> None:
                 "channel": alias[2],
                 "exchange_symbol": alias[3],
                 "created_at": now,
+                "session_id": seed_session_id,
+                "sequence_id": seed_seq,
                 "timestamp": now,
                 "known_to": _KNOWN_TO_MAX,
             },
         )
     for cap in SYMBOL_CAPABILITIES:
+        seed_seq += 1
         conn.execute(
             text("""
                 INSERT INTO symbol_exchange_capabilities
                 (public_id, symbol_public_id, exchange, can_market_data, can_trade,
-                 source, created_at, timestamp, known_to)
+                 source, created_at, session_id, sequence_id, timestamp, known_to)
                 VALUES (:public_id, :symbol_public_id, :exchange, :can_market_data, :can_trade,
-                        :source, :created_at, :timestamp, :known_to)
+                        :source, :created_at, :session_id, :sequence_id, :timestamp, :known_to)
                 """),
             {
                 "public_id": str(uuid7()),
@@ -762,6 +858,8 @@ def upgrade() -> None:
                 "can_trade": cap[3],
                 "source": "seed",
                 "created_at": now,
+                "session_id": seed_session_id,
+                "sequence_id": seed_seq,
                 "timestamp": now,
                 "known_to": _KNOWN_TO_MAX,
             },
@@ -774,6 +872,8 @@ def downgrade() -> None:
     Removes all tables created by the upgrade function, respecting
     foreign key constraints by dropping in reverse dependency order.
     """
+    op.drop_table("telemetry")
+    op.drop_table("control")
     op.drop_table("market_snapshots")
     op.drop_table("instrument_specs")
     op.drop_table("process_runs")

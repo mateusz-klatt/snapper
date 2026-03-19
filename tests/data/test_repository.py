@@ -184,6 +184,8 @@ async def test_upsert_candles_closes_old_and_inserts_new(
             "volume": 1000.0,
             "vwap": None,
             "trades": 10,
+            "session_id": "test-session",
+            "sequence_id": 1,
         },
     ]
     inserted = await repo.upsert_candles(rows)
@@ -246,6 +248,8 @@ async def test_upsert_candles_inserts_new_when_no_existing(
             "volume": 1000.0,
             "vwap": None,
             "trades": 10,
+            "session_id": "test-session",
+            "sequence_id": 1,
         },
     ]
     inserted = await repo.upsert_candles(rows)
@@ -366,6 +370,8 @@ async def test_upsert_candles_generates_timestamp_when_missing(
             "volume": 1000.0,
             "vwap": None,
             "trades": 10,
+            "session_id": "test-session",
+            "sequence_id": 1,
         },
     ]
     await repo.upsert_candles(rows)
@@ -488,6 +494,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
                 asset_type="crypto",
                 created_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
             )
         )
         await s.commit()
@@ -502,8 +510,12 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         "tick_size": 0.01,
         "lot_size": 0.001,
     }
-    instrument_id = await repo.upsert_instrument(**instrument_payload)
-    duplicate_id = await repo.upsert_instrument(**instrument_payload)
+    instrument_id = await repo.upsert_instrument(
+        **instrument_payload, session_id="test-session", sequence_id=1
+    )
+    duplicate_id = await repo.upsert_instrument(
+        **instrument_payload, session_id="test-session", sequence_id=1
+    )
     assert duplicate_id == instrument_id
     base_ts = datetime.now(UTC) - timedelta(minutes=10)
     candle_rows = [
@@ -519,6 +531,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             "volume": 100.0,
             "vwap": 10.5,
             "trades": 4,
+            "session_id": "test-session",
+            "sequence_id": 1,
         },
         {
             "instrument_id": instrument_id,
@@ -532,6 +546,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             "volume": 80.0,
             "vwap": 11.8,
             "trades": 3,
+            "session_id": "test-session",
+            "sequence_id": 1,
         },
     ]
     inserted_candles = await repo.upsert_candles(candle_rows)
@@ -544,6 +560,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             "size": 0.25,
             "side": "buy",
             "trade_id": "t1",
+            "session_id": "test-session",
+            "sequence_id": 1,
         },
         {
             "instrument_id": instrument_id,
@@ -552,6 +570,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             "size": 0.5,
             "side": "sell",
             "trade_id": "t2",
+            "session_id": "test-session",
+            "sequence_id": 2,
         },
     ]
     inserted_trades = await repo.upsert_trades(trade_rows)
@@ -581,11 +601,15 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         price=10.5,
         size=0.75,
         status="new",
+        session_id="",
+        sequence_id=0,
     )
     order_v2 = await repo.update_order(
         order_id=order_id,
         status="partially_filled",
         updated_at=base_ts + timedelta(minutes=1),
+        session_id="",
+        sequence_id=0,
         filled_size=0.5,
         average_price=10.55,
     )
@@ -593,6 +617,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         order_id=order_v2,
         status="filled",
         updated_at=base_ts + timedelta(minutes=2),
+        session_id="",
+        sequence_id=0,
         exchange_order_id="ex-1",
         error=None,
     )
@@ -606,6 +632,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         size=0.5,
         fee=0.01,
         fee_asset="USD",
+        session_id="",
+        sequence_id=0,
     )
     assert isinstance(execution_id, int)
     assert execution_id > 0
@@ -626,6 +654,8 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             spread=0.2,
             spread_pct=0.018,
             timestamp=base_ts,
+            session_id="test-session",
+            sequence_id=1,
         )
         session.add(stored_snapshot)
         await session.commit()
@@ -800,6 +830,8 @@ class DummyRepository(Repository):
         price: float | None,
         size: float,
         status: str,
+        session_id: str,
+        sequence_id: int,
         time_in_force: str | None = None,
     ) -> tuple[int, str]:
         """Insert order - no-op returning (0, stub-public-id)."""
@@ -810,10 +842,10 @@ class DummyRepository(Repository):
         order_id: int,
         status: str,
         updated_at: datetime,
+        session_id: str,
+        sequence_id: int,
         exchange_order_id: str | None = None,
         err: str | None = None,
-        session_id: str | None = None,
-        sequence_id: int | None = None,
     ) -> int:
         """Update order - no-op returning 0."""
         return 0
@@ -1162,6 +1194,8 @@ class TestSQLAlchemyRepositoryDialects:
                     "volume": 1000.0,
                     "vwap": None,
                     "trades": 10,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 }
             ]
             result = await mock_postgres_repo.upsert_candles(rows)
@@ -1203,6 +1237,8 @@ class TestSQLAlchemyRepositoryDialects:
                     "volume": 1000.0,
                     "vwap": None,
                     "trades": 10,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
                 {
                     "instrument_id": 1,
@@ -1216,6 +1252,8 @@ class TestSQLAlchemyRepositoryDialects:
                     "volume": 1200.0,
                     "vwap": None,
                     "trades": 12,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
             ]
             result = await mock_other_repo.upsert_candles(rows)
@@ -1262,6 +1300,8 @@ class TestSQLAlchemyRepositoryDialects:
                     "volume": 1000.0,
                     "vwap": None,
                     "trades": 10,
+                    "session_id": "test-session",
+                    "sequence_id": 1,
                 },
             ]
             result = await mock_other_repo.upsert_candles(rows)
@@ -1376,6 +1416,8 @@ class TestSQLAlchemyRepositoryDialects:
                 exchange="kraken",
                 tick_size=0.01,
                 lot_size=0.001,
+                session_id="test-session",
+                sequence_id=1,
             )
             assert result == 123
             mock_session.rollback.assert_called_once()
@@ -1411,6 +1453,8 @@ class TestSQLAlchemyRepositoryDialects:
                     exchange="kraken",
                     tick_size=0.01,
                     lot_size=0.001,
+                    session_id="test-session",
+                    sequence_id=1,
                 )
             mock_session.rollback.assert_called_once()
 
@@ -1444,6 +1488,8 @@ class TestSQLAlchemyRepositoryDialects:
                 exchange="kraken",
                 tick_size=0.01,
                 lot_size=0.001,
+                session_id="test-session",
+                sequence_id=1,
             )
             assert result == 456
             mock_session.add.assert_not_called()
@@ -1681,6 +1727,8 @@ class _MinimalRepository(Repository):
         price: float | None,
         size: float,
         status: str,
+        session_id: str,
+        sequence_id: int,
         time_in_force: str | None = None,
     ) -> tuple[int, str]:
         return (0, "stub-public-id")
@@ -1690,10 +1738,10 @@ class _MinimalRepository(Repository):
         order_id: int,
         status: str,
         updated_at: datetime,
+        session_id: str,
+        sequence_id: int,
         exchange_order_id: str | None = None,
         error: str | None = None,
-        session_id: str | None = None,
-        sequence_id: int | None = None,
     ) -> int:
         """Update order - no-op returning 0."""
         return 0

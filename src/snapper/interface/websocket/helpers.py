@@ -11,6 +11,7 @@ from fastapi import WebSocket
 from snapper.auth.domain.roles import UserRole
 from snapper.config.app import AppSettings
 from snapper.interface.websocket.schemas import WSAuthFailedResponse
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.topics.builders import parse_market_topic
 from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.messaging.topics.builders import parse_order_event_topic
@@ -69,7 +70,9 @@ def build_allowed_origins(settings: AppSettings, server_port: int = 8000) -> set
     return {origin.rstrip("/") for origin in allowed_origins if origin}
 
 
-async def validate_origin(websocket: WebSocket, allowed_origins: set[str]) -> bool:
+async def validate_origin(
+    websocket: WebSocket, allowed_origins: set[str], tracker: SequenceTracker
+) -> bool:
     """Validate WebSocket connection origin header.
 
     Sends auth_failed and closes connection if origin is not allowed.
@@ -77,13 +80,18 @@ async def validate_origin(websocket: WebSocket, allowed_origins: set[str]) -> bo
     Args:
         websocket: The WebSocket connection.
         allowed_origins: Set of allowed origin URLs.
+        tracker: Sequence tracker for stamping outbound messages.
 
     Returns:
         True if origin is valid, False if rejected.
     """
     origin = (websocket.headers.get("origin") or "").rstrip("/")
     if origin and origin not in allowed_origins:
-        auth_failed = WSAuthFailedResponse(reason="origin_forbidden")
+        auth_failed = WSAuthFailedResponse(
+            reason="origin_forbidden",
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("control"),
+        )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4403, reason="Origin not allowed")
         return False

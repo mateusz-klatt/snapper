@@ -32,7 +32,14 @@ class TestInstrumentModel:
         When: Instrument is created,
         Then: All fields match provided values.
         """
-        instrument = Instrument(symbol="BTC-USD", exchange="kraken", base="BTC", quote="USD")
+        instrument = Instrument(
+            symbol="BTC-USD",
+            exchange="kraken",
+            base="BTC",
+            quote="USD",
+            session_id="test-session",
+            sequence_id=1,
+        )
         assert instrument.symbol == "BTC-USD"
         assert instrument.exchange == "kraken"
         assert instrument.base == "BTC"
@@ -45,7 +52,14 @@ class TestInstrumentModel:
         When: Converted to string,
         Then: Returns string representation.
         """
-        instrument = Instrument(symbol="ETH-USD", exchange="kraken", base="ETH", quote="USD")
+        instrument = Instrument(
+            symbol="ETH-USD",
+            exchange="kraken",
+            base="ETH",
+            quote="USD",
+            session_id="test-session",
+            sequence_id=1,
+        )
         str_repr = str(instrument)
         assert isinstance(str_repr, str)
 
@@ -56,7 +70,9 @@ class TestInstrumentModel:
         When: Checking exchange field before flush,
         Then: Attribute is None (INSERT default supplies empty string).
         """
-        instrument = Instrument(symbol="BTC-USD", base="BTC", quote="USD")
+        instrument = Instrument(
+            symbol="BTC-USD", base="BTC", quote="USD", session_id="test-session", sequence_id=1
+        )
         assert instrument.exchange is None
 
 
@@ -80,6 +96,8 @@ class TestCandleModel:
             low=48500.0,
             close=50500.0,
             volume=150.5,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert candle.instrument_id == 1
         assert candle.timestamp == now
@@ -106,6 +124,8 @@ class TestCandleModel:
             low=48000.0,
             close=51000.0,
             volume=100.0,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert candle.high >= candle.open
         assert candle.high >= candle.close
@@ -132,6 +152,8 @@ class TestTradeModel:
             size=1.5,
             side="buy",
             trade_id="trade-123",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert trade.instrument_id == 1
         assert trade.price == pytest.approx(50000.0)
@@ -154,6 +176,8 @@ class TestTradeModel:
             size=2.0,
             side="buy",
             trade_id="trade-123",
+            session_id="test-session",
+            sequence_id=1,
         )
         expected_value = 2.0 * 45000.0
         assert trade.size * trade.price == expected_value
@@ -172,6 +196,8 @@ class TestTradeModel:
             size=1.0,
             side="buy",
             trade_id="buy-trade",
+            session_id="test-session",
+            sequence_id=1,
         )
         sell_trade = Trade(
             instrument_id=1,
@@ -180,6 +206,8 @@ class TestTradeModel:
             size=1.0,
             side="sell",
             trade_id="sell-trade",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert buy_trade.side == "buy"
         assert sell_trade.side == "sell"
@@ -209,6 +237,8 @@ class TestOrderModel:
             filled_size=0.0,
             average_price=None,
             status="pending",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert order.instrument_id == 1
         assert order.client_order_id == "client-123"
@@ -238,6 +268,8 @@ class TestOrderModel:
             price=None,
             size=0.5,
             status="pending",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert order.order_type == "market"
         assert order.price is None
@@ -259,6 +291,8 @@ class TestOrderModel:
             price=50000.0,
             size=1.0,
             status="pending",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert order.status == "pending"
         order.status = "filled"
@@ -285,6 +319,8 @@ class TestExecutionModel:
             size=1.0,
             fee=5.0,
             fee_asset="USD",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert execution.order_id == 1
         assert execution.order_public_id == "order-pub-id-1"
@@ -311,6 +347,8 @@ class TestExecutionModel:
             size=2.0,
             fee=10.0,
             fee_asset="USD",
+            session_id="test-session",
+            sequence_id=1,
         )
         trade_value = execution.price * execution.size
         fee_percentage = (execution.fee / trade_value) * 100
@@ -335,6 +373,8 @@ class TestPositionModel:
             unrealized_pnl=5000.0,
             realized_pnl=1000.0,
             timestamp=datetime.now(UTC),
+            session_id="test-session",
+            sequence_id=1,
         )
         assert position.instrument_id == 1
         assert position.quantity == pytest.approx(2.5)
@@ -356,6 +396,8 @@ class TestPositionModel:
             unrealized_pnl=0.0,
             realized_pnl=0.0,
             timestamp=datetime.now(UTC),
+            session_id="test-session",
+            sequence_id=1,
         )
         market_value = position.quantity * position.average_price
         assert market_value == pytest.approx(45000.0)
@@ -374,6 +416,8 @@ class TestPositionModel:
             unrealized_pnl=2000.0,
             realized_pnl=500.0,
             timestamp=datetime.now(UTC),
+            session_id="test-session",
+            sequence_id=1,
         )
         total_pnl = position.unrealized_pnl + position.realized_pnl
         assert total_pnl == pytest.approx(2500.0)
@@ -397,6 +441,8 @@ class TestSymbolModel:
             asset_type="crypto",
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert sym.native_symbol == "BTC-USD"
         assert sym.base == "BTC"
@@ -420,6 +466,8 @@ class TestSymbolModel:
             asset_type="equity",
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert sym.quote is None
         assert sym.asset_type == "equity"
@@ -443,6 +491,8 @@ class TestSymbolAliasModel:
             exchange_symbol="BTC/USD",
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert alias.symbol_public_id == "test-uuid-1234"
         assert alias.exchange == "kraken"
@@ -464,6 +514,8 @@ class TestSymbolAliasModel:
             exchange_symbol="X:BTCUSD",
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert alias.exchange == "polygon"
         assert alias.channel == "rest"
@@ -499,6 +551,8 @@ class TestSymbolExchangeCapabilityModel:
             reason="Listed on exchange ticker list",
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert cap.symbol_public_id == "test-uuid-cap-1"
         assert cap.exchange == "kraken"
@@ -526,6 +580,8 @@ class TestSymbolExchangeCapabilityModel:
             reason=None,
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert cap.can_market_data is False
         assert cap.can_trade is False
@@ -547,6 +603,8 @@ class TestSymbolExchangeCapabilityModel:
             reason=None,
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert cap.source is None
         assert cap.reason is None
@@ -568,6 +626,8 @@ class TestSymbolExchangeCapabilityModel:
             reason="WS-only, no REST ticker",
             created_at=now,
             timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert cap.source == "kraken_updater"
         assert cap.reason == "WS-only, no REST ticker"
@@ -591,6 +651,8 @@ class TestSignalEventModel:
             reason="RSI oversold",
             strategy_name="RSIReversion",
             price=49000.0,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert event.instrument_id == 1
         assert event.side == "buy"
@@ -613,6 +675,8 @@ class TestSignalEventModel:
             strength=0.9,
             reason="MACD bearish cross",
             strategy_name="MACDCrossover",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert 0.0 <= event.strength <= 1.0
 
@@ -630,6 +694,8 @@ class TestSignalEventModel:
             strength=0.7,
             reason="Custom signal",
             price=None,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert event.price is None
 
@@ -644,7 +710,14 @@ class TestModelRelationships:
         When: Checking relationship attributes,
         Then: Has candles and trades attributes.
         """
-        instrument = Instrument(symbol="BTC-USD", exchange="kraken", base="BTC", quote="USD")
+        instrument = Instrument(
+            symbol="BTC-USD",
+            exchange="kraken",
+            base="BTC",
+            quote="USD",
+            session_id="test-session",
+            sequence_id=1,
+        )
         assert hasattr(instrument, "candles")
         assert hasattr(instrument, "trades")
 
@@ -664,6 +737,8 @@ class TestModelRelationships:
             low=49000.0,
             close=50500.0,
             volume=100.0,
+            session_id="test-session",
+            sequence_id=1,
         )
         assert hasattr(candle, "instrument")
 
@@ -681,6 +756,8 @@ class TestModelRelationships:
             size=1.0,
             side="buy",
             trade_id="trade-123",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert hasattr(trade, "instrument")
 
@@ -697,6 +774,8 @@ class TestModelRelationships:
             side="buy",
             strength=0.8,
             reason="Test signal",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert hasattr(event, "instrument")
 
