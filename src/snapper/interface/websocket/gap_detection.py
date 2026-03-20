@@ -44,7 +44,7 @@ class WsClientGapDetector:
         """
         try:
             payload: Any = json.loads(raw_message)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError:
             return
 
         if not isinstance(payload, dict):
