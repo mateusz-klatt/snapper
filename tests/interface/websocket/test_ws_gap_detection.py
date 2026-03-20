@@ -5,6 +5,7 @@ import json
 from loguru import logger
 
 from snapper.interface.websocket.gap_detection import WsClientGapDetector
+from snapper.interface.websocket.gap_detection import _client_counter_key
 
 
 class TestWsClientGapDetector:
@@ -210,3 +211,86 @@ class TestWsClientGapDetector:
         provenance_logs = [m for m in messages if "WS client provenance" in m]
         assert len(provenance_logs) == 1
         assert "only-pub-id" in provenance_logs[0]
+
+
+class TestClientCounterKey:
+    """Tests for _client_counter_key mapping."""
+
+    def test_subscribe_maps_to_control(self) -> None:
+        """Subscribe message type maps to control counter."""
+        assert _client_counter_key("subscribe") == "control"
+
+    def test_unsubscribe_maps_to_control(self) -> None:
+        """Unsubscribe message type maps to control counter."""
+        assert _client_counter_key("unsubscribe") == "control"
+
+    def test_authenticate_maps_to_control(self) -> None:
+        """Authenticate message type maps to control counter."""
+        assert _client_counter_key("authenticate") == "control"
+
+    def test_reauthenticate_maps_to_control(self) -> None:
+        """Reauthenticate message type maps to control counter."""
+        assert _client_counter_key("reauthenticate") == "control"
+
+    def test_ping_maps_to_telemetry(self) -> None:
+        """Ping message type maps to telemetry counter."""
+        assert _client_counter_key("ping") == "telemetry"
+
+    def test_heartbeat_maps_to_telemetry(self) -> None:
+        """Heartbeat message type maps to telemetry counter."""
+        assert _client_counter_key("heartbeat") == "telemetry"
+
+    def test_unknown_type_returns_original(self) -> None:
+        """Unknown message type passes through unchanged."""
+        assert _client_counter_key("custom_event") == "custom_event"
+
+
+class TestMixedCounterFamilies:
+    """Tests verifying no false gaps when mixing control and telemetry."""
+
+    def test_subscribe_then_ping_no_gap(self) -> None:
+        """Interleaved subscribe and ping produce no false gaps.
+
+        Given: A WsClientGapDetector,
+        When: Subscribe(control seq=1), ping(telemetry seq=1), subscribe(control seq=2),
+        Then: No gap warnings because control and telemetry are tracked separately.
+        """
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="WARNING")
+        session = "ws-mixed-aabbccdd"
+        try:
+            detector = WsClientGapDetector()
+            detector.inspect(
+                json.dumps(
+                    {
+                        "type": "subscribe",
+                        "session_id": session,
+                        "sequence_id": 1,
+                        "public_id": "p1",
+                    }
+                )
+            )
+            detector.inspect(
+                json.dumps(
+                    {
+                        "type": "ping",
+                        "session_id": session,
+                        "sequence_id": 1,
+                        "public_id": "p2",
+                    }
+                )
+            )
+            detector.inspect(
+                json.dumps(
+                    {
+                        "type": "subscribe",
+                        "session_id": session,
+                        "sequence_id": 2,
+                        "public_id": "p3",
+                    }
+                )
+            )
+        finally:
+            logger.remove(sink_id)
+        gap_warnings = [m for m in messages if "Gap" in m]
+        assert len(gap_warnings) == 0

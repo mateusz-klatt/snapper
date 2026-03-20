@@ -42,7 +42,6 @@
     "unlisted": "error",
     "exports": "error",
     "nsExports": "error",
-    "classMembers": "error",
     "types": "error",
     "nsTypes": "error",
     "enumMembers": "error",

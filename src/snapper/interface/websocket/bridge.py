@@ -131,7 +131,7 @@ class ZmqWebSocketBridgeService:
                 client_session_id=None,
                 client_public_id=None,
                 session_id=tracker.session_id,
-                sequence_id=tracker.next_sequence("control"),
+                sequence_id=tracker.next_sequence("server.control"),
                 timestamp=now,
             )
             async with repo.session() as session:
@@ -317,15 +317,15 @@ class ZmqWebSocketBridgeService:
     def _check_gap(self, topic: str, received_topic: str, payload_str: str) -> bool:
         """Run gap detection on a received message.
 
-        Parses the payload as a GapEnvelope to extract session_id and
-        sequence_id. Returns False and increments the invalid_messages
-        counter when the payload cannot be parsed as JSON; the caller
-        must drop the message in that case (Phase 1.3 strict mode).
+        Parses the payload as a GapEnvelope to extract session_id,
+        sequence_id, and type. The gap detector stream key is the
+        received ZMQ topic, matching the publisher-side SequenceTracker
+        which maintains per-topic monotonic counters.
 
         Args:
             topic: Subscription topic key used for metrics lookup.
-            received_topic: Exact topic from the ZMQ frame, used as the
-                gap detector stream key.
+            received_topic: Exact topic from the ZMQ frame, used as
+                the gap detector stream key.
             payload_str: Raw JSON payload string.
 
         Returns:
@@ -650,7 +650,7 @@ class ZmqWebSocketBridgeService:
                 error_response = WSErrorResponse(
                     message=f"Invalid topic: {error_msg}",
                     session_id=tracker.session_id,
-                    sequence_id=tracker.next_sequence("control"),
+                    sequence_id=tracker.next_sequence("server.control"),
                 )
                 await websocket.send_text(error_response.model_dump_json())
             except Exception as e:

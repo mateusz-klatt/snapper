@@ -82,3 +82,6 @@ fastlane/test_output
 *.gcno
 
 .claude/worktrees/
+
+# Working plan files (not tracked)
+plan-*.md

@@ -233,7 +233,7 @@ class WebSocketConnectionManager:
         error = WSErrorResponse(
             message=error_message,
             session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence("control"),
+            sequence_id=self._tracker.next_sequence("server.control"),
         )
         await self.send_response(websocket, error)
 

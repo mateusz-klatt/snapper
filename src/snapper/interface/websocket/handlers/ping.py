@@ -30,6 +30,6 @@ async def handle_ping(websocket: WebSocket, manager: WebSocketConnectionManager)
         timestamp=datetime.now(UTC),
         active_connections=len(manager.active_connections),
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("telemetry"),
+        sequence_id=manager.tracker.next_sequence("server.telemetry"),
     )
     await websocket.send_text(pong.model_dump_json())

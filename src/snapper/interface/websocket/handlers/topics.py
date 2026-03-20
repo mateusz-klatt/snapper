@@ -52,6 +52,6 @@ async def handle_get_topic_suggestions(
         prefix=prefix,
         suggestions=filtered,
         session_id=_manager.tracker.session_id,
-        sequence_id=_manager.tracker.next_sequence("control"),
+        sequence_id=_manager.tracker.next_sequence("server.control"),
     )
     await websocket.send_text(response.model_dump_json())

@@ -335,33 +335,22 @@ One `SequenceTracker` per component process; all `MessagePublisher` instances wi
 component share it. Counters survive socket reconnects — only a full component restart
 creates a new session.
 
-#### Per-Table Counters
+#### Per-Topic Counters
 
-`SequenceTracker` maintains monotonic counters keyed by **destination DB table name**,
-not by ZMQ topic. Multiple ZMQ topics that write to the same table share one counter.
-This guarantees that `GROUP BY session_id ORDER BY sequence_id` on any SQL table shows
-no gaps.
+`SequenceTracker` maintains monotonic counters keyed by **ZMQ topic** (e.g.
+`market.kraken.BTC-USD.candles.1m`, `orders.events.kraken.BTC-USD.executed`).
+Each topic has its own independent counter. `MessagePublisher.publish()` derives
+the topic via `topic_for_message(data)` and uses it as the counter key
+automatically.
 
-`table_for_message()` in `snapper.messaging.topics.builders` maps each Data class to
-its destination table. `MessagePublisher.publish()` calls it automatically before
-incrementing the counter.
+For DB-only writes that do not flow over ZMQ (instruments, users, settings seed
+data), the counter key is the destination table name as a logical identifier.
 
-Counter key convention uses bare table names:
+For WS control and REST middleware paths, logical channel names are used:
+`server.control`, `server.telemetry`, `rest.control`, `rest.telemetry`.
 
-| Counter Key | Data Classes |
-| ----------- | ------------ |
-| `candles` | `CandleData`, `TickData` |
-| `trades` | `TradeData` |
-| `orders` | `OrderRequestData`, `OrderCancelData`, `OrderReplaceData`, `OrderData`, `OrderEventData` |
-| `executions` | `ExecutionData` |
-| `signals` | `SignalData` |
-| `settings` | `SettingChangedData` |
-| `symbol_aliases` | `SymbolAliasUpdateData` |
-| `control` | `ReplayStartData`, `ReplayEndData` |
-| `telemetry` | `HeartbeatData` |
-
-For paper market data or other cases where the topic cannot be derived from the payload
-alone, pass an explicit `topic` override:
+For paper market data or other cases where the topic cannot be derived from the
+payload alone, pass an explicit `topic` override:
 
 ```python
 await publisher.publish(tick_data, topic="market.paper.kraken.BTC-USD.ticks")

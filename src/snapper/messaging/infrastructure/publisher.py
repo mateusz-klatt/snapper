@@ -1,11 +1,11 @@
 """Provenance-stamping message publisher for ZMQ transport.
 
-Provides SequenceTracker (session + per-table counters) and MessagePublisher
+Provides SequenceTracker (session + per-topic counters) and MessagePublisher
 (derives topic, stamps provenance, serializes, sends). Together they ensure
 every published payload item carries session_id and sequence_id for downstream
 gap detection.
 
-SequenceTracker owns one session_id and per-table monotonic counters for
+SequenceTracker owns one session_id and per-topic monotonic counters for
 one component lifetime. MessagePublisher wraps ValidatedPublisher, delegates
 session/counter state to the injected SequenceTracker, and stamps a copied
 model before sending.
@@ -15,21 +15,22 @@ from uuid import uuid7
 
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.topics.builders import table_for_message
 from snapper.messaging.topics.builders import topic_for_message
 
 
 class SequenceTracker:
-    """Per-component session identity and per-table sequence counters.
+    """Per-component session identity and per-topic sequence counters.
 
     Created once at component start and shared across all MessagePublisher
     instances within that component. Generates a stable session_id (UUID7)
-    and maintains monotonic counters keyed by destination table name.
+    and maintains monotonic counters keyed by stream name (ZMQ topic or
+    logical channel).
 
-    Counter keys are bare table names (e.g. "candles", "orders", "control",
-    "telemetry") — not ZMQ topics. Multiple ZMQ topics writing to the same
-    table share one counter. This guarantees that GROUP BY session_id
-    ORDER BY sequence_id on any SQL table shows no gaps.
+    Counter keys are ZMQ topics (e.g. "market.kraken.BTC-USD.ticks",
+    "orders.events.kraken.BTC-USD.executed") or logical channel names
+    for non-ZMQ paths (e.g. "ws.control", "ws.telemetry"). Consumers
+    use the same key for gap detection, ensuring accurate per-stream
+    sequence tracking without false gaps.
 
     Invariant: session_id and counters are inseparable. If a component
     restarts, it creates a new SequenceTracker with a fresh session_id
@@ -50,19 +51,19 @@ class SequenceTracker:
         """
         return self._session_id
 
-    def next_sequence(self, table: str) -> int:
-        """Return the next monotonic sequence number for a destination table.
+    def next_sequence(self, stream: str) -> int:
+        """Return the next monotonic sequence number for a stream.
 
         Args:
-            table: Destination table name (e.g. "candles", "orders",
-                "control", "telemetry"). Must match the actual DB table
-                that the payload item will be persisted into.
+            stream: Stream identifier, typically a ZMQ topic (e.g.
+                "market.kraken.BTC-USD.ticks") or logical channel
+                (e.g. "ws.control", "ws.telemetry").
 
         Returns:
             Next sequence number (starts at 1, increments by 1).
         """
-        seq = self._counters.get(table, 0) + 1
-        self._counters[table] = seq
+        seq = self._counters.get(stream, 0) + 1
+        self._counters[stream] = seq
         return seq
 
 
@@ -108,8 +109,7 @@ class MessagePublisher:
             The stamped copy with session_id and sequence_id set.
         """
         resolved_topic = topic or topic_for_message(data)
-        dest_table = table_for_message(data)
-        seq = self._tracker.next_sequence(dest_table)
+        seq = self._tracker.next_sequence(resolved_topic)
         stamped = data.model_copy(
             update={
                 "session_id": self._tracker.session_id,

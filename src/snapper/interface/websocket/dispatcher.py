@@ -135,7 +135,7 @@ async def _record_ws_control(
             client_session_id=client_sid,
             client_public_id=client_pid,
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("control"),
+            sequence_id=tracker.next_sequence("server.control"),
             timestamp=now,
         )
         async with repo.session() as session:
@@ -163,7 +163,7 @@ async def _record_ws_telemetry(
         message_type: Discriminator (e.g. ``ping``, ``pong``).
         raw_payload: Optional raw message payload.
     """
-    seq = tracker.next_sequence("telemetry")
+    seq = tracker.next_sequence("server.telemetry")
     settings = get_settings()
     if db_url is None or not settings.telemetry_recording_enabled:
         return
@@ -210,7 +210,7 @@ async def send_auth_complete(
     auth_ok = WSAuthOkResponse(
         exp=datetime.fromtimestamp(ws_payload.exp, UTC),
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("control"),
+        sequence_id=manager.tracker.next_sequence("server.control"),
     )
     await websocket.send_text(auth_ok.model_dump_json())
     allowed_topics = get_allowed_topics_for_role(user.role)
@@ -221,7 +221,7 @@ async def send_auth_complete(
         session_expires_at=session_expires_at_dt,
         ws_token_exp=datetime.fromtimestamp(ws_payload.exp, UTC),
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("control"),
+        sequence_id=manager.tracker.next_sequence("server.control"),
     )
     await websocket.send_text(auth_complete.model_dump_json())
     await _record_ws_control(db_url, manager.tracker, "auth", "ok")
@@ -245,7 +245,7 @@ def _try_parse_message(
         return WSErrorResponse(
             message=f"Invalid message format: {e.error_count()} errors",
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("control"),
+            sequence_id=manager.tracker.next_sequence("server.control"),
         )
 
 
@@ -363,7 +363,7 @@ async def dispatch_messages(
         error_msg = WSErrorResponse(
             message="Internal server error",
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("control"),
+            sequence_id=manager.tracker.next_sequence("server.control"),
         )
         await websocket.send_text(error_msg.model_dump_json())
         await _record_ws_control(

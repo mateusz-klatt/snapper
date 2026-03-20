@@ -90,7 +90,7 @@ async def validate_origin(
         auth_failed = WSAuthFailedResponse(
             reason="origin_forbidden",
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("control"),
+            sequence_id=tracker.next_sequence("server.control"),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4403, reason="Origin not allowed")

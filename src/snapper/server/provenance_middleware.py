@@ -293,7 +293,7 @@ class ClientProvenanceMiddleware:
                 client_session_id=client_session,
                 client_public_id=client_public,
                 session_id=self.tracker.session_id,
-                sequence_id=self.tracker.next_sequence("control"),
+                sequence_id=self.tracker.next_sequence("rest.control"),
                 timestamp=now,
             )
             async with repo.session() as session:
@@ -323,7 +323,7 @@ class ClientProvenanceMiddleware:
                 message_type=f"GET {path}",
                 payload=None,
                 session_id=self.tracker.session_id,
-                sequence_id=self.tracker.next_sequence("telemetry"),
+                sequence_id=self.tracker.next_sequence("rest.telemetry"),
                 timestamp=now,
             )
             async with repo.session() as session:

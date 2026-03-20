@@ -4,6 +4,9 @@ Provides per-connection gap detection for incoming WebSocket client
 messages. Each WsClientGapDetector wraps a GapDetector keyed by
 session_id and logs client provenance fields for observability.
 
+The detector uses counter family keys ("control" / "telemetry") that
+match the frontend SequenceTracker counter keys, not raw message types.
+
 Observability-first: gaps are logged as warnings, never cause
 disconnects or message rejection.
 """
@@ -14,6 +17,44 @@ from typing import Any
 from loguru import logger
 
 from snapper.messaging.infrastructure.gap_detector import GapDetector
+
+_CLIENT_CONTROL_TYPES = frozenset(
+    {
+        "authenticate",
+        "reauthenticate",
+        "subscribe",
+        "unsubscribe",
+    }
+)
+
+_CLIENT_TELEMETRY_TYPES = frozenset(
+    {
+        "ping",
+        "heartbeat",
+    }
+)
+
+
+def _client_counter_key(msg_type: str) -> str:
+    """Map a client WS message type to its counter family.
+
+    The frontend SequenceTracker uses two counter keys:
+    ``"control"`` for auth/subscribe commands and ``"telemetry"`` for
+    pings. This function mirrors that mapping so the server-side
+    gap detector tracks the same counter partitions.
+
+    Args:
+        msg_type: The ``type`` field from the client JSON message.
+
+    Returns:
+        ``"control"``, ``"telemetry"``, or the original type for
+        unmapped message types.
+    """
+    if msg_type in _CLIENT_CONTROL_TYPES:
+        return "control"
+    if msg_type in _CLIENT_TELEMETRY_TYPES:
+        return "telemetry"
+    return msg_type
 
 
 class WsClientGapDetector:
@@ -74,4 +115,4 @@ class WsClientGapDetector:
             if detector is None:
                 detector = GapDetector(name=f"ws-client:{session_id[:8]}")
                 self.gap_detectors[session_id] = detector
-            detector.check(msg_type, session_id, sequence_id)
+            detector.check(_client_counter_key(msg_type), session_id, sequence_id)

@@ -82,6 +82,7 @@ __all__ = [
     "TemporalMixin",
     "Instrument",
     "Candle",
+    "Tick",
     "Trade",
     "Order",
     "Execution",
@@ -197,6 +198,27 @@ class Candle(TemporalMixin, Base):
     vwap: Mapped[float | None] = mapped_column(Float, nullable=True)
     trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
     instrument: Mapped[Instrument] = relationship(back_populates="candles")
+
+
+class Tick(TemporalMixin, Base):
+    """SQLAlchemy model for real-time price tick snapshots."""
+
+    __tablename__ = "ticks"
+    __table_args__ = (
+        Index("ix_tick_instrument_ts", "instrument_id", "timestamp"),
+        Index(
+            "ix_ticks_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+    )
+    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float] = mapped_column(Float)
 
 
 class Trade(TemporalMixin, Base):

@@ -251,7 +251,7 @@ class TestRecordWsTelemetry:
         ):
             await _record_ws_telemetry(None, tracker, "ping")
         mock_get_repo.assert_not_called()
-        assert tracker.next_sequence("telemetry") == 2
+        assert tracker.next_sequence("server.telemetry") == 2
 
     @pytest.mark.asyncio
     async def test_counter_increments_when_disabled(self) -> None:
@@ -270,7 +270,7 @@ class TestRecordWsTelemetry:
         ):
             await _record_ws_telemetry(TEST_DB_URL, tracker, "ping")
         mock_get_repo.assert_not_called()
-        assert tracker.next_sequence("telemetry") == 2
+        assert tracker.next_sequence("server.telemetry") == 2
 
     @pytest.mark.asyncio
     async def test_writes_telemetry_row_when_enabled(self) -> None:

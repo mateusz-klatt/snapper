@@ -43,13 +43,15 @@ class GapEnvelope(BaseModel):
 
     Attributes:
         session_id: Producer session identifier (empty string when absent).
-        sequence_id: Per-topic monotonic counter (zero when absent).
+        sequence_id: Per-table monotonic counter (zero when absent).
+        type: Payload item type discriminator (empty string when absent).
     """
 
     model_config = ConfigDict(extra="ignore")
 
     session_id: str = ""
     sequence_id: int = 0
+    type: str = ""
 
 
 class MessageParseError(Exception):

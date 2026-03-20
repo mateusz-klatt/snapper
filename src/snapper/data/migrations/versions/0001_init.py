@@ -100,8 +100,8 @@ for _alias in SYMBOL_ALIASES:
 def upgrade() -> None:
     """Create initial database schema and seed reference data.
 
-    Creates all tables for instruments, candles, trades, orders, executions,
-    positions, signals, users, settings, symbols, symbol aliases,
+    Creates all tables for instruments, candles, ticks, trades, orders,
+    executions, positions, signals, users, settings, symbols, symbol aliases,
     process runs, instrument specs, market snapshots, control, and telemetry.
     Seeds symbols, aliases, and exchange capabilities.
     """
@@ -361,6 +361,34 @@ def upgrade() -> None:
     op.create_index("ix_trades_instrument_id", "trades", ["instrument_id"])
     op.create_index("ix_trades_timestamp", "trades", ["timestamp"])
     op.create_index("ix_trade_instrument_ts", "trades", ["instrument_id", "timestamp"])
+    op.create_table(
+        "ticks",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_id", sa.Integer(), nullable=False),
+        sa.Column("bid", sa.Float(), nullable=True),
+        sa.Column("ask", sa.Float(), nullable=True),
+        sa.Column("last", sa.Float(), nullable=True),
+        sa.Column("volume", sa.Float(), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_ticks_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_ticks_sequence_id"),
+    )
+    op.create_index(
+        "ix_ticks_public_id",
+        "ticks",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index("ix_ticks_instrument_id", "ticks", ["instrument_id"])
+    op.create_index("ix_tick_instrument_ts", "ticks", ["instrument_id", "timestamp"])
     op.create_table(
         "orders",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -884,6 +912,7 @@ def downgrade() -> None:
     op.drop_table("positions")
     op.drop_table("executions")
     op.drop_table("orders")
+    op.drop_table("ticks")
     op.drop_table("trades")
     op.drop_table("candles")
     op.drop_table("instruments")
