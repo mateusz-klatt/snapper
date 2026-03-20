@@ -168,3 +168,29 @@ class TestGapDetector:
         finally:
             logger.remove(sink_id)
         assert any("[GapDetector:ws-client]" in m for m in messages)
+
+    def test_reset_topic_clears_state(self) -> None:
+        """reset_topic removes tracking state so resubscribe starts fresh.
+
+        Given: A GapDetector tracking topic.a at seq=3,
+        When: reset_topic("topic.a") is called and new seq=1 arrives,
+        Then: No gap is detected (state was cleared).
+        """
+        gd = GapDetector(name="bridge")
+        gd.check("topic.a", "s1-aabb-ccdd", 1)
+        gd.check("topic.a", "s1-aabb-ccdd", 2)
+        gd.check("topic.a", "s1-aabb-ccdd", 3)
+        gd.reset_topic("topic.a")
+        result = gd.check("topic.a", "s1-aabb-ccdd", 1)
+        assert result is True
+        assert gd.stats.gaps_detected == 0
+
+    def test_reset_topic_no_op_for_unknown(self) -> None:
+        """reset_topic on unknown topic does not raise.
+
+        Given: A GapDetector with no tracked topics,
+        When: reset_topic is called for an untracked topic,
+        Then: No error is raised.
+        """
+        gd = GapDetector()
+        gd.reset_topic("nonexistent.topic")

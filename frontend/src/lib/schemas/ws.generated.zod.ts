@@ -355,17 +355,6 @@ export const WSGetSubscriptionsRequestSchema = z
   })
   .strict()
 
-export const WSGetTopicSuggestionsRequestSchema = z
-  .object({
-    public_id: z.string().optional(),
-    type: z.literal('get_topic_suggestions'),
-    timestamp: z.iso.datetime().optional(),
-    session_id: z.string(),
-    sequence_id: z.number().int(),
-    prefix: z.string(),
-  })
-  .strict()
-
 export const WSPingRequestSchema = z
   .object({
     public_id: z.string().optional(),
@@ -443,7 +432,6 @@ export const WSSubscriptionSuccessResponseSchema = z
     topics: z.array(z.string()),
     denied_topics: z.array(z.string()).optional(),
     active_subscriptions: z.array(z.string()),
-    zmq_topics: z.array(z.string()).optional(),
     message: z.string().nullable(),
   })
   .strict()
@@ -458,18 +446,6 @@ export const WSSubscriptionsListResponseSchema = z
     subscriptions: z.array(z.string()),
     available_topics: z.array(z.string()),
     total_available: z.number().int(),
-  })
-  .strict()
-
-export const WSTopicSuggestionsResponseSchema = z
-  .object({
-    public_id: z.string().optional(),
-    type: z.literal('topic_suggestions'),
-    timestamp: z.iso.datetime().optional(),
-    session_id: z.string(),
-    sequence_id: z.number().int(),
-    prefix: z.string(),
-    suggestions: z.array(z.string()),
   })
   .strict()
 

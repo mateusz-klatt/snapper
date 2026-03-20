@@ -28,12 +28,10 @@ export type {
   WSReauthRequest,
   WSPingRequest,
   WSGetSubscriptionsRequest,
-  WSGetTopicSuggestionsRequest,
   WSSubscribeRequest,
   WSUnsubscribeRequest,
   WSSubscriptionSuccessResponse,
   WSSubscriptionsListResponse,
-  WSTopicSuggestionsResponse,
   WSPongResponse,
 } from './ws.generated'
 import type {
@@ -65,12 +63,10 @@ import type {
   WSReauthRequest,
   WSPingRequest,
   WSGetSubscriptionsRequest,
-  WSGetTopicSuggestionsRequest,
   WSSubscribeRequest,
   WSUnsubscribeRequest,
   WSSubscriptionSuccessResponse,
   WSSubscriptionsListResponse,
-  WSTopicSuggestionsResponse,
   WSPongResponse,
 } from './ws.generated'
 
@@ -103,12 +99,10 @@ export type WebSocketMessages =
   | WSReauthRequest
   | WSPingRequest
   | WSGetSubscriptionsRequest
-  | WSGetTopicSuggestionsRequest
   | WSSubscribeRequest
   | WSUnsubscribeRequest
   | WSSubscriptionSuccessResponse
   | WSSubscriptionsListResponse
-  | WSTopicSuggestionsResponse
   | WSPongResponse
 
 export type PongWithRtt = WSPongResponse & { rtt_ms: number }

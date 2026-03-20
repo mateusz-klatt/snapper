@@ -29,7 +29,6 @@ export {
   WSUnsubscribeRequestSchema as unsubscribeRequestSchema,
   WSSubscriptionSuccessResponseSchema as subscriptionSuccessResponseSchema,
   WSSubscriptionsListResponseSchema as subscriptionsListResponseSchema,
-  WSTopicSuggestionsResponseSchema as topicSuggestionsResponseSchema,
   WSPongResponseSchema as pongMessageSchema,
 } from './ws.generated.zod'
 import {
@@ -59,7 +58,6 @@ import {
   WSErrorResponseSchema,
   WSSubscriptionSuccessResponseSchema,
   WSSubscriptionsListResponseSchema,
-  WSTopicSuggestionsResponseSchema,
   WSPongResponseSchema,
 } from './ws.generated.zod'
 
@@ -90,7 +88,6 @@ export const wsMessageUnionSchema = z.discriminatedUnion('type', [
   WSErrorResponseSchema,
   WSSubscriptionSuccessResponseSchema,
   WSSubscriptionsListResponseSchema,
-  WSTopicSuggestionsResponseSchema,
   WSPongResponseSchema,
 ])
 export const wsMessageBaseSchema = z.looseObject({
@@ -138,7 +135,6 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'unsubscribed',
   'subscription_success',
   'subscriptions_list',
-  'topic_suggestions',
 ])
 
 export function parseWsMessage(raw: unknown): WsMessageUnion | null {

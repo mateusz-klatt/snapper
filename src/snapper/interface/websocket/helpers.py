@@ -128,8 +128,8 @@ def get_allowed_topics_for_role(role: UserRole) -> list[str]:
     allowed_categories = role_allowed_categories(role)
     topics: list[str] = []
     for category in allowed_categories:
-        category_topics = get_topics_by_category(category)
-        topics.extend(category_topics.keys())
+        schemas = get_topics_by_category(category)
+        topics.extend(schema.pattern for schema in schemas)
     return sorted(set(topics))
 
 

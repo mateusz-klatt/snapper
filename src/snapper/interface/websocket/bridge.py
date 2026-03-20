@@ -147,9 +147,9 @@ class ZmqWebSocketBridgeService:
             Dictionary mapping topic names to configurations.
         """
         config = {}
-        for topic_name, topic_schema in TOPIC_REGISTRY.items():
+        for topic_schema in TOPIC_REGISTRY:
             endpoint: str = self.settings.zmq_broker_xpub
-            config[topic_name] = TopicConfigurationModel(
+            config[topic_schema.pattern] = TopicConfigurationModel(
                 endpoint=endpoint,
                 pattern=topic_schema.pattern,
                 throttle_ms=topic_schema.throttle_ms,
@@ -312,6 +312,7 @@ class ZmqWebSocketBridgeService:
             socket.setsockopt(zmq.LINGER, 0)
             socket.close()
             del self.zmq_subscribers[topic]
+        self._gap_detector.reset_topic(topic)
         logger.info(f"ZMQ subscription stopped for topic: {topic}")
 
     def _check_gap(self, topic: str, received_topic: str, payload_str: str) -> bool:
@@ -596,6 +597,7 @@ class ZmqWebSocketBridgeService:
             self.zmq_subscribers[topic].setsockopt(zmq.LINGER, 0)
             self.zmq_subscribers[topic].close()
             del self.zmq_subscribers[topic]
+        self._gap_detector.reset_topic(topic)
         logger.info(f"Stopped ZMQ subscriber for topic: {topic}")
         await asyncio.sleep(0)
 

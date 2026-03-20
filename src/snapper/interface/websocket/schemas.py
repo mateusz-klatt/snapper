@@ -8,7 +8,7 @@ Message categories:
     - Authentication: auth_required, auth_ok, auth_failed, auth_complete
     - Reauthentication: reauth_required, reauth_ok, auth_expired
     - Subscriptions: subscribe, unsubscribe, subscription_success, subscriptions_list
-    - Utility: ping, pong, error, topic_suggestions
+    - Utility: ping, pong, error
 """
 
 from datetime import datetime
@@ -193,7 +193,6 @@ class WSSubscriptionSuccessResponse(WsMessageSchema):
         topics: Topics that were successfully processed.
         denied_topics: Topics denied due to permissions.
         active_subscriptions: Current list of active subscriptions.
-        zmq_topics: ZMQ topics that were mapped.
         message: Optional additional details.
     """
 
@@ -207,7 +206,6 @@ class WSSubscriptionSuccessResponse(WsMessageSchema):
         default_factory=list, description="Topics that were denied due to permissions"
     )
     active_subscriptions: list[str] = Field(..., description="Current list of active subscriptions")
-    zmq_topics: list[str] = Field(default_factory=list, description="ZMQ topics that were mapped")
     message: str | None = Field(
         default=None, description="Optional message with additional details"
     )
@@ -229,22 +227,6 @@ class WSSubscriptionsListResponse(WsMessageSchema):
     subscriptions: list[str] = Field(..., description="Current active subscriptions")
     available_topics: list[str] = Field(..., description="Topics available for subscription")
     total_available: int = Field(..., description="Total number of available topics")
-
-
-class WSTopicSuggestionsResponse(WsMessageSchema):
-    """Topic autocomplete suggestions response.
-
-    Sent in response to get_topic_suggestions request.
-
-    Attributes:
-        type: Message type discriminator ('topic_suggestions').
-        prefix: Search prefix that was used.
-        suggestions: Matching topic names.
-    """
-
-    type: Literal["topic_suggestions"] = Field("topic_suggestions", description=_TYPE_DESC)
-    prefix: str = Field(..., description="Search prefix that was used")
-    suggestions: list[str] = Field(..., description="Matching topic names")
 
 
 class WSPongResponse(WsMessageSchema):
@@ -311,17 +293,3 @@ class WSGetSubscriptionsRequest(WsMessageSchema):
     """
 
     type: Literal["get_subscriptions"] = Field(default="get_subscriptions", description=_TYPE_DESC)
-
-
-class WSGetTopicSuggestionsRequest(WsMessageSchema):
-    """Request topic name suggestions for autocomplete.
-
-    Attributes:
-        type: Message type discriminator ('get_topic_suggestions').
-        prefix: Search prefix for filtering topics.
-    """
-
-    type: Literal["get_topic_suggestions"] = Field(
-        default="get_topic_suggestions", description=_TYPE_DESC
-    )
-    prefix: str = Field(default="", description="Search prefix for topics")

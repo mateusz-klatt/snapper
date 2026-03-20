@@ -53,6 +53,7 @@ class GapDetector:
             name: Optional component name for log context.
         """
         self._name = name
+        self._log_prefix = f"[GapDetector:{name}]" if name else "[GapDetector]"
         self._streams: dict[str, _StreamState] = {}
         self.stats: GapDetectorStats = GapDetectorStats()
 
@@ -69,15 +70,12 @@ class GapDetector:
             False if the message was rejected as unstamped.
         """
         if not session_id or sequence_id == 0:
-            log_prefix = f"[GapDetector:{self._name}]" if self._name else "[GapDetector]"
             logger.warning(
-                f"{log_prefix} Rejected unstamped message on {received_topic} "
+                f"{self._log_prefix} Rejected unstamped message on {received_topic} "
                 f"(session_id={session_id!r}, sequence_id={sequence_id})"
             )
             self.stats.rejected_unstamped += 1
             return False
-
-        log_prefix = f"[GapDetector:{self._name}]" if self._name else "[GapDetector]"
 
         state = self._streams.get(received_topic)
 
@@ -89,7 +87,7 @@ class GapDetector:
             if sequence_id > 1:
                 self.stats.mid_stream_joins += 1
                 logger.info(
-                    f"{log_prefix} Joined mid-stream on {received_topic} "
+                    f"{self._log_prefix} Joined mid-stream on {received_topic} "
                     f"at seq={sequence_id} (session={session_id[:8]})"
                 )
             return True
@@ -97,7 +95,7 @@ class GapDetector:
         if state.last_session_id != session_id:
             self.stats.session_resets += 1
             logger.info(
-                f"{log_prefix} Session reset on {received_topic}: "
+                f"{self._log_prefix} Session reset on {received_topic}: "
                 f"{state.last_session_id[:8]} -> {session_id[:8]}, "
                 f"seq={sequence_id}"
             )
@@ -113,7 +111,7 @@ class GapDetector:
             gap_size = sequence_id - state.expected_sequence_id
             self.stats.gaps_detected += gap_size
             logger.warning(
-                f"{log_prefix} Gap on {received_topic}: "
+                f"{self._log_prefix} Gap on {received_topic}: "
                 f"expected seq={state.expected_sequence_id}, "
                 f"got seq={sequence_id} "
                 f"(missing {gap_size} message(s), "
@@ -124,9 +122,28 @@ class GapDetector:
 
         self.stats.duplicates += 1
         logger.debug(
-            f"{log_prefix} Duplicate/reorder on {received_topic}: "
+            f"{self._log_prefix} Duplicate/reorder on {received_topic}: "
             f"expected seq={state.expected_sequence_id}, "
             f"got seq={sequence_id} "
             f"(session={session_id[:8]})"
         )
         return True
+
+    def reset_topic(self, topic: str) -> None:
+        """Clear tracking state for a topic.
+
+        Called when the bridge unsubscribes from a ZMQ topic (no more
+        WS clients). Without this, resubscribing later would produce
+        false gaps because messages published while unsubscribed are
+        never received.
+
+        Args:
+            topic: The ZMQ topic whose state should be discarded.
+        """
+        removed = self._streams.pop(topic, None)
+        if removed is not None:
+            logger.debug(
+                f"{self._log_prefix} Reset tracking for {topic} "
+                f"(was at seq={removed.expected_sequence_id}, "
+                f"session={removed.last_session_id[:8]})"
+            )

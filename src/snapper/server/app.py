@@ -122,7 +122,6 @@ from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
-from snapper.messaging.topics.schemas import get_all_topic_names
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
@@ -884,7 +883,6 @@ def _create_monitoring_endpoints_router(
             version="0.1.0",
             connections=ConnectionStatsSchema(**asdict(stats.connections)),
             topics=HealthTopics(
-                available=len(get_all_topic_names()),
                 active=stats.connections.active_topics,
             ),
             gap_detection=gap_stats,

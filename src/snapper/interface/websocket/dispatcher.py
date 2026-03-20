@@ -38,13 +38,11 @@ from snapper.interface.websocket.handlers.ping import handle_ping
 from snapper.interface.websocket.handlers.subscribe import handle_get_subscriptions
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
-from snapper.interface.websocket.handlers.topics import handle_get_topic_suggestions
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
 from snapper.interface.websocket.schemas import WSAuthCompleteResponse
 from snapper.interface.websocket.schemas import WSAuthOkResponse
 from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.interface.websocket.schemas import WSGetSubscriptionsRequest
-from snapper.interface.websocket.schemas import WSGetTopicSuggestionsRequest
 from snapper.interface.websocket.schemas import WSPingRequest
 from snapper.interface.websocket.schemas import WSReauthRequest
 from snapper.interface.websocket.schemas import WSSubscribeRequest
@@ -56,7 +54,6 @@ WSClientMessage = Annotated[
     | WSUnsubscribeRequest
     | WSPingRequest
     | WSGetSubscriptionsRequest
-    | WSGetTopicSuggestionsRequest
     | WSReauthRequest,
     "type",
 ]
@@ -330,7 +327,7 @@ async def dispatch_messages(
     """Main message dispatch loop for WebSocket connection.
 
     Receives messages, validates them, and routes to appropriate handlers.
-    Handles re-authentication, subscriptions, pings, and topic suggestions.
+    Handles re-authentication, subscriptions, and pings.
 
     Args:
         websocket: The authenticated WebSocket connection.
@@ -395,9 +392,6 @@ def _build_dispatch_table(
         WSUnsubscribeRequest: lambda msg: handle_unsubscribe(websocket, msg, manager),
         WSGetSubscriptionsRequest: lambda msg: handle_get_subscriptions(
             websocket, manager, user.role
-        ),
-        WSGetTopicSuggestionsRequest: lambda msg: handle_get_topic_suggestions(
-            websocket, manager, msg, user.role
         ),
         WSPingRequest: lambda msg: handle_ping(websocket, manager),
     }

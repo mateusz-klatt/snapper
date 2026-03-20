@@ -585,8 +585,6 @@ struct HealthTopics: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String?
     let sequenceId: Int?
-    /// Total number of available topics
-    let available: Int
     /// Number of currently active topics
     let active: Int
 
@@ -596,7 +594,6 @@ struct HealthTopics: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case available
         case active
     }
 }

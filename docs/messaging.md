@@ -299,6 +299,8 @@ order_status = OrderData(
 from snapper.messaging.schemas.data import HeartbeatData
 
 heartbeat = HeartbeatData(
+    session_id="019e1a2b-0000-7000-8000-000000000001",
+    sequence_id=1,
     component="zmq_broker",
     status="healthy",
     sequence=1,
@@ -523,16 +525,6 @@ message payloads.  `ValidatedPublisher.send_multipart()` calls
 `validate_topic()` before sending; `ValidatedSubscriber.subscribe()` calls
 `validate_subscription_pattern()` before subscribing.  Both raise
 `TopicValidationError` on invalid topics.
-
-A separate `validate_message_schema()` utility in `messaging.topics.schemas`
-checks a message dict against the required fields registered for a topic and
-returns `(bool, list[str])`:
-
-```python
-from snapper.messaging.topics.schemas import validate_message_schema
-
-is_valid, missing = validate_message_schema("market", {"exchange": "kraken"})
-```
 
 ## High Water Mark (HWM) Policy
 

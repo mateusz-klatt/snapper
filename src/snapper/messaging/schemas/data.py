@@ -397,7 +397,7 @@ class HeartbeatData(StrictDataSchema):
 
     Attributes:
         component: Name of the sending component.
-        sequence: Monotonically increasing sequence number.
+        sequence: Domain-level heartbeat generation count (not transport sequence_id).
         status: Current health status.
         lag_ms: Processing lag in milliseconds.
         meta: Optional metadata dictionary for extensions.

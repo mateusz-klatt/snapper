@@ -545,26 +545,6 @@ struct WSGetSubscriptionsRequest: Codable, Sendable {
     }
 }
 
-struct WSGetTopicSuggestionsRequest: Codable, Sendable {
-    let publicId: String?
-    /// Message type discriminator
-    let type: String
-    let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
-    /// Search prefix for topics
-    let prefix: String?
-
-    enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
-        case type
-        case timestamp
-        case sessionId = "session_id"
-        case sequenceId = "sequence_id"
-        case prefix
-    }
-}
-
 struct WSPingRequest: Codable, Sendable {
     let publicId: String?
     /// Message type discriminator
@@ -700,8 +680,6 @@ struct WSSubscriptionSuccessResponse: Codable, Sendable {
     let deniedTopics: [String]?
     /// Current list of active subscriptions
     let activeSubscriptions: [String]
-    /// ZMQ topics that were mapped
-    let zmqTopics: [String]?
     /// Optional message with additional details
     let message: String?
 
@@ -716,7 +694,6 @@ struct WSSubscriptionSuccessResponse: Codable, Sendable {
         case topics
         case deniedTopics = "denied_topics"
         case activeSubscriptions = "active_subscriptions"
-        case zmqTopics = "zmq_topics"
         case message
     }
 }
@@ -744,29 +721,6 @@ struct WSSubscriptionsListResponse: Codable, Sendable {
         case subscriptions
         case availableTopics = "available_topics"
         case totalAvailable = "total_available"
-    }
-}
-
-struct WSTopicSuggestionsResponse: Codable, Sendable {
-    let publicId: String?
-    /// Message type discriminator
-    let type: String
-    let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
-    /// Search prefix that was used
-    let prefix: String
-    /// Matching topic names
-    let suggestions: [String]
-
-    enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
-        case type
-        case timestamp
-        case sessionId = "session_id"
-        case sequenceId = "sequence_id"
-        case prefix
-        case suggestions
     }
 }
 

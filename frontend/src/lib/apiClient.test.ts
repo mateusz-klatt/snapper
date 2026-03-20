@@ -506,7 +506,6 @@ describe('domain API methods', () => {
           type: 'health_topics',
           session_id: '',
           sequence_id: 0,
-          available: 10,
           active: 3,
         },
       }),

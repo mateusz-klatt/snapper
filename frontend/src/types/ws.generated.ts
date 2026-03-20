@@ -33,7 +33,6 @@ export type WebSocketMessages =
   | WSAuthenticateRequest
   | WSErrorResponse
   | WSGetSubscriptionsRequest
-  | WSGetTopicSuggestionsRequest
   | WSPingRequest
   | WSPongResponse
   | WSReauthOkResponse
@@ -42,7 +41,6 @@ export type WebSocketMessages =
   | WSSubscribeRequest
   | WSSubscriptionSuccessResponse
   | WSSubscriptionsListResponse
-  | WSTopicSuggestionsResponse
   | WSUnsubscribeRequest;
 export type Type = "candle";
 export type Exchange = "kraken" | "zonda" | "walutomat" | "polygon";
@@ -159,31 +157,27 @@ export type Type23 = "get_subscriptions";
 /**
  * Message type discriminator
  */
-export type Type24 = "get_topic_suggestions";
+export type Type24 = "ping";
 /**
  * Message type discriminator
  */
-export type Type25 = "ping";
+export type Type25 = "pong";
 /**
  * Message type discriminator
  */
-export type Type26 = "pong";
+export type Type26 = "reauth_ok";
 /**
  * Message type discriminator
  */
-export type Type27 = "reauth_ok";
+export type Type27 = "reauth";
 /**
  * Message type discriminator
  */
-export type Type28 = "reauth";
+export type Type28 = "reauth_required";
 /**
  * Message type discriminator
  */
-export type Type29 = "reauth_required";
-/**
- * Message type discriminator
- */
-export type Type30 = "subscribe";
+export type Type29 = "subscribe";
 /**
  * Topics to subscribe to
  */
@@ -191,7 +185,7 @@ export type Topics = string[];
 /**
  * Message type discriminator
  */
-export type Type31 = "subscription_success";
+export type Type30 = "subscription_success";
 /**
  * The subscription action performed
  */
@@ -213,17 +207,13 @@ export type DeniedTopics = string[];
  */
 export type ActiveSubscriptions = string[];
 /**
- * ZMQ topics that were mapped
- */
-export type ZmqTopics = string[];
-/**
  * Optional message with additional details
  */
 export type Message = string | null;
 /**
  * Message type discriminator
  */
-export type Type32 = "subscriptions_list";
+export type Type31 = "subscriptions_list";
 /**
  * Current active subscriptions
  */
@@ -235,15 +225,7 @@ export type AvailableTopics1 = string[];
 /**
  * Message type discriminator
  */
-export type Type33 = "topic_suggestions";
-/**
- * Matching topic names
- */
-export type Suggestions = string[];
-/**
- * Message type discriminator
- */
-export type Type34 = "unsubscribe";
+export type Type32 = "unsubscribe";
 /**
  * Topics to unsubscribe from
  */
@@ -355,7 +337,7 @@ export interface ExecutionData {
  *
  * Attributes:
  *     component: Name of the sending component.
- *     sequence: Monotonically increasing sequence number.
+ *     sequence: Domain-level heartbeat generation count (not transport sequence_id).
  *     status: Current health status.
  *     lag_ms: Processing lag in milliseconds.
  *     meta: Optional metadata dictionary for extensions.
@@ -880,24 +862,6 @@ export interface WSGetSubscriptionsRequest {
   sequence_id?: number;
 }
 /**
- * Request topic name suggestions for autocomplete.
- *
- * Attributes:
- *     type: Message type discriminator ('get_topic_suggestions').
- *     prefix: Search prefix for filtering topics.
- */
-export interface WSGetTopicSuggestionsRequest {
-  public_id?: string;
-  type: Type24;
-  timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
-  /**
-   * Search prefix for topics
-   */
-  prefix?: string;
-}
-/**
  * Ping request from client.
  *
  * Used for connection health checks.
@@ -907,7 +871,7 @@ export interface WSGetTopicSuggestionsRequest {
  */
 export interface WSPingRequest {
   public_id?: string;
-  type: Type25;
+  type: Type24;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;
@@ -924,7 +888,7 @@ export interface WSPingRequest {
  */
 export interface WSPongResponse {
   public_id?: string;
-  type: Type26;
+  type: Type25;
   /**
    * Server timestamp (ISO 8601)
    */
@@ -947,7 +911,7 @@ export interface WSPongResponse {
  */
 export interface WSReauthOkResponse {
   public_id?: string;
-  type: Type27;
+  type: Type26;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;
@@ -967,7 +931,7 @@ export interface WSReauthOkResponse {
  */
 export interface WSReauthRequest {
   public_id?: string;
-  type: Type28;
+  type: Type27;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;
@@ -987,7 +951,7 @@ export interface WSReauthRequest {
  */
 export interface WSReauthRequiredResponse {
   public_id?: string;
-  type: Type29;
+  type: Type28;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;
@@ -1005,7 +969,7 @@ export interface WSReauthRequiredResponse {
  */
 export interface WSSubscribeRequest {
   public_id?: string;
-  type: Type30;
+  type: Type29;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;
@@ -1023,12 +987,11 @@ export interface WSSubscribeRequest {
  *     topics: Topics that were successfully processed.
  *     denied_topics: Topics denied due to permissions.
  *     active_subscriptions: Current list of active subscriptions.
- *     zmq_topics: ZMQ topics that were mapped.
  *     message: Optional additional details.
  */
 export interface WSSubscriptionSuccessResponse {
   public_id?: string;
-  type: Type31;
+  type: Type30;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;
@@ -1037,7 +1000,6 @@ export interface WSSubscriptionSuccessResponse {
   topics: Topics1;
   denied_topics?: DeniedTopics;
   active_subscriptions: ActiveSubscriptions;
-  zmq_topics?: ZmqTopics;
   message?: Message;
 }
 /**
@@ -1053,7 +1015,7 @@ export interface WSSubscriptionSuccessResponse {
  */
 export interface WSSubscriptionsListResponse {
   public_id?: string;
-  type: Type32;
+  type: Type31;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;
@@ -1065,28 +1027,6 @@ export interface WSSubscriptionsListResponse {
   total_available: number;
 }
 /**
- * Topic autocomplete suggestions response.
- *
- * Sent in response to get_topic_suggestions request.
- *
- * Attributes:
- *     type: Message type discriminator ('topic_suggestions').
- *     prefix: Search prefix that was used.
- *     suggestions: Matching topic names.
- */
-export interface WSTopicSuggestionsResponse {
-  public_id?: string;
-  type: Type33;
-  timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
-  /**
-   * Search prefix that was used
-   */
-  prefix: string;
-  suggestions: Suggestions;
-}
-/**
  * Topic unsubscription request from client.
  *
  * Attributes:
@@ -1095,7 +1035,7 @@ export interface WSTopicSuggestionsResponse {
  */
 export interface WSUnsubscribeRequest {
   public_id?: string;
-  type: Type34;
+  type: Type32;
   timestamp?: string;
   session_id?: string;
   sequence_id?: number;

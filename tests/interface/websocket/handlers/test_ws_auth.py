@@ -64,10 +64,8 @@ from snapper.interface.websocket.handlers.ping import handle_ping
 from snapper.interface.websocket.handlers.subscribe import handle_get_subscriptions
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
-from snapper.interface.websocket.handlers.topics import handle_get_topic_suggestions
 from snapper.interface.websocket.helpers import determine_topic_category
 from snapper.interface.websocket.helpers import filter_topics
-from snapper.interface.websocket.schemas import WSGetTopicSuggestionsRequest
 from snapper.interface.websocket.schemas import WSReauthRequest
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
@@ -201,8 +199,8 @@ class TestSecureWebSocketIntegration:
             auth_ok, auth_complete = _complete_handshake(websocket, ws_token)
             assert isinstance(auth_ok["exp"], str)
             topics = set(cast(list[str], auth_complete["available_topics"]))
-            assert "market" in topics
-            assert "signals" in topics
+            assert "market." in topics
+            assert "signals." in topics
             assert "system.heartbeats." in topics
             assert auth_complete["user_role"] == "operator"
 
@@ -324,9 +322,9 @@ class TestSecureWebSocketViewer:
             _, auth_response = _complete_handshake(websocket, ws_token)
             assert auth_response["user_role"] == "viewer"
             topics = set(cast(list[str], auth_response["available_topics"]))
-            assert "market" in topics
+            assert "market." in topics
             assert "system.heartbeats." in topics
-            assert "signals" not in topics
+            assert "signals." not in topics
             assert "orders" not in topics
 
     def test_viewer_subscription_filtering(self, test_client: Any) -> None:
@@ -382,11 +380,11 @@ class TestSecureWebSocketAdmin:
             _, auth_response = _complete_handshake(websocket, ws_token)
             assert auth_response["user_role"] == "admin"
             topics = set(cast(list[str], auth_response["available_topics"]))
-            assert "market" in topics
-            assert "signals" in topics
+            assert "market." in topics
+            assert "signals." in topics
             assert "system.heartbeats." in topics
-            assert "orders.commands" in topics
-            assert "orders.events" in topics
+            assert "orders.commands." in topics
+            assert "orders.events." in topics
 
 
 def test_websocket_stats_endpoint(test_client: Any) -> None:
@@ -445,7 +443,7 @@ def test_successful_handshake_returns_topics(test_client: Any) -> None:
     with test_client.websocket_connect(WS_PATH) as websocket:
         _, auth_complete = _complete_handshake(websocket, ws_token)
         topics = set(cast(list[str], auth_complete["available_topics"]))
-        assert "signals" in topics
+        assert "signals." in topics
         assert "system.heartbeats." in topics
         assert auth_complete["session_expires_at"] is not None
 
@@ -668,64 +666,6 @@ def test_legacy_token_update_returns_error(test_client: Any) -> None:
         response = _receive_json(websocket)
         assert response["type"] == "error"
         assert "Invalid message format" in response["message"]
-
-
-def test_topic_suggestions_filtered_for_viewer(test_client: Any) -> None:
-    """Topic suggestions filtered by viewer role.
-
-    Given: An authenticated viewer,
-    When: Requesting topic suggestions for 'ord' prefix,
-    Then: Returns empty suggestions as orders not allowed.
-    """
-    ws_token, _ = _prepare_ws_token_v2(
-        test_client,
-        username=VIEWER_USERNAME,
-        password=VIEWER_PASSWORD,
-    )
-    with test_client.websocket_connect(WS_PATH) as websocket:
-        _complete_handshake(websocket, ws_token)
-        websocket.send_text(
-            json.dumps(
-                {
-                    "type": "get_topic_suggestions",
-                    "session_id": "",
-                    "sequence_id": 0,
-                    "prefix": "ord",
-                }
-            )
-        )
-        response = _receive_json(websocket)
-        assert response["type"] == "topic_suggestions"
-        assert response["suggestions"] == []
-
-
-def test_topic_suggestions_for_operator(test_client: Any) -> None:
-    """Topic suggestions include signals for operator.
-
-    Given: An authenticated operator,
-    When: Requesting topic suggestions for 'sig' prefix,
-    Then: Returns suggestions including signals topics.
-    """
-    ws_token, _ = _prepare_ws_token_v2(
-        test_client,
-        username=OPERATOR_USERNAME,
-        password=OPERATOR_PASSWORD,
-    )
-    with test_client.websocket_connect(WS_PATH) as websocket:
-        _complete_handshake(websocket, ws_token)
-        websocket.send_text(
-            json.dumps(
-                {
-                    "type": "get_topic_suggestions",
-                    "session_id": "",
-                    "sequence_id": 0,
-                    "prefix": "sig",
-                }
-            )
-        )
-        response = _receive_json(websocket)
-        assert response["type"] == "topic_suggestions"
-    assert any("signals" in s for s in response["suggestions"])
 
 
 class WebSocketStub:
@@ -1969,7 +1909,6 @@ FILTER_TOPICS: Any = filter_topics
 DETERMINE_TOPIC_CATEGORY: Any = determine_topic_category
 HANDLE_PING: Any = handle_ping
 HANDLE_GET_SUBSCRIPTIONS: Any = handle_get_subscriptions
-HANDLE_GET_TOPIC_SUGGESTIONS: Any = handle_get_topic_suggestions
 HANDLE_SUBSCRIBE: Any = handle_subscribe
 HANDLE_UNSUBSCRIBE: Any = handle_unsubscribe
 
@@ -2143,36 +2082,6 @@ async def test_handle_get_subscriptions_uses_helper() -> None:
     assert response["type"] == "subscriptions_list"
     assert response["subscriptions"] == ["signals.kraken.BTC-USD.live"]
     assert response["available_topics"] == ["market.kraken.BTC-USD.candles.1m"]
-
-
-@pytest.mark.asyncio
-async def test_handle_get_topic_suggestions_filters_by_role() -> None:
-    """Topic suggestions filtered by user role.
-
-    Given: A viewer user and topics including admin topics,
-    When: Getting suggestions with prefix 'm',
-    Then: Admin topics excluded from suggestions.
-    """
-    websocket = WebSocketStub()
-    manager = ManagerStub()
-    with patch(
-        "snapper.interface.websocket.handlers.topics.get_all_topic_names",
-        return_value=[
-            "market.kraken.BTC-USD.candles.1m",
-            "signals.kraken.BTC-USD.live",
-            "admin.metrics",
-        ],
-    ):
-        await HANDLE_GET_TOPIC_SUGGESTIONS(
-            cast(Any, websocket),
-            manager,
-            WSGetTopicSuggestionsRequest(session_id="", sequence_id=0, prefix="m"),
-            UserRole.VIEWER,
-        )
-    response = json.loads(websocket.sent[-1])
-    assert response["type"] == "topic_suggestions"
-    assert "admin.metrics" not in response["suggestions"]
-    assert "market.kraken.BTC-USD.candles.1m" in response["suggestions"]
 
 
 def test_has_trading_permission_roles() -> None:
@@ -4270,7 +4179,7 @@ class TestSecureWebSocketUtilities:
         Then: Returns appropriate topic lists per role.
         """
         viewer_topics = get_allowed_topics_for_role(UserRole.VIEWER)
-        assert "market" in viewer_topics
+        assert "market." in viewer_topics
         assert "system.heartbeats." in viewer_topics
         operator_topics = get_allowed_topics_for_role(UserRole.OPERATOR)
         assert "signals" in operator_topics or any(t.startswith("signals") for t in operator_topics)

@@ -2156,26 +2156,21 @@ class TestZMQBridgeHelperMethods:
             patch("snapper.interface.websocket.bridge.get_settings", return_value=mock_settings),
             patch("snapper.interface.websocket.bridge.TOPIC_REGISTRY") as mock_registry,
         ):
-            mock_registry.items.return_value = [
-                ("market.candles", MagicMock(category="market", pattern="test", throttle_ms=100)),
-                (
-                    "signals.kraken.BTC-USD.live",
-                    MagicMock(category="trade", pattern="test", throttle_ms=200),
-                ),
-                (
-                    "strategy.signals",
-                    MagicMock(category="strategy", pattern="test", throttle_ms=300),
-                ),
-                (
-                    "system.heartbeats.",
-                    MagicMock(category="system", pattern="test", throttle_ms=400),
-                ),
-                ("unknown.topic", MagicMock(category="unknown", pattern="test", throttle_ms=500)),
-            ]
+            mock_registry.__iter__ = MagicMock(
+                return_value=iter(
+                    [
+                        MagicMock(pattern="market.", category="market", throttle_ms=100),
+                        MagicMock(pattern="signals.", category="trade", throttle_ms=200),
+                        MagicMock(pattern="strategy.", category="strategy", throttle_ms=300),
+                        MagicMock(pattern="system.heartbeats.", category="system", throttle_ms=400),
+                        MagicMock(pattern="unknown.", category="unknown", throttle_ms=500),
+                    ]
+                )
+            )
             bridge = ZmqWebSocketBridgeService(mock_connection_manager)
-            assert "market.candles" in bridge.available_topics
-            assert "signals.kraken.BTC-USD.live" in bridge.available_topics
-            assert "strategy.signals" in bridge.available_topics
+            assert "market." in bridge.available_topics
+            assert "signals." in bridge.available_topics
+            assert "strategy." in bridge.available_topics
             assert "system.heartbeats." in bridge.available_topics
 
 
@@ -2778,7 +2773,7 @@ class TestZMQBridgeAdditionalCoverage:
         When: Starting ZMQ subscription for a topic,
         Then: Socket is created and subscription task started.
         """
-        topic = "market"
+        topic = "market.candles"
         mock_socket = MagicMock()
         mock_zmq_loop = MagicMock(return_value=None)
         with (

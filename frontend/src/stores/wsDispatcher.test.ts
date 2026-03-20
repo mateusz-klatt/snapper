@@ -966,7 +966,20 @@ describe('WSDispatcher', () => {
 
       connectionHandler?.(true)
       expect(mockWsClient.subscribe).not.toHaveBeenCalled()
-      expect(useAppStore.getState().setSubscribedTopics).not.toHaveBeenCalled()
+    })
+    it('syncs subscribed topics on subscription_success', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      vi.mocked(mockWsClient.getSubscribedTopics).mockReturnValue([
+        'market.kraken.BTC-USD.candles.1m',
+      ])
+      dispatcher.attach(mockWsClient)
+      const handler = messageHandlers.get('subscription_success')
+
+      handler?.({})
+      expect(useAppStore.getState().setSubscribedTopics).toHaveBeenCalledWith([
+        'market.kraken.BTC-USD.candles.1m',
+      ])
     })
     it('updates app store when disconnected', () => {
       const dispatcher = new WSDispatcher({ queryClient })

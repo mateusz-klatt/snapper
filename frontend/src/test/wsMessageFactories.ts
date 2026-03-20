@@ -106,18 +106,6 @@ export function createSubscriptionsList(
   }
 }
 
-export function createTopicSuggestions(
-  overrides: { prefix?: string; suggestions?: string[] } = {}
-) {
-  return {
-    type: 'topic_suggestions' as const,
-    session_id: '',
-    sequence_id: 0,
-    prefix: overrides.prefix ?? '',
-    suggestions: overrides.suggestions ?? [],
-  }
-}
-
 export function createPong(overrides: { timestamp?: string; active_connections?: number } = {}) {
   return {
     type: 'pong' as const,

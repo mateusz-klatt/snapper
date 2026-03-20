@@ -151,7 +151,6 @@ export const HealthTopicsSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    available: z.number().int(),
     active: z.number().int(),
   })
   .strict()

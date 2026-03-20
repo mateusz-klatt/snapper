@@ -1134,7 +1134,6 @@ If the client does not reauthenticate in time:
     "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
     "denied_topics": [],
     "active_subscriptions": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
-    "zmq_topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
     "message": null,
     "timestamp": "2026-01-18T12:00:01Z"
 }
@@ -1166,26 +1165,6 @@ If the client does not reauthenticate in time:
     "available_topics": ["market", "orders.commands", "orders.events", "signals", "strategy.signals", "system.heartbeats."],
     "total_available": 6,
     "timestamp": "2026-01-18T12:00:02Z"
-}
-```
-
-**Topic autocomplete suggestions:**
-
-```json
-{
-    "type": "get_topic_suggestions",
-    "prefix": "market"
-}
-```
-
-**Response:**
-
-```json
-{
-    "type": "topic_suggestions",
-    "prefix": "market",
-    "suggestions": ["market"],
-    "timestamp": "2026-01-18T12:00:03Z"
 }
 ```
 
@@ -1350,6 +1329,8 @@ use these fields to detect gaps without server-side replay support.
     "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "heartbeat",
     "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "019e1a2b-0000-7000-8000-000000000001",
+    "sequence_id": 42,
     "component": "zmq_broker",
     "sequence": 42,
     "status": "healthy",

@@ -67,15 +67,13 @@ class TopicMetricSnapshotSchema(StrictApiSchema):
 
 
 class HealthTopics(StrictApiSchema):
-    """Topic availability statistics.
+    """Topic subscription statistics.
 
     Attributes:
-        available: Total number of available topics.
         active: Number of currently active topics with subscribers.
     """
 
     type: Literal["health_topics"] = "health_topics"
-    available: int = Field(description="Total number of available topics")
     active: int = Field(description="Number of currently active topics")
 
 

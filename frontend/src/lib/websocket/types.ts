@@ -17,7 +17,6 @@ import type {
   WSReauthOkResponse,
   WSSubscriptionSuccessResponse,
   WSSubscriptionsListResponse,
-  WSTopicSuggestionsResponse,
   WSPongResponse,
 } from '../../types/ws'
 import type { Components } from '../../types/api.generated'
@@ -40,7 +39,6 @@ export interface WebSocketMessageTypeMap {
   reauth_ok: WSReauthOkResponse
   subscription_success: WSSubscriptionSuccessResponse
   subscriptions_list: WSSubscriptionsListResponse
-  topic_suggestions: WSTopicSuggestionsResponse
   pong: WSPongResponse
 }
 export type WebSocketMessageType = keyof WebSocketMessageTypeMap

@@ -89,9 +89,8 @@ async def handle_subscribe(
         )
         await websocket.send_text(response.model_dump_json())
         return
-    zmq_topics = [str(topic).strip() for topic in allowed if topic]
-    for ui_topic in allowed:
-        manager.subscribe_client(websocket, ui_topic)
+    for topic in allowed:
+        manager.subscribe_client(websocket, topic)
     bridge = manager.zmq_bridge
     if bridge is None:
         error_msg = WSErrorResponse(
@@ -101,14 +100,13 @@ async def handle_subscribe(
         )
         await websocket.send_text(error_msg.model_dump_json())
         return
-    await bridge.add_subscription(websocket, zmq_topics)
+    await bridge.add_subscription(websocket, allowed)
     response = WSSubscriptionSuccessResponse(
         action="subscribe",
         status="partial" if denied else "subscribed",
         topics=allowed,
         denied_topics=denied,
         active_subscriptions=list(manager.get_client_subscriptions(websocket)),
-        zmq_topics=zmq_topics,
         message=f"Access denied to topics: {denied}" if denied else None,
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.control"),
@@ -150,7 +148,6 @@ async def handle_unsubscribe(
         )
         await websocket.send_text(response.model_dump_json())
         return
-    zmq_topics = [str(topic).strip() for topic in allowed if topic]
     bridge = manager.zmq_bridge
     if bridge is None:
         error_msg = WSErrorResponse(
@@ -162,14 +159,13 @@ async def handle_unsubscribe(
         return
     for topic in allowed:
         manager.unsubscribe_client(websocket, topic)
-    await bridge.remove_subscription(websocket, zmq_topics)
+    await bridge.remove_subscription(websocket, allowed)
     response = WSSubscriptionSuccessResponse(
         action="unsubscribe",
         status="partial" if denied else "unsubscribed",
         topics=allowed,
         denied_topics=denied,
         active_subscriptions=list(manager.get_client_subscriptions(websocket)),
-        zmq_topics=zmq_topics,
         message=f"Not subscribed to topics: {denied}" if denied else None,
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.control"),

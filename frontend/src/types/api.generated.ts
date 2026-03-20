@@ -1586,10 +1586,9 @@ export type Components = {
         };
         /**
          * HealthTopics
-         * @description Topic availability statistics.
+         * @description Topic subscription statistics.
          *
          *     Attributes:
-         *         available: Total number of available topics.
          *         active: Number of currently active topics with subscribers.
          */
         HealthTopics: {
@@ -1616,11 +1615,6 @@ export type Components = {
              * @default 0
              */
             sequence_id: number;
-            /**
-             * Available
-             * @description Total number of available topics
-             */
-            available: number;
             /**
              * Active
              * @description Number of currently active topics

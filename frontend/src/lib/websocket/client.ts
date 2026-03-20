@@ -48,7 +48,6 @@ const CONTROL_TYPES = new Set([
   'subscribe',
   'unsubscribe',
   'get_subscriptions',
-  'get_topic_suggestions',
 ])
 
 class WebSocketClient {

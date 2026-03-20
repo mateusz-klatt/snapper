@@ -59,6 +59,9 @@ export class WSDispatcher {
       client.onMessage('trade', this.handleTradeMessage.bind(this)),
       client.onMessage('heartbeat', this.handleHeartbeatMessage.bind(this)),
       client.onMessage('pong', this.handlePongMessage.bind(this)),
+      client.onMessage('subscription_success', () => {
+        useAppStore.getState().setSubscribedTopics(client.getSubscribedTopics())
+      }),
       client.onConnection((connected: boolean) => {
         if (connected && this.topics.length > 0) {
           const existing = new Set(client.getSubscribedTopics())
@@ -68,7 +71,7 @@ export class WSDispatcher {
             client.subscribe(newTopics)
           }
 
-          useAppStore.getState().setSubscribedTopics(this.topics)
+          useAppStore.getState().setSubscribedTopics(client.getSubscribedTopics())
         } else if (!connected) {
           useAppStore.getState().setSubscribedTopics([])
         }
@@ -80,10 +83,10 @@ export class WSDispatcher {
     if (client.isConnected()) {
       if (this.topics.length > 0) {
         client.subscribe(this.topics)
-        useAppStore.getState().setSubscribedTopics(this.topics)
       }
 
       useAppStore.getState().setConnected(true)
+      useAppStore.getState().setSubscribedTopics(client.getSubscribedTopics())
     }
   }
   detach(): void {
