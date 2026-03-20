@@ -51,6 +51,7 @@ from snapper.auth.user_service import get_user_service
 from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
+from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.handlers.auth import AUTH_TIMEOUT_SECONDS
 from snapper.interface.websocket.handlers.auth import REAUTH_GRACE_PERIOD
@@ -71,7 +72,6 @@ from snapper.interface.websocket.schemas import WSReauthRequest
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
 from snapper.messaging.infrastructure.publisher import SequenceTracker
-from snapper.server.app import app
 from snapper.server.app import create_app
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.authenticated_websocket import get_allowed_topics_for_role
@@ -106,11 +106,8 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
     app.dependency_overrides[require_authentication] = skip_authentication
-    client: Any = TestClient(app)
-    try:
+    with TestClient(app) as client:
         yield client
-    finally:
-        client.close()
 
 
 WS_PATH = "/api/ws"
@@ -1526,7 +1523,7 @@ def endpoint_factory(monkeypatch: pytest.MonkeyPatch) -> Any:
             server_port=1234,
             ui_origin="",
             session_domain="",
-            db_url="sqlite+aiosqlite:///test.db",
+            db_url=BootstrapSettingsLoader().db_url,
         )
         monkeypatch.setattr(auth_ws, "get_ws_auth_manager", lambda: auth_instance)
         monkeypatch.setattr(auth_ws, "get_ws_token_service", lambda: token_instance)
@@ -3639,9 +3636,9 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
     assert exc.value.detail == "User not found"
 
 
-@pytest.fixture(name="client", scope="module")
-def client_fixture() -> Generator[TestClient]:
-    """Provide module-scoped TestClient with mocked process launcher."""
+@pytest.fixture(name="auth_routes_app", scope="module")
+def auth_routes_app_fixture() -> Generator[FastAPI]:
+    """Provide module-scoped FastAPI app with mocked process launcher."""
     with (
         patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
         patch("snapper.server.app.discover_processes", return_value=None),
@@ -3652,8 +3649,14 @@ def client_fixture() -> Generator[TestClient]:
         mock_factory.stop_all_processes = AsyncMock(return_value=None)
         mock_factory.started_processes = {}
         mock_factory_cls.return_value = mock_factory
-        with TestClient(app) as client:
-            yield client
+        yield create_app()
+
+
+@pytest.fixture(name="client", scope="module")
+def client_fixture(auth_routes_app: FastAPI) -> Generator[TestClient]:
+    """Provide module-scoped TestClient with mocked process launcher."""
+    with TestClient(auth_routes_app) as client:
+        yield client
 
 
 class TestAuthRoutesCoverage:
@@ -3920,25 +3923,25 @@ class TestAuthRoutesCoverage:
         assert data["username"] == "admin"
         assert data["role"] == "admin"
 
-    def test_me_endpoint_no_token(self) -> None:
+    def test_me_endpoint_no_token(self, auth_routes_app: FastAPI) -> None:
         """Me endpoint returns 401 without token.
 
         Given: No authentication,
         When: Calling /me endpoint,
         Then: Returns 401 error.
         """
-        with TestClient(app) as fresh_client:
+        with TestClient(auth_routes_app) as fresh_client:
             response = fresh_client.get("/api/auth/me")
             assert response.status_code == 401
 
-    def test_me_endpoint_invalid_token(self) -> None:
+    def test_me_endpoint_invalid_token(self, auth_routes_app: FastAPI) -> None:
         """Me endpoint returns 401 with invalid token.
 
         Given: Invalid access token cookie,
         When: Calling /me endpoint,
         Then: Returns 401 error.
         """
-        with TestClient(app) as fresh_client:
+        with TestClient(auth_routes_app) as fresh_client:
             fresh_client.cookies.set("access_token", "invalid_token")
             response = fresh_client.get("/api/auth/me")
             assert response.status_code == 401

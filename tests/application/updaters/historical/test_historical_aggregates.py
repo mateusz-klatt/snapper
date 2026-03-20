@@ -28,6 +28,8 @@ from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Repository
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 
+TEST_DB_URL = "sqlite:///:memory:"
+
 
 @pytest.fixture(autouse=True)
 def _patch_resolve_spid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,7 +148,7 @@ def fixture_service(monkeypatch: pytest.MonkeyPatch) -> PolygonAggregatesBackfil
 
     class _DummySettings:
         polygon_api_key = "test-key"
-        db_url = "sqlite:///test.db"
+        db_url = TEST_DB_URL
         backfill_days = 3
         instruments = {"polygon": ["X:BTCUSD"]}
 
@@ -352,7 +354,7 @@ def test_build_candle_rows(service: PolygonAggregatesBackfillService) -> None:
 class DummySettings(SimpleNamespace):
     """Mock settings object for testing aggregates service."""
 
-    db_url: str = "sqlite:///test.db"
+    db_url: str = TEST_DB_URL
     zmq_broker_xpub: str = "tcp://127.0.0.1:5555"
     master_password: str | None = None
     polygon_api_key: str | None = None
@@ -1431,7 +1433,7 @@ async def test_start_without_symbols_returns(monkeypatch: pytest.MonkeyPatch) ->
         Any,
         SimpleNamespace(
             instruments={"polygon": []},
-            db_url="sqlite://",
+            db_url=TEST_DB_URL,
             zmq_broker_xpub="xpub",
             master_password=None,
             polygon_api_key="dummy",
@@ -1480,7 +1482,7 @@ async def test_start_all_mapped_without_results(
         Any,
         SimpleNamespace(
             instruments={"polygon": []},
-            db_url="sqlite://",
+            db_url=TEST_DB_URL,
             zmq_broker_xpub="xpub",
             master_password=None,
             polygon_api_key="dummy",
@@ -1530,7 +1532,7 @@ async def test_start_skips_symbol_without_context(
         Any,
         SimpleNamespace(
             instruments={"polygon": ["X:UNKNOWN"]},
-            db_url="sqlite://",
+            db_url=TEST_DB_URL,
             zmq_broker_xpub="xpub",
             master_password=None,
             polygon_api_key="dummy",
@@ -1638,7 +1640,7 @@ async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyP
     Then symbols are fetched from the mapper and processed.
     """
     dummy_settings = SimpleNamespace(
-        db_url="sqlite:///tmp.db",
+        db_url=TEST_DB_URL,
         zmq_broker_xpub="inproc://xpub",
         master_password="pw",
         polygon_api_key="key",
@@ -1711,7 +1713,7 @@ async def test_process_symbol_caps_to_max_ts(monkeypatch: pytest.MonkeyPatch) ->
     Then the timestamp is capped to the maximum allowed value.
     """
     dummy_settings = SimpleNamespace(
-        db_url="sqlite:///tmp.db",
+        db_url=TEST_DB_URL,
         zmq_broker_xpub="inproc://xpub",
         master_password="pw",
         polygon_api_key="key",
@@ -1997,7 +1999,7 @@ def base_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         instruments={"polygon": []},
         backfill_days=7,
         polygon_api_key="key",
-        db_url="sqlite://",
+        db_url=TEST_DB_URL,
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password="pwd",
     )

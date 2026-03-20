@@ -33,7 +33,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 class DummySettings(SimpleNamespace):
     """Simple namespace settings stub for testing."""
 
-    db_url: str = "sqlite:///test.db"
+    db_url: str = "sqlite:///:memory:"
 
 
 class DummyProcess:

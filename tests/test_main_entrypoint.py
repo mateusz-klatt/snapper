@@ -1,8 +1,10 @@
 """Unit tests for Snapper package entry point."""
 
+import os
 import runpy
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -125,6 +127,7 @@ class TestMain:
         self,
         mock_setup_logging: MagicMock,
         mock_app: MagicMock,
+        tmp_path: Path,
     ) -> None:
         """Verify python -m snapper --help executes successfully.
 
@@ -132,12 +135,28 @@ class TestMain:
         When running python -m snapper --help in subprocess,
         Then exit code is 0 and output contains usage info.
         """
+        env = os.environ.copy()
+        env["DB_URL"] = f"sqlite+aiosqlite:///{(tmp_path / 'subprocess.db').as_posix()}"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(
+                None,
+                [
+                    str(Path(__file__).resolve().parents[1] / "src"),
+                    env.get("PYTHONPATH", ""),
+                ],
+            )
+        )
+        run_cwd = tmp_path / "runroot"
+        run_cwd.mkdir()
         result = subprocess.run(
             [sys.executable, "-m", "snapper", "--help"],
             capture_output=True,
             text=True,
             timeout=15,
             check=False,
+            cwd=run_cwd,
+            env=env,
         )
         assert result.returncode == 0
         output = (result.stdout or "") + (result.stderr or "")

@@ -15,6 +15,8 @@ from starlette.testclient import TestClient
 
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 
+TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
+
 
 async def _echo_handler(request: Request) -> JSONResponse:
     """Dummy handler that echoes request method."""
@@ -66,7 +68,7 @@ class TestControlRecordingOk:
             "snapper.server.provenance_middleware.get_repository",
             return_value=mock_repo,
         ):
-            app = _create_test_app(db_url="sqlite+aiosqlite:///test.db")
+            app = _create_test_app(db_url=TEST_DB_URL)
             client = TestClient(app)
             body = json.dumps({"session_id": "s1", "sequence_id": 1, "public_id": "p1"})
             resp = client.post("/mutate", content=body)
@@ -99,7 +101,7 @@ class TestControlRecordingError:
             "snapper.server.provenance_middleware.get_repository",
             return_value=mock_repo,
         ):
-            app = _create_test_app(db_url="sqlite+aiosqlite:///test.db")
+            app = _create_test_app(db_url=TEST_DB_URL)
             client = TestClient(app)
             resp = client.post("/error", content=b"{}")
 
@@ -126,7 +128,7 @@ class TestControlRecordingException:
             "snapper.server.provenance_middleware.get_repository",
             return_value=mock_repo,
         ):
-            app = _create_test_app(db_url="sqlite+aiosqlite:///test.db")
+            app = _create_test_app(db_url=TEST_DB_URL)
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/exception", content=b"{}")
 
@@ -155,7 +157,7 @@ class TestControlRecordingNonBlocking:
             "snapper.server.provenance_middleware.get_repository",
             return_value=mock_repo,
         ):
-            app = _create_test_app(db_url="sqlite+aiosqlite:///test.db")
+            app = _create_test_app(db_url=TEST_DB_URL)
             client = TestClient(app)
             resp = client.post("/mutate", content=b'{"x": 1}')
 
@@ -179,7 +181,7 @@ class TestControlRecordingNonBlocking:
                 "snapper.server.provenance_middleware.get_repository",
                 return_value=mock_repo,
             ):
-                app = _create_test_app(db_url="sqlite+aiosqlite:///test.db")
+                app = _create_test_app(db_url=TEST_DB_URL)
                 client = TestClient(app)
                 client.post("/mutate", content=b'{"x": 1}')
         finally:
@@ -221,7 +223,7 @@ class TestControlRecordingRedaction:
             "snapper.server.provenance_middleware.get_repository",
             return_value=mock_repo,
         ):
-            app = _create_test_app(db_url="sqlite+aiosqlite:///test.db")
+            app = _create_test_app(db_url=TEST_DB_URL)
             client = TestClient(app)
             body = json.dumps({"password": "secret", "name": "test"})
             client.post("/mutate", content=body)
@@ -240,7 +242,7 @@ class TestGetRequestNotRecorded:
         with patch(
             "snapper.server.provenance_middleware.get_repository",
         ) as mock_get_repo:
-            app = _create_test_app(db_url="sqlite+aiosqlite:///test.db")
+            app = _create_test_app(db_url=TEST_DB_URL)
             client = TestClient(app)
             resp = client.get("/read")
 

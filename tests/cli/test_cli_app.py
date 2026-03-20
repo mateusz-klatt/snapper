@@ -40,6 +40,9 @@ from snapper.cli.app import validate_api_keys
 from snapper.cli.app import zmq_logger
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 
+SYNC_MEMORY_DB_URL = "sqlite:///:memory:"
+ASYNC_MEMORY_DB_URL = "sqlite+aiosqlite:///:memory:"
+
 
 @pytest.fixture()
 def cli_runner() -> CliRunner:
@@ -135,8 +138,8 @@ def test_alembic_cfg_sets_url_and_uses_root_ini() -> None:
     When: _alembic_cfg is called,
     Then: Config has correct URL and script location.
     """
-    cfg = _alembic_cfg("sqlite:///tmp.db")
-    assert cfg.get_main_option("sqlalchemy.url") == "sqlite:///tmp.db"
+    cfg = _alembic_cfg(SYNC_MEMORY_DB_URL)
+    assert cfg.get_main_option("sqlalchemy.url") == SYNC_MEMORY_DB_URL
     script_location = cfg.get_main_option("script_location")
     assert script_location is not None
     assert "migrations" in script_location
@@ -155,7 +158,7 @@ def test_trade_zmq_invokes_async_runner(
     captured: dict[str, Any] = {}
 
     def fake_settings() -> Any:
-        return SimpleNamespace(db_url="sqlite:///memory.db")
+        return SimpleNamespace(db_url=SYNC_MEMORY_DB_URL)
 
     monkeypatch.setattr(app_module, "get_settings", fake_settings)
 
@@ -196,7 +199,7 @@ def test_trade_zmq_invokes_async_runner(
     )
     assert result.exit_code == 0
     assert "Central Trading Coordinator" in result.stdout
-    assert captured["db_url"] == "sqlite:///memory.db"
+    assert captured["db_url"] == SYNC_MEMORY_DB_URL
     assert upgraded == [(dummy_cfg, "head")]
     trader_kwargs = captured["trader_kwargs"]
     assert trader_kwargs["signal_topics"] == ["signals.macd"]
@@ -210,7 +213,7 @@ def test_db_init_runs_upgrade(monkeypatch: pytest.MonkeyPatch, cli_runner: CliRu
     Then: Alembic upgrade to head is executed.
     """
     captured: dict[str, Any] = {}
-    settings = SimpleNamespace(db_url="sqlite:///memory.db")
+    settings = SimpleNamespace(db_url=SYNC_MEMORY_DB_URL)
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
 
     class DummyConfig:
@@ -235,7 +238,7 @@ def test_db_init_runs_upgrade(monkeypatch: pytest.MonkeyPatch, cli_runner: CliRu
     monkeypatch.setattr(app_module, "command", dummy_alembic)
     result = cli_runner.invoke(app, ["db-init"])
     assert result.exit_code == 0
-    assert captured["db_url"] == "sqlite:///memory.db"
+    assert captured["db_url"] == SYNC_MEMORY_DB_URL
     assert dummy_alembic.upgrades == [(dummy_cfg, "head")]
     assert "DB initialized" in result.stdout
 
@@ -249,7 +252,7 @@ def test_db_upgrade_uses_requested_revision(
     When: db-upgrade is invoked with --revision,
     Then: Alembic upgrade to specified revision is executed.
     """
-    settings = SimpleNamespace(db_url="sqlite:///memory.db")
+    settings = SimpleNamespace(db_url=SYNC_MEMORY_DB_URL)
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
 
     class DummyConfig:
@@ -286,7 +289,7 @@ def test_db_downgrade_uses_requested_revision(
     When: db-downgrade is invoked with --revision,
     Then: Alembic downgrade to specified revision is executed.
     """
-    settings = SimpleNamespace(db_url="sqlite:///memory.db")
+    settings = SimpleNamespace(db_url=SYNC_MEMORY_DB_URL)
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
 
     class DummyConfig:
@@ -316,7 +319,7 @@ def test_db_downgrade_uses_requested_revision(
 
 def _fake_settings(**overrides: Any) -> Any:
     defaults = {
-        "db_url": "sqlite:///memory.db",
+        "db_url": SYNC_MEMORY_DB_URL,
         "server_host": "127.0.0.1",
         "server_port": 8000,
         "server_reload": False,
@@ -1166,7 +1169,7 @@ def test_db_downgrade_invokes_command(
     Then: Alembic downgrade is called with correct args.
     """
     captured: dict[str, object] = {}
-    settings = SimpleNamespace(db_url="sqlite:///tmp.db")
+    settings = SimpleNamespace(db_url=SYNC_MEMORY_DB_URL)
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
 
     class DummyConfig:
@@ -1191,7 +1194,7 @@ def test_db_downgrade_invokes_command(
     monkeypatch.setattr(app_module, "command", dummy_alembic)
     result = cli_runner.invoke(app, ["db-downgrade", "--revision", "-2"])
     assert result.exit_code == 0
-    assert captured["db_url"] == "sqlite:///tmp.db"
+    assert captured["db_url"] == SYNC_MEMORY_DB_URL
     assert dummy_alembic.calls == [(dummy_cfg, "-2")]
     assert "DB downgraded" in result.stdout
 
@@ -1206,7 +1209,7 @@ def test_settings_rotate_encryption_dry_run_with_no_encrypted_settings(
     Then: Message indicates no encrypted settings found.
     """
     settings = SimpleNamespace(
-        db_url="sqlite+aiosqlite:///memory.db",
+        db_url=ASYNC_MEMORY_DB_URL,
         master_password="old-pass",
     )
     monkeypatch.setattr(app_module, "BootstrapSettingsLoader", lambda: settings)
@@ -1259,7 +1262,7 @@ def create_mock_settings(**overrides: Any) -> type:
     default_attrs: dict[str, Any] = {
         "kraken_api_key": None,
         "kraken_api_secret": None,
-        "db_url": "sqlite:///test.db",
+        "db_url": SYNC_MEMORY_DB_URL,
         "instruments": {"kraken": ["BTC-USD"], "zonda": [], "walutomat": [], "polygon": []},
         "timeframes": ["1m"],
         "backfill_days": 30,
@@ -1925,7 +1928,7 @@ class TestAlembicConfigNotFound:
             patch.object(Path, "exists", return_value=False),
             pytest.raises(RuntimeError, match="alembic.ini not found"),
         ):
-            _alembic_cfg("sqlite:///test.db")
+            _alembic_cfg(SYNC_MEMORY_DB_URL)
 
 
 class TestServeCommandKeyboardInterrupt:
@@ -2404,7 +2407,7 @@ class TestPolygonBackfillSuccess:
 def mock_settings() -> SimpleNamespace:
     """Provide mock settings with database and server configuration."""
     return SimpleNamespace(
-        db_url="sqlite:///memory.db",
+        db_url=SYNC_MEMORY_DB_URL,
         server_host="0.0.0.0",
         server_port=8000,
         server_reload=False,

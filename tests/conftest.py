@@ -43,6 +43,7 @@ import sqlite3
 import sys
 import tracemalloc
 import weakref
+from collections.abc import AsyncGenerator
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ from unittest import mock
 from unittest.mock import Mock
 
 import pytest
+import pytest_asyncio
 import zmq
 import zmq.asyncio
 from fastapi.testclient import TestClient
@@ -465,8 +467,8 @@ def pytest_configure(config: pytest.Config) -> None:
         """Intentionally suppressed: zmq may not be installed."""
 
 
-@pytest.fixture(autouse=True)
-def cleanup_all() -> Generator[None]:
+@pytest_asyncio.fixture(autouse=True)
+async def cleanup_all() -> AsyncGenerator[None]:
     """Clean up singletons and repository caches after each test."""
     yield
     mock.patch.stopall()
@@ -483,18 +485,7 @@ def cleanup_all() -> Generator[None]:
     except Exception:
         pass
     try:
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-            task = asyncio.create_task(dispose_repositories())
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(dispose_repositories())
-            finally:
-                loop.close()
+        await dispose_repositories()
     except Exception:
         pass
     finally:

@@ -65,7 +65,7 @@ def service_fixture(
     """Provide configured service and loader stub for testing."""
     settings = SimpleNamespace(
         polygon_api_key="api-key",
-        db_url="sqlite://",
+        db_url="sqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password="pwd",
     )
@@ -151,7 +151,7 @@ async def test_start_requires_polygon_api_key(monkeypatch: pytest.MonkeyPatch) -
     """
     settings = SimpleNamespace(
         polygon_api_key="",
-        db_url="sqlite://",
+        db_url="sqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:7501",
         master_password="pwd",
     )

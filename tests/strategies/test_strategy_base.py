@@ -3648,7 +3648,7 @@ class TestCliAppPhase4:
             patch.object(Path, "exists", return_value=False),
             pytest.raises(RuntimeError, match="alembic.ini not found"),
         ):
-            _alembic_cfg("sqlite:///test.db")
+            _alembic_cfg("sqlite:///:memory:")
 
 
 class TestBrokerProxyLoop:

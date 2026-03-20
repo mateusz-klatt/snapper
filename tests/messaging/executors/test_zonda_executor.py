@@ -16,7 +16,7 @@ def mocked_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     settings = SimpleNamespace(
         zonda_api_key="api-key",
         zonda_api_secret="api-secret",
-        db_url="sqlite://",
+        db_url="sqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:5555",
         zmq_broker_xsub="tcp://127.0.0.1:5556",
         master_password="master",

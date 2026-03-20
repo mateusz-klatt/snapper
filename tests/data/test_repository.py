@@ -986,8 +986,8 @@ def test_get_repository_caches_by_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(SQLAlchemyRepository, "__call__", None, raising=False)
     monkeypatch.setattr("snapper.data.repository.SQLAlchemyRepository", lambda url: _StubRepo(url))
-    repo1 = get_repository("sqlite:///tmp.db")
-    repo2 = get_repository("sqlite:///tmp.db")
+    repo1 = get_repository("sqlite:///:memory:")
+    repo2 = get_repository("sqlite:///:memory:")
     repo3 = get_repository("postgresql+asyncpg://server/db")
     assert repo1 is repo2
     assert repo3 is not repo1
@@ -1009,7 +1009,7 @@ async def test_dispose_repositories_handles_mock_engine(monkeypatch: pytest.Monk
             self.engine = MagicMock()
 
     monkeypatch.setattr("snapper.data.repository.SQLAlchemyRepository", lambda url: _StubRepo(url))
-    get_repository("sqlite:///tmp.db")
+    get_repository("sqlite:///:memory:")
     await dispose_repositories()
     assert repo_module._repository_cache == {}
 
@@ -1135,7 +1135,7 @@ def test_get_repository_sqlite() -> None:
     Then: Returns SQLAlchemyRepository instance.
     """
     with patch("snapper.data.repository.create_async_engine"):
-        sqlite_url = "sqlite+aiosqlite:///test.db"
+        sqlite_url = "sqlite+aiosqlite:///:memory:"
         repo = get_repository(sqlite_url)
         assert isinstance(repo, SQLAlchemyRepository)
 
@@ -1622,7 +1622,7 @@ async def test_dispose_repositories_awaits_coroutine(
         def __init__(self) -> None:
             self.engine = SimpleNamespace(dispose=_async_dispose)
 
-    repo_module._repository_cache["sqlite:///tmp.db"] = cast(repo_module.Repository, _Repo())
+    repo_module._repository_cache["sqlite:///:memory:"] = cast(repo_module.Repository, _Repo())
     await dispose_repositories()
     assert disposed == [True]
     assert repo_module._repository_cache == {}
@@ -1634,7 +1634,7 @@ async def test_get_trades_returns_empty_when_instrument_missing(
 ) -> None:
     """Verify get_trades returns empty list when instrument is not found."""
     with patch("snapper.data.repository.create_async_engine"):
-        repo = SQLAlchemyRepository("sqlite+aiosqlite:///tmp.db")
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     mock_execute_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:
@@ -1666,7 +1666,7 @@ async def test_get_trades_with_exchange_filter(
 ) -> None:
     """Verify get_trades filters by exchange when provided."""
     with patch("snapper.data.repository.create_async_engine"):
-        repo = SQLAlchemyRepository("sqlite+aiosqlite:///tmp.db")
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     mock_execute_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:

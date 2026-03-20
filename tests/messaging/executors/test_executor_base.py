@@ -38,6 +38,8 @@ from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.messages import MessageParseError
 
+TEST_DB_URL = "sqlite:///:memory:"
+
 
 def zmq_socket_stub(
     track_calls: list[tuple[int, int]] | None = None, **kwargs: Any
@@ -61,7 +63,7 @@ class DummyExecutor(ExchangeExecutorService[Any]):
         self.settings = cast(
             Any,
             SimpleNamespace(
-                db_url="sqlite://",
+                db_url=TEST_DB_URL,
                 zmq_broker_xpub="xpub",
                 zmq_broker_xsub="xsub",
                 master_password=None,
@@ -3330,7 +3332,7 @@ class TestExecutor:
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -3355,7 +3357,7 @@ class TestExecutor:
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -3380,7 +3382,7 @@ class TestExecutor:
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -3400,7 +3402,7 @@ class TestExecutorWebSocketExecutions:
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
         mock_settings.zmq_heartbeat_interval_ms = 1000
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         if with_credentials:
             mock_settings.kraken_api_key = "test_api_key"
             mock_settings.kraken_api_secret = "test_api_secret"

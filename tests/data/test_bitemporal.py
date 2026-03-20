@@ -63,21 +63,20 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
     db_path = tmp_path / "bitemporal.db"
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await repo.create_all()
+    symbol = Symbol(
+        native_symbol="BTC-USD",
+        base="BTC",
+        quote="USD",
+        asset_type="crypto",
+        created_at=datetime.now(UTC),
+        timestamp=datetime.now(UTC),
+        session_id="test-session",
+        sequence_id=1,
+    )
     async with repo.session() as s:
-        s.add(
-            Symbol(
-                native_symbol="BTC-USD",
-                base="BTC",
-                quote="USD",
-                asset_type="crypto",
-                created_at=datetime.now(UTC),
-                timestamp=datetime.now(UTC),
-                session_id="test-session",
-                sequence_id=1,
-            )
-        )
+        s.add(symbol)
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "BTC-USD")
+    spid = symbol.public_id
     assert spid is not None
     inst_id = await repo.upsert_instrument(
         symbol_public_id=spid,

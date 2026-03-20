@@ -15,6 +15,8 @@ from snapper.infrastructure.market_data.kraken import KrakenSnapshotUpdaterServi
 from snapper.infrastructure.market_data.kraken import _async_update_snapshots
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 
+TEST_DB_URL = "sqlite:///:memory:"
+
 
 def test_service_initialization() -> None:
     """Test KrakenSnapshotUpdaterService initialization.
@@ -46,7 +48,7 @@ def test_run_snapshot_update_integration() -> None:
         patch("snapper.infrastructure.market_data.kraken._async_update_snapshots") as mock_async,
     ):
         mock_settings.return_value = MagicMock()
-        mock_settings.return_value.db_url = "sqlite:///test.db"
+        mock_settings.return_value.db_url = TEST_DB_URL
         mock_client = AsyncMock()
         mock_client_class.return_value = mock_client
         mock_repo = MagicMock()
@@ -86,7 +88,7 @@ async def test_async_update_snapshots_success_flow() -> None:
     Then: service.start is awaited and client.disconnect called.
     """
     settings_mock = MagicMock()
-    settings_mock.db_url = "sqlite:///test.db"
+    settings_mock.db_url = TEST_DB_URL
     repository_mock = MagicMock()
     exchange_client_mock = MagicMock()
     exchange_client_mock.disconnect = AsyncMock()
@@ -111,7 +113,7 @@ async def test_async_update_snapshots_success_flow() -> None:
         ) as service_cls,
     ):
         await _async_update_snapshots()
-    repo_cls.assert_called_once_with("sqlite:///test.db")
+    repo_cls.assert_called_once_with(TEST_DB_URL)
     client_cls.assert_called_once_with()
     service_cls.assert_called_once_with(exchange_client_mock, repository_mock)
     service_instance.start.assert_awaited_once()
@@ -127,7 +129,7 @@ async def test_async_update_snapshots_disconnects_on_failure() -> None:
     Then: client.disconnect called even on failure (finally block).
     """
     settings_mock = MagicMock()
-    settings_mock.db_url = "sqlite:///test.db"
+    settings_mock.db_url = TEST_DB_URL
     repository_mock = MagicMock()
     exchange_client_mock = MagicMock()
     exchange_client_mock.disconnect = AsyncMock()

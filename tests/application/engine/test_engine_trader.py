@@ -27,6 +27,8 @@ from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
 
+TEST_DB_URL = "sqlite:///:memory:"
+
 
 class TestTraderCoverage:
     """Tests for TraderCoordinator coverage and core functionality."""
@@ -47,7 +49,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -78,7 +80,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -101,7 +103,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -133,7 +135,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -173,7 +175,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -201,7 +203,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7501"
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
@@ -240,7 +242,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -277,7 +279,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -320,7 +322,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -363,7 +365,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -403,7 +405,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -439,7 +441,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -482,7 +484,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -515,7 +517,7 @@ class TestTraderCoverage:
         """
         mock_settings = MagicMock()
         mock_settings.instruments = {"kraken": ["BTC-USD"]}
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_get_repository.return_value = MagicMock()
         trader = TraderCoordinator()
@@ -553,7 +555,7 @@ class TestTraderCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -732,7 +734,7 @@ def test_get_default_kwargs_returns_default_signal_topic() -> None:
 def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespace, _RepositoryStub]:
     repository = _RepositoryStub()
     settings = SimpleNamespace(
-        db_url="sqlite://",
+        db_url=TEST_DB_URL,
         zmq_broker_xsub="tcp://broker.xsub",
         risk_r_per_trade=0.01,
         risk_max_leverage=2.0,
@@ -1964,7 +1966,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         risk_r_per_trade=0.01,
         risk_max_leverage=1.0,
         risk_max_drawdown=0.5,
-        db_url="sqlite://",
+        db_url=TEST_DB_URL,
         zmq_broker_xsub="inproc://broker",
     )
     monkeypatch.setattr(trader_module, "get_settings", lambda: settings)

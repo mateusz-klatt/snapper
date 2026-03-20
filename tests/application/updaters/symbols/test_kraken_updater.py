@@ -29,16 +29,21 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 
+def _create_mock_settings() -> MagicMock:
+    """Create mock settings bound to the current isolated test database."""
+    settings = MagicMock()
+    settings.db_url = BootstrapSettingsLoader().db_url
+    settings.zmq_broker_xsub = "tcp://localhost:5555"
+    return settings
+
+
 class TestKrakenSymbolUpdater:
     """Test cases for KrakenSymbolUpdaterService basic functionality."""
 
     @pytest.fixture
     def mock_settings(self) -> MagicMock:
         """Create mock settings for Kraken updater."""
-        settings = MagicMock()
-        settings.db_url = "sqlite:///test.db"
-        settings.zmq_broker_xsub = "tcp://localhost:5555"
-        return settings
+        return _create_mock_settings()
 
     @pytest.fixture
     def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
@@ -652,10 +657,7 @@ class TestKrakenUpdaterClientCaching:
     @pytest.fixture
     def mock_settings(self) -> MagicMock:
         """Create mock settings for caching tests."""
-        settings = MagicMock()
-        settings.db_url = "sqlite:///test.db"
-        settings.zmq_broker_xsub = "tcp://localhost:5555"
-        return settings
+        return _create_mock_settings()
 
     @pytest.fixture
     def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
@@ -687,10 +689,7 @@ class TestLoadKrakenRestSymbolsFallback:
     @pytest.fixture
     def mock_settings(self) -> MagicMock:
         """Create mock settings for fallback tests."""
-        settings = MagicMock()
-        settings.db_url = "sqlite:///test.db"
-        settings.zmq_broker_xsub = "tcp://localhost:5555"
-        return settings
+        return _create_mock_settings()
 
     @pytest.fixture
     def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
@@ -781,10 +780,7 @@ class TestVerifyWebsocketSymbols:
     @pytest.fixture
     def mock_settings(self) -> MagicMock:
         """Create mock settings for WebSocket tests."""
-        settings = MagicMock()
-        settings.db_url = "sqlite:///test.db"
-        settings.zmq_broker_xsub = "tcp://localhost:5555"
-        return settings
+        return _create_mock_settings()
 
     @pytest.fixture
     def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
@@ -875,10 +871,7 @@ class TestTokenizedAssetWarnings:
     @pytest.fixture
     def mock_settings(self) -> MagicMock:
         """Create mock settings for tokenized asset tests."""
-        settings = MagicMock()
-        settings.db_url = "sqlite:///test.db"
-        settings.zmq_broker_xsub = "tcp://localhost:5555"
-        return settings
+        return _create_mock_settings()
 
     @pytest.fixture
     def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
@@ -944,10 +937,7 @@ class TestWebSocketDisconnectError:
     @pytest.fixture
     def mock_settings(self) -> MagicMock:
         """Create mock settings for disconnect error tests."""
-        settings = MagicMock()
-        settings.db_url = "sqlite:///test.db"
-        settings.zmq_broker_xsub = "tcp://localhost:5555"
-        return settings
+        return _create_mock_settings()
 
     @pytest.fixture
     def updater(self, mock_settings: MagicMock) -> KrakenSymbolUpdaterService:
@@ -981,13 +971,6 @@ class TestWebSocketDisconnectError:
             verified, ws_only = await updater.verify_websocket_symbols({"BTC/USD"})
         assert "BTC/USD" in verified
         assert ws_only == []
-
-
-def _create_mock_settings() -> MagicMock:
-    settings = MagicMock()
-    settings.db_url = "sqlite:///test.db"
-    settings.zmq_broker_xsub = "tcp://localhost:5555"
-    return settings
 
 
 class TestKrakenGetDefaultKwargs:

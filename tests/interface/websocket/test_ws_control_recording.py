@@ -10,6 +10,8 @@ import pytest
 from snapper.interface.websocket.dispatcher import _record_ws_control
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
+TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
+
 
 class TestRecordWsControl:
     """Tests for _record_ws_control helper."""
@@ -40,7 +42,7 @@ class TestRecordWsControl:
             return_value=mock_repo,
         ):
             await _record_ws_control(
-                "sqlite+aiosqlite:///test.db",
+                TEST_DB_URL,
                 tracker,
                 "subscribe",
                 "ok",
@@ -71,7 +73,7 @@ class TestRecordWsControl:
             return_value=mock_repo,
         ):
             await _record_ws_control(
-                "sqlite+aiosqlite:///test.db",
+                TEST_DB_URL,
                 tracker,
                 "error",
                 "error",
@@ -99,7 +101,7 @@ class TestRecordWsControl:
             return_value=mock_repo,
         ):
             await _record_ws_control(
-                "sqlite+aiosqlite:///test.db",
+                TEST_DB_URL,
                 tracker,
                 "auth",
                 "ok",
@@ -121,7 +123,7 @@ class TestRecordWsControl:
             return_value=mock_repo,
         ):
             await _record_ws_control(
-                "sqlite+aiosqlite:///test.db",
+                TEST_DB_URL,
                 tracker,
                 "auth",
                 "ok",

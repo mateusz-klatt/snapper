@@ -40,6 +40,8 @@ from snapper.server.app import lifespan
 from snapper.utils.logging import setup_logging
 from tests.server import dummy_processes
 
+TEST_DB_URL = "sqlite:///:memory:"
+
 _tracked_test_clients: list[TestClient] = []
 
 
@@ -293,7 +295,7 @@ class TestCreateApiRouter:
         Then: Response contains candle data array with OHLCV values.
         """
         mock_settings = MagicMock()
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repo = MagicMock()
         mock_session = MagicMock()
@@ -361,7 +363,7 @@ class TestCreateApiRouter:
         Then: Response contains an empty array.
         """
         mock_settings = MagicMock()
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repo = MagicMock()
         mock_get_repo.return_value = mock_repo
@@ -405,7 +407,7 @@ class TestCreateApiRouter:
         Then: Response status is 204 No Content.
         """
         mock_settings = MagicMock()
-        mock_settings.db_url = "sqlite:///test.db"
+        mock_settings.db_url = TEST_DB_URL
         mock_get_settings.return_value = mock_settings
         mock_repo = MagicMock()
         mock_session = MagicMock()

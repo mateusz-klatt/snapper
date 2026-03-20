@@ -211,7 +211,9 @@ async def test_async_update_snapshots_uses_service(monkeypatch: pytest.MonkeyPat
         async def start(self) -> None:
             called["start"] = True
 
-    monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace(db_url="sqlite:///tmp.db"))
+    monkeypatch.setattr(
+        module, "get_settings", lambda: SimpleNamespace(db_url="sqlite:///:memory:")
+    )
     monkeypatch.setattr(module, "DatabaseRepository", lambda _url: SimpleNamespace())
     monkeypatch.setattr(module, "WalutomatExchangeClient", DummyClient)
     monkeypatch.setattr(module, "WalutomatSnapshotUpdaterService", DummyService)

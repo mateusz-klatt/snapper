@@ -811,13 +811,13 @@ class TestPaperOrderExecutor:
         When: _create_exchange_client is called,
         Then: PaperExchangeClient is created with repository.
         """
-        settings = SimpleNamespace(db_url="sqlite://")
+        settings = SimpleNamespace(db_url="sqlite:///:memory:")
         mock_get_settings.return_value = settings
         repository = object()
         mock_get_repository.return_value = repository
         executor = PaperOrderExecutor()
         client = executor._create_exchange_client()
-        mock_get_repository.assert_called_once_with("sqlite://")
+        mock_get_repository.assert_called_once_with("sqlite:///:memory:")
         mock_paper_client.assert_called_once_with(
             repository=repository,
             fill_delay=0.1,

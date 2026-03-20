@@ -439,14 +439,13 @@ class SQLAlchemyRepository(Repository):
         return self.engine.url.get_dialect().name
 
     def __del__(self) -> None:
-        """Attempt to dispose the sync engine when the repository is garbage-collected."""
-        engine = getattr(self, "engine", None)
-        if engine is None:
-            return
-        try:
-            engine.sync_engine.dispose()
-        except Exception:
-            return
+        """Avoid implicit async-engine disposal during garbage collection.
+
+        Async engine disposal must happen through explicit lifecycle hooks that can
+        await cleanup. Triggering sync disposal from ``__del__`` can race with
+        event-loop shutdown and produce nondeterministic aiosqlite thread errors.
+        """
+        return
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
