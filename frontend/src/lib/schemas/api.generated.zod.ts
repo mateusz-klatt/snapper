@@ -7,12 +7,22 @@ import { z } from 'zod'
 
 export const AdminResetPasswordRequestSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('admin_reset_password_request'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     new_password: z.string().min(8),
   })
   .strict()
 
 export const AvailableProcessSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('available_process'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     name: z.string(),
     class_path: z.string(),
     method: z.string(),
@@ -47,6 +57,11 @@ export const CandleDataSchema = z
 
 export const ChangePasswordRequestSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('change_password_request'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     current_password: z.string(),
     new_password: z.string().min(8),
   })
@@ -54,6 +69,11 @@ export const ChangePasswordRequestSchema = z
 
 export const ConfiguredProcessSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('configured_process'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     name: z.string(),
     enabled: z.boolean(),
     running: z.boolean(),
@@ -74,6 +94,11 @@ export const ConfiguredProcessSchema = z
 
 export const ConnectionStatsSchemaSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('connection_stats'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     active_connections: z.number().int(),
     zmq_subscribers: z.number().int(),
     subscriber_tasks: z.number().int(),
@@ -104,8 +129,28 @@ export const ExecutionDataSchema = z
   })
   .strict()
 
+export const GapStatsSchemaSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('gap_stats'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    gaps_detected: z.number().int(),
+    session_resets: z.number().int(),
+    duplicates: z.number().int(),
+    mid_stream_joins: z.number().int(),
+    rejected_unstamped: z.number().int(),
+  })
+  .strict()
+
 export const HealthTopicsSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('health_topics'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     available: z.number().int(),
     active: z.number().int(),
   })
@@ -113,6 +158,11 @@ export const HealthTopicsSchema = z
 
 export const LoginRequestSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('login_request'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     username: z.string(),
     password: z.string(),
     remember_me: z.boolean(),
@@ -121,6 +171,11 @@ export const LoginRequestSchema = z
 
 export const MessageResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('message'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     message: z.string(),
   })
   .strict()
@@ -169,6 +224,11 @@ export const PositionDataSchema = z
 
 export const ProcessCategoryCountSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_category_count'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     running: z.number().int(),
     total: z.number().int(),
   })
@@ -176,6 +236,11 @@ export const ProcessCategoryCountSchema = z
 
 export const ProcessCreateRequestSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_create_request'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     name: z.string().min(3).max(64),
     template: z.string(),
     enabled: z.boolean().nullable().optional(),
@@ -188,6 +253,11 @@ export const ProcessCreateRequestSchema = z
 
 export const ProcessCreatedInfoSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_created_info'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     name: z.string(),
     template: z.string(),
   })
@@ -196,6 +266,10 @@ export const ProcessCreatedInfoSchema = z
 export const ProcessRunSchema = z
   .object({
     public_id: z.string(),
+    type: z.literal('process_run'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     process_name: z.string(),
     status: z.enum(['running', 'succeeded', 'failed', 'cancelled']),
     role: z.enum(['core', 'task', 'strategy', 'backtest']),
@@ -211,6 +285,11 @@ export const ProcessRunSchema = z
 
 export const ProcessSchemaResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_schema'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     name: z.string(),
     description: z.string(),
     class_path: z.string(),
@@ -225,6 +304,11 @@ export const ProcessSchemaResponseSchema = z
 
 export const ProcessStartRequestSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_start_request'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     mode: z.enum(['thread', 'process']).nullable().optional(),
     args: z.array(z.unknown()).nullable().optional(),
     kwargs: z.record(z.string(), z.unknown()).nullable().optional(),
@@ -234,15 +318,25 @@ export const ProcessStartRequestSchema = z
 
 export const ProcessStartResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_start_response'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     status: z.enum(['success', 'already_running', 'error']),
     name: z.string(),
-    public_id: z.string().nullable().optional(),
+    process_public_id: z.string().nullable().optional(),
     message: z.string().nullable().optional(),
   })
   .strict()
 
 export const ProcessStatusSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_status'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     status: z.enum(['not_running', 'running', 'stopped', 'completed', 'error']),
     pid: z.number().int().nullable().optional(),
     started_at: z.string().nullable().optional(),
@@ -254,6 +348,11 @@ export const ProcessStatusSchema = z
 
 export const ProcessStopResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_stop_response'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     status: z.enum(['success', 'not_running', 'error']),
     name: z.string(),
     message: z.string().nullable().optional(),
@@ -262,12 +361,22 @@ export const ProcessStopResponseSchema = z
 
 export const SettingCategoriesResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('setting_categories'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     categories: z.array(z.string()),
   })
   .strict()
 
 export const SettingReadSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('setting_read'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     key: z.string(),
     value: z.string(),
     category: z.string(),
@@ -279,6 +388,11 @@ export const SettingReadSchema = z
 
 export const SettingUpdateSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('setting_update'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     value: z.string(),
     category: z.string(),
     description: z.string().nullable().optional(),
@@ -305,6 +419,11 @@ export const SignalDataSchema = z
 
 export const StrategyProcessSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('strategy_process'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     name: z.string(),
     running: z.boolean(),
     enabled: z.boolean(),
@@ -314,6 +433,11 @@ export const StrategyProcessSchema = z
 
 export const StrategyStatusPayloadSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('strategy_status'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     strategy_name: z.string(),
     status: z.string(),
     details: z.record(z.string(), z.unknown()).optional(),
@@ -329,6 +453,11 @@ export const StrategyStatusPayloadSchema = z
 
 export const SubscriptionsStatsSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('subscriptions_stats'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     per_topic: z.record(z.string(), z.number().int()),
     per_client: z.record(z.string(), z.array(z.string())),
   })
@@ -336,6 +465,11 @@ export const SubscriptionsStatsSchema = z
 
 export const TopicMetricSnapshotSchemaSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('topic_metric_snapshot'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     active_subscribers: z.number().int(),
     received: z.number().int(),
     forwarded: z.number().int(),
@@ -364,6 +498,11 @@ export const ValidationErrorSchema = z
 
 export const WebSocketStatsSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('websocket_stats'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     active_connections: z.number().int(),
     topic_subscribers: z.record(z.string(), z.number().int()),
     client_count: z.number().int(),
@@ -372,6 +511,11 @@ export const WebSocketStatsSchema = z
 
 export const WsStatsConfigSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('ws_stats_config'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     broker_xpub: z.string(),
     heartbeat_interval_ms: z.number().int(),
   })
@@ -379,6 +523,11 @@ export const WsStatsConfigSchema = z
 
 export const ZmqBridgeStatsSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('zmq_bridge_stats'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     active_topics: z.number().int(),
     subscriber_tasks: z.number().int(),
     available_topics: z.array(z.string()),
@@ -387,6 +536,11 @@ export const ZmqBridgeStatsSchema = z
 
 export const ZmqComponentsSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('zmq_components'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     zmq_context: z.enum(['ok', 'error']),
     websocket_manager: z.enum(['ok', 'error']),
     active_connections: z.number().int(),
@@ -395,12 +549,22 @@ export const ZmqComponentsSchema = z
 
 export const ZmqConfigSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('zmq_config'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     available_topics: z.array(z.string()),
   })
   .strict()
 
 export const AvailableProcessesResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('available_processes'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     processes: z.array(AvailableProcessSchema),
     count: z.number().int(),
   })
@@ -408,23 +572,35 @@ export const AvailableProcessesResponseSchema = z
 
 export const ConfiguredProcessesResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('configured_processes'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     processes: z.array(ConfiguredProcessSchema),
     count: z.number().int(),
   })
   .strict()
 
-export const HealthCheckResponseSchema = z
+export const GapDetectionStatsSchema = z
   .object({
-    status: z.enum(['healthy', 'warning', 'error']),
-    timestamp: z.iso.datetime(),
-    version: z.string(),
-    connections: ConnectionStatsSchemaSchema,
-    topics: HealthTopicsSchema,
+    public_id: z.string().optional(),
+    type: z.literal('gap_detection_stats'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    bridge: GapStatsSchemaSchema.optional(),
+    rest_clients: z.record(z.string(), GapStatsSchemaSchema).optional(),
   })
   .strict()
 
 export const ProcessSummaryResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_summary'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     feeds: ProcessCategoryCountSchema,
     strategies: ProcessCategoryCountSchema,
     executors: ProcessCategoryCountSchema,
@@ -434,6 +610,11 @@ export const ProcessSummaryResponseSchema = z
 
 export const ProcessCreateResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_create_response'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     status: z.literal('created'),
     process: ProcessCreatedInfoSchema,
   })
@@ -441,6 +622,11 @@ export const ProcessCreateResponseSchema = z
 
 export const ProcessRunsResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('process_runs'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     runs: z.array(ProcessRunSchema),
     count: z.number().int(),
   })
@@ -448,6 +634,11 @@ export const ProcessRunsResponseSchema = z
 
 export const StrategyListResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('strategy_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     strategies: z.array(StrategyProcessSchema),
     count: z.number().int(),
   })
@@ -455,6 +646,11 @@ export const StrategyListResponseSchema = z
 
 export const SystemStatusSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('system_status'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     trader: ProcessStatusSchema,
     backtests: z.record(z.string(), ProcessStatusSchema),
     strategies: z.array(StrategyStatusPayloadSchema).optional(),
@@ -463,6 +659,11 @@ export const SystemStatusSchema = z
 
 export const CreateUserRequestSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('create_user_request'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     username: z.string().min(3).max(64),
     email: z.string().max(255).nullable().optional(),
     password: z.string().min(8),
@@ -473,6 +674,11 @@ export const CreateUserRequestSchema = z
 
 export const UpdateUserRequestSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('update_user_request'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     email: z.string().max(255).nullable().optional(),
     role: UserRoleSchema.nullable().optional(),
     is_active: z.boolean().nullable().optional(),
@@ -481,6 +687,11 @@ export const UpdateUserRequestSchema = z
 
 export const UserProfileSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('user_profile'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     username: z.string(),
     email: z.string().nullable().optional(),
     role: UserRoleSchema,
@@ -497,6 +708,11 @@ export const HTTPValidationErrorSchema = z
 
 export const WsStatsResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('ws_stats'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     websocket: WebSocketStatsSchema,
     zmq_bridge: ZmqBridgeStatsSchema,
     connections: ConnectionStatsSchemaSchema,
@@ -508,8 +724,12 @@ export const WsStatsResponseSchema = z
 
 export const ZmqHealthResponseSchema = z
   .object({
-    status: z.enum(['healthy', 'warning', 'error']),
+    public_id: z.string().optional(),
+    type: z.literal('zmq_health'),
     timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    status: z.enum(['healthy', 'warning', 'error']),
     components: ZmqComponentsSchema,
     config: ZmqConfigSchema,
     connections: ConnectionStatsSchemaSchema,
@@ -518,8 +738,28 @@ export const ZmqHealthResponseSchema = z
   })
   .strict()
 
+export const HealthCheckResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('health_check'),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    status: z.enum(['healthy', 'warning', 'error']),
+    version: z.string(),
+    connections: ConnectionStatsSchemaSchema,
+    topics: HealthTopicsSchema,
+    gap_detection: GapDetectionStatsSchema.optional(),
+  })
+  .strict()
+
 export const LoginResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('login_response'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     message: z.string(),
     expires_in: z.number().int(),
     user: UserProfileSchema,
@@ -528,6 +768,11 @@ export const LoginResponseSchema = z
 
 export const RefreshResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('refresh_response'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     message: z.string(),
     ws_token: z.string(),
     ws_token_exp: z.iso.datetime(),
@@ -538,6 +783,11 @@ export const RefreshResponseSchema = z
 
 export const UserListResponseSchema = z
   .object({
+    public_id: z.string().optional(),
+    type: z.literal('user_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
     users: z.array(UserProfileSchema),
     total_count: z.number().int(),
   })
@@ -551,6 +801,7 @@ export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
 export type ConnectionStatsSchema = z.infer<typeof ConnectionStatsSchemaSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
+export type GapStatsSchema = z.infer<typeof GapStatsSchemaSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
@@ -582,7 +833,7 @@ export type ZmqComponents = z.infer<typeof ZmqComponentsSchema>
 export type ZmqConfig = z.infer<typeof ZmqConfigSchema>
 export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
 export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
-export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
+export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
 export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
@@ -594,6 +845,7 @@ export type UserProfile = z.infer<typeof UserProfileSchema>
 export type HTTPValidationError = z.infer<typeof HTTPValidationErrorSchema>
 export type WsStatsResponse = z.infer<typeof WsStatsResponseSchema>
 export type ZmqHealthResponse = z.infer<typeof ZmqHealthResponseSchema>
+export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
 export type LoginResponse = z.infer<typeof LoginResponseSchema>
 export type RefreshResponse = z.infer<typeof RefreshResponseSchema>
 export type UserListResponse = z.infer<typeof UserListResponseSchema>

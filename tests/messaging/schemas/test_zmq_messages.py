@@ -29,7 +29,14 @@ class TestMessages:
         When: Serialized to JSON,
         Then: JSON contains type, instrument, last, volume, and timestamp.
         """
-        msg = TickData(instrument="BTCUSD", volume=0.1, last=50000.0, exchange="kraken")
+        msg = TickData(
+            session_id="",
+            sequence_id=0,
+            instrument="BTCUSD",
+            volume=0.1,
+            last=50000.0,
+            exchange="kraken",
+        )
         json_str = msg.to_json()
         data = json.loads(json_str)
         assert data["type"] == "tick"
@@ -46,6 +53,8 @@ class TestMessages:
         Then: All fields are preserved.
         """
         msg = CandleData(
+            session_id="",
+            sequence_id=0,
             instrument="ETHUSD",
             exchange="kraken",
             volume=5.0,
@@ -78,6 +87,8 @@ class TestMessages:
         Then: Strategy name, side, and strength are preserved.
         """
         msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="rsi_reversion#1",
             instrument="BTCUSD",
             exchange="kraken",
@@ -100,6 +111,8 @@ class TestMessages:
         Then: Strategy ID, mode, side, and quantity are preserved.
         """
         msg = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="strategy_1",
             instrument="BTCUSD",
             mode="paper",
@@ -125,6 +138,8 @@ class TestMessages:
         Then: Order ID, size, price, and status are preserved.
         """
         msg = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="TRADE-XYZ",
             exchange_order_id="KRAKEN-ABC123",
             client_order_id="test_order_123",
@@ -153,6 +168,8 @@ class TestMessages:
         Then: Component, sequence, and status are preserved.
         """
         msg = HeartbeatData(
+            session_id="",
+            sequence_id=0,
             component="feed.kraken.BTCUSD",
             sequence=12345,
             status="healthy",
@@ -174,6 +191,8 @@ class TestMessages:
         Then: Correct TickData type is returned.
         """
         tick_msg = TickData(
+            session_id="",
+            sequence_id=0,
             instrument="BTCUSD",
             exchange="kraken",
             volume=0.1,
@@ -226,6 +245,8 @@ class TestMessages:
         Then: It is within 1 second of current time.
         """
         msg = TickData(
+            session_id="",
+            sequence_id=0,
             instrument="BTCUSD",
             exchange="kraken",
             volume=0.1,
@@ -242,11 +263,19 @@ class TestMessages:
         Then: ValueError is raised.
         """
         msg = SignalData(
-            instrument="BTCUSD", exchange="kraken", side="buy", strength=0.5, reason="test"
+            session_id="",
+            sequence_id=0,
+            instrument="BTCUSD",
+            exchange="kraken",
+            side="buy",
+            strength=0.5,
+            reason="test",
         )
         assert msg.strength == pytest.approx(0.5)
         with pytest.raises(ValueError):
             SignalData(
+                session_id="",
+                sequence_id=0,
                 instrument="BTCUSD",
                 exchange="kraken",
                 side="buy",
@@ -262,6 +291,8 @@ class TestMessages:
         Then: ValueError is raised.
         """
         msg = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test",
             instrument="BTCUSD",
             mode="paper",
@@ -274,6 +305,8 @@ class TestMessages:
         assert msg.quantity == pytest.approx(0.01)
         with pytest.raises(ValueError):
             OrderRequestData(
+                session_id="",
+                sequence_id=0,
                 strategy_id="test",
                 instrument="BTCUSD",
                 mode="paper",
@@ -292,6 +325,8 @@ class TestMessages:
         Then: Exchange, instrument, and exchange_order_id are preserved.
         """
         msg = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-ABC123",
@@ -315,6 +350,8 @@ class TestMessages:
         """
         json_data = {
             "type": "order_cancel",
+            "session_id": "",
+            "sequence_id": 0,
             "exchange": "paper",
             "instrument": "ETH-USD",
             "exchange_order_id": "PAPER-XYZ789",
@@ -332,6 +369,8 @@ class TestMessages:
         Then: Exchange, instrument, exchange_order_id, and new values are preserved.
         """
         msg = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-ABC123",
@@ -357,6 +396,8 @@ class TestMessages:
         Then: new_quantity is set and new_price is None.
         """
         msg = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-ABC123",
@@ -375,6 +416,8 @@ class TestMessages:
         """
         json_data = {
             "type": "order_replace",
+            "session_id": "",
+            "sequence_id": 0,
             "exchange": "zonda",
             "instrument": "BTC-PLN",
             "exchange_order_id": "ZONDA-111",
@@ -394,6 +437,8 @@ class TestMessages:
         Then: All fields are preserved correctly.
         """
         msg = OrderEventData(
+            session_id="",
+            sequence_id=0,
             exchange_order_id="KRAKEN-ABC123",
             client_order_id="client_order_456",
             exchange="kraken",
@@ -419,6 +464,8 @@ class TestMessages:
         Then: Reason is preserved.
         """
         msg = OrderEventData(
+            session_id="",
+            sequence_id=0,
             exchange_order_id="KRAKEN-ABC123",
             client_order_id="client_456",
             exchange="kraken",
@@ -438,6 +485,8 @@ class TestMessages:
         """
         json_data = {
             "type": "order_event",
+            "session_id": "",
+            "sequence_id": 0,
             "exchange_order_id": "PAPER-XYZ789",
             "client_order_id": "client_789",
             "exchange": "paper",

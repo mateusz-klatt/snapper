@@ -41,6 +41,7 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 | `SERVER_PROXY_HEADERS` | `true` | Enable proxy header parsing in uvicorn |
 | `SERVER_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for forwarded headers |
 | `SERVER_API_ONLY` | `false` | Skip process autostart; serve API + WS bridge only (for multi-worker or separate engine) |
+| `TELEMETRY_RECORDING_ENABLED` | `false` | Record pings, heartbeats, and GET reads to `telemetry` table. High volume — enable for debugging only |
 
 ### ZeroMQ
 

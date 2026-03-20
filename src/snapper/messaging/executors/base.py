@@ -483,6 +483,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         try:
             order_event = OrderEventData(
+                session_id="",
+                sequence_id=0,
                 exchange_order_id=cancel.exchange_order_id,
                 client_order_id=cancel.client_order_id,
                 exchange=exchange_name,
@@ -513,6 +515,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         try:
             order_event = OrderEventData(
+                session_id="",
+                sequence_id=0,
                 exchange_order_id=replace.exchange_order_id,
                 client_order_id=replace.client_order_id,
                 exchange=exchange_name,
@@ -727,6 +731,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         status = to_fill_status(execution)
         total_fee = execution.fee_usd_equiv or 0.0
         return ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id=execution.exec_id,
             exchange_order_id=exchange_order_id,
             client_order_id=original_order.client_order_id,
@@ -798,6 +804,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         try:
             order_status = OrderData(
+                session_id="",
+                sequence_id=0,
                 exchange_order_id=exchange_order_id,
                 client_order_id=order.client_order_id,
                 instrument=order.instrument,
@@ -828,6 +836,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self.heartbeat_seq += 1
                 lag_ms = 0
                 hb_msg = HeartbeatData(
+                    session_id="",
+                    sequence_id=0,
                     component=f"executor.{exchange_name}",
                     sequence=self.heartbeat_seq,
                     status="healthy",

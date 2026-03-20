@@ -289,6 +289,8 @@ class TestTraderCoverage:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@kraken-live"] = mock_engine
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -332,6 +334,8 @@ class TestTraderCoverage:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@kraken-live"] = mock_engine
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="sell",
@@ -374,6 +378,8 @@ class TestTraderCoverage:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@kraken-live"] = mock_engine
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -411,6 +417,8 @@ class TestTraderCoverage:
         mock_get_repository.return_value = mock_repository
         trader = TraderCoordinator()
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test_strategy",
             instrument="UNKNOWN-USD",
             side="buy",
@@ -452,6 +460,8 @@ class TestTraderCoverage:
         trader.engines["BTC-USD@kraken-live"] = mock_engine
         trader.last_signal_time["BTC-USD@kraken-live"] = 0.0
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -492,6 +502,8 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         trader._current_topic = "signals.binance.BTC-USD.live"
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test",
             instrument="BTC-USD",
             side="buy",
@@ -523,6 +535,8 @@ class TestTraderCoverage:
         trader = TraderCoordinator()
         trader.execution_publisher = MagicMock()
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test_strategy",
             instrument="NONTRADEABLE-USD",
             side="buy",
@@ -562,6 +576,8 @@ class TestTraderCoverage:
         trader = TraderCoordinator()
         trader._current_topic = "signals.kraken.BTC-USD.live"
         signal_msg = SignalData(
+            session_id="",
+            sequence_id=0,
             strategy_name="test",
             instrument="BTC-USD",
             side="buy",
@@ -975,22 +991,44 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     coord_any = cast(Any, coord)
     coord_any._current_topic = "signals.invalid"
     signal_invalid_topic = SignalData(
-        instrument="BTC-USD", side="buy", strength=0.5, price=10.0, exchange="kraken", reason="test"
+        session_id="",
+        sequence_id=0,
+        instrument="BTC-USD",
+        side="buy",
+        strength=0.5,
+        price=10.0,
+        exchange="kraken",
+        reason="test",
     )
     await coord_any._on_signal(signal_invalid_topic)
     assert coord.engines == {}
     coord_any._current_topic = "signals.kraken.BTC-USD.live"
     signal_no_price = SignalData(
-        instrument="BTC-USD", side="buy", strength=0.5, exchange="kraken", reason="test"
+        session_id="",
+        sequence_id=0,
+        instrument="BTC-USD",
+        side="buy",
+        strength=0.5,
+        exchange="kraken",
+        reason="test",
     )
     await coord_any._on_signal(signal_no_price)
     assert coord.engines == {}
     signal_zero_price = SignalData(
-        instrument="BTC-USD", side="buy", strength=0.5, price=0.0, exchange="kraken", reason="test"
+        session_id="",
+        sequence_id=0,
+        instrument="BTC-USD",
+        side="buy",
+        strength=0.5,
+        price=0.0,
+        exchange="kraken",
+        reason="test",
     )
     await coord_any._on_signal(signal_zero_price)
     assert coord.engines == {}
     signal_valid = SignalData(
+        session_id="",
+        sequence_id=0,
         instrument="BTC-USD",
         side="buy",
         price=10.0,
@@ -1006,6 +1044,8 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     assert repository.calls[0]["symbol"] == "BTC-USD"
     assert engine.execute_calls[0]["desired_units"] == pytest.approx(0.5)
     signal_sell = SignalData(
+        session_id="",
+        sequence_id=0,
         instrument="BTC-USD",
         side="sell",
         strength=1.0,
@@ -1047,6 +1087,8 @@ async def test_listen_signals_processes_single_message(monkeypatch: pytest.Monke
     subscriber = _SubscriberStub(subscriber_socket)
     message: dict[str, Any] = {
         "type": "signal",
+        "session_id": "",
+        "sequence_id": 0,
         "instrument": "BTC-USD",
         "side": "buy",
         "price": 10.0,
@@ -1120,7 +1162,14 @@ async def test_listen_signals_handles_settings_update(
         (
             "system.settings",
             json.dumps(
-                {"type": "setting_changed", "key": "foo", "value": "bar", "category": "test"}
+                {
+                    "type": "setting_changed",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "key": "foo",
+                    "value": "bar",
+                    "category": "test",
+                }
             ).encode("utf-8"),
         )
     )
@@ -1178,7 +1227,14 @@ async def test_handle_settings_update_skips_when_no_instance(
         lambda: None,
     )
     payload = json.dumps(
-        {"type": "setting_changed", "key": "test_key", "value": "test_value", "category": "test"}
+        {
+            "type": "setting_changed",
+            "session_id": "",
+            "sequence_id": 0,
+            "key": "test_key",
+            "value": "test_value",
+            "category": "test",
+        }
     )
     coord._handle_settings_update(payload.encode("utf-8"))
 
@@ -1194,6 +1250,8 @@ async def test_handle_execution_fill_success(monkeypatch: pytest.MonkeyPatch) ->
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     fill = ExecutionData(
+        session_id="",
+        sequence_id=0,
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1222,6 +1280,8 @@ async def test_handle_execution_fill_invariant_exchange_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     fill = ExecutionData(
+        session_id="",
+        sequence_id=0,
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1250,6 +1310,8 @@ async def test_handle_execution_fill_invariant_instrument_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     fill = ExecutionData(
+        session_id="",
+        sequence_id=0,
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1276,6 +1338,8 @@ async def test_handle_execution_fill_malformed_topic(monkeypatch: pytest.MonkeyP
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     fill = ExecutionData(
+        session_id="",
+        sequence_id=0,
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1322,6 +1386,8 @@ async def test_listen_signals_routes_execution_fill(monkeypatch: pytest.MonkeyPa
             json.dumps(
                 {
                     "type": "execution",
+                    "session_id": "",
+                    "sequence_id": 0,
                     "trade_id": "exec-1",
                     "exchange_order_id": "exch-123",
                     "client_order_id": "order-123",
@@ -1360,6 +1426,8 @@ async def test_listen_signals_routes_order_status(monkeypatch: pytest.MonkeyPatc
             json.dumps(
                 {
                     "type": "order",
+                    "session_id": "",
+                    "sequence_id": 0,
                     "exchange_order_id": "exch-123",
                     "client_order_id": "order-123",
                     "instrument": "BTC-USD",
@@ -1396,7 +1464,14 @@ async def test_listen_signals_handles_invalid_order_event_payload(
     subscriber.messages.append(
         (
             "orders.events.kraken.BTC-USD.accepted",
-            json.dumps({"type": "order", "client_order_id": "order-123"}).encode("utf-8"),
+            json.dumps(
+                {
+                    "type": "order",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "client_order_id": "order-123",
+                }
+            ).encode("utf-8"),
         )
     )
     coord.signal_subscriber = cast(Any, subscriber)
@@ -1415,6 +1490,8 @@ async def test_handle_order_status_success(monkeypatch: pytest.MonkeyPatch) -> N
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_status = OrderData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -1443,6 +1520,8 @@ async def test_handle_order_status_invariant_exchange_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_status = OrderData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -1471,6 +1550,8 @@ async def test_handle_order_status_invariant_instrument_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_status = OrderData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="ETH-USD",
@@ -1499,6 +1580,8 @@ async def test_handle_order_status_rejected_logs_envelope_type(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_status = OrderData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id=None,
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -1529,6 +1612,8 @@ async def test_dispatch_order_event_routes_order_event_envelope(
     payload = json.dumps(
         {
             "type": "order_event",
+            "session_id": "",
+            "sequence_id": 0,
             "exchange_order_id": "exch-123",
             "client_order_id": "order-123",
             "exchange": "kraken",
@@ -1550,7 +1635,15 @@ async def test_dispatch_order_event_unknown_type(monkeypatch: pytest.MonkeyPatch
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     payload = json.dumps(
-        {"type": "heartbeat", "component": "test", "sequence": 1, "status": "healthy", "lag_ms": 0}
+        {
+            "type": "heartbeat",
+            "session_id": "",
+            "sequence_id": 0,
+            "component": "test",
+            "sequence": 1,
+            "status": "healthy",
+            "lag_ms": 0,
+        }
     ).encode("utf-8")
     coord._dispatch_order_event("orders.events.kraken.BTC-USD.accepted", payload)
 
@@ -1566,6 +1659,8 @@ async def test_handle_order_event_success(monkeypatch: pytest.MonkeyPatch) -> No
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_event = OrderEventData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1588,6 +1683,8 @@ async def test_handle_order_event_invariant_exchange_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_event = OrderEventData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="paper",
@@ -1610,6 +1707,8 @@ async def test_handle_order_event_invariant_instrument_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_event = OrderEventData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1630,6 +1729,8 @@ async def test_handle_order_event_malformed_topic(monkeypatch: pytest.MonkeyPatc
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_event = OrderEventData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1652,6 +1753,8 @@ async def test_handle_order_event_topic_payload_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_event = OrderEventData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1674,6 +1777,8 @@ async def test_handle_order_event_rejected_logs_envelope_type(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_event = OrderEventData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1694,6 +1799,8 @@ async def test_handle_order_status_malformed_topic(monkeypatch: pytest.MonkeyPat
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_status = OrderData(
+        session_id="",
+        sequence_id=0,
         client_order_id="order-123",
         instrument="BTC-USD",
         exchange="kraken",
@@ -1720,6 +1827,8 @@ async def test_handle_order_status_topic_payload_mismatch(
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     order_status = OrderData(
+        session_id="",
+        sequence_id=0,
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -1986,6 +2095,8 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     coordinator.msg_publisher = cast(Any, SimpleNamespace(publish=AsyncMock()))
     coordinator._current_topic = "signals.paper.BTC-USD.live"
     signal = SignalData(
+        session_id="",
+        sequence_id=0,
         instrument="BTC-USD",
         side="buy",
         strength=0.5,

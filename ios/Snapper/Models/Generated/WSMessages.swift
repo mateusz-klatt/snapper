@@ -110,8 +110,8 @@ struct HeartbeatData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let component: String
     let sequence: Int
     let status: String
@@ -136,8 +136,8 @@ struct OrderCancelData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
@@ -160,8 +160,8 @@ struct OrderEventData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let exchangeOrderId: String
     let clientOrderId: String
     let exchange: String
@@ -188,8 +188,8 @@ struct OrderReplaceData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
@@ -216,8 +216,8 @@ struct OrderRequestData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let strategyId: String
     let exchange: String
     let instrument: String
@@ -252,8 +252,8 @@ struct ReplayEndData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -268,8 +268,8 @@ struct ReplayStartData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let startedAt: Date?
 
     enum CodingKeys: String, CodingKey {
@@ -286,8 +286,8 @@ struct SettingChangedData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let key: String
     let value: String
     let category: String
@@ -310,8 +310,8 @@ struct SymbolAliasUpdateData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let event: String
     let action: String
 
@@ -330,8 +330,8 @@ struct TickData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let instrument: String
     let exchange: String
     let volume: Double
@@ -358,8 +358,8 @@ struct TradeData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let instrument: String
     let exchange: String
     let executedAt: Date?

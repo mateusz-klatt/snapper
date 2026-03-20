@@ -5,6 +5,7 @@ insight into system status, ZMQ bridge health, and WebSocket statistics.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
@@ -26,6 +27,7 @@ class ConnectionStatsSchema(StrictApiSchema):
         active_clients: Number of unique connected clients.
     """
 
+    type: Literal["connection_stats"] = "connection_stats"
     active_connections: int = Field(default=0, description="Active WebSocket connections")
     zmq_subscribers: int = Field(default=0, description="Active ZMQ subscriber sockets")
     subscriber_tasks: int = Field(default=0, description="Running subscriber tasks")
@@ -50,6 +52,7 @@ class TopicMetricSnapshotSchema(StrictApiSchema):
         pattern: ZMQ subscription pattern (None if unconfigured).
     """
 
+    type: Literal["topic_metric_snapshot"] = "topic_metric_snapshot"
     active_subscribers: int = Field(default=0, description="Current subscriber count")
     received: int = Field(default=0, description="Total messages received")
     forwarded: int = Field(default=0, description="Messages forwarded to clients")
@@ -71,15 +74,54 @@ class HealthTopics(StrictApiSchema):
         active: Number of currently active topics with subscribers.
     """
 
+    type: Literal["health_topics"] = "health_topics"
     available: int = Field(description="Total number of available topics")
     active: int = Field(description="Number of currently active topics")
+
+
+class GapStatsSchema(StrictApiSchema):
+    """Gap detection telemetry counters for a single detector.
+
+    Attributes:
+        gaps_detected: Total missing messages detected.
+        session_resets: Producer session resets observed.
+        duplicates: Duplicate or reordered messages observed.
+        mid_stream_joins: Subscriptions that started mid-stream.
+        rejected_unstamped: Messages rejected due to missing provenance.
+    """
+
+    type: Literal["gap_stats"] = "gap_stats"
+    gaps_detected: int = Field(default=0, description="Total missing messages detected")
+    session_resets: int = Field(default=0, description="Producer session resets observed")
+    duplicates: int = Field(default=0, description="Duplicate or reordered messages")
+    mid_stream_joins: int = Field(default=0, description="Subscriptions started mid-stream")
+    rejected_unstamped: int = Field(default=0, description="Messages without provenance")
+
+
+class GapDetectionStats(StrictApiSchema):
+    """Aggregated gap detection statistics from all detectors.
+
+    Attributes:
+        bridge: Gap stats from the ZMQ-to-WebSocket bridge detector.
+        rest_clients: Per-session gap stats from REST client detectors.
+    """
+
+    type: Literal["gap_detection_stats"] = "gap_detection_stats"
+    bridge: GapStatsSchema = Field(
+        default_factory=GapStatsSchema,
+        description="ZMQ bridge gap detection stats",
+    )
+    rest_clients: dict[str, GapStatsSchema] = Field(
+        default_factory=dict,
+        description="Per-session REST client gap stats",
+    )
 
 
 class HealthCheckResponse(StrictApiSchema):
     """Main health check endpoint response.
 
     Provides overall service health status including version,
-    connection statistics, and topic availability.
+    connection statistics, topic availability, and gap detection stats.
 
     Attributes:
         status: Overall service health status (healthy/warning/error).
@@ -87,13 +129,19 @@ class HealthCheckResponse(StrictApiSchema):
         version: Application version string.
         connections: Connection statistics.
         topics: Topic availability information.
+        gap_detection: Gap detection statistics from all detectors.
     """
 
+    type: Literal["health_check"] = "health_check"
     status: HealthStatus = Field(description="Overall service health status")
     timestamp: datetime = Field(description="Timestamp of the health check")
     version: str = Field(description="Application version")
     connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
     topics: HealthTopics = Field(description="Topics availability")
+    gap_detection: GapDetectionStats = Field(
+        default_factory=GapDetectionStats,
+        description="Gap detection statistics",
+    )
 
 
 class ZmqComponents(StrictApiSchema):
@@ -105,6 +153,7 @@ class ZmqComponents(StrictApiSchema):
         active_connections: Number of active WebSocket connections.
     """
 
+    type: Literal["zmq_components"] = "zmq_components"
     zmq_context: ComponentStatus = Field(description="ZMQ context status")
     websocket_manager: ComponentStatus = Field(description="WebSocket manager status")
     active_connections: int = Field(description="Number of active WebSocket connections")
@@ -117,6 +166,7 @@ class ZmqConfig(StrictApiSchema):
         available_topics: List of available ZMQ topics for subscription.
     """
 
+    type: Literal["zmq_config"] = "zmq_config"
     available_topics: list[str] = Field(description="List of available ZMQ topics")
 
 
@@ -136,6 +186,7 @@ class ZmqHealthResponse(StrictApiSchema):
         errors: Error messages if not healthy.
     """
 
+    type: Literal["zmq_health"] = "zmq_health"
     status: HealthStatus = Field(description="Overall ZMQ bridge health status")
     timestamp: datetime = Field(description="Timestamp of the health check")
     components: ZmqComponents = Field(description="Component status details")
@@ -156,6 +207,7 @@ class WebSocketStats(StrictApiSchema):
         client_count: Total client count.
     """
 
+    type: Literal["websocket_stats"] = "websocket_stats"
     active_connections: int = Field(description="Number of active WebSocket connections")
     topic_subscribers: dict[str, int] = Field(description="Subscriber count per topic")
     client_count: int = Field(description="Total client count")
@@ -170,6 +222,7 @@ class ZmqBridgeStats(StrictApiSchema):
         available_topics: List of available topics.
     """
 
+    type: Literal["zmq_bridge_stats"] = "zmq_bridge_stats"
     active_topics: int = Field(description="Number of active ZMQ topics")
     subscriber_tasks: int = Field(description="Number of subscriber tasks")
     available_topics: list[str] = Field(description="List of available topics")
@@ -183,6 +236,7 @@ class WsStatsConfig(StrictApiSchema):
         heartbeat_interval_ms: Heartbeat interval in milliseconds.
     """
 
+    type: Literal["ws_stats_config"] = "ws_stats_config"
     broker_xpub: str = Field(description="ZMQ broker XPUB endpoint")
     heartbeat_interval_ms: int = Field(description="Heartbeat interval in milliseconds")
 
@@ -195,6 +249,7 @@ class SubscriptionsStats(StrictApiSchema):
         per_client: Topics subscribed per client.
     """
 
+    type: Literal["subscriptions_stats"] = "subscriptions_stats"
     per_topic: dict[str, int] = Field(description="Subscriber count per topic")
     per_client: dict[str, list[str]] = Field(description="Topics subscribed per client")
 
@@ -214,6 +269,7 @@ class WsStatsResponse(StrictApiSchema):
         config: Configuration details.
     """
 
+    type: Literal["ws_stats"] = "ws_stats"
     websocket: WebSocketStats = Field(description="WebSocket statistics")
     zmq_bridge: ZmqBridgeStats = Field(description="ZMQ bridge statistics")
     connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
@@ -229,11 +285,14 @@ class SettingCategoriesResponse(StrictApiSchema):
         categories: List of unique setting categories.
     """
 
+    type: Literal["setting_categories"] = "setting_categories"
     categories: list[str] = Field(description="List of unique setting categories")
 
 
 __all__ = [
     "ConnectionStatsSchema",
+    "GapDetectionStats",
+    "GapStatsSchema",
     "HealthCheckResponse",
     "HealthTopics",
     "SettingCategoriesResponse",

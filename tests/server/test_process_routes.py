@@ -462,7 +462,7 @@ class TestStartProcess:
         )
         assert result.status == "success"
         assert result.name == "zmq_broker"
-        assert result.public_id == "run-001"
+        assert result.process_public_id == "run-001"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker",
             mode="process",

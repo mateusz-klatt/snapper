@@ -486,17 +486,29 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
+        type: 'health_check',
+        session_id: '',
+        sequence_id: 0,
         status: 'healthy',
         timestamp: '2024-01-01T00:00:00Z',
         version: '1.0.0',
         connections: {
+          type: 'connection_stats',
+          session_id: '',
+          sequence_id: 0,
           active_connections: 5,
           zmq_subscribers: 2,
           subscriber_tasks: 1,
           active_topics: 3,
           active_clients: 4,
         },
-        topics: { available: 10, active: 3 },
+        topics: {
+          type: 'health_topics',
+          session_id: '',
+          sequence_id: 0,
+          available: 10,
+          active: 3,
+        },
       }),
     })
     const result = await apiClient.getHealth()
@@ -509,7 +521,16 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        trader: { status: 'running', pid: 1234 },
+        type: 'system_status',
+        session_id: '',
+        sequence_id: 0,
+        trader: {
+          type: 'process_status',
+          session_id: '',
+          sequence_id: 0,
+          status: 'running',
+          pid: 1234,
+        },
         backtests: {},
       }),
     })
@@ -789,6 +810,9 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => [
         {
+          type: 'setting_read',
+          session_id: '',
+          sequence_id: 0,
           key: 'setting1',
           value: 'value1',
           category: 'trading',
@@ -820,7 +844,12 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ categories: ['trading', 'system'] }),
+      json: async () => ({
+        type: 'setting_categories',
+        session_id: '',
+        sequence_id: 0,
+        categories: ['trading', 'system'],
+      }),
     })
     const result = await apiClient.getSettingCategories()
 
@@ -831,6 +860,9 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
+        type: 'setting_read',
+        session_id: '',
+        sequence_id: 0,
         key: 'setting1',
         value: 'new-value',
         category: 'general',
@@ -849,11 +881,21 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ message: 'Setting deleted successfully' }),
+      json: async () => ({
+        type: 'message',
+        session_id: '',
+        sequence_id: 0,
+        message: 'Setting deleted successfully',
+      }),
     })
     const result = await apiClient.deleteSetting('setting1')
 
-    expect(result).toEqual({ message: 'Setting deleted successfully' })
+    expect(result).toEqual({
+      type: 'message',
+      session_id: '',
+      sequence_id: 0,
+      message: 'Setting deleted successfully',
+    })
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/settings/setting1'),
       expect.objectContaining({ method: 'DELETE' })
@@ -864,6 +906,9 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
+        type: 'process_schema',
+        session_id: '',
+        sequence_id: 0,
         name: 'test',
         description: 'Test process',
         class_path: 'snapper.processes.test',
@@ -883,8 +928,17 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
+        type: 'process_create_response',
+        session_id: '',
+        sequence_id: 0,
         status: 'created',
-        process: { name: 'new-process', template: 'test-template' },
+        process: {
+          type: 'process_created_info',
+          session_id: '',
+          sequence_id: 0,
+          name: 'new-process',
+          template: 'test-template',
+        },
       }),
     })
     const result = await apiClient.createProcessConfig({
@@ -899,18 +953,57 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ processes: [], count: 0 }),
+      json: async () => ({
+        type: 'configured_processes',
+        session_id: '',
+        sequence_id: 0,
+        processes: [],
+        count: 0,
+      }),
     })
     const result = await apiClient.getConfiguredProcesses()
 
-    expect(result).toEqual({ processes: [], count: 0 })
+    expect(result).toEqual({
+      type: 'configured_processes',
+      session_id: '',
+      sequence_id: 0,
+      processes: [],
+      count: 0,
+    })
   })
   it('getProcessSummary returns process category counts', async () => {
     const summary = {
-      feeds: { running: 1, total: 2 },
-      strategies: { running: 0, total: 1 },
-      executors: { running: 0, total: 0 },
-      brokers: { running: 1, total: 1 },
+      type: 'process_summary' as const,
+      session_id: '',
+      sequence_id: 0,
+      feeds: {
+        type: 'process_category_count' as const,
+        session_id: '',
+        sequence_id: 0,
+        running: 1,
+        total: 2,
+      },
+      strategies: {
+        type: 'process_category_count' as const,
+        session_id: '',
+        sequence_id: 0,
+        running: 0,
+        total: 1,
+      },
+      executors: {
+        type: 'process_category_count' as const,
+        session_id: '',
+        sequence_id: 0,
+        running: 0,
+        total: 0,
+      },
+      brokers: {
+        type: 'process_category_count' as const,
+        session_id: '',
+        sequence_id: 0,
+        running: 1,
+        total: 1,
+      },
     }
 
     mockFetch.mockResolvedValueOnce({
@@ -924,7 +1017,20 @@ describe('domain API methods', () => {
   })
   it('getStrategies returns strategy list', async () => {
     const strategiesResponse = {
-      strategies: [{ name: 'strategy_test', running: true, enabled: true, mode: 'thread' }],
+      type: 'strategy_list' as const,
+      session_id: '',
+      sequence_id: 0,
+      strategies: [
+        {
+          type: 'strategy_process' as const,
+          session_id: '',
+          sequence_id: 0,
+          name: 'strategy_test',
+          running: true,
+          enabled: true,
+          mode: 'thread' as const,
+        },
+      ],
       count: 1,
     }
 
@@ -941,21 +1047,45 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ processes: [], count: 0 }),
+      json: async () => ({
+        type: 'available_processes',
+        session_id: '',
+        sequence_id: 0,
+        processes: [],
+        count: 0,
+      }),
     })
     const result = await apiClient.getAvailableProcesses()
 
-    expect(result).toEqual({ processes: [], count: 0 })
+    expect(result).toEqual({
+      type: 'available_processes',
+      session_id: '',
+      sequence_id: 0,
+      processes: [],
+      count: 0,
+    })
   })
   it('getProcessRuns returns process runs', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ runs: [], count: 0 }),
+      json: async () => ({
+        type: 'process_runs',
+        session_id: '',
+        sequence_id: 0,
+        runs: [],
+        count: 0,
+      }),
     })
     const result = await apiClient.getProcessRuns({ limit: 10, name: 'test' })
 
-    expect(result).toEqual({ runs: [], count: 0 })
+    expect(result).toEqual({
+      type: 'process_runs',
+      session_id: '',
+      sequence_id: 0,
+      runs: [],
+      count: 0,
+    })
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=10'), expect.any(Object))
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('name=test'), expect.any(Object))
   })
@@ -963,7 +1093,13 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ runs: [], count: 0 }),
+      json: async () => ({
+        type: 'process_runs',
+        session_id: '',
+        sequence_id: 0,
+        runs: [],
+        count: 0,
+      }),
     })
     await apiClient.getProcessRuns()
     expect(mockFetch).toHaveBeenCalledWith(
@@ -975,7 +1111,14 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'success', name: 'test-process', message: 'Process started' }),
+      json: async () => ({
+        type: 'process_start_response',
+        session_id: '',
+        sequence_id: 0,
+        status: 'success',
+        name: 'test-process',
+        message: 'Process started',
+      }),
     })
     const result = await apiClient.startProcessByName('test-process', {
       mode: 'live',
@@ -984,13 +1127,27 @@ describe('domain API methods', () => {
       autostart: true,
     })
 
-    expect(result).toEqual({ status: 'success', name: 'test-process', message: 'Process started' })
+    expect(result).toEqual({
+      type: 'process_start_response',
+      session_id: '',
+      sequence_id: 0,
+      status: 'success',
+      name: 'test-process',
+      message: 'Process started',
+    })
   })
   it('startProcessByName works without options', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'success', name: 'test-process', message: 'Started' }),
+      json: async () => ({
+        type: 'process_start_response',
+        session_id: '',
+        sequence_id: 0,
+        status: 'success',
+        name: 'test-process',
+        message: 'Started',
+      }),
     })
     await apiClient.startProcessByName('test-process')
     expect(mockFetch).toHaveBeenCalled()
@@ -999,21 +1156,45 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'success', name: 'test-process', message: 'Process stopped' }),
+      json: async () => ({
+        type: 'process_stop_response',
+        session_id: '',
+        sequence_id: 0,
+        status: 'success',
+        name: 'test-process',
+        message: 'Process stopped',
+      }),
     })
     const result = await apiClient.stopProcessByName('test-process')
 
-    expect(result).toEqual({ status: 'success', name: 'test-process', message: 'Process stopped' })
+    expect(result).toEqual({
+      type: 'process_stop_response',
+      session_id: '',
+      sequence_id: 0,
+      status: 'success',
+      name: 'test-process',
+      message: 'Process stopped',
+    })
   })
   it('changePassword changes user password', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ message: 'Password changed successfully' }),
+      json: async () => ({
+        type: 'message',
+        session_id: '',
+        sequence_id: 0,
+        message: 'Password changed successfully',
+      }),
     })
     const result = await apiClient.changePassword('testuser', 'oldPassword', 'newPassword')
 
-    expect(result).toEqual({ message: 'Password changed successfully' })
+    expect(result).toEqual({
+      type: 'message',
+      session_id: '',
+      sequence_id: 0,
+      message: 'Password changed successfully',
+    })
     const call = mockFetch.mock.calls[0]
 
     expect(call[0]).toBe('/api/auth/users/testuser/change-password')
@@ -1043,8 +1224,14 @@ describe('user management API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
+        type: 'user_list',
+        session_id: '',
+        sequence_id: 0,
         users: [
           {
+            type: 'user_profile',
+            session_id: '',
+            sequence_id: 0,
             username: 'admin',
             email: 'admin@test.com',
             role: 'admin',
@@ -1066,7 +1253,12 @@ describe('user management API methods', () => {
   it('createUser posts new user', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ message: 'User created' }),
+      json: async () => ({
+        type: 'message',
+        session_id: '',
+        sequence_id: 0,
+        message: 'User created',
+      }),
     })
     const result = await apiClient.createUser({
       username: 'new',
@@ -1085,7 +1277,12 @@ describe('user management API methods', () => {
   it('updateUser puts user data', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ message: 'User updated' }),
+      json: async () => ({
+        type: 'message',
+        session_id: '',
+        sequence_id: 0,
+        message: 'User updated',
+      }),
     })
     const result = await apiClient.updateUser('admin', {
       email: 'new@e.com',
@@ -1102,7 +1299,12 @@ describe('user management API methods', () => {
   it('deactivateUser deletes user', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ message: 'User deactivated' }),
+      json: async () => ({
+        type: 'message',
+        session_id: '',
+        sequence_id: 0,
+        message: 'User deactivated',
+      }),
     })
     const result = await apiClient.deactivateUser('testuser')
 
@@ -1115,7 +1317,12 @@ describe('user management API methods', () => {
   it('adminResetPassword resets password', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ message: 'Password reset' }),
+      json: async () => ({
+        type: 'message',
+        session_id: '',
+        sequence_id: 0,
+        message: 'Password reset',
+      }),
     })
     const result = await apiClient.adminResetPassword('admin', { new_password: 'newpass123' })
 

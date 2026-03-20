@@ -69,6 +69,8 @@ from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.health import ConnectionStatsSchema
+from snapper.api.schemas.health import GapDetectionStats
+from snapper.api.schemas.health import GapStatsSchema
 from snapper.api.schemas.health import HealthCheckResponse
 from snapper.api.schemas.health import HealthTopics
 from snapper.api.schemas.health import SubscriptionsStats
@@ -114,6 +116,7 @@ from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
+from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
@@ -298,10 +301,17 @@ def create_app() -> FastAPI:
 
     settings = get_settings()
     allowed_origins = list(build_allowed_origins(settings))
+    provenance_gap_detectors: dict[str, Any] = {}
     app.state.limiter = limiter
+    app.state.provenance_gap_detectors = provenance_gap_detectors
     app.add_exception_handler(RateLimitExceeded, handle_rate_limit_exceeded)
     app.add_middleware(SlowAPIMiddleware)
-    app.add_middleware(ClientProvenanceMiddleware, db_url=settings.db_url)
+    app.add_middleware(
+        ClientProvenanceMiddleware,
+        db_url=settings.db_url,
+        telemetry_enabled=settings.telemetry_recording_enabled,
+        gap_detectors=provenance_gap_detectors,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
@@ -807,6 +817,48 @@ def _create_orders_executions_router() -> APIRouter:
     return router
 
 
+def _gap_detector_stats_to_schema(stats: GapDetectorStats) -> GapStatsSchema:
+    """Convert a GapDetectorStats dataclass to a GapStatsSchema.
+
+    Args:
+        stats: Gap detector statistics dataclass.
+
+    Returns:
+        Pydantic schema with the same counter values.
+    """
+    return GapStatsSchema(
+        gaps_detected=stats.gaps_detected,
+        session_resets=stats.session_resets,
+        duplicates=stats.duplicates,
+        mid_stream_joins=stats.mid_stream_joins,
+        rejected_unstamped=stats.rejected_unstamped,
+    )
+
+
+def _collect_gap_detection_stats(
+    manager: WebSocketConnectionManager,
+    middleware_gap_detectors: dict[str, Any] | None,
+) -> GapDetectionStats:
+    """Aggregate gap detection stats from bridge and REST middleware.
+
+    Args:
+        manager: WebSocket connection manager with ZMQ bridge.
+        middleware_gap_detectors: Per-session gap detectors from the
+            provenance middleware (may be None).
+
+    Returns:
+        Aggregated gap detection statistics.
+    """
+    bridge_stats = _gap_detector_stats_to_schema(
+        manager.zmq_bridge._gap_detector.stats,
+    )
+    rest_clients: dict[str, GapStatsSchema] = {}
+    if middleware_gap_detectors:
+        for session_id, detector in middleware_gap_detectors.items():
+            rest_clients[session_id] = _gap_detector_stats_to_schema(detector.stats)
+    return GapDetectionStats(bridge=bridge_stats, rest_clients=rest_clients)
+
+
 def _create_monitoring_endpoints_router(
     manager: WebSocketConnectionManager,
 ) -> APIRouter:
@@ -822,8 +874,10 @@ def _create_monitoring_endpoints_router(
     zmq_bridge = manager.zmq_bridge
 
     @router.get("/health")
-    async def health_check() -> HealthCheckResponse:
+    async def health_check(request: Request) -> HealthCheckResponse:
         stats = manager.get_stats()
+        middleware_detectors = getattr(request.app.state, "provenance_gap_detectors", None)
+        gap_stats = _collect_gap_detection_stats(manager, middleware_detectors)
         return HealthCheckResponse(
             status="healthy",
             timestamp=dt.datetime.now(dt.UTC),
@@ -833,6 +887,7 @@ def _create_monitoring_endpoints_router(
                 available=len(get_all_topic_names()),
                 active=stats.connections.active_topics,
             ),
+            gap_detection=gap_stats,
         )
 
     @router.get("/ws/stats")

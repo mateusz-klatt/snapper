@@ -80,3 +80,5 @@ fastlane/screenshots/**/*.png
 fastlane/test_output
 *.gcda
 *.gcno
+
+.claude/worktrees/

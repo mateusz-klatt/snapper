@@ -79,6 +79,8 @@ class StrategyHealthMonitor:
             Heartbeat data ready for publishing.
         """
         return HeartbeatData(
+            session_id="",
+            sequence_id=0,
             component=f"strategy.{self.strategy.name}",
             sequence=self.strategy.heartbeat_seq,
             status=self.classify_health_status(lag_ms),

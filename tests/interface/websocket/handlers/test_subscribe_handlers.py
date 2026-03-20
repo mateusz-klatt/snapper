@@ -51,7 +51,9 @@ class TestHandleSubscribeEdgeCases:
         When: Handling subscribe request,
         Then: Returns error response with invalid topic names.
         """
-        message = WSSubscribeRequest(topics=["invalid..topic", "another..bad"])
+        message = WSSubscribeRequest(
+            session_id="", sequence_id=0, topics=["invalid..topic", "another..bad"]
+        )
         await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
@@ -69,7 +71,7 @@ class TestHandleSubscribeEdgeCases:
         When: Handling subscribe request,
         Then: Returns success with no_topics status.
         """
-        message = WSSubscribeRequest(topics=["  ", ""])
+        message = WSSubscribeRequest(session_id="", sequence_id=0, topics=["  ", ""])
         await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
@@ -86,7 +88,9 @@ class TestHandleSubscribeEdgeCases:
         When: Handling subscribe request,
         Then: Returns success with denied status and all denied topics.
         """
-        message = WSSubscribeRequest(topics=["admin.users", "admin.settings"])
+        message = WSSubscribeRequest(
+            session_id="", sequence_id=0, topics=["admin.users", "admin.settings"]
+        )
         await handle_subscribe(mock_websocket, message, mock_manager, UserRole.VIEWER)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
@@ -107,7 +111,7 @@ class TestHandleSubscribeEdgeCases:
         mock_manager.zmq_bridge = None
         valid_topic = "market.kraken.BTC-USD.candles.1m"
         mock_manager.topic_manager.get_all_topics = MagicMock(return_value=[valid_topic])
-        message = WSSubscribeRequest(topics=[valid_topic])
+        message = WSSubscribeRequest(session_id="", sequence_id=0, topics=[valid_topic])
         with patch(
             "snapper.interface.websocket.handlers.subscribe.get_allowed_topics_for_role",
             return_value=[valid_topic],
@@ -159,7 +163,9 @@ class TestHandleUnsubscribeEdgeCases:
         When: Unsubscribing from ETH-PLN,
         Then: Returns success with no_topics status and denied topic.
         """
-        message = WSUnsubscribeRequest(topics=["market.zonda.ETH-PLN.candles.1m"])
+        message = WSUnsubscribeRequest(
+            session_id="", sequence_id=0, topics=["market.zonda.ETH-PLN.candles.1m"]
+        )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
@@ -178,7 +184,9 @@ class TestHandleUnsubscribeEdgeCases:
         Then: Returns error about unavailable ZMQ bridge.
         """
         mock_manager.zmq_bridge = None
-        message = WSUnsubscribeRequest(topics=["market.kraken.BTC-USD.candles.1m"])
+        message = WSUnsubscribeRequest(
+            session_id="", sequence_id=0, topics=["market.kraken.BTC-USD.candles.1m"]
+        )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
@@ -198,7 +206,9 @@ class TestHandleUnsubscribeEdgeCases:
         mock_manager.get_client_subscriptions = MagicMock(
             return_value={"market.kraken.BTC-USD.ticks"}
         )
-        message = WSUnsubscribeRequest(topics=["   ", "\t", "", "market.kraken.BTC-USD.ticks"])
+        message = WSUnsubscribeRequest(
+            session_id="", sequence_id=0, topics=["   ", "\t", "", "market.kraken.BTC-USD.ticks"]
+        )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])

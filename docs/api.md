@@ -207,10 +207,12 @@ Public health check endpoint. No authentication required.
 
 ```json
 {
+    "type": "health_check",
     "status": "healthy",
     "timestamp": "2026-01-18T12:00:00Z",
     "version": "0.1.0",
     "connections": {
+        "type": "connection_stats",
         "active_connections": 5,
         "zmq_subscribers": 12,
         "subscriber_tasks": 12,
@@ -218,11 +220,27 @@ Public health check endpoint. No authentication required.
         "active_clients": 3
     },
     "topics": {
+        "type": "health_topics",
         "available": 7,
         "active": 3
+    },
+    "gap_detection": {
+        "type": "gap_detection_stats",
+        "bridge": {
+            "type": "gap_stats",
+            "gaps_detected": 0,
+            "session_resets": 0,
+            "duplicates": 0,
+            "mid_stream_joins": 0,
+            "rejected_unstamped": 0
+        },
+        "rest_clients": {}
     }
 }
 ```
+
+The `gap_detection` field provides observability into sequence gap detection
+across the ZMQ bridge and per-session REST client detectors.
 
 ### GET /api/candles
 

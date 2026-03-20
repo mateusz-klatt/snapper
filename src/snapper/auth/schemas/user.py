@@ -6,6 +6,7 @@ the authentication and authorization system.
 
 from datetime import UTC
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
@@ -20,6 +21,7 @@ class UserProfile(StrictApiSchema):
     endpoints and stored in request state.
 
     Attributes:
+        type: Payload item type discriminator.
         username: User's login name (also the primary key).
         email: Optional email address.
         role: User's role (VIEWER, OPERATOR, ADMIN).
@@ -27,6 +29,7 @@ class UserProfile(StrictApiSchema):
         created_at: Account creation timestamp.
     """
 
+    type: Literal["user_profile"] = "user_profile"
     username: str
     email: str | None = None
     role: UserRole

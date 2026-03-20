@@ -50,6 +50,8 @@ def make_candle_envelope(
 ) -> CandleData:
     """Create a CandleData with default values for testing."""
     return CandleData(
+        session_id="",
+        sequence_id=0,
         instrument=instrument,
         timeframe="1h",
         open=close - 100,

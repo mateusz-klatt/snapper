@@ -71,6 +71,8 @@ def make_candle_envelope(
 ) -> CandleData:
     """Create a CandleData with default test values."""
     return CandleData(
+        session_id="",
+        sequence_id=0,
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -603,6 +605,8 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
 
     monkeypatch.setattr("snapper.strategies.system_events._get_db_mapper", lambda: _Mapper())
     heartbeat = HeartbeatData(
+        session_id="",
+        sequence_id=0,
         component="feed.kraken",
         sequence=1,
         status="healthy",
@@ -616,8 +620,14 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
             "system.heartbeats.feed.kraken",
             heartbeat.to_json().encode(),
         ),
-        ("system.replay.start", json.dumps({"type": "replay_start"}).encode()),
-        ("system.replay.end", json.dumps({"type": "replay_end"}).encode()),
+        (
+            "system.replay.start",
+            json.dumps({"type": "replay_start", "session_id": "", "sequence_id": 0}).encode(),
+        ),
+        (
+            "system.replay.end",
+            json.dumps({"type": "replay_end", "session_id": "", "sequence_id": 0}).encode(),
+        ),
         (
             "market.kraken.BTC-USD.candles.1h",
             candle.to_json().encode(),
@@ -674,6 +684,8 @@ async def test_default_handlers_return_none() -> None:
     candle = make_candle_envelope("BTC-USD", 50000.0)
     assert await strategy.on_candle("BTC-USD", candle) is None
     tick = TickData(
+        session_id="",
+        sequence_id=0,
         instrument="BTC-USD",
         volume=100.0,
         bid=50000.0,
@@ -682,6 +694,8 @@ async def test_default_handlers_return_none() -> None:
     )
     assert await strategy.on_tick("BTC-USD", tick) is None
     trade = TradeData(
+        session_id="",
+        sequence_id=0,
         instrument="BTC-USD",
         price=50000.0,
         volume=1.0,
@@ -826,6 +840,8 @@ async def test_listen_loop_handles_tick_data() -> None:
     mock_msg_publisher = AsyncMock()
     strategy.msg_publisher = mock_msg_publisher
     tick = TickData(
+        session_id="",
+        sequence_id=0,
         instrument="BTC-USD",
         volume=100.0,
         bid=50000.0,
@@ -864,6 +880,8 @@ async def test_listen_loop_handles_trade_data() -> None:
     mock_msg_publisher = AsyncMock()
     strategy.msg_publisher = mock_msg_publisher
     trade = TradeData(
+        session_id="",
+        sequence_id=0,
         instrument="BTC-USD",
         price=50000.0,
         volume=1.0,
@@ -1806,7 +1824,12 @@ class TestListenLoop:
         strategy = ReplayAwareStrategy(strategy_config)
         strategy._running = True
         replay_payload = json.dumps(
-            {"type": "replay_start", "started_at": "2024-01-01T00:02:03.450000+00:00"}
+            {
+                "type": "replay_start",
+                "session_id": "",
+                "sequence_id": 0,
+                "started_at": "2024-01-01T00:02:03.450000+00:00",
+            }
         ).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
@@ -1830,7 +1853,9 @@ class TestListenLoop:
         strategy = ReplayAwareStrategy(strategy_config)
         strategy._running = True
         strategy._last_data_ts = 55.5
-        replay_end_payload = json.dumps({"type": "replay_end"}).encode()
+        replay_end_payload = json.dumps(
+            {"type": "replay_end", "session_id": "", "sequence_id": 0}
+        ).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[("system.replay.end", replay_end_payload), asyncio.CancelledError()]
@@ -1955,6 +1980,8 @@ class TestListenLoop:
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
         heartbeat = HeartbeatData(
+            session_id="",
+            sequence_id=0,
             component="feed.kraken",
             sequence=1,
             status="healthy",
@@ -2524,7 +2551,12 @@ class TestReplayHandling:
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
         replay_payload = json.dumps(
-            {"type": "replay_start", "started_at": "2024-01-01T00:02:03.456000+00:00"}
+            {
+                "type": "replay_start",
+                "session_id": "",
+                "sequence_id": 0,
+                "started_at": "2024-01-01T00:02:03.456000+00:00",
+            }
         ).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
@@ -2556,9 +2588,14 @@ class TestReplayHandling:
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
         replay_start = json.dumps(
-            {"type": "replay_start", "started_at": "2024-01-01T00:00:50.000000+00:00"}
+            {
+                "type": "replay_start",
+                "session_id": "",
+                "sequence_id": 0,
+                "started_at": "2024-01-01T00:00:50.000000+00:00",
+            }
         ).encode()
-        replay_end = json.dumps({"type": "replay_end"}).encode()
+        replay_end = json.dumps({"type": "replay_end", "session_id": "", "sequence_id": 0}).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[
@@ -2590,7 +2627,7 @@ class TestReplayHandling:
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
         strategy._last_data_ts = 777.0
-        replay_end = json.dumps({"type": "replay_end"}).encode()
+        replay_end = json.dumps({"type": "replay_end", "session_id": "", "sequence_id": 0}).encode()
 
         class StubSubscriber:
             def __init__(self) -> None:
@@ -2629,7 +2666,9 @@ class TestReplayHandling:
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
         strategy._last_data_ts = 99.0
-        replay_end_payload = json.dumps({"type": "replay_end"}).encode()
+        replay_end_payload = json.dumps(
+            {"type": "replay_end", "session_id": "", "sequence_id": 0}
+        ).encode()
 
         class SingleMessageSubscriber:
             def __init__(self) -> None:
@@ -3148,6 +3187,8 @@ class TestListenLoopSystemMessages:
                     json.dumps(
                         {
                             "type": "setting_changed",
+                            "session_id": "",
+                            "sequence_id": 0,
                             "key": "foo",
                             "value": "bar",
                             "category": "test",
@@ -3178,7 +3219,9 @@ class TestListenLoopSystemMessages:
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
-        envelope = SettingChangedData(key="test_key", value="test_value", category="test")
+        envelope = SettingChangedData(
+            session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+        )
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
             mock_instance._parse_value.return_value = "test_value"
@@ -3202,7 +3245,9 @@ class TestListenLoopSystemMessages:
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
-        envelope = SettingChangedData(key="test_key", value="test_value", category="test")
+        envelope = SettingChangedData(
+            session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+        )
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_service.return_value = None
             strategy._handle_settings_update(envelope)
@@ -3221,7 +3266,9 @@ class TestListenLoopSystemMessages:
             outputs=["BTC-USD"],
         )
         strategy = SimpleTestStrategy(config)
-        envelope = SettingChangedData(key="test_key", value="test_value", category="test")
+        envelope = SettingChangedData(
+            session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+        )
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
             mock_instance._parse_value.side_effect = RuntimeError("parse failed")
@@ -3248,6 +3295,8 @@ class TestListenLoopSystemMessages:
         strategy._running = True
         strategy._feed_heartbeats = {}
         heartbeat = HeartbeatData(
+            session_id="",
+            sequence_id=0,
             component="feed_kraken",
             sequence=1,
             status="healthy",
@@ -3625,6 +3674,8 @@ class TestExecutorBasePhase4:
             mock_msg_publisher.publish = AsyncMock(side_effect=Exception("Connection failed"))
             executor.msg_publisher = mock_msg_publisher
             heartbeat = HeartbeatData(
+                session_id="",
+                sequence_id=0,
                 timestamp=datetime.now(UTC),
                 component="test.executor",
                 sequence=1,

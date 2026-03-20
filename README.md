@@ -26,6 +26,9 @@ Open <http://localhost:8000/> and log in:
 - **Strategies** — Framework for creating strategies based on RSI, MACD,
   cointegration, and TA-Lib indicators
 - **ZeroMQ messaging** — Pub/sub architecture for market data and signals
+- **Provenance and audit** — Every payload item carries `session_id` and
+  `sequence_id` for gap detection. Control table (always-on) and telemetry
+  table (toggleable) record all commands and operational events
 - **Web dashboard** — FastAPI + React with real-time WebSocket
 - **CLI** — Full system management via Typer CLI
 - **Backtesting** — Strategy testing on historical data
@@ -76,6 +79,9 @@ SERVER_PORT=8000
 SERVER_API_ONLY=false
 SERVER_PROXY_HEADERS=true
 SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
+
+# Telemetry recording (pings, heartbeats, GET reads)
+TELEMETRY_RECORDING_ENABLED=false
 
 # ZeroMQ broker
 ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500

@@ -348,6 +348,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 )
                 candle_msg = CandleData(
                     public_id=public_id,
+                    session_id="",
+                    sequence_id=0,
                     exchange=exchange,
                     instrument=native_symbol,
                     volume=candle.volume,
@@ -385,6 +387,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     break
                 native_symbol = message.symbol
                 tick_msg = TickData(
+                    session_id="",
+                    sequence_id=0,
                     exchange=exchange,
                     instrument=native_symbol,
                     volume=message.volume,
@@ -414,6 +418,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     break
                 native_symbol = trade.symbol
                 trade_msg = TradeData(
+                    session_id="",
+                    sequence_id=0,
                     exchange=exchange,
                     instrument=native_symbol,
                     executed_at=trade.timestamp,
@@ -465,6 +471,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     lag_ms = int(current_time - last_data_time)
                     max_lag_ms = max(max_lag_ms, lag_ms)
                 hb_msg = HeartbeatData(
+                    session_id="",
+                    sequence_id=0,
                     component=component_name,
                     sequence=self.heartbeat_seq,
                     status="healthy",

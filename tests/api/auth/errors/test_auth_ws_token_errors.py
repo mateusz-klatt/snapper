@@ -166,7 +166,9 @@ def test_verify_token_wrong_purpose() -> None:
     sid_hash = compute_sid_hash("session1")
     tampered_payload = result.payload.model_copy(update={"purpose": "unexpected"})
     tampered_token = jwt.encode(
-        tampered_payload.model_dump(),
+        tampered_payload.model_dump(
+            exclude={"public_id", "timestamp", "session_id", "sequence_id", "type"},
+        ),
         service.settings.auth_secret_key,
         algorithm=service.settings.auth_algorithm,
     )
@@ -263,10 +265,13 @@ def test_expired_token_after_decode() -> None:
     expired_payload = result.payload.model_copy(
         update={"exp": int(service._now().timestamp()) - 10}
     )
-    with patch(
-        "snapper.api.auth.services.ws_token_service.jwt.decode",
-        return_value=expired_payload.model_dump(),
-    ), pytest.raises(WsTokenError, match="ws_token_expired"):
+    with (
+        patch(
+            "snapper.api.auth.services.ws_token_service.jwt.decode",
+            return_value=expired_payload.model_dump(),
+        ),
+        pytest.raises(WsTokenError, match="ws_token_expired"),
+    ):
         service.verify(
             result.token,
             expected_sub=user_id,

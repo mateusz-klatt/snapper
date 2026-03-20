@@ -36,7 +36,9 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns market.kraken.BTC-USD.ticks.
         """
-        data = TickData(exchange="kraken", instrument="BTC-USD", volume=1.0)
+        data = TickData(
+            session_id="", sequence_id=0, exchange="kraken", instrument="BTC-USD", volume=1.0
+        )
         assert topic_for_message(data) == "market.kraken.BTC-USD.ticks"
 
     def test_candle_data(self) -> None:
@@ -47,6 +49,8 @@ class TestTopicForMessage:
         Then: Returns market.kraken.BTC-USD.candles.1m.
         """
         data = CandleData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             timeframe="1m",
@@ -66,7 +70,14 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns market.zonda.BTC-PLN.trades.
         """
-        data = TradeData(exchange="zonda", instrument="BTC-PLN", price=200000.0, volume=0.5)
+        data = TradeData(
+            session_id="",
+            sequence_id=0,
+            exchange="zonda",
+            instrument="BTC-PLN",
+            price=200000.0,
+            volume=0.5,
+        )
         assert topic_for_message(data) == "market.zonda.BTC-PLN.trades"
 
     def test_order_request_data(self) -> None:
@@ -77,6 +88,8 @@ class TestTopicForMessage:
         Then: Returns orders.commands.kraken.BTC-USD.submit.
         """
         data = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="strat-1",
             exchange="kraken",
             instrument="BTC-USD",
@@ -97,6 +110,8 @@ class TestTopicForMessage:
         Then: Returns orders.commands.kraken.ETH-USD.cancel.
         """
         data = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="ETH-USD",
             exchange_order_id="exch-123",
@@ -112,6 +127,8 @@ class TestTopicForMessage:
         Then: Returns orders.commands.kraken.BTC-USD.replace.
         """
         data = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="exch-456",
@@ -128,6 +145,8 @@ class TestTopicForMessage:
         Then: Returns orders.events.kraken.BTC-USD.submitted.
         """
         data = OrderData(
+            session_id="",
+            sequence_id=0,
             client_order_id="ord-001",
             instrument="BTC-USD",
             exchange="kraken",
@@ -148,6 +167,8 @@ class TestTopicForMessage:
         Then: Returns orders.events.kraken.BTC-USD.cancelled.
         """
         data = OrderEventData(
+            session_id="",
+            sequence_id=0,
             exchange_order_id="exch-789",
             client_order_id="ord-003",
             exchange="kraken",
@@ -164,6 +185,8 @@ class TestTopicForMessage:
         Then: Returns orders.events.kraken.BTC-USD.executed.
         """
         data = ExecutionData(
+            session_id="",
+            sequence_id=0,
             client_order_id="ord-001",
             instrument="BTC-USD",
             exchange="kraken",
@@ -184,6 +207,8 @@ class TestTopicForMessage:
         Then: Returns signals.kraken.BTC-USD.live.
         """
         data = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -200,6 +225,8 @@ class TestTopicForMessage:
         Then: Returns signals.paper.BTC-USD.momentum.
         """
         data = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument="BTC-USD",
             exchange="paper",
             side="sell",
@@ -218,6 +245,8 @@ class TestTopicForMessage:
         """
         with pytest.raises(ValueError, match="strategy_name"):
             SignalData(
+                session_id="",
+                sequence_id=0,
                 instrument="BTC-USD",
                 exchange="paper",
                 side="buy",
@@ -255,6 +284,8 @@ class TestTopicForMessage:
         Then: Returns system.heartbeats.executor.kraken.
         """
         data = HeartbeatData(
+            session_id="",
+            sequence_id=0,
             component="executor.kraken",
             sequence=1,
             status="healthy",
@@ -269,7 +300,9 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns system.settings.
         """
-        data = SettingChangedData(key="max_position", value="100", category="trading")
+        data = SettingChangedData(
+            session_id="", sequence_id=0, key="max_position", value="100", category="trading"
+        )
         assert topic_for_message(data) == "system.settings"
 
     def test_symbol_alias_update_data(self) -> None:
@@ -279,7 +312,7 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns system.symbol_aliases.
         """
-        data = SymbolAliasUpdateData()
+        data = SymbolAliasUpdateData(session_id="", sequence_id=0)
         assert topic_for_message(data) == "system.symbol_aliases"
 
     def test_replay_start_data(self) -> None:
@@ -289,7 +322,7 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns system.replay.start.
         """
-        data = ReplayStartData()
+        data = ReplayStartData(session_id="", sequence_id=0)
         assert topic_for_message(data) == "system.replay.start"
 
     def test_replay_end_data(self) -> None:
@@ -299,7 +332,7 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns system.replay.end.
         """
-        data = ReplayEndData()
+        data = ReplayEndData(session_id="", sequence_id=0)
         assert topic_for_message(data) == "system.replay.end"
 
     def test_unknown_type_raises(self) -> None:
@@ -309,7 +342,7 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: ValueError is raised.
         """
-        data = StrictDataSchema(type="unknown_thing")
+        data = StrictDataSchema(session_id="", sequence_id=0, type="unknown_thing")
         with pytest.raises(ValueError, match="No topic derivation"):
             topic_for_message(data)
 
@@ -335,6 +368,8 @@ class TestTableForMessage:
     def test_candle_data(self) -> None:
         """CandleData maps to candles table."""
         data = CandleData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             timeframe="1m",
@@ -349,17 +384,28 @@ class TestTableForMessage:
 
     def test_tick_data(self) -> None:
         """TickData maps to candles table."""
-        data = TickData(exchange="kraken", instrument="BTC-USD", volume=1.0)
+        data = TickData(
+            session_id="", sequence_id=0, exchange="kraken", instrument="BTC-USD", volume=1.0
+        )
         assert table_for_message(data) == "candles"
 
     def test_trade_data(self) -> None:
         """TradeData maps to trades table."""
-        data = TradeData(exchange="zonda", instrument="BTC-PLN", price=200000.0, volume=0.5)
+        data = TradeData(
+            session_id="",
+            sequence_id=0,
+            exchange="zonda",
+            instrument="BTC-PLN",
+            price=200000.0,
+            volume=0.5,
+        )
         assert table_for_message(data) == "trades"
 
     def test_order_request_data(self) -> None:
         """OrderRequestData maps to orders table."""
         data = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="strat-1",
             exchange="kraken",
             instrument="BTC-USD",
@@ -375,6 +421,8 @@ class TestTableForMessage:
     def test_order_cancel_data(self) -> None:
         """OrderCancelData maps to orders table."""
         data = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="ETH-USD",
             exchange_order_id="exch-123",
@@ -385,6 +433,8 @@ class TestTableForMessage:
     def test_order_replace_data(self) -> None:
         """OrderReplaceData maps to orders table."""
         data = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="exch-456",
@@ -396,6 +446,8 @@ class TestTableForMessage:
     def test_order_data(self) -> None:
         """OrderData maps to orders table."""
         data = OrderData(
+            session_id="",
+            sequence_id=0,
             client_order_id="ord-001",
             instrument="BTC-USD",
             exchange="kraken",
@@ -411,6 +463,8 @@ class TestTableForMessage:
     def test_order_event_data(self) -> None:
         """OrderEventData maps to orders table."""
         data = OrderEventData(
+            session_id="",
+            sequence_id=0,
             exchange_order_id="exch-789",
             client_order_id="ord-003",
             exchange="kraken",
@@ -422,6 +476,8 @@ class TestTableForMessage:
     def test_execution_data(self) -> None:
         """ExecutionData maps to executions table."""
         data = ExecutionData(
+            session_id="",
+            sequence_id=0,
             client_order_id="ord-001",
             instrument="BTC-USD",
             exchange="kraken",
@@ -437,6 +493,8 @@ class TestTableForMessage:
     def test_signal_data(self) -> None:
         """SignalData maps to signals table."""
         data = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -447,31 +505,40 @@ class TestTableForMessage:
 
     def test_heartbeat_data(self) -> None:
         """HeartbeatData maps to telemetry table."""
-        data = HeartbeatData(component="executor.kraken", sequence=1, status="healthy", lag_ms=5)
+        data = HeartbeatData(
+            session_id="",
+            sequence_id=0,
+            component="executor.kraken",
+            sequence=1,
+            status="healthy",
+            lag_ms=5,
+        )
         assert table_for_message(data) == "telemetry"
 
     def test_setting_changed_data(self) -> None:
         """SettingChangedData maps to settings table."""
-        data = SettingChangedData(key="some.setting", value="val", category="general")
+        data = SettingChangedData(
+            session_id="", sequence_id=0, key="some.setting", value="val", category="general"
+        )
         assert table_for_message(data) == "settings"
 
     def test_symbol_alias_update_data(self) -> None:
         """SymbolAliasUpdateData maps to symbol_aliases table."""
-        data = SymbolAliasUpdateData()
+        data = SymbolAliasUpdateData(session_id="", sequence_id=0)
         assert table_for_message(data) == "symbol_aliases"
 
     def test_replay_start_data(self) -> None:
         """ReplayStartData maps to control table."""
-        data = ReplayStartData()
+        data = ReplayStartData(session_id="", sequence_id=0)
         assert table_for_message(data) == "control"
 
     def test_replay_end_data(self) -> None:
         """ReplayEndData maps to control table."""
-        data = ReplayEndData()
+        data = ReplayEndData(session_id="", sequence_id=0)
         assert table_for_message(data) == "control"
 
     def test_unknown_type_raises(self) -> None:
         """Unknown StrictDataSchema subclass raises ValueError."""
-        data = StrictDataSchema(type="unknown_thing")
+        data = StrictDataSchema(session_id="", sequence_id=0, type="unknown_thing")
         with pytest.raises(ValueError, match="No table mapping"):
             table_for_message(data)

@@ -322,7 +322,7 @@ async def start_process(
     return ProcessStartResponse(
         status=result.status,
         name=name,
-        public_id=result.public_id,
+        process_public_id=result.public_id,
         message=result.message,
     )
 

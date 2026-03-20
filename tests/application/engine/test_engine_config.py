@@ -378,6 +378,8 @@ class TestTraderSignalHandling:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         signal = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
@@ -439,6 +441,8 @@ class TestTraderSignalHandling:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         signal = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument="BTC-USD",
             side="sell",
             strength=1.0,
@@ -493,6 +497,8 @@ class TestTraderSignalHandling:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         invalid_signal = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument="BTC-USD",
             side="buy",
             strength=0.5,
@@ -555,6 +561,8 @@ class TestTraderSignalHandling:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         signal = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument="ETH-USD",
             side="buy",
             strength=0.5,

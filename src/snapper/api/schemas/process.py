@@ -61,12 +61,14 @@ class ProcessStartRequest(StrictApiSchema):
     Used to start a configured process with optional parameter overrides.
 
     Attributes:
+        type: Payload item type discriminator.
         mode: Execution mode (thread/process) override.
         args: Constructor positional arguments override.
         kwargs: Constructor keyword arguments override.
         autostart: Toggle autostart flag (None keeps stored value).
     """
 
+    type: Literal["process_start_request"] = "process_start_request"
     mode: ProcessMode | None = Field(
         None,
         description="Execution mode (thread/process) - for ProcessLauncherService, not constructor",
@@ -94,6 +96,7 @@ class ProcessCreateRequest(StrictApiSchema):
     Used to create a new process configuration from a template.
 
     Attributes:
+        type: Payload item type discriminator.
         name: Unique process name (lowercase alphanumeric with underscores).
         template: Registered process identifier used as template.
         enabled: Whether process should autostart on boot.
@@ -103,6 +106,7 @@ class ProcessCreateRequest(StrictApiSchema):
         note: Optional note stored alongside configuration.
     """
 
+    type: Literal["process_create_request"] = "process_create_request"
     name: str = Field(
         ...,
         description=_UNIQUE_PROCESS_NAME_DESC,
@@ -143,10 +147,12 @@ class TradeStartRequest(StrictApiSchema):
     Used to start live trading with a specific strategy.
 
     Attributes:
+        type: Payload item type discriminator.
         strategy: Strategy name to trade with.
         paper: Enable paper trading mode.
     """
 
+    type: Literal["trade_start_request"] = "trade_start_request"
     strategy: str = Field(description="Strategy name to trade with")
     paper: bool = Field(default=False, description="Enable paper trading mode")
 
@@ -157,11 +163,13 @@ class BacktestRequest(StrictApiSchema):
     Used to start a backtest run.
 
     Attributes:
+        type: Payload item type discriminator.
         strategy: Strategy name to backtest.
         start: Start date in YYYY-MM-DD format.
         end: End date in YYYY-MM-DD format.
     """
 
+    type: Literal["backtest_request"] = "backtest_request"
     strategy: str = Field(description="Strategy name to backtest")
     start: str = Field(description="Start date in YYYY-MM-DD format")
     end: str = Field(description="End date in YYYY-MM-DD format")
@@ -173,6 +181,7 @@ class ProcessStatus(StrictApiSchema):
     Represents the current status of a single process.
 
     Attributes:
+        type: Payload item type discriminator.
         status: Process status (not_running, running, stopped, completed, error).
         pid: Process ID if running.
         started_at: Start time in ISO format.
@@ -181,6 +190,7 @@ class ProcessStatus(StrictApiSchema):
         error: Error message if failed.
     """
 
+    type: Literal["process_status"] = "process_status"
     status: SpawnerProcessStatus = Field(
         description="Process status: not_running, running, stopped, completed, error"
     )
@@ -195,6 +205,7 @@ class StrategyStatusPayload(StrictApiSchema):
     """Strategy process status payload for the system status endpoint.
 
     Attributes:
+        type: Payload item type discriminator.
         strategy_name: Name of the strategy.
         status: Current strategy status string.
         details: Full raw status dictionary from the process.
@@ -207,6 +218,7 @@ class StrategyStatusPayload(StrictApiSchema):
         uptime: Process uptime string.
     """
 
+    type: Literal["strategy_status"] = "strategy_status"
     strategy_name: str = Field(description="Strategy name")
     status: str = Field(description="Current strategy status")
     details: dict[str, Any] = Field(default_factory=dict, description="Full raw status")
@@ -225,11 +237,13 @@ class SystemStatus(StrictApiSchema):
     Provides status of the trader process, backtests, and active strategies.
 
     Attributes:
+        type: Payload item type discriminator.
         trader: Trader process status.
         backtests: Status of backtest processes by ID.
         strategies: List of active strategies from strategy_runner.
     """
 
+    type: Literal["system_status"] = "system_status"
     trader: ProcessStatus
     backtests: dict[str, ProcessStatus]
     strategies: list[StrategyStatusPayload] = Field(
@@ -243,6 +257,7 @@ class BacktestStatus(StrictApiSchema):
     Represents the current status of a backtest run.
 
     Attributes:
+        type: Payload item type discriminator.
         status: Backtest status.
         backtest_id: Unique backtest identifier.
         pid: Process ID if running.
@@ -252,6 +267,7 @@ class BacktestStatus(StrictApiSchema):
         error: Error message if failed.
     """
 
+    type: Literal["backtest_status"] = "backtest_status"
     status: SpawnerProcessStatus
     backtest_id: str | None = None
     pid: int | None = None
@@ -267,11 +283,13 @@ class BacktestOutput(StrictApiSchema):
     Contains output lines from a backtest run.
 
     Attributes:
+        type: Payload item type discriminator.
         backtest_id: Unique backtest identifier.
         output_lines: List of output lines.
         status: Current backtest status.
     """
 
+    type: Literal["backtest_output"] = "backtest_output"
     backtest_id: str
     output_lines: list[str]
     status: SpawnerProcessStatus
@@ -283,6 +301,7 @@ class AvailableProcess(StrictApiSchema):
     Describes a registered process that can be instantiated.
 
     Attributes:
+        type: Payload item type discriminator.
         name: Process identifier.
         class_path: Full Python class path.
         method: Entry point method name.
@@ -293,6 +312,7 @@ class AvailableProcess(StrictApiSchema):
         parameters_schema: JSON Schema for parameters.
     """
 
+    type: Literal["available_process"] = "available_process"
     name: str = Field(description="Process identifier")
     class_path: str = Field(description=_CLASS_PATH_DESC)
     method: str = Field(description=_METHOD_DESC)
@@ -307,10 +327,12 @@ class AvailableProcessesResponse(StrictApiSchema):
     """Available processes list response schema.
 
     Attributes:
+        type: Payload item type discriminator.
         processes: List of available process templates.
         count: Total number of available processes.
     """
 
+    type: Literal["available_processes"] = "available_processes"
     processes: list[AvailableProcess]
     count: int
 
@@ -321,6 +343,7 @@ class ConfiguredProcess(StrictApiSchema):
     Describes a process configuration with its current runtime state.
 
     Attributes:
+        type: Payload item type discriminator.
         name: Unique process name.
         enabled: Whether process autostarts on boot.
         running: Whether process is currently running.
@@ -338,6 +361,7 @@ class ConfiguredProcess(StrictApiSchema):
         active_public_id: Active public ID if running.
     """
 
+    type: Literal["configured_process"] = "configured_process"
     name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
     enabled: bool = Field(description=_ENABLED_DESC)
     running: bool = Field(description=_RUNNING_DESC)
@@ -359,10 +383,12 @@ class ConfiguredProcessesResponse(StrictApiSchema):
     """Configured processes list response schema.
 
     Attributes:
+        type: Payload item type discriminator.
         processes: List of configured processes.
         count: Total number of configured processes.
     """
 
+    type: Literal["configured_processes"] = "configured_processes"
     processes: list[ConfiguredProcess]
     count: int
 
@@ -371,10 +397,12 @@ class ProcessCategoryCount(StrictApiSchema):
     """Running/total count for a process category.
 
     Attributes:
+        type: Payload item type discriminator.
         running: Number of currently running processes.
         total: Total number of configured processes.
     """
 
+    type: Literal["process_category_count"] = "process_category_count"
     running: int = Field(description="Number of currently running processes")
     total: int = Field(description="Total number of configured processes")
 
@@ -383,12 +411,14 @@ class ProcessSummaryResponse(StrictApiSchema):
     """Lightweight process summary for the overview dashboard.
 
     Attributes:
+        type: Payload item type discriminator.
         feeds: Count of feed publisher processes.
         strategies: Count of strategy processes.
         executors: Count of executor processes.
         brokers: Count of broker processes.
     """
 
+    type: Literal["process_summary"] = "process_summary"
     feeds: ProcessCategoryCount = Field(description="Feed publisher process counts")
     strategies: ProcessCategoryCount = Field(description="Strategy process counts")
     executors: ProcessCategoryCount = Field(description="Executor process counts")
@@ -399,12 +429,14 @@ class StrategyProcess(StrictApiSchema):
     """Lightweight strategy process info for read-only views.
 
     Attributes:
+        type: Payload item type discriminator.
         name: Unique process name.
         running: Whether process is currently running.
         enabled: Whether process autostarts on boot.
         mode: Execution mode (thread/process).
     """
 
+    type: Literal["strategy_process"] = "strategy_process"
     name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
     running: bool = Field(description=_RUNNING_DESC)
     enabled: bool = Field(description=_ENABLED_DESC)
@@ -415,10 +447,12 @@ class StrategyListResponse(StrictApiSchema):
     """Strategy processes list response.
 
     Attributes:
+        type: Payload item type discriminator.
         strategies: List of strategy processes.
         count: Total number of strategies.
     """
 
+    type: Literal["strategy_list"] = "strategy_list"
     strategies: list[StrategyProcess]
     count: int
 
@@ -427,10 +461,12 @@ class ProcessCreatedInfo(StrictApiSchema):
     """Process creation info schema.
 
     Attributes:
+        type: Payload item type discriminator.
         name: Unique process name.
         template: Template used for creation.
     """
 
+    type: Literal["process_created_info"] = "process_created_info"
     name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
     template: str = Field(description="Template used for creation")
 
@@ -439,10 +475,12 @@ class ProcessCreateResponse(StrictApiSchema):
     """Process creation response schema.
 
     Attributes:
+        type: Payload item type discriminator.
         status: Operation status ('created').
         process: Created process info.
     """
 
+    type: Literal["process_create_response"] = "process_create_response"
     status: Literal["created"] = Field(description="Operation status")
     process: ProcessCreatedInfo = Field(description="Created process info")
 
@@ -453,6 +491,7 @@ class ProcessSchemaResponse(StrictApiSchema):
     Describes a process template schema with default values.
 
     Attributes:
+        type: Payload item type discriminator.
         name: Process identifier.
         description: Human-readable description.
         class_path: Full Python class path.
@@ -464,6 +503,7 @@ class ProcessSchemaResponse(StrictApiSchema):
         lifecycle: Process lifecycle type.
     """
 
+    type: Literal["process_schema"] = "process_schema"
     name: str = Field(description="Process identifier")
     description: str = Field(description="Human-readable description")
     class_path: str = Field(description=_CLASS_PATH_DESC)
@@ -481,6 +521,7 @@ class ProcessRun(StrictApiSchema):
     Represents a single execution run of a process.
 
     Attributes:
+        type: Payload item type discriminator.
         public_id: Unique run identifier.
         process_name: Process name.
         status: Run status.
@@ -494,6 +535,7 @@ class ProcessRun(StrictApiSchema):
         completed_at: Completion time if finished.
     """
 
+    type: Literal["process_run"] = "process_run"
     public_id: str = Field(description="Unique run identifier")
     process_name: str = Field(description=_PROCESS_NAME_DESC)
     status: ProcessRunStatusType = Field(description="Run status")
@@ -511,10 +553,12 @@ class ProcessRunsResponse(StrictApiSchema):
     """Process runs list response schema.
 
     Attributes:
+        type: Payload item type discriminator.
         runs: List of process runs.
         count: Total number of runs.
     """
 
+    type: Literal["process_runs"] = "process_runs"
     runs: list[ProcessRun]
     count: int
 
@@ -525,6 +569,7 @@ class ProcessRuntimeStatus(StrictApiSchema):
     Represents the current runtime state of a process.
 
     Attributes:
+        type: Payload item type discriminator.
         name: Process name.
         running: Whether process is currently running.
         role: Process role category.
@@ -533,6 +578,7 @@ class ProcessRuntimeStatus(StrictApiSchema):
         details: Additional process details.
     """
 
+    type: Literal["process_runtime_status"] = "process_runtime_status"
     name: str = Field(description=_PROCESS_NAME_DESC)
     running: bool = Field(description=_RUNNING_DESC)
     role: ProcessRoleType = Field(description=_ROLE_DESC)
@@ -545,17 +591,19 @@ class ProcessStartResponse(StrictApiSchema):
     """Process start response schema.
 
     Attributes:
+        type: Payload item type discriminator.
         status: Operation status (success, already_running, error).
         name: Process name.
-        public_id: Public ID if started.
+        process_public_id: Public ID of the started process run (if started).
         message: Additional message.
     """
 
+    type: Literal["process_start_response"] = "process_start_response"
     status: StartProcessStatus = Field(
         description="Operation status (success, already_running, error)"
     )
     name: str = Field(description=_PROCESS_NAME_DESC)
-    public_id: str | None = Field(None, description="Public ID if started")
+    process_public_id: str | None = Field(None, description="Public ID if started")
     message: str | None = Field(None, description="Additional message")
 
 
@@ -563,11 +611,13 @@ class ProcessStopResponse(StrictApiSchema):
     """Process stop response schema.
 
     Attributes:
+        type: Payload item type discriminator.
         status: Operation status (success, not_running, error).
         name: Process name.
         message: Additional message.
     """
 
+    type: Literal["process_stop_response"] = "process_stop_response"
     status: StopProcessStatus = Field(description="Operation status (success, not_running, error)")
     name: str = Field(description=_PROCESS_NAME_DESC)
     message: str | None = Field(None, description="Additional message")

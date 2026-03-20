@@ -82,6 +82,20 @@ Persistence layer with SQLAlchemy:
     - `InstrumentSpec` — Instrument trading specifications
     - `MarketSnapshot` — Real-time market data snapshots
     - `UserLoginEvent` — Authentication event log
+    - `Control` — Always-on audit for commands, auth events, subscribe/unsubscribe,
+      REST mutations. Includes redacted payload, outcome, and client causation linkage
+      (`client_session_id`, `client_public_id`)
+    - `Telemetry` — Toggleable high-volume table for pings, heartbeats, pongs, and
+      GET read requests. Recording gated by `TELEMETRY_RECORDING_ENABLED` setting
+
+    All ORM models carry provenance via `TemporalMixin`:
+
+    - `session_id` (str, required) — producer session identity
+    - `sequence_id` (int, required) — per-table monotonic counter for gap detection
+
+    `StrictDataSchema` (Pydantic base) enforces these as required fields with
+    no defaults. `StrictApiSchema` and `WsMessageSchema` provide sentinel defaults
+    since their objects are stamped by middleware/handlers before delivery.
 
     All ORM models use a dual-key pattern:
 
@@ -176,12 +190,17 @@ FastAPI application:
 - **REST API** — HTTP endpoints
 - **WebSocket** — Real-time streaming via ZMQ bridge
 - **Static Files** — Frontend dashboard
+- **ClientProvenanceMiddleware** (`provenance_middleware.py`) — Extracts client
+  provenance from mutation requests, runs per-session gap detection, records
+  mutations to `control` table and GET reads to `telemetry` table
 
 ### API (`src/snapper/api/`)
 
 Shared API schemas and WebSocket auth helpers (not route definitions):
 
-- **Schemas** (`schemas/`) — Pydantic request/response models (health, process, settings)
+- **Schemas** (`schemas/`) — Pydantic request/response models (health, process, settings).
+  `StrictApiSchema` inherits from `StrictDataSchema`, so all REST API responses carry
+  per-item provenance (`public_id`, `session_id`, `sequence_id`, `timestamp`, `type`)
 - **Auth** (`auth/`) — WebSocket token service and schemas
 
 Route modules live closer to their domains: `server/app.py` (assembly and

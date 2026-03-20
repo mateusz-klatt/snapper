@@ -228,6 +228,8 @@ class TestPayloadContract:
         Then: All required frontend fields are present.
         """
         fill = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-456",
             exchange_order_id="exch-456",
             client_order_id="test-order-123",
@@ -273,6 +275,8 @@ class TestPayloadContract:
         Then: Side value is preserved.
         """
         buy_fill = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-1",
             exchange_order_id="exch-1",
             client_order_id="test-1",
@@ -288,6 +292,8 @@ class TestPayloadContract:
         )
         assert buy_fill.side == "buy"
         sell_fill = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-2",
             exchange_order_id="exch-2",
             client_order_id="test-2",
@@ -316,6 +322,8 @@ class TestPayloadContract:
         valid_statuses = ["filled", "partial"]
         for status in valid_statuses:
             fill = ExecutionData(
+                session_id="",
+                sequence_id=0,
                 trade_id="trade",
                 exchange_order_id="exch",
                 client_order_id="test",

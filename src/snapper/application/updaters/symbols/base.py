@@ -117,7 +117,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not self.msg_publisher:
             self._setup_zmq()
         if self.msg_publisher:
-            envelope = SymbolAliasUpdateData()
+            envelope = SymbolAliasUpdateData(session_id="", sequence_id=0)
             await self.msg_publisher.publish(envelope)
             logger.info("Broadcasted cache invalidation: system.symbol_aliases")
         else:

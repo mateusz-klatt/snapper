@@ -236,6 +236,8 @@ class MergedDummyExecutor(ExchangeExecutorService[Any]):
 def make_order(**overrides: Any) -> OrderRequestData:
     """Create an OrderRequestData with optional overrides."""
     return OrderRequestData(
+        session_id="",
+        sequence_id=0,
         type="order_request",
         exchange="paper",
         instrument=overrides.get("instrument", "BTC-USD"),
@@ -525,7 +527,7 @@ async def test_order_handler_settings_message(monkeypatch: pytest.MonkeyPatch) -
             ex.running = False
             return (
                 "system.settings",
-                b'{"type":"setting_changed","key":"foo","value":"bar"}',
+                b'{"type":"setting_changed","session_id":"","sequence_id":0,"key":"foo","value":"bar"}',
             )
 
     ex.subscriber = OneShotSubscriber()
@@ -1114,7 +1116,8 @@ class TestOrderHandlerEdgeCases:
                 return (
                     "orders.commands.binance.BTC-USD.submit",
                     (
-                        b'{"type":"order_request","strategy_id":"test","exchange":"binance",'
+                        b'{"type":"order_request","session_id":"","sequence_id":0,'
+                        b'"strategy_id":"test","exchange":"binance",'
                         b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
                         b'"quantity":0.1,"client_order_id":"test123"}'
                     ),
@@ -1151,7 +1154,7 @@ class TestOrderHandlerEdgeCases:
             if recv_count == 1:
                 return (
                     "orders.commands.kraken.BTC-USD.submit",
-                    b'{"type":"heartbeat","timestamp":"2024-01-01T00:00:00Z"}',
+                    b'{"type":"heartbeat","session_id":"","sequence_id":0,"timestamp":"2024-01-01T00:00:00Z"}',
                 )
             service_any.running = False
             await asyncio.sleep(0.1)
@@ -1183,7 +1186,10 @@ class TestOrderHandlerEdgeCases:
             nonlocal recv_count
             recv_count += 1
             if recv_count == 1:
-                return ("unknown.topic", b'{"type":"order_request"}')
+                return (
+                    "unknown.topic",
+                    b'{"type":"order_request","session_id":"","sequence_id":0}',
+                )
             service_any.running = False
             await asyncio.sleep(0.1)
             return ("", b"")
@@ -1281,7 +1287,7 @@ class TestExecuteLiveOrderErrors:
             "client_order_id": "test_order_123",
         }
         base.update(overrides)
-        return OrderRequestData(**base)
+        return OrderRequestData(session_id="", sequence_id=0, **base)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1348,7 +1354,7 @@ class TestProcessOrder:
             "client_order_id": "test_order_123",
         }
         base.update(overrides)
-        return OrderRequestData(**base)
+        return OrderRequestData(session_id="", sequence_id=0, **base)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1435,6 +1441,8 @@ class TestProcessExecution:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1483,6 +1491,8 @@ class TestProcessExecution:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1529,6 +1539,8 @@ class TestProcessExecution:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1590,6 +1602,8 @@ class TestHeartbeat:
         service_any.msg_publisher = None
         service_any.running = True
         hb = HeartbeatData(
+            session_id="",
+            sequence_id=0,
             component="test",
             sequence=1,
             status="healthy",
@@ -1615,6 +1629,8 @@ class TestHeartbeat:
         mock_msg_publisher.publish = AsyncMock(side_effect=Exception("Send failed"))
         service_any.msg_publisher = mock_msg_publisher
         hb = HeartbeatData(
+            session_id="",
+            sequence_id=0,
             component="test",
             sequence=1,
             status="healthy",
@@ -1663,6 +1679,8 @@ class TestSymbolAliasUpdate:
         service_any = cast(Any, service)
         payload = json.dumps(
             {
+                "session_id": "",
+                "sequence_id": 0,
                 "event": "symbol_aliases_updated",
                 "action": "clear_cache",
             }
@@ -1715,6 +1733,8 @@ class TestSettingsUpdate:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         envelope = SettingChangedData(
+            session_id="",
+            sequence_id=0,
             key="test_key",
             value="test_value",
             category="test",
@@ -1743,6 +1763,8 @@ class TestSettingsUpdate:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         envelope = SettingChangedData(
+            session_id="",
+            sequence_id=0,
             key="test_key",
             value="test_value",
             category="test",
@@ -1779,6 +1801,8 @@ class TestPublishOrderStatus:
         service_any.msg_publisher = None
         service_any.running = True
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -2055,7 +2079,8 @@ class TestOrderHandlerWrongExchange:
                 return (
                     "orders.commands.kraken.BTC-USD.submit",
                     (
-                        b'{"type":"order_request","strategy_id":"test","exchange":"binance",'
+                        b'{"type":"order_request","session_id":"","sequence_id":0,'
+                        b'"strategy_id":"test","exchange":"binance",'
                         b'"instrument":"BTC-USD","mode":"paper","side":"buy","order_type":"market",'
                         b'"quantity":0.1,"client_order_id":"test123"}'
                     ),
@@ -2299,6 +2324,8 @@ async def test_order_handler_processes_order_and_stops(monkeypatch: pytest.Monke
     executor = DummyExecutorSimple()
     executor.running = True
     order = OrderRequestData(
+        session_id="",
+        sequence_id=0,
         strategy_id="s1",
         exchange="paper",
         instrument="BTC-USD",
@@ -2503,7 +2530,7 @@ class TestExecutorCoverage:
             "client_order_id": "test_order_123",
         }
         base_payload.update(overrides)
-        return OrderRequestData(**base_payload)
+        return OrderRequestData(session_id="", sequence_id=0, **base_payload)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2556,6 +2583,8 @@ class TestExecutorCoverage:
         service_any.msg_publisher = mock_publisher
         service_any.running = True
         fill_msg = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-1",
             exchange_order_id="exchange_123",
             client_order_id="test_order_123",
@@ -2586,6 +2615,8 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = False
         fill_msg = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-1",
             exchange_order_id="test_order_123",
             client_order_id="test_order_123",
@@ -2913,7 +2944,14 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.msg_publisher = AsyncMock()
-        hb = HeartbeatData(component="executor.kraken", sequence=1, status="healthy", lag_ms=0)
+        hb = HeartbeatData(
+            session_id="",
+            sequence_id=0,
+            component="executor.kraken",
+            sequence=1,
+            status="healthy",
+            lag_ms=0,
+        )
         await service_any._publish_heartbeat(hb)
         service_any.msg_publisher.publish.assert_awaited_once()
 
@@ -2937,7 +2975,14 @@ class TestExecutorCoverage:
         mock_get_instance.return_value = mock_db_mapper
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
-        payload = json.dumps({"event": "symbol_aliases_updated", "action": "clear_cache"})
+        payload = json.dumps(
+            {
+                "session_id": "",
+                "sequence_id": 0,
+                "event": "symbol_aliases_updated",
+                "action": "clear_cache",
+            }
+        )
         service_any._handle_symbol_alias_update(payload)
         mock_db_mapper.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
 
@@ -3211,6 +3256,8 @@ class TestExecutorCoverage:
         service_any.msg_publisher = AsyncMock()
         service_any.msg_publisher.publish.side_effect = RuntimeError("fill failed")
         fill_msg = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-1",
             exchange_order_id="one",
             client_order_id="one",
@@ -3536,6 +3583,8 @@ class TestExecutorWebSocketExecutions:
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3572,6 +3621,8 @@ class TestExecutorWebSocketExecutions:
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3606,6 +3657,8 @@ class TestExecutorWebSocketExecutions:
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3636,6 +3689,8 @@ class TestExecutorWebSocketExecutions:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3691,6 +3746,8 @@ class TestExecutorWebSocketExecutions:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3739,6 +3796,8 @@ class TestExecutorWebSocketExecutions:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3818,6 +3877,8 @@ class TestExecutorWebSocketExecutions:
         service.running = True
         service.publisher = AsyncMock()
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3864,6 +3925,8 @@ class TestExecutorWebSocketExecutions:
         service.running = True
         service.publisher = AsyncMock()
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3955,7 +4018,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_cancel = AsyncMock()
         payload = (
-            '{"type":"order_cancel","exchange":"kraken","instrument":"BTC-USD",'
+            '{"type":"order_cancel","session_id":"","sequence_id":0,'
+            '"exchange":"kraken","instrument":"BTC-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456"}'
         )
         await service_any._handle_cancel_command(payload, "kraken", "BTC-USD")
@@ -3982,7 +4046,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_cancel = AsyncMock()
         payload = (
-            '{"type":"order_cancel","exchange":"paper","instrument":"BTC-USD",'
+            '{"type":"order_cancel","session_id":"","sequence_id":0,'
+            '"exchange":"paper","instrument":"BTC-USD",'
             '"exchange_order_id":"PAPER-123","client_order_id":"client_456"}'
         )
         await service_any._handle_cancel_command(payload, "kraken", "BTC-USD")
@@ -4031,7 +4096,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_replace = AsyncMock()
         payload = (
-            '{"type":"order_replace","exchange":"kraken","instrument":"BTC-USD",'
+            '{"type":"order_replace","session_id":"","sequence_id":0,'
+            '"exchange":"kraken","instrument":"BTC-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456",'
             '"new_quantity":0.5,"new_price":48000.0}'
         )
@@ -4059,7 +4125,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_replace = AsyncMock()
         payload = (
-            '{"type":"order_replace","exchange":"zonda","instrument":"BTC-PLN",'
+            '{"type":"order_replace","session_id":"","sequence_id":0,'
+            '"exchange":"zonda","instrument":"BTC-PLN",'
             '"exchange_order_id":"ZONDA-123","client_order_id":"client_456","new_price":200000.0}'
         )
         await service_any._handle_replace_command(payload, "kraken", "BTC-PLN")
@@ -4177,7 +4244,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_order = AsyncMock()
         payload = (
-            '{"type":"order_request","strategy_id":"test","exchange":"kraken",'
+            '{"type":"order_request","session_id":"","sequence_id":0,'
+            '"strategy_id":"test","exchange":"kraken",'
             '"instrument":"ETH-USD","mode":"paper","side":"buy","order_type":"market",'
             '"quantity":1.0,"client_order_id":"test-123"}'
         )
@@ -4202,7 +4270,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_cancel = AsyncMock()
         payload = (
-            '{"type":"order_cancel","exchange":"kraken","instrument":"ETH-USD",'
+            '{"type":"order_cancel","session_id":"","sequence_id":0,'
+            '"exchange":"kraken","instrument":"ETH-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456"}'
         )
         await service_any._handle_cancel_command(payload, "kraken", "BTC-USD")
@@ -4226,7 +4295,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._process_replace = AsyncMock()
         payload = (
-            '{"type":"order_replace","exchange":"kraken","instrument":"ETH-USD",'
+            '{"type":"order_replace","session_id":"","sequence_id":0,'
+            '"exchange":"kraken","instrument":"ETH-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456","new_price":48000.0}'
         )
         await service_any._handle_replace_command(payload, "kraken", "BTC-USD")
@@ -4255,6 +4325,8 @@ class TestCancelReplaceHandlers:
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
         cancel_envelope = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4281,6 +4353,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._publish_cancel_event = AsyncMock()
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -4299,6 +4373,8 @@ class TestCancelReplaceHandlers:
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
         cancel_envelope = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4332,6 +4408,8 @@ class TestCancelReplaceHandlers:
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
         cancel_envelope = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4361,6 +4439,8 @@ class TestCancelReplaceHandlers:
         mock_client.cancel_order = AsyncMock(side_effect=Exception("Network error"))
         service_any.exchange_client = mock_client
         cancel_envelope = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4387,6 +4467,8 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any._publish_replace_event = AsyncMock()
         replace_envelope = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4416,6 +4498,8 @@ class TestCancelReplaceHandlers:
         mock_publisher = AsyncMock()
         service_any.msg_publisher = mock_publisher
         cancel_envelope = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4447,6 +4531,8 @@ class TestCancelReplaceHandlers:
         service_any.running = True
         service_any.msg_publisher = None
         cancel_envelope = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4475,6 +4561,8 @@ class TestCancelReplaceHandlers:
         mock_publisher.publish = AsyncMock(side_effect=Exception("Network error"))
         service_any.msg_publisher = mock_publisher
         cancel_envelope = OrderCancelData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4502,6 +4590,8 @@ class TestCancelReplaceHandlers:
         mock_publisher = AsyncMock()
         service_any.msg_publisher = mock_publisher
         replace_envelope = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4535,6 +4625,8 @@ class TestCancelReplaceHandlers:
         service_any.running = True
         service_any.msg_publisher = None
         replace_envelope = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4563,6 +4655,8 @@ class TestCancelReplaceHandlers:
         mock_publisher.publish = AsyncMock(side_effect=Exception("Network error"))
         service_any.msg_publisher = mock_publisher
         replace_envelope = OrderReplaceData(
+            session_id="",
+            sequence_id=0,
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",

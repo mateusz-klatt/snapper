@@ -2,12 +2,16 @@
 
 This module bridges ZMQ pub/sub topics to WebSocket clients, handling
 subscription management, message forwarding, throttling, and backpressure.
+Control-plane events (invalid topic errors, disconnect) are recorded to
+the ``control`` table for audit purposes.
 """
 
 import asyncio
 import contextlib
 import logging
 import time
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 
 import zmq
@@ -16,6 +20,8 @@ from fastapi import WebSocket
 
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.data.models import Control
+from snapper.data.repository import get_repository
 from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import SubscriptionStatsSnapshot
 from snapper.interface.websocket.models import SubscriptionTopicDetail
@@ -25,6 +31,7 @@ from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.messaging.infrastructure.gap_detector import GapDetector
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.messages import GapEnvelope
@@ -90,6 +97,48 @@ class ZmqWebSocketBridgeService:
         self._gap_detector: GapDetector = GapDetector("bridge")
         self.available_topics: dict[str, TopicConfigurationModel] = self._build_topic_config()
         self._shutdown_event: asyncio.Event | None = None
+
+    async def _record_bridge_control(
+        self,
+        message_type: str,
+        outcome: str,
+        detail: str | None = None,
+    ) -> None:
+        """Write a control row for a ZMQ bridge event (non-blocking).
+
+        Any DB failure is logged and swallowed so the bridge is never
+        disrupted.
+
+        Args:
+            message_type: Discriminator (e.g. ``zmq_subscribe``, ``zmq_unsubscribe``).
+            outcome: ``ok``, ``error``, or ``exception``.
+            detail: Optional error detail message.
+        """
+        db_url: str = self.settings.db_url
+        if not db_url:
+            return
+        try:
+            tracker: SequenceTracker = self.connection_manager.tracker
+            repo = get_repository(db_url)
+            now = datetime.now(UTC)
+            row = Control(
+                transport="zmq",
+                direction="inbound",
+                message_type=message_type,
+                outcome=outcome,
+                detail=detail,
+                payload=None,
+                client_session_id=None,
+                client_public_id=None,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence("control"),
+                timestamp=now,
+            )
+            async with repo.session() as session:
+                session.add(row)
+                await session.commit()
+        except Exception as exc:
+            logger.warning("Bridge control record write failed (non-blocking): %s", exc)
 
     def _build_topic_config(self) -> dict[str, TopicConfigurationModel]:
         """Build topic configuration from registry.
@@ -195,11 +244,21 @@ class ZmqWebSocketBridgeService:
         if websocket not in self.client_subscriptions:
             with contextlib.suppress(Exception):
                 await websocket.close()
+            await self._record_bridge_control(
+                "zmq_disconnect",
+                "ok",
+                detail=f"Client {client_id} disconnected (no subscriptions)",
+            )
             return
         client_topics = list(self.client_subscriptions[websocket])
         await self.unsubscribe_client(websocket, client_topics)
         with contextlib.suppress(Exception):
             await websocket.close()
+        await self._record_bridge_control(
+            "zmq_disconnect",
+            "ok",
+            detail=f"Client {client_id} disconnected, unsubscribed from {len(client_topics)} topics",
+        )
         logger.info(f"Client {client_id} cleanup complete")
 
     async def _start_zmq_subscription(self, topic: str) -> None:
@@ -596,6 +655,11 @@ class ZmqWebSocketBridgeService:
                 await websocket.send_text(error_response.model_dump_json())
             except Exception as e:
                 logger.error(f"Failed to send error to client: {e}")
+            await self._record_bridge_control(
+                "zmq_subscribe",
+                "error",
+                detail=f"Invalid topic: {topic}",
+            )
             return False
         if topic in self.topic_subscriptions:
             for sub in self.topic_subscriptions[topic]:

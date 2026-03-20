@@ -15,8 +15,8 @@ importers:
         specifier: ^2.2.6
         version: 2.2.6(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@tanstack/react-query':
-        specifier: ^5.91.2
-        version: 5.91.2(react@19.2.4)
+        specifier: ^5.91.3
+        version: 5.91.3(react@19.2.4)
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -153,8 +153,8 @@ packages:
     resolution: {integrity: sha512-2SZFvqMyvboVV1d15lMf7XiI3m7SDqXUuKaTymJYLN6dSGadqp+fVojqJlVoMlbZnlTmu3S0TLwLTJpvBMO1Aw==}
     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
 
-  '@asamuzakjp/dom-selector@7.0.3':
-    resolution: {integrity: sha512-Q6mU0Z6bfj6YvnX2k9n0JxiIwrCFN59x/nWmYQnAqP000ruX/yV+5bp/GRcF5T8ncvfwJQ7fgfP74DlpKExILA==}
+  '@asamuzakjp/dom-selector@7.0.4':
+    resolution: {integrity: sha512-jXR6x4AcT3eIrS2fSNAwJpwirOkGcd+E7F7CP3zjdTqz9B/2huHOL8YJZBgekKwLML+u7qB/6P1LXQuMScsx0w==}
     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
 
   '@asamuzakjp/nwsapi@2.3.9':
@@ -1208,8 +1208,8 @@ packages:
   '@tanstack/query-core@5.91.2':
     resolution: {integrity: sha512-Uz2pTgPC1mhqrrSGg18RKCWT/pkduAYtxbcyIyKBhw7dTWjXZIzqmpzO2lBkyWr4hlImQgpu1m1pei3UnkFRWw==}
 
-  '@tanstack/react-query@5.91.2':
-    resolution: {integrity: sha512-GClLPzbM57iFXv+FlvOUL56XVe00PxuTaVEyj1zAObhRiKF008J5vedmaq7O6ehs+VmPHe8+PUQhMuEyv8d9wQ==}
+  '@tanstack/react-query@5.91.3':
+    resolution: {integrity: sha512-D8jsCexxS5crZxAeiH6VlLHOUzmHOxeW5c11y8rZu0c34u/cy18hUKQXA/gn1Ila3ZIFzP+Pzv76YnliC0EtZQ==}
     peerDependencies:
       react: ^18 || ^19
 
@@ -2482,8 +2482,8 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
-  katex@0.16.39:
-    resolution: {integrity: sha512-FR2f6y85+81ZLO0GPhyQ+EJl/E5ILNWltJhpAeOTzRny952Z13x2867lTFDmvMZix//Ux3CuMQ2VkLXRbUwOFg==}
+  katex@0.16.40:
+    resolution: {integrity: sha512-1DJcK/L05k1Y9Gf7wMcyuqFOL6BiY3vY0CFcAM/LPRN04NALxcl6u7lOWNsp3f/bCHWxigzQl6FbR95XJ4R84Q==}
     hasBin: true
 
   keyv@4.5.4:
@@ -3607,7 +3607,7 @@ snapshots:
       '@csstools/css-tokenizer': 4.0.0
       lru-cache: 11.2.7
 
-  '@asamuzakjp/dom-selector@7.0.3':
+  '@asamuzakjp/dom-selector@7.0.4':
     dependencies:
       '@asamuzakjp/nwsapi': 2.3.9
       bidi-js: 1.0.3
@@ -4517,7 +4517,7 @@ snapshots:
 
   '@tanstack/query-core@5.91.2': {}
 
-  '@tanstack/react-query@5.91.2(react@19.2.4)':
+  '@tanstack/react-query@5.91.3(react@19.2.4)':
     dependencies:
       '@tanstack/query-core': 5.91.2
       react: 19.2.4
@@ -5802,7 +5802,7 @@ snapshots:
   jsdom@29.0.1:
     dependencies:
       '@asamuzakjp/css-color': 5.0.1
-      '@asamuzakjp/dom-selector': 7.0.3
+      '@asamuzakjp/dom-selector': 7.0.4
       '@bramus/specificity': 2.4.2
       '@csstools/css-syntax-patches-for-csstree': 1.1.1(css-tree@3.2.1)
       '@exodus/bytes': 1.15.0
@@ -5853,7 +5853,7 @@ snapshots:
 
   json5@2.2.3: {}
 
-  katex@0.16.39:
+  katex@0.16.40:
     dependencies:
       commander: 8.3.0
 
@@ -6014,7 +6014,7 @@ snapshots:
       dagre-d3-es: 7.0.14
       dayjs: 1.11.20
       dompurify: 3.3.3
-      katex: 0.16.39
+      katex: 0.16.40
       khroma: 2.1.0
       lodash-es: 4.17.23
       marked: 16.4.2

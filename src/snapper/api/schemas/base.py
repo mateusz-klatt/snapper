@@ -18,6 +18,7 @@ Schema hierarchy:
 
 from datetime import UTC
 from datetime import datetime
+from typing import Literal
 from typing import Self
 from uuid import uuid7
 
@@ -59,12 +60,18 @@ class StrictDataSchema(BaseModel):
 
     Also provides to_json/from_json for ZMQ serialization.
 
+    Provenance fields (session_id, sequence_id) are required at construction
+    time with no defaults. For objects published via MessagePublisher, pass
+    placeholder values (session_id="", sequence_id=0) since publish() stamps
+    real values via model_copy(). For objects constructed in REST/WS handlers,
+    pass the tracker values directly.
+
     Attributes:
         public_id: Unique identifier (UUID7), generated at creation time.
         type: Payload item type discriminator for routing and deserialization.
         timestamp: Bus arrival timestamp (UTC), generated once at creation.
-        session_id: Producer session identifier for provenance tracking.
-        sequence_id: Per-table monotonic counter for gap detection.
+        session_id: Producer session identifier for provenance tracking (required).
+        sequence_id: Per-table monotonic counter for gap detection (required).
     """
 
     model_config = STRICT_DATA_CONFIG
@@ -72,8 +79,8 @@ class StrictDataSchema(BaseModel):
     public_id: str = Field(default_factory=lambda: str(uuid7()))
     type: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    session_id: str = ""
-    sequence_id: int = 0
+    session_id: str
+    sequence_id: int
 
     def to_json(self) -> str:
         """Serialize to JSON string for ZMQ transport.
@@ -103,23 +110,38 @@ class WsMessageSchema(StrictDataSchema):
     from StrictDataSchema. Uses loose type coercion (strict=False) to handle
     JavaScript clients that may send numbers as strings.
 
+    Provides sentinel defaults for provenance fields since WS control
+    messages are stamped by a SequenceTracker before transmission, or
+    carry informational payloads where provenance is not required.
+
     Subclasses MUST override type with a Literal default.
     """
 
     model_config = STRICT_WS_CONFIG
 
+    session_id: str = ""
+    sequence_id: int = 0
 
-class StrictApiSchema(BaseModel):
+
+class StrictApiSchema(StrictDataSchema):
     """Base schema for REST API request/response models.
 
-    Inherits Pydantic BaseModel with strict validation:
-    - Extra fields are forbidden (HTTP 422 on unknown fields)
-    - Strict type coercion (no implicit conversions)
-    - Default values are validated
-    - Field aliases are populated by name
+    Inherits StrictDataSchema to gain provenance fields (public_id,
+    session_id, sequence_id, timestamp) on all REST operational responses.
+    Uses strict type coercion (unlike WsMessageSchema which is loose).
+
+    Provides sentinel defaults for provenance fields since REST responses
+    are stamped by the ClientProvenanceMiddleware before delivery, or
+    carry informational payloads where provenance is not required.
+
+    Subclasses MUST override type with a Literal default
+    (e.g. type: Literal["health_check"] = "health_check").
     """
 
     model_config = STRICT_API_CONFIG
+
+    session_id: str = ""
+    sequence_id: int = 0
 
 
 class StrictWsSchema(BaseModel):
@@ -138,9 +160,11 @@ class MessageResponse(StrictApiSchema):
     Used for simple acknowledgment responses.
 
     Attributes:
+        type: Payload item type discriminator.
         message: Human-readable response message.
     """
 
+    type: Literal["message"] = "message"
     message: str
 
 

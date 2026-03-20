@@ -463,6 +463,7 @@ Bridge automatically:
 - Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
 - Disconnects slow clients on trade topics when exceeding `MAX_PENDING_MESSAGES_TRADE` (1000)
 - Unsubscribes when last client disconnects
+- Records control events (subscribe errors, client disconnects) to the `control` table
 
 ## Gap Detection
 
@@ -594,27 +595,41 @@ WebSocket — has a uniform provenance envelope.
 Two destination tables provide always-available observability for non-domain traffic:
 
 - **control** — Always-on audit for commands, authentication events, subscribe/unsubscribe
-  messages, replay start/end, and REST mutation requests. Every mutation processed by
-  `ClientProvenanceMiddleware` writes a control row in a `finally` block so the record
-  is persisted regardless of whether the request succeeded or failed. The write is
-  non-blocking: any DB failure is logged and swallowed so the response already sent to
-  the client is never invalidated.
+  messages, and REST mutation requests. Recording is wired in three places:
+  - **WS handlers** — `_record_ws_control()` records auth, subscribe, unsubscribe,
+    and error events with `transport="ws"`. Client causation linkage is extracted
+    from inbound messages via `_extract_client_provenance()` and stored as
+    `client_session_id` and `client_public_id` on the control row.
+  - **REST middleware** — `ClientProvenanceMiddleware._record_control()` records
+    every mutation (POST/PUT/DELETE) with `transport="rest"`, redacted payload,
+    outcome (`ok`/`error`/`exception`), and server-side provenance.
+  - **ZMQ bridge** — `_record_bridge_control()` records subscribe errors and
+    client disconnects with `transport="zmq"`.
 
-- **telemetry** — Toggleable high-volume table for pings, heartbeats, pongs, and health
-  check payloads. Telemetry recording can be enabled or disabled without affecting the
-  control audit trail.
+  All control writes use a `finally` block so the record is persisted regardless of
+  whether the request succeeded or failed. The write is non-blocking: any DB failure
+  is logged and swallowed so the response already sent to the client is never
+  invalidated.
+
+- **telemetry** — Toggleable high-volume table for pings, heartbeats, pongs, and
+  GET read requests. Recording is gated by the `TELEMETRY_RECORDING_ENABLED`
+  environment variable (default `false`). When disabled, `SequenceTracker` counters
+  still increment — only the DB write is skipped. Recording is wired in:
+  - **WS handlers** — `_record_ws_telemetry()` records ping/pong/heartbeat events
+  - **REST middleware** — `_record_telemetry()` records GET reads (health, status,
+    entity endpoints)
 
 The non-blocking audit invariant applies to both tables: audit writes never reject,
 delay, or invalidate the primary request/message flow.
 
 ## Best Practices
 
-1.  **One broker per system** — All components connect to the same broker
-2.  **Topic hierarchy** — Use hierarchy for filtering (`market.kraken.*`)
-3.  **Data types** — Always use typed Data classes from `messaging.schemas.data`
-4.  **Provenance** — Use `MessagePublisher` (not `ValidatedPublisher` directly) so every
-    message carries `session_id` and `sequence_id` for gap detection
-5.  **One `SequenceTracker` per component** — Create it once at `start()` and share across
-    all publisher instances; restart creates a new session
-6.  **Heartbeats** — Keep component-specific heartbeat cadences small and regular
-7.  **Graceful shutdown** — Close sockets with LINGER=0
+1. **One broker per system** — All components connect to the same broker
+2. **Topic hierarchy** — Use hierarchy for filtering (`market.kraken.*`)
+3. **Data types** — Always use typed Data classes from `messaging.schemas.data`
+4. **Provenance** — Use `MessagePublisher` (not `ValidatedPublisher` directly) so every
+   message carries `session_id` and `sequence_id` for gap detection
+5. **One `SequenceTracker` per component** — Create it once at `start()` and share across
+   all publisher instances; restart creates a new session
+6. **Heartbeats** — Keep component-specific heartbeat cadences small and regular
+7. **Graceful shutdown** — Close sockets with LINGER=0

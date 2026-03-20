@@ -180,6 +180,8 @@ class TradingEngineService:
         if signaled_at is not None:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
         order = OrderRequestData(
+            session_id="",
+            sequence_id=0,
             strategy_id=reason,
             instrument=self.instrument,
             mode=self.mode,

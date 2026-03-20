@@ -2958,6 +2958,8 @@ class TestZmqWsBridgeE2ESmoke:
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
         fill = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-1",
             exchange_order_id="exec-1",
             client_order_id="order-123",
@@ -3000,6 +3002,8 @@ class TestZmqWsBridgeE2ESmoke:
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
         order = OrderData(
+            session_id="",
+            sequence_id=0,
             exchange_order_id=None,
             client_order_id="order-789",
             instrument="BTC-USD",
@@ -3139,6 +3143,8 @@ class TestDataSerialization:
         Then: JSON contains all fields with correct values.
         """
         fill = ExecutionData(
+            session_id="",
+            sequence_id=0,
             trade_id="trade-123",
             exchange_order_id="exchange-fill-123",
             client_order_id="order-123",
@@ -3169,6 +3175,8 @@ class TestDataSerialization:
         Then: JSON contains all fields with correct values.
         """
         order = OrderData(
+            session_id="",
+            sequence_id=0,
             exchange_order_id="exchange-789",
             client_order_id="order-789",
             instrument="BTC-USD",
@@ -3187,3 +3195,177 @@ class TestDataSerialization:
         assert parsed["client_order_id"] == "order-789"
         assert parsed["exchange"] == "kraken"
         assert parsed["status"] == "submitted"
+
+
+class TestBridgeControlRecording:
+    """Tests for _record_bridge_control in ZmqWebSocketBridgeService."""
+
+    @pytest.fixture
+    def recording_bridge(self) -> ZmqWebSocketBridgeService:
+        """Provide bridge with db_url configured for control recording."""
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_cm = MagicMock()
+        type(mock_cm).tracker = PropertyMock(return_value=SequenceTracker())
+        with patch("snapper.interface.websocket.bridge.get_settings", return_value=mock_settings):
+            instance = ZmqWebSocketBridgeService(mock_cm)
+        instance.context = MagicMock()
+        instance.available_topics = {
+            "market.candles.": TopicConfigurationModel(
+                endpoint="tcp://127.0.0.1:5555",
+                pattern="market.candles.",
+                throttle_ms=100,
+            ),
+        }
+        return instance
+
+    @pytest.mark.asyncio
+    async def test_record_bridge_control_writes_row(
+        self, recording_bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Bridge control row is persisted with correct fields."""
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        with patch(
+            "snapper.interface.websocket.bridge.get_repository",
+            return_value=mock_repo,
+        ):
+            await recording_bridge._record_bridge_control(
+                "zmq_subscribe", "error", detail="Invalid topic: foo"
+            )
+
+        mock_session.add.assert_called_once()
+        row = mock_session.add.call_args[0][0]
+        assert row.transport == "zmq"
+        assert row.direction == "inbound"
+        assert row.message_type == "zmq_subscribe"
+        assert row.outcome == "error"
+        assert row.detail == "Invalid topic: foo"
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_record_bridge_control_non_blocking(
+        self, recording_bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Bridge control DB failure is swallowed without raising."""
+        mock_session = AsyncMock(add=MagicMock())
+        mock_session.commit = AsyncMock(side_effect=RuntimeError("db down"))
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        with patch(
+            "snapper.interface.websocket.bridge.get_repository",
+            return_value=mock_repo,
+        ):
+            await recording_bridge._record_bridge_control("zmq_disconnect", "ok")
+
+    @pytest.mark.asyncio
+    async def test_record_bridge_control_skips_empty_db_url(self) -> None:
+        """No DB call when db_url is empty."""
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.db_url = ""
+        mock_cm = MagicMock()
+        type(mock_cm).tracker = PropertyMock(return_value=SequenceTracker())
+        with patch("snapper.interface.websocket.bridge.get_settings", return_value=mock_settings):
+            instance = ZmqWebSocketBridgeService(mock_cm)
+
+        with patch(
+            "snapper.interface.websocket.bridge.get_repository",
+        ) as mock_get_repo:
+            await instance._record_bridge_control("zmq_subscribe", "ok")
+        mock_get_repo.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_websocket_invalid_topic_records_control(
+        self, recording_bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Invalid topic subscription records control with error outcome."""
+        mock_ws = AsyncMock()
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        with patch(
+            "snapper.interface.websocket.bridge.get_repository",
+            return_value=mock_repo,
+        ):
+            result = await recording_bridge.subscribe_websocket(mock_ws, "invalid.topic")
+
+        assert result is False
+        mock_session.add.assert_called_once()
+        row = mock_session.add.call_args[0][0]
+        assert row.message_type == "zmq_subscribe"
+        assert row.outcome == "error"
+        assert "invalid.topic" in row.detail
+
+    @pytest.mark.asyncio
+    async def test_disconnect_client_records_control(
+        self, recording_bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Client disconnect records control with ok outcome."""
+        mock_ws = MagicMock()
+        mock_ws.close = AsyncMock()
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        with patch(
+            "snapper.interface.websocket.bridge.get_repository",
+            return_value=mock_repo,
+        ):
+            await recording_bridge.disconnect_client(mock_ws)
+
+        mock_session.add.assert_called_once()
+        row = mock_session.add.call_args[0][0]
+        assert row.message_type == "zmq_disconnect"
+        assert row.outcome == "ok"
+
+    @pytest.mark.asyncio
+    async def test_disconnect_client_with_subscriptions_records_control(
+        self, recording_bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Client disconnect with active subscriptions records control."""
+        mock_ws = MagicMock()
+        mock_ws.close = AsyncMock()
+        recording_bridge.client_subscriptions[mock_ws] = {"market.candles."}
+        recording_bridge.topic_subscriptions["market.candles."] = [
+            TopicSubscriptionModel(websocket=mock_ws, throttle_ms=100)
+        ]
+
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        with (
+            patch(
+                "snapper.interface.websocket.bridge.get_repository",
+                return_value=mock_repo,
+            ),
+            patch.object(recording_bridge, "_stop_zmq_subscription", new_callable=AsyncMock),
+        ):
+            await recording_bridge.disconnect_client(mock_ws)
+
+        mock_session.add.assert_called_once()
+        row = mock_session.add.call_args[0][0]
+        assert row.message_type == "zmq_disconnect"
+        assert row.outcome == "ok"
+        assert "1 topics" in row.detail

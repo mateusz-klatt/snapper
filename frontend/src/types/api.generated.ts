@@ -790,9 +790,33 @@ export type Components = {
          *     without knowing the current password.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         new_password: New password to set (min 8 chars).
          */
         AdminResetPasswordRequest: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default admin_reset_password_request
+             * @constant
+             */
+            type: "admin_reset_password_request";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** New Password */
             new_password: string;
         };
@@ -803,6 +827,7 @@ export type Components = {
          *     Describes a registered process that can be instantiated.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         name: Process identifier.
          *         class_path: Full Python class path.
          *         method: Entry point method name.
@@ -813,6 +838,29 @@ export type Components = {
          *         parameters_schema: JSON Schema for parameters.
          */
         AvailableProcess: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default available_process
+             * @constant
+             */
+            type: "available_process";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Name
              * @description Process identifier
@@ -863,10 +911,34 @@ export type Components = {
          * @description Available processes list response schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         processes: List of available process templates.
          *         count: Total number of available processes.
          */
         AvailableProcessesResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default available_processes
+             * @constant
+             */
+            type: "available_processes";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Processes */
             processes: Components["schemas"]["AvailableProcess"][];
             /** Count */
@@ -906,15 +978,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -952,10 +1018,34 @@ export type Components = {
          *     Used by authenticated users to change their own password.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         current_password: Current password for verification.
          *         new_password: New password (min 8 chars).
          */
         ChangePasswordRequest: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default change_password_request
+             * @constant
+             */
+            type: "change_password_request";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Current Password */
             current_password: string;
             /** New Password */
@@ -968,6 +1058,7 @@ export type Components = {
          *     Describes a process configuration with its current runtime state.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         name: Unique process name.
          *         enabled: Whether process autostarts on boot.
          *         running: Whether process is currently running.
@@ -985,6 +1076,29 @@ export type Components = {
          *         active_public_id: Active public ID if running.
          */
         ConfiguredProcess: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default configured_process
+             * @constant
+             */
+            type: "configured_process";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -1073,10 +1187,34 @@ export type Components = {
          * @description Configured processes list response schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         processes: List of configured processes.
          *         count: Total number of configured processes.
          */
         ConfiguredProcessesResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default configured_processes
+             * @constant
+             */
+            type: "configured_processes";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Processes */
             processes: Components["schemas"]["ConfiguredProcess"][];
             /** Count */
@@ -1094,6 +1232,29 @@ export type Components = {
          *         active_clients: Number of unique connected clients.
          */
         ConnectionStatsSchema: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default connection_stats
+             * @constant
+             */
+            type: "connection_stats";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Active Connections
              * @description Active WebSocket connections
@@ -1130,6 +1291,7 @@ export type Components = {
          * @description Create user request schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         username: Unique username (3-64 chars).
          *         email: Optional email address.
          *         password: Password (min 8 chars).
@@ -1137,6 +1299,29 @@ export type Components = {
          *         is_active: Whether account is active.
          */
         CreateUserRequest: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default create_user_request
+             * @constant
+             */
+            type: "create_user_request";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Username */
             username: string;
             /** Email */
@@ -1187,15 +1372,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Trade Id */
             trade_id?: string | null;
@@ -1234,6 +1413,114 @@ export type Components = {
              */
             executed_at?: string;
         };
+        /**
+         * GapDetectionStats
+         * @description Aggregated gap detection statistics from all detectors.
+         *
+         *     Attributes:
+         *         bridge: Gap stats from the ZMQ-to-WebSocket bridge detector.
+         *         rest_clients: Per-session gap stats from REST client detectors.
+         */
+        GapDetectionStats: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default gap_detection_stats
+             * @constant
+             */
+            type: "gap_detection_stats";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
+            /** @description ZMQ bridge gap detection stats */
+            bridge?: Components["schemas"]["GapStatsSchema"];
+            /**
+             * Rest Clients
+             * @description Per-session REST client gap stats
+             */
+            rest_clients?: {
+                [key: string]: Components["schemas"]["GapStatsSchema"];
+            };
+        };
+        /**
+         * GapStatsSchema
+         * @description Gap detection telemetry counters for a single detector.
+         *
+         *     Attributes:
+         *         gaps_detected: Total missing messages detected.
+         *         session_resets: Producer session resets observed.
+         *         duplicates: Duplicate or reordered messages observed.
+         *         mid_stream_joins: Subscriptions that started mid-stream.
+         *         rejected_unstamped: Messages rejected due to missing provenance.
+         */
+        GapStatsSchema: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default gap_stats
+             * @constant
+             */
+            type: "gap_stats";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
+            /**
+             * Gaps Detected
+             * @description Total missing messages detected
+             * @default 0
+             */
+            gaps_detected: number;
+            /**
+             * Session Resets
+             * @description Producer session resets observed
+             * @default 0
+             */
+            session_resets: number;
+            /**
+             * Duplicates
+             * @description Duplicate or reordered messages
+             * @default 0
+             */
+            duplicates: number;
+            /**
+             * Mid Stream Joins
+             * @description Subscriptions started mid-stream
+             * @default 0
+             */
+            mid_stream_joins: number;
+            /**
+             * Rejected Unstamped
+             * @description Messages without provenance
+             * @default 0
+             */
+            rejected_unstamped: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1244,7 +1531,7 @@ export type Components = {
          * @description Main health check endpoint response.
          *
          *     Provides overall service health status including version,
-         *     connection statistics, and topic availability.
+         *     connection statistics, topic availability, and gap detection stats.
          *
          *     Attributes:
          *         status: Overall service health status (healthy/warning/error).
@@ -1252,20 +1539,39 @@ export type Components = {
          *         version: Application version string.
          *         connections: Connection statistics.
          *         topics: Topic availability information.
+         *         gap_detection: Gap detection statistics from all detectors.
          */
         HealthCheckResponse: {
+            /** Public Id */
+            public_id?: string;
             /**
-             * Status
-             * @description Overall service health status
-             * @enum {string}
+             * Type
+             * @default health_check
+             * @constant
              */
-            status: "healthy" | "warning" | "error";
+            type: "health_check";
             /**
              * Timestamp
              * Format: date-time
              * @description Timestamp of the health check
              */
             timestamp: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
+            /**
+             * Status
+             * @description Overall service health status
+             * @enum {string}
+             */
+            status: "healthy" | "warning" | "error";
             /**
              * Version
              * @description Application version
@@ -1275,6 +1581,8 @@ export type Components = {
             connections: Components["schemas"]["ConnectionStatsSchema"];
             /** @description Topics availability */
             topics: Components["schemas"]["HealthTopics"];
+            /** @description Gap detection statistics */
+            gap_detection?: Components["schemas"]["GapDetectionStats"];
         };
         /**
          * HealthTopics
@@ -1285,6 +1593,29 @@ export type Components = {
          *         active: Number of currently active topics with subscribers.
          */
         HealthTopics: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default health_topics
+             * @constant
+             */
+            type: "health_topics";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Available
              * @description Total number of available topics
@@ -1301,11 +1632,35 @@ export type Components = {
          * @description Login request schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         username: User's login name.
          *         password: User's password.
          *         remember_me: If True, extends refresh token lifetime.
          */
         LoginRequest: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default login_request
+             * @constant
+             */
+            type: "login_request";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Username */
             username: string;
             /** Password */
@@ -1323,11 +1678,35 @@ export type Components = {
          *     Returned after successful authentication.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         message: Success message.
          *         expires_in: Access token TTL in seconds.
          *         user: Authenticated user profile.
          */
         LoginResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default login_response
+             * @constant
+             */
+            type: "login_response";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Message */
             message: string;
             /** Expires In */
@@ -1341,9 +1720,33 @@ export type Components = {
          *     Used for simple acknowledgment responses.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         message: Human-readable response message.
          */
         MessageResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default message
+             * @constant
+             */
+            type: "message";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Message */
             message: string;
         };
@@ -1389,15 +1792,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Exchange Order Id */
             exchange_order_id?: string | null;
@@ -1474,15 +1871,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -1505,10 +1896,34 @@ export type Components = {
          * @description Running/total count for a process category.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         running: Number of currently running processes.
          *         total: Total number of configured processes.
          */
         ProcessCategoryCount: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_category_count
+             * @constant
+             */
+            type: "process_category_count";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Running
              * @description Number of currently running processes
@@ -1527,6 +1942,7 @@ export type Components = {
          *     Used to create a new process configuration from a template.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         name: Unique process name (lowercase alphanumeric with underscores).
          *         template: Registered process identifier used as template.
          *         enabled: Whether process should autostart on boot.
@@ -1536,6 +1952,29 @@ export type Components = {
          *         note: Optional note stored alongside configuration.
          */
         ProcessCreateRequest: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_create_request
+             * @constant
+             */
+            type: "process_create_request";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -1579,10 +2018,34 @@ export type Components = {
          * @description Process creation response schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         status: Operation status ('created').
          *         process: Created process info.
          */
         ProcessCreateResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_create_response
+             * @constant
+             */
+            type: "process_create_response";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Status
              * @description Operation status
@@ -1597,10 +2060,34 @@ export type Components = {
          * @description Process creation info schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         name: Unique process name.
          *         template: Template used for creation.
          */
         ProcessCreatedInfo: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_created_info
+             * @constant
+             */
+            type: "process_created_info";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -1619,6 +2106,7 @@ export type Components = {
          *     Represents a single execution run of a process.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         public_id: Unique run identifier.
          *         process_name: Process name.
          *         status: Run status.
@@ -1637,6 +2125,27 @@ export type Components = {
              * @description Unique run identifier
              */
             public_id: string;
+            /**
+             * Type
+             * @default process_run
+             * @constant
+             */
+            type: "process_run";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Process Name
              * @description Process name
@@ -1700,10 +2209,34 @@ export type Components = {
          * @description Process runs list response schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         runs: List of process runs.
          *         count: Total number of runs.
          */
         ProcessRunsResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_runs
+             * @constant
+             */
+            type: "process_runs";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Runs */
             runs: Components["schemas"]["ProcessRun"][];
             /** Count */
@@ -1716,6 +2249,7 @@ export type Components = {
          *     Describes a process template schema with default values.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         name: Process identifier.
          *         description: Human-readable description.
          *         class_path: Full Python class path.
@@ -1727,6 +2261,29 @@ export type Components = {
          *         lifecycle: Process lifecycle type.
          */
         ProcessSchemaResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_schema
+             * @constant
+             */
+            type: "process_schema";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Name
              * @description Process identifier
@@ -1784,12 +2341,36 @@ export type Components = {
          *     Used to start a configured process with optional parameter overrides.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         mode: Execution mode (thread/process) override.
          *         args: Constructor positional arguments override.
          *         kwargs: Constructor keyword arguments override.
          *         autostart: Toggle autostart flag (None keeps stored value).
          */
         ProcessStartRequest: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_start_request
+             * @constant
+             */
+            type: "process_start_request";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Mode
              * @description Execution mode (thread/process) - for ProcessLauncherService, not constructor
@@ -1828,12 +2409,36 @@ export type Components = {
          * @description Process start response schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         status: Operation status (success, already_running, error).
          *         name: Process name.
-         *         public_id: Public ID if started.
+         *         process_public_id: Public ID of the started process run (if started).
          *         message: Additional message.
          */
         ProcessStartResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_start_response
+             * @constant
+             */
+            type: "process_start_response";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Status
              * @description Operation status (success, already_running, error)
@@ -1846,10 +2451,10 @@ export type Components = {
              */
             name: string;
             /**
-             * Public Id
+             * Process Public Id
              * @description Public ID if started
              */
-            public_id?: string | null;
+            process_public_id?: string | null;
             /**
              * Message
              * @description Additional message
@@ -1863,6 +2468,7 @@ export type Components = {
          *     Represents the current status of a single process.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         status: Process status (not_running, running, stopped, completed, error).
          *         pid: Process ID if running.
          *         started_at: Start time in ISO format.
@@ -1871,6 +2477,29 @@ export type Components = {
          *         error: Error message if failed.
          */
         ProcessStatus: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_status
+             * @constant
+             */
+            type: "process_status";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Status
              * @description Process status: not_running, running, stopped, completed, error
@@ -1908,11 +2537,35 @@ export type Components = {
          * @description Process stop response schema.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         status: Operation status (success, not_running, error).
          *         name: Process name.
          *         message: Additional message.
          */
         ProcessStopResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_stop_response
+             * @constant
+             */
+            type: "process_stop_response";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Status
              * @description Operation status (success, not_running, error)
@@ -1935,12 +2588,36 @@ export type Components = {
          * @description Lightweight process summary for the overview dashboard.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         feeds: Count of feed publisher processes.
          *         strategies: Count of strategy processes.
          *         executors: Count of executor processes.
          *         brokers: Count of broker processes.
          */
         ProcessSummaryResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default process_summary
+             * @constant
+             */
+            type: "process_summary";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** @description Feed publisher process counts */
             feeds: Components["schemas"]["ProcessCategoryCount"];
             /** @description Strategy process counts */
@@ -1957,6 +2634,7 @@ export type Components = {
          *     Returned after successful token refresh.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         message: Success message.
          *         ws_token: New WebSocket authentication token.
          *         ws_token_exp: WebSocket token expiration time.
@@ -1964,6 +2642,29 @@ export type Components = {
          *         user: User profile.
          */
         RefreshResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default refresh_response
+             * @constant
+             */
+            type: "refresh_response";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Message */
             message: string;
             /** Ws Token */
@@ -1985,6 +2686,29 @@ export type Components = {
          *         categories: List of unique setting categories.
          */
         SettingCategoriesResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default setting_categories
+             * @constant
+             */
+            type: "setting_categories";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Categories
              * @description List of unique setting categories
@@ -1998,6 +2722,7 @@ export type Components = {
          *     Returned when fetching a setting from the database.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         key: Unique setting key identifier.
          *         value: Setting value as string.
          *         category: Setting category for grouping.
@@ -2006,6 +2731,29 @@ export type Components = {
          *         updated_by: User who last modified the setting.
          */
         SettingRead: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default setting_read
+             * @constant
+             */
+            type: "setting_read";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Key */
             key: string;
             /** Value */
@@ -2029,11 +2777,35 @@ export type Components = {
          *     Used when updating an existing setting.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         value: New setting value as string.
          *         category: Setting category (defaults to 'system').
          *         description: Optional description.
          */
         SettingUpdate: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default setting_update
+             * @constant
+             */
+            type: "setting_update";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Value
              * @description Setting value as string
@@ -2082,15 +2854,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -2123,10 +2889,34 @@ export type Components = {
          * @description Strategy processes list response.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         strategies: List of strategy processes.
          *         count: Total number of strategies.
          */
         StrategyListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default strategy_list
+             * @constant
+             */
+            type: "strategy_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Strategies */
             strategies: Components["schemas"]["StrategyProcess"][];
             /** Count */
@@ -2137,12 +2927,36 @@ export type Components = {
          * @description Lightweight strategy process info for read-only views.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         name: Unique process name.
          *         running: Whether process is currently running.
          *         enabled: Whether process autostarts on boot.
          *         mode: Execution mode (thread/process).
          */
         StrategyProcess: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default strategy_process
+             * @constant
+             */
+            type: "strategy_process";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -2170,6 +2984,7 @@ export type Components = {
          * @description Strategy process status payload for the system status endpoint.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         strategy_name: Name of the strategy.
          *         status: Current strategy status string.
          *         details: Full raw status dictionary from the process.
@@ -2182,6 +2997,29 @@ export type Components = {
          *         uptime: Process uptime string.
          */
         StrategyStatusPayload: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default strategy_status
+             * @constant
+             */
+            type: "strategy_status";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Strategy Name
              * @description Strategy name
@@ -2244,6 +3082,29 @@ export type Components = {
          *         per_client: Topics subscribed per client.
          */
         SubscriptionsStats: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default subscriptions_stats
+             * @constant
+             */
+            type: "subscriptions_stats";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Per Topic
              * @description Subscriber count per topic
@@ -2266,11 +3127,35 @@ export type Components = {
          *     Provides status of the trader process, backtests, and active strategies.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         trader: Trader process status.
          *         backtests: Status of backtest processes by ID.
          *         strategies: List of active strategies from strategy_runner.
          */
         SystemStatus: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default system_status
+             * @constant
+             */
+            type: "system_status";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             trader: Components["schemas"]["ProcessStatus"];
             /** Backtests */
             backtests: {
@@ -2300,6 +3185,29 @@ export type Components = {
          *         pattern: ZMQ subscription pattern (None if unconfigured).
          */
         TopicMetricSnapshotSchema: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default topic_metric_snapshot
+             * @constant
+             */
+            type: "topic_metric_snapshot";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Active Subscribers
              * @description Current subscriber count
@@ -2372,11 +3280,35 @@ export type Components = {
          *     All fields are optional - only provided fields are updated.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         email: New email address.
          *         role: New role assignment.
          *         is_active: New active status.
          */
         UpdateUserRequest: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default update_user_request
+             * @constant
+             */
+            type: "update_user_request";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Email */
             email?: string | null;
             role?: Components["schemas"]["UserRole"] | null;
@@ -2390,10 +3322,34 @@ export type Components = {
          *     Returned by user listing endpoints.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         users: List of user profiles.
          *         total_count: Total number of users.
          */
         UserListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default user_list
+             * @constant
+             */
+            type: "user_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Users */
             users: Components["schemas"]["UserProfile"][];
             /** Total Count */
@@ -2407,6 +3363,7 @@ export type Components = {
          *     endpoints and stored in request state.
          *
          *     Attributes:
+         *         type: Payload item type discriminator.
          *         username: User's login name (also the primary key).
          *         email: Optional email address.
          *         role: User's role (VIEWER, OPERATOR, ADMIN).
@@ -2414,6 +3371,29 @@ export type Components = {
          *         created_at: Account creation timestamp.
          */
         UserProfile: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default user_profile
+             * @constant
+             */
+            type: "user_profile";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** Username */
             username: string;
             /** Email */
@@ -2465,6 +3445,29 @@ export type Components = {
          *         client_count: Total client count.
          */
         WebSocketStats: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default websocket_stats
+             * @constant
+             */
+            type: "websocket_stats";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Active Connections
              * @description Number of active WebSocket connections
@@ -2492,6 +3495,29 @@ export type Components = {
          *         heartbeat_interval_ms: Heartbeat interval in milliseconds.
          */
         WsStatsConfig: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default ws_stats_config
+             * @constant
+             */
+            type: "ws_stats_config";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Broker Xpub
              * @description ZMQ broker XPUB endpoint
@@ -2519,6 +3545,29 @@ export type Components = {
          *         config: Configuration details.
          */
         WsStatsResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default ws_stats
+             * @constant
+             */
+            type: "ws_stats";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /** @description WebSocket statistics */
             websocket: Components["schemas"]["WebSocketStats"];
             /** @description ZMQ bridge statistics */
@@ -2547,6 +3596,29 @@ export type Components = {
          *         available_topics: List of available topics.
          */
         ZmqBridgeStats: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default zmq_bridge_stats
+             * @constant
+             */
+            type: "zmq_bridge_stats";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Active Topics
              * @description Number of active ZMQ topics
@@ -2573,6 +3645,29 @@ export type Components = {
          *         active_connections: Number of active WebSocket connections.
          */
         ZmqComponents: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default zmq_components
+             * @constant
+             */
+            type: "zmq_components";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Zmq Context
              * @description ZMQ context status
@@ -2599,6 +3694,29 @@ export type Components = {
          *         available_topics: List of available ZMQ topics for subscription.
          */
         ZmqConfig: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default zmq_config
+             * @constant
+             */
+            type: "zmq_config";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
             /**
              * Available Topics
              * @description List of available ZMQ topics
@@ -2622,18 +3740,36 @@ export type Components = {
          *         errors: Error messages if not healthy.
          */
         ZmqHealthResponse: {
+            /** Public Id */
+            public_id?: string;
             /**
-             * Status
-             * @description Overall ZMQ bridge health status
-             * @enum {string}
+             * Type
+             * @default zmq_health
+             * @constant
              */
-            status: "healthy" | "warning" | "error";
+            type: "zmq_health";
             /**
              * Timestamp
              * Format: date-time
              * @description Timestamp of the health check
              */
             timestamp: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Sequence Id
+             * @default 0
+             */
+            sequence_id: number;
+            /**
+             * Status
+             * @description Overall ZMQ bridge health status
+             * @enum {string}
+             */
+            status: "healthy" | "warning" | "error";
             /** @description Component status details */
             components: Components["schemas"]["ZmqComponents"];
             /** @description ZMQ configuration */

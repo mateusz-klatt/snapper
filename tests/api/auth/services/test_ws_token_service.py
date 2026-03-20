@@ -208,8 +208,8 @@ async def test_dispatch_messages_loop_continues_after_ping() -> None:
     """
     websocket = MultiMessageWebSocket(
         messages=[
-            json.dumps({"type": "ping"}),
-            json.dumps({"type": "ping"}),
+            json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}),
+            json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}),
         ]
     )
     manager = MockConnectionManager()

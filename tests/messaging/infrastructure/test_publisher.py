@@ -14,7 +14,9 @@ from snapper.messaging.schemas.data import TickData
 
 def _make_tick(exchange: str = "kraken", instrument: str = "BTC-USD") -> TickData:
     """Build a minimal TickData instance for testing."""
-    return TickData(exchange=exchange, instrument=instrument, volume=1.0)
+    return TickData(
+        session_id="", sequence_id=0, exchange=exchange, instrument=instrument, volume=1.0
+    )
 
 
 def _make_mock_publisher() -> MagicMock:

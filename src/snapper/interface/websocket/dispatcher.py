@@ -3,9 +3,12 @@
 This module handles incoming WebSocket messages, routing them to
 appropriate handlers based on message type.  After handling each
 message, a control record is written to the ``control`` table for
-audit purposes (auth, subscribe, error events).
+audit purposes (auth, subscribe, error events).  Ping/pong messages
+are recorded as telemetry rows, gated by the
+``telemetry_recording_enabled`` bootstrap setting.
 """
 
+import json
 from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import UTC
@@ -23,8 +26,10 @@ from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.config.settings import get_settings
 from snapper.core.redact import redact
 from snapper.data.models import Control
+from snapper.data.models import Telemetry
 from snapper.data.repository import get_repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.gap_detection import WsClientGapDetector
@@ -59,7 +64,36 @@ _client_message_adapter: TypeAdapter[WSClientMessage] = TypeAdapter(WSClientMess
 __all__ = [
     "send_auth_complete",
     "dispatch_messages",
+    "_record_ws_control",
+    "_record_ws_telemetry",
+    "_extract_client_provenance",
 ]
+
+
+def _extract_client_provenance(raw_payload: str | None) -> tuple[str | None, str | None]:
+    """Extract client_session_id and client_public_id from a raw JSON payload.
+
+    Parses the payload once and looks for ``session_id`` and ``public_id``
+    fields that the client may have stamped for causation linkage.
+
+    Args:
+        raw_payload: Raw JSON string from the client, or None.
+
+    Returns:
+        Tuple of (client_session_id, client_public_id). Both may be None
+        when the payload is missing, unparseable, or lacks provenance fields.
+    """
+    if raw_payload is None:
+        return None, None
+    try:
+        parsed: Any = json.loads(raw_payload)
+    except (json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+    client_sid: str | None = parsed.get("session_id") or None
+    client_pid: str | None = parsed.get("public_id") or None
+    return client_sid, client_pid
 
 
 async def _record_ws_control(
@@ -73,7 +107,8 @@ async def _record_ws_control(
     """Write a control row for a WebSocket event (non-blocking).
 
     Any DB failure is logged and swallowed so the WebSocket handler
-    is never disrupted.
+    is never disrupted.  Client provenance fields (``session_id`` and
+    ``public_id``) are extracted from the raw payload for causation linkage.
 
     Args:
         db_url: Database URL; skip recording when None.
@@ -86,6 +121,7 @@ async def _record_ws_control(
     if db_url is None:
         return
     try:
+        client_sid, client_pid = _extract_client_provenance(raw_payload)
         redacted = redact(raw_payload)
         repo = get_repository(db_url)
         now = datetime.now(UTC)
@@ -96,8 +132,8 @@ async def _record_ws_control(
             outcome=outcome,
             detail=detail,
             payload=redacted,
-            client_session_id=None,
-            client_public_id=None,
+            client_session_id=client_sid,
+            client_public_id=client_pid,
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("control"),
             timestamp=now,
@@ -107,6 +143,47 @@ async def _record_ws_control(
             await session.commit()
     except Exception as exc:
         logger.warning("WS control record write failed (non-blocking): {}", exc)
+
+
+async def _record_ws_telemetry(
+    db_url: str | None,
+    tracker: SequenceTracker,
+    message_type: str,
+    raw_payload: str | None = None,
+) -> None:
+    """Write a telemetry row for a data-plane WebSocket event (non-blocking).
+
+    The sequence counter always increments (via the tracker) regardless
+    of whether the row is actually persisted. Persistence is gated by the
+    ``telemetry_recording_enabled`` bootstrap setting.
+
+    Args:
+        db_url: Database URL; skip recording when None.
+        tracker: Sequence tracker for provenance fields.
+        message_type: Discriminator (e.g. ``ping``, ``pong``).
+        raw_payload: Optional raw message payload.
+    """
+    seq = tracker.next_sequence("telemetry")
+    settings = get_settings()
+    if db_url is None or not settings.telemetry_recording_enabled:
+        return
+    try:
+        repo = get_repository(db_url)
+        now = datetime.now(UTC)
+        row = Telemetry(
+            transport="ws",
+            direction="inbound",
+            message_type=message_type,
+            payload=raw_payload,
+            session_id=tracker.session_id,
+            sequence_id=seq,
+            timestamp=now,
+        )
+        async with repo.session() as session:
+            session.add(row)
+            await session.commit()
+    except Exception as exc:
+        logger.warning("WS telemetry record write failed (non-blocking): {}", exc)
 
 
 async def send_auth_complete(
@@ -224,13 +301,21 @@ async def _handle_one_message(
         )
         return success
     await _dispatch_single_message(websocket, parsed, manager, user)
-    await _record_ws_control(
-        db_url,
-        manager.tracker,
-        msg_type,
-        "ok",
-        raw_payload=raw_message,
-    )
+    if isinstance(parsed, WSPingRequest):
+        await _record_ws_telemetry(
+            db_url,
+            manager.tracker,
+            "ping",
+            raw_payload=raw_message,
+        )
+    else:
+        await _record_ws_control(
+            db_url,
+            manager.tracker,
+            msg_type,
+            "ok",
+            raw_payload=raw_message,
+        )
     return True
 
 

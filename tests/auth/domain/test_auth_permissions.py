@@ -57,6 +57,8 @@ def make_candle_envelope(
 ) -> CandleData:
     """Create a CandleData instance with configurable parameters."""
     return CandleData(
+        session_id="",
+        sequence_id=0,
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -119,8 +121,10 @@ class TestDispatcherReauthFailure:
         mock_user.role = "admin"
         mock_ws_auth_manager = MagicMock()
         mock_ws_token_service = MagicMock()
+        mock_manager.tracker.session_id = "test-session"
+        mock_manager.tracker.next_sequence.return_value = 1
         mock_websocket.receive_text.return_value = json.dumps(
-            {"type": "reauth", "ws_token": "invalid"}
+            {"type": "reauth", "session_id": "", "sequence_id": 0, "ws_token": "invalid"}
         )
         with patch(
             "snapper.interface.websocket.dispatcher.handle_reauth",

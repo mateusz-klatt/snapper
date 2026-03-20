@@ -144,7 +144,11 @@ def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
 def _complete_handshake(websocket: Any, ws_token: str) -> tuple[dict[str, Any], dict[str, Any]]:
     auth_required = _receive_json(websocket)
     assert auth_required["type"] == "auth_required"
-    websocket.send_text(json.dumps({"type": "authenticate", "ws_token": ws_token}))
+    websocket.send_text(
+        json.dumps(
+            {"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": ws_token}
+        )
+    )
     auth_ok = _receive_json(websocket)
     assert auth_ok["type"] == "auth_ok"
     auth_complete = _receive_json(websocket)
@@ -220,6 +224,8 @@ class TestSecureWebSocketIntegration:
                 json.dumps(
                     {
                         "type": "subscribe",
+                        "session_id": "",
+                        "sequence_id": 0,
                         "topics": [
                             "market.kraken.BTC-USD.candles.1m",
                             "signals.kraken.BTC-USD.live",
@@ -248,7 +254,7 @@ class TestSecureWebSocketIntegration:
         )
         with test_client.websocket_connect(WS_PATH) as websocket:
             _complete_handshake(websocket, ws_token)
-            websocket.send_text(json.dumps({"type": "ping"}))
+            websocket.send_text(json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}))
             response = _receive_json(websocket)
             assert response["type"] == "pong"
             assert "timestamp" in response
@@ -341,6 +347,8 @@ class TestSecureWebSocketViewer:
                 json.dumps(
                     {
                         "type": "subscribe",
+                        "session_id": "",
+                        "sequence_id": 0,
                         "topics": [
                             "market.kraken.BTC-USD.candles.1m",
                             "signals.kraken.BTC-USD.live",
@@ -456,7 +464,9 @@ def test_get_subscriptions_initial_state(test_client: Any) -> None:
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "get_subscriptions"}))
+        websocket.send_text(
+            json.dumps({"type": "get_subscriptions", "session_id": "", "sequence_id": 0})
+        )
         response = _receive_json(websocket)
         assert response["type"] == "subscriptions_list"
         assert response["subscriptions"] == []
@@ -481,6 +491,8 @@ def test_viewer_subscribe_partial_permissions(test_client: Any) -> None:
             json.dumps(
                 {
                     "type": "subscribe",
+                    "session_id": "",
+                    "sequence_id": 0,
                     "topics": ["market.kraken.BTC-USD.candles.1m", "signals.kraken.BTC-USD.live"],
                 }
             )
@@ -540,6 +552,8 @@ def test_unsubscribe_flow(test_client: Any) -> None:
             json.dumps(
                 {
                     "type": "subscribe",
+                    "session_id": "",
+                    "sequence_id": 0,
                     "topics": ["market.kraken.BTC-USD.candles.1m"],
                 }
             )
@@ -549,6 +563,8 @@ def test_unsubscribe_flow(test_client: Any) -> None:
             json.dumps(
                 {
                     "type": "unsubscribe",
+                    "session_id": "",
+                    "sequence_id": 0,
                     "topics": ["market.kraken.BTC-USD.candles.1m"],
                 }
             )
@@ -573,7 +589,7 @@ def test_ping_returns_pong(test_client: Any) -> None:
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "ping"}))
+        websocket.send_text(json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}))
         response = _receive_json(websocket)
         assert response["type"] == "pong"
         assert "timestamp" in response
@@ -593,10 +609,12 @@ def test_ping_then_get_subscriptions_loop_continuation(test_client: Any) -> None
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "ping"}))
+        websocket.send_text(json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}))
         pong_response = _receive_json(websocket)
         assert pong_response["type"] == "pong"
-        websocket.send_text(json.dumps({"type": "get_subscriptions"}))
+        websocket.send_text(
+            json.dumps({"type": "get_subscriptions", "session_id": "", "sequence_id": 0})
+        )
         subs_response = _receive_json(websocket)
         assert subs_response["type"] == "subscriptions_list"
 
@@ -642,7 +660,11 @@ def test_legacy_token_update_returns_error(test_client: Any) -> None:
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "token_update", "token": access_token}))
+        websocket.send_text(
+            json.dumps(
+                {"type": "token_update", "session_id": "", "sequence_id": 0, "token": access_token}
+            )
+        )
         response = _receive_json(websocket)
         assert response["type"] == "error"
         assert "Invalid message format" in response["message"]
@@ -662,7 +684,16 @@ def test_topic_suggestions_filtered_for_viewer(test_client: Any) -> None:
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "get_topic_suggestions", "prefix": "ord"}))
+        websocket.send_text(
+            json.dumps(
+                {
+                    "type": "get_topic_suggestions",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "prefix": "ord",
+                }
+            )
+        )
         response = _receive_json(websocket)
         assert response["type"] == "topic_suggestions"
         assert response["suggestions"] == []
@@ -682,7 +713,16 @@ def test_topic_suggestions_for_operator(test_client: Any) -> None:
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "get_topic_suggestions", "prefix": "sig"}))
+        websocket.send_text(
+            json.dumps(
+                {
+                    "type": "get_topic_suggestions",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "prefix": "sig",
+                }
+            )
+        )
         response = _receive_json(websocket)
         assert response["type"] == "topic_suggestions"
     assert any("signals" in s for s in response["suggestions"])
@@ -1126,7 +1166,7 @@ async def test_handshake_missing_ws_token() -> None:
         websocket = WebSocketStub(
             headers={"origin": "http://localhost:8000"},
             cookies={"access_token": "valid_token"},
-            messages=[json.dumps({"type": "authenticate"})],
+            messages=[json.dumps({"type": "authenticate", "session_id": "", "sequence_id": 0})],
         )
         endpoint = router.routes[0].endpoint
         await endpoint(websocket)
@@ -1164,7 +1204,16 @@ async def test_handshake_invalid_ws_token() -> None:
         websocket = WebSocketStub(
             headers={"origin": "http://localhost:8000"},
             cookies={"access_token": "valid_token"},
-            messages=[json.dumps({"type": "authenticate", "ws_token": "invalid_token"})],
+            messages=[
+                json.dumps(
+                    {
+                        "type": "authenticate",
+                        "session_id": "",
+                        "sequence_id": 0,
+                        "ws_token": "invalid_token",
+                    }
+                )
+            ],
         )
         with patch("snapper.server.authenticated_websocket.get_ws_token_service") as mock_token_svc:
             mock_token_service = MagicMock()
@@ -1194,7 +1243,14 @@ async def test_bridge_creation_when_manager_zmq_bridge_is_none() -> None:
         headers={"origin": "http://localhost:8000"},
         cookies={"access_token": "valid_token"},
         messages=[
-            json.dumps({"type": "authenticate", "ws_token": "valid_token"}),
+            json.dumps(
+                {
+                    "type": "authenticate",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "ws_token": "valid_token",
+                }
+            ),
             WebSocketDisconnect(),
         ],
     )
@@ -1280,7 +1336,14 @@ async def test_websocket_endpoint_handles_unexpected_exception() -> None:
                 headers={"origin": "http://localhost:8000"},
                 cookies={"access_token": "valid-token"},
                 messages=[
-                    json.dumps({"type": "authenticate", "ws_token": "valid_token"}),
+                    json.dumps(
+                        {
+                            "type": "authenticate",
+                            "session_id": "",
+                            "sequence_id": 0,
+                            "ws_token": "valid_token",
+                        }
+                    ),
                 ],
             )
             with patch(
@@ -1745,7 +1808,7 @@ async def test_ws_endpoint_requires_ws_token(
     monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
-        messages=['{"type": "authenticate"}'],
+        messages=['{"type": "authenticate", "session_id": "", "sequence_id": 0}'],
     )
     await endpoint(websocket)
     assert json.loads(websocket.sent[-1])["type"] == "auth_failed"
@@ -1787,7 +1850,9 @@ async def test_ws_endpoint_handles_token_replay(
     monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
-        messages=['{"type": "authenticate", "ws_token": "token"}'],
+        messages=[
+            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "token"}'
+        ],
     )
     await endpoint(websocket)
     assert json.loads(websocket.sent[-1])["type"] == "auth_failed"
@@ -1829,7 +1894,9 @@ async def test_ws_endpoint_handles_invalid_token(
     monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
-        messages=['{"type": "authenticate", "ws_token": "token"}'],
+        messages=[
+            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "token"}'
+        ],
     )
     await endpoint(websocket)
     assert websocket.closed[-1][1] == "Invalid ws_token"
@@ -1881,8 +1948,8 @@ async def test_ws_endpoint_success_and_reauth_flow(
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=[
-            '{"type": "authenticate", "ws_token": "valid-token"}',
-            '{"type": "reauth", "ws_token": "reauth-token"}',
+            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "valid-token"}',
+            '{"type": "reauth", "session_id": "", "sequence_id": 0, "ws_token": "reauth-token"}',
             WebSocketDisconnect(),
         ],
         settings=SimpleNamespace(ui_origin="https://ui.example/", session_domain="example.com "),
@@ -2099,7 +2166,7 @@ async def test_handle_get_topic_suggestions_filters_by_role() -> None:
         await HANDLE_GET_TOPIC_SUGGESTIONS(
             cast(Any, websocket),
             manager,
-            WSGetTopicSuggestionsRequest(prefix="m"),
+            WSGetTopicSuggestionsRequest(session_id="", sequence_id=0, prefix="m"),
             UserRole.VIEWER,
         )
     response = json.loads(websocket.sent[-1])
@@ -2136,7 +2203,9 @@ async def test_handle_subscribe_reports_invalid_topics() -> None:
     ):
         await HANDLE_SUBSCRIBE(
             cast(Any, websocket),
-            WSSubscribeRequest(topics=["market.kraken.BTC-USD.candles.1m"]),
+            WSSubscribeRequest(
+                session_id="", sequence_id=0, topics=["market.kraken.BTC-USD.candles.1m"]
+            ),
             manager,
             UserRole.OPERATOR,
         )
@@ -2174,7 +2243,9 @@ async def test_handle_subscribe_success_partial() -> None:
         await HANDLE_SUBSCRIBE(
             cast(Any, websocket),
             WSSubscribeRequest(
-                topics=["market.kraken.BTC-USD.candles.1m", "signals.kraken.BTC-USD.live"]
+                session_id="",
+                sequence_id=0,
+                topics=["market.kraken.BTC-USD.candles.1m", "signals.kraken.BTC-USD.live"],
             ),
             manager,
             UserRole.VIEWER,
@@ -2199,7 +2270,7 @@ async def test_handle_unsubscribe_handles_unknown() -> None:
     manager.set_subscriptions(websocket, {"known.topic"})
     await HANDLE_UNSUBSCRIBE(
         cast(Any, websocket),
-        WSUnsubscribeRequest(topics=["unknown.topic"]),
+        WSUnsubscribeRequest(session_id="", sequence_id=0, topics=["unknown.topic"]),
         manager,
     )
     response = json.loads(websocket.sent[-1])
@@ -2219,7 +2290,7 @@ async def test_handle_unsubscribe_success() -> None:
     manager.set_subscriptions(websocket, {"signals.kraken.BTC-USD.live"})
     await HANDLE_UNSUBSCRIBE(
         cast(Any, websocket),
-        WSUnsubscribeRequest(topics=["signals.kraken.BTC-USD.live"]),
+        WSUnsubscribeRequest(session_id="", sequence_id=0, topics=["signals.kraken.BTC-USD.live"]),
         manager,
     )
     response = json.loads(websocket.sent[-1])
@@ -2519,7 +2590,9 @@ class TestAuthenticateWebsocket:
             mock_user,
             mock_token_data,
         )
-        mock_websocket.receive_text.return_value = json.dumps({"type": "subscribe"})
+        mock_websocket.receive_text.return_value = json.dumps(
+            {"type": "subscribe", "session_id": "", "sequence_id": 0}
+        )
         result = await authenticate_websocket(
             mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
@@ -2546,7 +2619,9 @@ class TestAuthenticateWebsocket:
             mock_user,
             mock_token_data,
         )
-        mock_websocket.receive_text.return_value = json.dumps({"type": "authenticate"})
+        mock_websocket.receive_text.return_value = json.dumps(
+            {"type": "authenticate", "session_id": "", "sequence_id": 0}
+        )
         result = await authenticate_websocket(
             mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
         )
@@ -2574,7 +2649,12 @@ class TestAuthenticateWebsocket:
             mock_token_data,
         )
         mock_websocket.receive_text.return_value = json.dumps(
-            {"type": "authenticate", "ws_token": "already-used-token"}
+            {
+                "type": "authenticate",
+                "session_id": "",
+                "sequence_id": 0,
+                "ws_token": "already-used-token",
+            }
         )
         mock_ws_token_service.verify.side_effect = WsTokenAlreadyUsedError("Token replay")
         result = await authenticate_websocket(
@@ -2604,7 +2684,12 @@ class TestAuthenticateWebsocket:
             mock_token_data,
         )
         mock_websocket.receive_text.return_value = json.dumps(
-            {"type": "authenticate", "ws_token": "invalid-token"}
+            {
+                "type": "authenticate",
+                "session_id": "",
+                "sequence_id": 0,
+                "ws_token": "invalid-token",
+            }
         )
         mock_ws_token_service.verify.side_effect = WsTokenError("Invalid token")
         result = await authenticate_websocket(
@@ -2635,7 +2720,7 @@ class TestAuthenticateWebsocket:
             mock_token_data,
         )
         mock_websocket.receive_text.return_value = json.dumps(
-            {"type": "authenticate", "ws_token": "valid-token"}
+            {"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "valid-token"}
         )
         mock_ws_token_service.verify.return_value = mock_ws_payload
         result = await authenticate_websocket(
@@ -2674,7 +2759,7 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Closes connection with Missing session state reason.
         """
-        message = WSReauthRequest(ws_token="some-token")
+        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="some-token")
         mock_ws_auth_manager.get_state.return_value = None
         result = await handle_reauth(
             mock_websocket,
@@ -2702,7 +2787,7 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Closes connection with ws_token replay reason.
         """
-        message = WSReauthRequest(ws_token="reused-token")
+        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="reused-token")
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
@@ -2733,7 +2818,7 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Closes connection with Invalid ws_token reason.
         """
-        message = WSReauthRequest(ws_token="invalid-token")
+        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="invalid-token")
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
@@ -2765,7 +2850,7 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Updates state and sends reauth_ok message.
         """
-        message = WSReauthRequest(ws_token="new-valid-token")
+        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="new-valid-token")
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state

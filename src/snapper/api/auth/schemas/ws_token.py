@@ -6,6 +6,7 @@ for secure WebSocket connection establishment.
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from pydantic import ConfigDict
 
@@ -20,6 +21,7 @@ class WsTokenPayload(StrictApiSchema):
     Contains claims for a single-use WebSocket connection token.
 
     Attributes:
+        type: Payload item type discriminator.
         purpose: Token purpose (must be 'ws_connect').
         sub: Subject (user ID).
         sid_hash: SHA-256 hash of the session ID.
@@ -28,6 +30,7 @@ class WsTokenPayload(StrictApiSchema):
         jti: Unique token identifier for replay prevention.
     """
 
+    type: Literal["ws_token_payload"] = "ws_token_payload"
     purpose: str
     sub: str
     sid_hash: str

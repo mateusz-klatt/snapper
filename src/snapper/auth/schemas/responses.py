@@ -5,6 +5,7 @@ API responses.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from snapper.api.schemas.base import StrictApiSchema
 from snapper.auth.schemas.user import UserProfile
@@ -16,11 +17,13 @@ class LoginResponse(StrictApiSchema):
     Returned after successful authentication.
 
     Attributes:
+        type: Payload item type discriminator.
         message: Success message.
         expires_in: Access token TTL in seconds.
         user: Authenticated user profile.
     """
 
+    type: Literal["login_response"] = "login_response"
     message: str
     expires_in: int
     user: UserProfile
@@ -32,6 +35,7 @@ class RefreshResponse(StrictApiSchema):
     Returned after successful token refresh.
 
     Attributes:
+        type: Payload item type discriminator.
         message: Success message.
         ws_token: New WebSocket authentication token.
         ws_token_exp: WebSocket token expiration time.
@@ -39,6 +43,7 @@ class RefreshResponse(StrictApiSchema):
         user: User profile.
     """
 
+    type: Literal["refresh_response"] = "refresh_response"
     message: str
     ws_token: str
     ws_token_exp: datetime
@@ -52,9 +57,11 @@ class UserListResponse(StrictApiSchema):
     Returned by user listing endpoints.
 
     Attributes:
+        type: Payload item type discriminator.
         users: List of user profiles.
         total_count: Total number of users.
     """
 
+    type: Literal["user_list"] = "user_list"
     users: list[UserProfile]
     total_count: int

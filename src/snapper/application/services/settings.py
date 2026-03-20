@@ -294,6 +294,8 @@ class SettingsService:
             logger.warning("ZMQ publisher not available, skipping broadcast")
             return
         envelope = SettingChangedData(
+            session_id="",
+            sequence_id=0,
             key=key,
             value=value,
             category=category,

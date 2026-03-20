@@ -141,7 +141,9 @@ class WsTokenService:
             jti=uuid.uuid4().hex,
         )
         token = jwt.encode(
-            payload.model_dump(),
+            payload.model_dump(
+                exclude={"public_id", "timestamp", "session_id", "sequence_id", "type"}
+            ),
             self.settings.auth_secret_key,
             algorithm=self.settings.auth_algorithm,
         )

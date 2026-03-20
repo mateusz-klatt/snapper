@@ -505,6 +505,8 @@ class BaseStrategy(ABC):
         if not self.msg_publisher:
             await self._setup_publisher()
         signal_envelope = SignalData(
+            session_id="",
+            sequence_id=0,
             instrument=signal.instrument,
             side=signal.side,
             strength=signal.strength,

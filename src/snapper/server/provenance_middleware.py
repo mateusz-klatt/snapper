@@ -1,4 +1,4 @@
-"""Server-side client provenance validation and control recording middleware.
+"""Server-side client provenance validation and control/telemetry recording middleware.
 
 Observability-first middleware that logs client provenance fields
 (public_id, session_id, sequence_id) on mutation requests and detects
@@ -9,6 +9,10 @@ Additionally records every mutation request to the ``control`` table for
 audit purposes. The control write is non-blocking: any DB failure is
 logged and swallowed so the response already sent to the client is never
 invalidated.
+
+GET requests are optionally recorded to the ``telemetry`` table when
+``telemetry.recording_enabled`` is True in application settings. Telemetry
+rows carry server-side provenance (server session_id + sequence_id).
 
 The middleware inspects POST, PUT, DELETE, and PATCH requests that carry
 a JSON body with provenance fields from StrictDataSchema.
@@ -28,6 +32,7 @@ from starlette.types import Send
 
 from snapper.core.redact import redact
 from snapper.data.models import Control
+from snapper.data.models import Telemetry
 from snapper.data.repository import get_repository
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -45,6 +50,10 @@ class ClientProvenanceMiddleware:
     2. Runs a per-session_id GapDetector to warn on sequence gaps.
     3. Writes a row to the ``control`` table with redacted payload.
 
+    GET requests are optionally recorded to the ``telemetry`` table when
+    ``telemetry_enabled`` is True. Telemetry rows carry server-side
+    provenance (server session_id + sequence_id).
+
     Non-mutation requests and bodies without provenance fields pass through
     without any processing overhead beyond method check.
 
@@ -54,25 +63,45 @@ class ClientProvenanceMiddleware:
     Attributes:
         app: The wrapped ASGI application.
         gap_detectors: Per-session GapDetector instances.
-        tracker: Sequence tracker for control-table provenance.
-        db_url: Database URL for control recording (may be None).
+        tracker: Sequence tracker for control/telemetry provenance.
+        db_url: Database URL for control/telemetry recording (may be None).
+        telemetry_enabled: Whether GET telemetry recording is active.
     """
 
-    def __init__(self, app: ASGIApp, db_url: str | None = None) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        db_url: str | None = None,
+        telemetry_enabled: bool = False,
+        gap_detectors: dict[str, GapDetector] | None = None,
+    ) -> None:
         """Initialize middleware wrapping the given ASGI app.
 
         Args:
             app: The ASGI application to wrap.
             db_url: Optional database URL. When provided the middleware
-                records mutation requests to the control table.
+                records mutation requests to the control table and
+                (when enabled) GET requests to the telemetry table.
+            telemetry_enabled: Whether to record GET requests to the
+                telemetry table. Defaults to False.
+            gap_detectors: Optional shared dictionary for per-session
+                gap detectors. When provided, the health endpoint can
+                read REST client gap stats from this dict.
         """
         self.app = app
-        self.gap_detectors: dict[str, GapDetector] = {}
+        self.gap_detectors: dict[str, GapDetector] = (
+            gap_detectors if gap_detectors is not None else {}
+        )
         self.tracker = SequenceTracker()
         self.db_url = db_url
+        self.telemetry_enabled = telemetry_enabled
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Process an ASGI request, logging provenance for mutations.
+
+        For mutations (POST/PUT/DELETE/PATCH), inspects the body for
+        provenance and records to the control table. For GET requests,
+        records to the telemetry table when telemetry is enabled.
 
         Args:
             scope: ASGI connection scope.
@@ -87,9 +116,55 @@ class ClientProvenanceMiddleware:
         method_bytes = method.encode() if isinstance(method, str) else method
 
         if method_bytes not in _MUTATION_METHODS:
-            await self.app(scope, receive, send)
+            await self._handle_non_mutation(scope, receive, send, method_bytes)
             return
 
+        await self._handle_mutation(scope, receive, send, method)
+
+    async def _handle_non_mutation(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        method_bytes: bytes,
+    ) -> None:
+        """Route non-mutation requests, optionally recording telemetry.
+
+        GET requests are recorded to the telemetry table when both
+        ``telemetry_enabled`` and ``db_url`` are set. All other
+        non-mutation methods pass through without overhead.
+
+        Args:
+            scope: ASGI connection scope.
+            receive: ASGI receive callable.
+            send: ASGI send callable.
+            method_bytes: HTTP method as bytes.
+        """
+        if method_bytes == b"GET" and self.telemetry_enabled and self.db_url:
+            await self.app(scope, receive, send)
+            path: str = scope.get("path", "")
+            await self._record_telemetry(path=path)
+        else:
+            await self.app(scope, receive, send)
+
+    async def _handle_mutation(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        method: str | bytes,
+    ) -> None:
+        """Handle a mutation request with body interception and control recording.
+
+        Wraps receive/send to capture body and status code, then records
+        the control row after the response is sent.
+
+        Args:
+            scope: ASGI connection scope.
+            receive: ASGI receive callable.
+            send: ASGI send callable.
+            method: HTTP method (str or bytes).
+        """
         body_chunks: list[bytes] = []
         status_code: int = 200
         outcome = "ok"
@@ -226,3 +301,33 @@ class ClientProvenanceMiddleware:
                 await session.commit()
         except Exception as exc:
             logger.warning("Control record write failed (non-blocking): {}", exc)
+
+    async def _record_telemetry(self, path: str) -> None:
+        """Persist a telemetry row for a GET request.
+
+        Records transport, direction, and message_type using server-side
+        provenance (server session_id + sequence_id). Any failure is logged
+        and swallowed so it never affects the response.
+
+        Args:
+            path: Request URL path.
+        """
+        if self.db_url is None:
+            return
+        try:
+            repo = get_repository(self.db_url)
+            now = datetime.now(UTC)
+            row = Telemetry(
+                transport="rest",
+                direction="inbound",
+                message_type=f"GET {path}",
+                payload=None,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("telemetry"),
+                timestamp=now,
+            )
+            async with repo.session() as session:
+                session.add(row)
+                await session.commit()
+        except Exception as exc:
+            logger.warning("Telemetry record write failed (non-blocking): {}", exc)
