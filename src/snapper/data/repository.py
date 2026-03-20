@@ -438,15 +438,6 @@ class SQLAlchemyRepository(Repository):
         """Return the database dialect name."""
         return self.engine.url.get_dialect().name
 
-    def __del__(self) -> None:
-        """Avoid implicit async-engine disposal during garbage collection.
-
-        Async engine disposal must happen through explicit lifecycle hooks that can
-        await cleanup. Triggering sync disposal from ``__del__`` can race with
-        event-loop shutdown and produce nondeterministic aiosqlite thread errors.
-        """
-        return
-
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
         """Provide async session with automatic rollback on error."""

@@ -960,15 +960,14 @@ def test_database_repository_del_without_engine() -> None:
     DatabaseRepository.__del__(repo)
 
 
-def test_sqlalchemy_repository_del_without_engine() -> None:
-    """Test SQLAlchemyRepository.__del__ tolerates missing engine attribute.
+def test_sqlalchemy_repository_has_no_custom_del() -> None:
+    """Test SQLAlchemyRepository does not define custom garbage-collection cleanup.
 
-    Given: A partially initialized async repository without an engine,
-    When: __del__ is invoked,
-    Then: No exception is raised.
+    Given: Async repository cleanup is handled through explicit lifecycle hooks,
+    When: Inspecting SQLAlchemyRepository,
+    Then: It does not expose a custom ``__del__`` implementation.
     """
-    repo = SQLAlchemyRepository.__new__(SQLAlchemyRepository)
-    SQLAlchemyRepository.__del__(repo)
+    assert "__del__" not in SQLAlchemyRepository.__dict__
 
 
 def test_get_repository_caches_by_url(monkeypatch: pytest.MonkeyPatch) -> None:
