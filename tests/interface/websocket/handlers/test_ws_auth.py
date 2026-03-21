@@ -2900,8 +2900,6 @@ class StubTokenManager:
     def __init__(self) -> None:
         """Initialize the instance."""
         self.create_tokens_response = TokenPair(
-            session_id="test-sid",
-            sequence_id=1,
             access_token="access-token",
             refresh_token="refresh-token",
             expires_in=900,
@@ -3075,8 +3073,6 @@ def test_login_success_sets_cookies(
     user_service.authenticated_user = user
     csrf_manager.token = "csrf-new"
     token_manager.create_tokens_response = TokenPair(
-        session_id="test-sid",
-        sequence_id=1,
         access_token="new-access",
         refresh_token="new-refresh",
         expires_in=600,
@@ -3138,8 +3134,6 @@ def test_refresh_token_success(
     user = UserProfile(session_id="test-sid", sequence_id=1, username="bob", role=UserRole.OPERATOR)
     user_service.user_by_id = user
     token_manager.create_tokens_response = TokenPair(
-        session_id="test-sid",
-        sequence_id=1,
         access_token="rotated-access",
         refresh_token="rotated-refresh",
         expires_in=999,

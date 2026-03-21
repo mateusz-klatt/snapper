@@ -146,8 +146,6 @@ class TokenManager:
         )
         logger.info(f"Created token pair for user {user.username} (remember_me={remember_me})")
         return TokenPair(
-            session_id="",
-            sequence_id=0,
             access_token=access_token,
             refresh_token=refresh_token,
             expires_in=int(access_token_expires.total_seconds()),

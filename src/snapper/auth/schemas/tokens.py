@@ -4,12 +4,9 @@ This module defines Pydantic schemas for JWT token claims
 and token pair responses.
 """
 
-from typing import Literal
-
 from pydantic import BaseModel
 from pydantic import ConfigDict
 
-from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
@@ -43,21 +40,21 @@ class TokenClaims(BaseModel):
     sid: str
 
 
-class TokenPair(StrictDataSchema):
-    """Token pair response schema.
+class TokenPair(BaseModel):
+    """Internal token pair DTO.
 
-    Returned after successful authentication containing both
-    access and refresh tokens.
+    Carries access and refresh token strings between token manager
+    and route handlers. Not a transport payload — never sent directly
+    in REST/WS/ZMQ responses. Token strings are extracted and set
+    as HTTP cookies by the route handler.
 
     Attributes:
-        type: Payload item type discriminator.
         access_token: Short-lived JWT for API access.
         refresh_token: Long-lived JWT for token renewal.
         token_type: Token type (always "bearer").
         expires_in: Access token TTL in seconds.
     """
 
-    type: Literal["token_pair"] = "token_pair"
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
