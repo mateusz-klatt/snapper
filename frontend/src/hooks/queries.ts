@@ -20,6 +20,7 @@ import type {
   SettingResponse,
   SettingUpdate,
   UserListResponse,
+  UserResponse,
   CreateUserRequest,
   UpdateUserRequest,
   AdminResetPasswordRequest,
@@ -110,7 +111,7 @@ export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: 
   const { isAuthenticated } = useAuth()
   const selectOrders = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getOrders>>) =>
-      data.items.map(safeOrderFromAPI).filter((o): o is NonNullable<typeof o> => o !== null),
+      data.payload.map(safeOrderFromAPI).filter((o): o is NonNullable<typeof o> => o !== null),
     []
   )
 
@@ -127,7 +128,7 @@ export const useExecutions = (filters?: { limit?: number }) => {
   const { isAuthenticated } = useAuth()
   const selectExecutions = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getExecutions>>) =>
-      data.items.map(safeExecutionFromAPI).filter((e): e is NonNullable<typeof e> => e !== null),
+      data.payload.map(safeExecutionFromAPI).filter((e): e is NonNullable<typeof e> => e !== null),
     []
   )
 
@@ -148,7 +149,7 @@ const usePositions = () => {
     queryFn: async () => {
       const data = await apiClient.getPositions()
 
-      return data.items.map(positionFromAPI)
+      return data.payload.map(positionFromAPI)
     },
     refetchInterval: isAuthenticated ? 10000 : false,
     enabled: isAuthenticated,
@@ -165,7 +166,7 @@ export const useSignals = (
   const { isAuthenticated } = useAuth()
   const selectSignals = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getSignals>>) =>
-      data.items.map(safeSignalFromAPI).filter((s): s is NonNullable<typeof s> => s !== null),
+      data.payload.map(safeSignalFromAPI).filter((s): s is NonNullable<typeof s> => s !== null),
     []
   )
 
@@ -367,7 +368,7 @@ export const useSettings = (category?: string) => {
   return useQuery({
     queryKey: queryKeys.settings(category),
     queryFn: () => apiClient.getSettings(category),
-    select: data => data.items,
+    select: data => data.payload,
     enabled: isAuthenticated,
     throwOnError: false,
   })
@@ -398,7 +399,7 @@ export const useUpdateSetting = () => {
 export const useDeleteSetting = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<{ message: string }, Error, string>({
+  return useMutation<{ payload: string }, Error, string>({
     mutationFn: key => apiClient.deleteSetting(key),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings'] })
@@ -420,7 +421,7 @@ export const useUsers = (includeInactive: boolean) => {
 export const useCreateUser = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<{ message: string }, Error, CreateUserRequest>({
+  return useMutation<UserResponse, Error, CreateUserRequest>({
     mutationFn: data => apiClient.createUser(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
@@ -431,7 +432,7 @@ export const useCreateUser = () => {
 export const useUpdateUser = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<{ message: string }, Error, { userId: string; data: UpdateUserRequest }>({
+  return useMutation<UserResponse, Error, { userId: string; data: UpdateUserRequest }>({
     mutationFn: ({ userId, data }) => apiClient.updateUser(userId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
@@ -442,7 +443,7 @@ export const useUpdateUser = () => {
 export const useDeactivateUser = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<{ message: string }, Error, string>({
+  return useMutation<{ payload: string }, Error, string>({
     mutationFn: userId => apiClient.deactivateUser(userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
@@ -454,7 +455,7 @@ export const useAdminResetPassword = () => {
   const queryClient = useQueryClient()
 
   return useMutation<
-    { message: string },
+    { payload: string },
     Error,
     { userId: string; data: AdminResetPasswordRequest }
   >({
@@ -467,7 +468,7 @@ export const useAdminResetPassword = () => {
 
 export const useChangePassword = () =>
   useMutation<
-    { message: string },
+    { payload: string },
     Error,
     { userId: string; currentPassword: string; newPassword: string }
   >({

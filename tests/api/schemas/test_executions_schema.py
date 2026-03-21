@@ -45,7 +45,7 @@ class TestDatabaseEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "order_list"
-        assert isinstance(data["items"], list)
+        assert isinstance(data["payload"], list)
 
     def test_get_orders_with_parameters(self) -> None:
         """Verify GET /orders accepts query parameters.
@@ -58,7 +58,7 @@ class TestDatabaseEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "order_list"
-        assert isinstance(data["items"], list)
+        assert isinstance(data["payload"], list)
 
     def test_get_signals_endpoint_basic(self) -> None:
         """Verify GET /signals endpoint returns 200 with wrapped list.
@@ -71,7 +71,7 @@ class TestDatabaseEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "signal_list"
-        assert isinstance(data["items"], list)
+        assert isinstance(data["payload"], list)
 
     def test_get_signals_with_parameters(self) -> None:
         """Verify GET /signals accepts query parameters.
@@ -86,7 +86,7 @@ class TestDatabaseEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "signal_list"
-        assert isinstance(data["items"], list)
+        assert isinstance(data["payload"], list)
 
     def test_get_executions_endpoint_basic(self) -> None:
         """Verify GET /executions endpoint returns 200 with wrapped list.
@@ -99,7 +99,7 @@ class TestDatabaseEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "execution_list"
-        assert isinstance(data["items"], list)
+        assert isinstance(data["payload"], list)
 
     def test_get_executions_with_parameters(self) -> None:
         """Verify GET /executions accepts limit parameter.
@@ -112,7 +112,7 @@ class TestDatabaseEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "execution_list"
-        assert isinstance(data["items"], list)
+        assert isinstance(data["payload"], list)
 
     def test_get_positions_endpoint_basic(self) -> None:
         """Verify GET /positions endpoint returns 200 with wrapped list.
@@ -125,7 +125,7 @@ class TestDatabaseEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "position_list"
-        assert isinstance(data["items"], list)
+        assert isinstance(data["payload"], list)
 
     def test_dependency_injection_is_used(self) -> None:
         """Verify endpoints use injected repository dependency.

@@ -119,7 +119,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: [] },
+      data: { payload: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -140,7 +140,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -161,7 +161,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -182,7 +182,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -202,7 +202,7 @@ describe('Strategies', () => {
 
     vi.mocked(useAvailableProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'strategy_macd',
             class_path: 'snapper.strategy_macd',
@@ -234,7 +234,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -255,7 +255,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -278,7 +278,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -303,7 +303,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -327,7 +327,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -371,7 +371,7 @@ describe('Strategies', () => {
     const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -413,7 +413,7 @@ describe('Strategies', () => {
     const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -454,7 +454,7 @@ describe('Strategies', () => {
       await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -510,7 +510,7 @@ describe('Strategies', () => {
     const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -549,7 +549,7 @@ describe('Strategies', () => {
     const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -588,7 +588,7 @@ describe('Strategies', () => {
     const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -627,7 +627,7 @@ describe('Strategies', () => {
     const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -667,7 +667,7 @@ describe('Strategies', () => {
       await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -724,7 +724,7 @@ describe('Strategies', () => {
     const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -763,7 +763,7 @@ describe('Strategies', () => {
     const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -820,7 +820,7 @@ describe('Strategies', () => {
 
     vi.mocked(useAvailableProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'strategy_macd',
             class_path: 'snapper.strategy_macd',
@@ -898,7 +898,7 @@ describe('Strategies', () => {
 
     vi.mocked(useAvailableProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'strategy_macd',
             class_path: 'snapper.strategy_macd',
@@ -970,7 +970,7 @@ describe('Strategies', () => {
 
     vi.mocked(useAvailableProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'strategy_macd',
             class_path: 'snapper.strategy_macd',
@@ -1037,7 +1037,7 @@ describe('Strategies', () => {
 
     vi.mocked(useAvailableProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'strategy_macd',
             class_path: 'snapper.strategy_macd',
@@ -1102,7 +1102,7 @@ describe('Strategies', () => {
     const { useStrategies, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1141,7 +1141,7 @@ describe('Strategies', () => {
     const { useStrategies, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1180,7 +1180,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1213,7 +1213,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1238,7 +1238,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1263,7 +1263,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1292,7 +1292,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1320,7 +1320,7 @@ describe('Strategies', () => {
     vi.mocked(useStrategies).mockImplementation(
       () =>
         ({
-          data: { items: mockStrategies },
+          data: { payload: mockStrategies },
           isLoading: false,
           refetch: vi.fn(),
         }) as never
@@ -1407,7 +1407,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1424,7 +1424,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: [] },
+      data: { payload: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1446,7 +1446,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1471,7 +1471,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1504,7 +1504,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1529,7 +1529,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1555,7 +1555,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1586,7 +1586,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1620,7 +1620,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1650,7 +1650,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1685,7 +1685,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1710,7 +1710,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: [] },
+      data: { payload: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1744,7 +1744,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: mockStrategies },
+      data: { payload: mockStrategies },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1769,7 +1769,7 @@ describe('Strategies', () => {
     const { useStrategies } = await import('../../hooks/queries')
 
     vi.mocked(useStrategies).mockReturnValue({
-      data: { items: [] },
+      data: { payload: [] },
       isLoading: false,
       refetch: vi.fn(),
     } as never)

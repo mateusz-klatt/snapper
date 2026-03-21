@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
@@ -323,18 +324,16 @@ class AvailableProcess(StrictDataSchema):
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
 
 
-class AvailableProcessesResponse(StrictDataSchema):
+class AvailableProcessesResponse(PayloadListResponse[AvailableProcess]):
     """Available processes list response schema.
 
     Attributes:
         type: Payload item type discriminator.
-        items: List of available process templates.
+        payload: List of available process templates.
         count: Total number of available processes.
     """
 
     type: Literal["available_processes"] = "available_processes"
-    items: list[AvailableProcess]
-    count: int
 
 
 class ConfiguredProcess(StrictDataSchema):
@@ -379,18 +378,16 @@ class ConfiguredProcess(StrictDataSchema):
     active_public_id: str | None = Field(None, description="Active public ID if running")
 
 
-class ConfiguredProcessesResponse(StrictDataSchema):
+class ConfiguredProcessesResponse(PayloadListResponse[ConfiguredProcess]):
     """Configured processes list response schema.
 
     Attributes:
         type: Payload item type discriminator.
-        items: List of configured processes.
+        payload: List of configured processes.
         count: Total number of configured processes.
     """
 
     type: Literal["configured_processes"] = "configured_processes"
-    items: list[ConfiguredProcess]
-    count: int
 
 
 class ProcessCategoryCount(StrictDataSchema):
@@ -443,18 +440,16 @@ class StrategyProcess(StrictDataSchema):
     mode: ProcessMode = Field(description="Execution mode (thread/process)")
 
 
-class StrategyListResponse(StrictDataSchema):
+class StrategyListResponse(PayloadListResponse[StrategyProcess]):
     """Strategy processes list response.
 
     Attributes:
         type: Payload item type discriminator.
-        items: List of strategy processes.
+        payload: List of strategy processes.
         count: Total number of strategies.
     """
 
     type: Literal["strategy_list"] = "strategy_list"
-    items: list[StrategyProcess]
-    count: int
 
 
 class ProcessCreatedInfo(StrictDataSchema):
@@ -549,18 +544,16 @@ class ProcessRun(StrictDataSchema):
     completed_at: str | None = Field(None, description="Completion time if finished")
 
 
-class ProcessRunsResponse(StrictDataSchema):
+class ProcessRunsResponse(PayloadListResponse[ProcessRun]):
     """Process runs list response schema.
 
     Attributes:
         type: Payload item type discriminator.
-        items: List of process runs.
+        payload: List of process runs.
         count: Total number of runs.
     """
 
     type: Literal["process_runs"] = "process_runs"
-    items: list[ProcessRun]
-    count: int
 
 
 class ProcessRuntimeStatus(StrictDataSchema):

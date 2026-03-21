@@ -56,9 +56,9 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
         result = await get_current_user_profile(
             request=_make_rest_request(), current_user=principal
         )
-    assert result.user is expected_profile
-    assert result.user.username == "testuser"
-    assert result.user.role == UserRole.VIEWER
+    assert result.payload is expected_profile
+    assert result.payload.username == "testuser"
+    assert result.payload.role == UserRole.VIEWER
     mock_service.get_user_by_id.assert_awaited_once_with("testuser")
 
 

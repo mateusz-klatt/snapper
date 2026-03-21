@@ -316,7 +316,7 @@ class APIClient {
 
     const data = await response.json()
 
-    return data.items ?? []
+    return data.payload ?? []
   }
   async getOrders(
     symbol?: string,
@@ -392,14 +392,14 @@ class APIClient {
     const data = await this.getJSON('/api/settings/categories')
     const response = validateResponse(data, SettingCategoriesResponseSchema, '/settings/categories')
 
-    return response.categories
+    return response.payload
   }
   async updateSetting(key: string, data: SettingUpdate): Promise<SettingResponse> {
     const response = await this.putJSON(`/api/settings/${encodeURIComponent(key)}`, data)
 
     return validateResponse(response, SettingResponseSchema, '/settings/:key')
   }
-  async deleteSetting(key: string): Promise<{ message: string }> {
+  async deleteSetting(key: string): Promise<{ payload: string }> {
     const data = await this.deleteJSON(`/api/settings/${encodeURIComponent(key)}`)
 
     return validateResponse(data, MessageResponseSchema, '/settings/:key DELETE')
@@ -464,7 +464,7 @@ class APIClient {
     userId: string,
     currentPassword: string,
     newPassword: string
-  ): Promise<{ message: string }> {
+  ): Promise<{ payload: string }> {
     const body: ChangePasswordRequest = {
       current_password: currentPassword,
       new_password: newPassword,
@@ -491,7 +491,7 @@ class APIClient {
 
     return validateResponse(data, UserResponseSchema, '/auth/users/:id PUT')
   }
-  async deactivateUser(userId: string): Promise<{ message: string }> {
+  async deactivateUser(userId: string): Promise<{ payload: string }> {
     const data = await this.deleteJSON(`/api/auth/users/${encodeURIComponent(userId)}`)
 
     return validateResponse(data, MessageResponseSchema, '/auth/users/:id DELETE')
@@ -499,7 +499,7 @@ class APIClient {
   async adminResetPassword(
     userId: string,
     body: AdminResetPasswordRequest
-  ): Promise<{ message: string }> {
+  ): Promise<{ payload: string }> {
     const data = await this.postJSON(
       `/api/auth/users/${encodeURIComponent(userId)}/admin-reset-password`,
       body

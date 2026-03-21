@@ -1455,7 +1455,7 @@ class TestProcessRoutesListRuns:
             _user=MagicMock(),
         )
         assert result.count == 2
-        assert len(result.items) == 2
+        assert len(result.payload) == 2
         mock_factory.get_recent_runs.assert_awaited_once_with(limit=50, name=None)
 
     @pytest.mark.asyncio

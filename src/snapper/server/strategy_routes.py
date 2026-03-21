@@ -67,7 +67,7 @@ async def list_strategies(
         if config.role is ProcessRoleEnum.STRATEGY
     ]
     return StrategyListResponse(
-        items=strategies,
+        payload=strategies,
         count=len(strategies),
         session_id=sid,
         sequence_id=tracker.next_sequence(_REST_STREAM),

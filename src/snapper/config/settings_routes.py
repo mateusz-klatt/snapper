@@ -105,7 +105,7 @@ async def get_all_settings(
             session_id=sid,
             sequence_id=seq,
             timestamp=ts,
-            items=items,
+            payload=items,
             count=len(items),
         )
 
@@ -139,7 +139,8 @@ async def get_setting_categories(
             session_id=sid,
             sequence_id=seq,
             timestamp=ts,
-            categories=sorted(categories),
+            payload=sorted(categories),
+            count=len(categories),
         )
 
 
@@ -205,7 +206,7 @@ async def update_setting(
             session_id=sid,
             sequence_id=seq,
             timestamp=ts,
-            setting=setting_read,
+            payload=setting_read,
         )
 
 
@@ -243,7 +244,7 @@ async def delete_setting(
         await session.commit()
     tracker: SequenceTracker = request.app.state.rest_tracker
     return MessageResponse(
-        message=f"Setting '{key}' deleted successfully",
+        payload=f"Setting '{key}' deleted successfully",
         session_id=tracker.session_id,
         sequence_id=tracker.next_sequence(_REST_STREAM),
     )

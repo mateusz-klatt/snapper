@@ -562,7 +562,7 @@ describe('domain API methods', () => {
         type: 'candle_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'candle',
             session_id: '',
@@ -630,7 +630,7 @@ describe('domain API methods', () => {
         type: 'order_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'order',
             session_id: '',
@@ -654,7 +654,7 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.getOrders('BTC/USD', 50, 10)
 
-    expect(result.items).toHaveLength(1)
+    expect(result.payload).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('symbol=BTC%2FUSD'),
       expect.any(Object)
@@ -668,7 +668,7 @@ describe('domain API methods', () => {
         type: 'order_list',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -686,7 +686,7 @@ describe('domain API methods', () => {
         type: 'execution_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'execution',
             session_id: '',
@@ -708,7 +708,7 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.getExecutions(50)
 
-    expect(result.items).toHaveLength(1)
+    expect(result.payload).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=50'), expect.any(Object))
   })
   it('getExecutions uses default limit', async () => {
@@ -719,7 +719,7 @@ describe('domain API methods', () => {
         type: 'execution_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'execution',
             session_id: '',
@@ -741,7 +741,7 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.getExecutions()
 
-    expect(result.items).toHaveLength(1)
+    expect(result.payload).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=100'), expect.any(Object))
   })
   it('getPositions returns positions', async () => {
@@ -752,7 +752,7 @@ describe('domain API methods', () => {
         type: 'position_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'position',
             session_id: '',
@@ -771,7 +771,7 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.getPositions()
 
-    expect(result.items).toHaveLength(1)
+    expect(result.payload).toHaveLength(1)
   })
   it('getSignals returns signals with optional filters', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -781,7 +781,7 @@ describe('domain API methods', () => {
         type: 'signal_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'signal',
             session_id: '',
@@ -801,7 +801,7 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.getSignals('momentum', 50, 'BTC/USD', 48)
 
-    expect(result.items).toHaveLength(1)
+    expect(result.payload).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('strategy=momentum'),
       expect.any(Object)
@@ -815,7 +815,7 @@ describe('domain API methods', () => {
         type: 'signal_list',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -835,7 +835,7 @@ describe('domain API methods', () => {
         type: 'signal_list',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -852,7 +852,7 @@ describe('domain API methods', () => {
         type: 'order_list',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -869,13 +869,13 @@ describe('domain API methods', () => {
         type: 'exchange_list',
         session_id: '',
         sequence_id: 0,
-        items: ['kraken', 'binance'],
+        payload: ['kraken', 'binance'],
         count: 2,
       }),
     })
     const result = await apiClient.getExchanges()
 
-    expect(result.items).toEqual(['kraken', 'binance'])
+    expect(result.payload).toEqual(['kraken', 'binance'])
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/exchanges'),
       expect.any(Object)
@@ -889,13 +889,13 @@ describe('domain API methods', () => {
         type: 'instrument_list',
         session_id: '',
         sequence_id: 0,
-        items: ['BTC/USD', 'ETH/USD'],
+        payload: ['BTC/USD', 'ETH/USD'],
         count: 2,
       }),
     })
     const result = await apiClient.getExchangeInstruments('kraken')
 
-    expect(result.items).toEqual(['BTC/USD', 'ETH/USD'])
+    expect(result.payload).toEqual(['BTC/USD', 'ETH/USD'])
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/exchanges/kraken/instruments'),
       expect.any(Object)
@@ -909,7 +909,7 @@ describe('domain API methods', () => {
         type: 'setting_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'setting_read',
             session_id: '',
@@ -925,7 +925,7 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.getSettings('trading')
 
-    expect(result.items).toHaveLength(1)
+    expect(result.payload).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('category=trading'),
       expect.any(Object)
@@ -939,7 +939,7 @@ describe('domain API methods', () => {
         type: 'setting_list',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -957,7 +957,8 @@ describe('domain API methods', () => {
         type: 'setting_categories',
         session_id: '',
         sequence_id: 0,
-        categories: ['trading', 'system'],
+        payload: ['trading', 'system'],
+        count: 2,
       }),
     })
     const result = await apiClient.getSettingCategories()
@@ -972,7 +973,7 @@ describe('domain API methods', () => {
         type: 'setting_response',
         session_id: '',
         sequence_id: 0,
-        setting: {
+        payload: {
           type: 'setting_read',
           session_id: '',
           sequence_id: 0,
@@ -988,8 +989,8 @@ describe('domain API methods', () => {
       category: 'general',
     })
 
-    expect(result.setting.key).toBe('setting1')
-    expect(result.setting.value).toBe('new-value')
+    expect(result.payload.key).toBe('setting1')
+    expect(result.payload.value).toBe('new-value')
   })
   it('deleteSetting deletes a setting', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -999,7 +1000,7 @@ describe('domain API methods', () => {
         type: 'message',
         session_id: '',
         sequence_id: 0,
-        message: 'Setting deleted successfully',
+        payload: 'Setting deleted successfully',
       }),
     })
     const result = await apiClient.deleteSetting('setting1')
@@ -1008,7 +1009,7 @@ describe('domain API methods', () => {
       type: 'message',
       session_id: '',
       sequence_id: 0,
-      message: 'Setting deleted successfully',
+      payload: 'Setting deleted successfully',
     })
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/settings/setting1'),
@@ -1071,7 +1072,7 @@ describe('domain API methods', () => {
         type: 'configured_processes',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -1081,7 +1082,7 @@ describe('domain API methods', () => {
       type: 'configured_processes',
       session_id: '',
       sequence_id: 0,
-      items: [],
+      payload: [],
       count: 0,
     })
   })
@@ -1134,7 +1135,7 @@ describe('domain API methods', () => {
       type: 'strategy_list' as const,
       session_id: '',
       sequence_id: 0,
-      items: [
+      payload: [
         {
           type: 'strategy_process' as const,
           session_id: '',
@@ -1165,7 +1166,7 @@ describe('domain API methods', () => {
         type: 'available_processes',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -1175,7 +1176,7 @@ describe('domain API methods', () => {
       type: 'available_processes',
       session_id: '',
       sequence_id: 0,
-      items: [],
+      payload: [],
       count: 0,
     })
   })
@@ -1187,7 +1188,7 @@ describe('domain API methods', () => {
         type: 'process_runs',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -1197,7 +1198,7 @@ describe('domain API methods', () => {
       type: 'process_runs',
       session_id: '',
       sequence_id: 0,
-      items: [],
+      payload: [],
       count: 0,
     })
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=10'), expect.any(Object))
@@ -1211,7 +1212,7 @@ describe('domain API methods', () => {
         type: 'process_runs',
         session_id: '',
         sequence_id: 0,
-        items: [],
+        payload: [],
         count: 0,
       }),
     })
@@ -1298,7 +1299,7 @@ describe('domain API methods', () => {
         type: 'message',
         session_id: '',
         sequence_id: 0,
-        message: 'Password changed successfully',
+        payload: 'Password changed successfully',
       }),
     })
     const result = await apiClient.changePassword('testuser', 'oldPassword', 'newPassword')
@@ -1307,7 +1308,7 @@ describe('domain API methods', () => {
       type: 'message',
       session_id: '',
       sequence_id: 0,
-      message: 'Password changed successfully',
+      payload: 'Password changed successfully',
     })
     const call = mockFetch.mock.calls[0]
 
@@ -1341,7 +1342,7 @@ describe('user management API methods', () => {
         type: 'user_list',
         session_id: '',
         sequence_id: 0,
-        items: [
+        payload: [
           {
             type: 'user_profile',
             session_id: '',
@@ -1358,7 +1359,7 @@ describe('user management API methods', () => {
     })
     const result = await apiClient.listUsers(true)
 
-    expect(result.items).toHaveLength(1)
+    expect(result.payload).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users?include_inactive=true',
       expect.objectContaining({ method: 'GET' })
@@ -1371,7 +1372,7 @@ describe('user management API methods', () => {
         type: 'user_response',
         session_id: '',
         sequence_id: 0,
-        user: {
+        payload: {
           type: 'user_profile',
           session_id: '',
           sequence_id: 0,
@@ -1390,7 +1391,7 @@ describe('user management API methods', () => {
       is_active: true,
     })
 
-    expect(result.user.username).toBe('new')
+    expect(result.payload.username).toBe('new')
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users',
       expect.objectContaining({ method: 'POST' })
@@ -1403,7 +1404,7 @@ describe('user management API methods', () => {
         type: 'user_response',
         session_id: '',
         sequence_id: 0,
-        user: {
+        payload: {
           type: 'user_profile',
           session_id: '',
           sequence_id: 0,
@@ -1420,7 +1421,7 @@ describe('user management API methods', () => {
       is_active: true,
     })
 
-    expect(result.user.username).toBe('admin')
+    expect(result.payload.username).toBe('admin')
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users/admin',
       expect.objectContaining({ method: 'PUT' })
@@ -1433,12 +1434,12 @@ describe('user management API methods', () => {
         type: 'message',
         session_id: '',
         sequence_id: 0,
-        message: 'User deactivated',
+        payload: 'User deactivated',
       }),
     })
     const result = await apiClient.deactivateUser('testuser')
 
-    expect(result.message).toBe('User deactivated')
+    expect(result.payload).toBe('User deactivated')
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users/testuser',
       expect.objectContaining({ method: 'DELETE' })
@@ -1451,12 +1452,12 @@ describe('user management API methods', () => {
         type: 'message',
         session_id: '',
         sequence_id: 0,
-        message: 'Password reset',
+        payload: 'Password reset',
       }),
     })
     const result = await apiClient.adminResetPassword('admin', { new_password: 'newpass123' })
 
-    expect(result.message).toBe('Password reset')
+    expect(result.payload).toBe('Password reset')
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users/admin/admin-reset-password',
       expect.objectContaining({ method: 'POST' })

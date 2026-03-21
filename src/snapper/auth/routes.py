@@ -78,7 +78,7 @@ def _message_response(request: Request, message: str) -> MessageResponse:
     """
     sid, seq, ts = _mint_provenance(request)
     return MessageResponse(
-        message=message,
+        payload=message,
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
@@ -283,7 +283,7 @@ async def get_current_user_profile(
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
-        user=user,
+        payload=user,
     )
 
 
@@ -389,7 +389,7 @@ async def get_users(
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
-        items=users,
+        payload=users,
         count=len(users),
     )
 
@@ -428,7 +428,7 @@ async def create_user(
             session_id=sid,
             sequence_id=seq,
             timestamp=ts,
-            user=new_user,
+            payload=new_user,
         )
     except ValueError as e:
         logger.warning("User creation failed: {}", str(e))
@@ -472,7 +472,7 @@ async def update_user(
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
-        user=updated_user,
+        payload=updated_user,
     )
 
 

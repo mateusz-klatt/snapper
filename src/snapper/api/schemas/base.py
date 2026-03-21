@@ -5,9 +5,12 @@ the application for REST API, WebSocket messages, and ZMQ data payloads.
 All event payload items inherit from StrictDataSchema to ensure mandatory
 provenance fields and strict type validation.
 
-Schema hierarchy:
+Schema hierarchy::
+
     BaseModel
     └── StrictDataSchema → ALL event payload items (provenance required)
+        ├── PayloadResponse[T] → singleton REST response (payload: T)
+        └── PayloadListResponse[T] → list REST response (payload: list[T], count)
 """
 
 from datetime import UTC
@@ -81,22 +84,52 @@ class StrictDataSchema(BaseModel):
         return cls.model_validate_json(data)
 
 
-class MessageResponse(StrictDataSchema):
+class PayloadResponse[PayloadT](StrictDataSchema):
+    """Generic REST response carrying a single payload.
+
+    All singleton REST responses inherit from this base. The ``payload``
+    field carries the domain object — either a projection from DB (with
+    its own provenance) or a minted result (sharing the envelope's provenance).
+
+    Attributes:
+        payload: The response data object.
+    """
+
+    payload: PayloadT
+
+
+class PayloadListResponse[PayloadT](StrictDataSchema):
+    """Generic REST response carrying a list of payloads.
+
+    All list REST responses inherit from this base. The ``payload``
+    field carries a list of items and ``count`` equals ``len(payload)``.
+
+    Attributes:
+        payload: List of response data objects.
+        count: Number of items in payload (== len(payload)).
+    """
+
+    payload: list[PayloadT]
+    count: int = Field(description="Number of items in payload")
+
+
+class MessageResponse(PayloadResponse[str]):
     """Generic API response containing a single message.
 
-    Used for simple acknowledgment responses.
+    Used for simple acknowledgment responses (logout, delete, password change).
 
     Attributes:
         type: Payload item type discriminator.
-        message: Human-readable response message.
+        payload: Human-readable response message.
     """
 
     type: Literal["message"] = "message"
-    message: str
 
 
 __all__ = [
     "STRICT_CONFIG",
     "StrictDataSchema",
+    "PayloadResponse",
+    "PayloadListResponse",
     "MessageResponse",
 ]

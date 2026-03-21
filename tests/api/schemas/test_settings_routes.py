@@ -193,10 +193,10 @@ class TestSettingsRoutes:
         ):
             result = await get_all_settings(request=self._make_rest_request(), user=mock_user)
         assert result.count == 2
-        assert result.items[0].key == "key1"
-        assert result.items[0].value == "value1"
-        assert result.items[1].key == "key2"
-        assert result.items[1].value == "value2"
+        assert result.payload[0].key == "key1"
+        assert result.payload[0].value == "value1"
+        assert result.payload[1].key == "key2"
+        assert result.payload[1].value == "value2"
 
     @pytest.mark.asyncio
     async def test_get_all_settings_with_category_filter(self) -> None:
@@ -228,7 +228,7 @@ class TestSettingsRoutes:
                 request=self._make_rest_request(), category="auth", user=mock_user
             )
         assert result.count == 1
-        assert result.items[0].category == "auth"
+        assert result.payload[0].category == "auth"
 
     @pytest.mark.asyncio
     async def test_get_setting_categories(self) -> None:
@@ -257,7 +257,7 @@ class TestSettingsRoutes:
                 request=self._make_rest_request(),
                 user=mock_user,
             )
-        assert result.categories == ["auth", "system"]
+        assert result.payload == ["auth", "system"]
 
     @pytest.mark.asyncio
     async def test_update_setting_found(self) -> None:
@@ -312,8 +312,8 @@ class TestSettingsRoutes:
             description="Updated description",
             updated_by="test_user",
         )
-        assert result.setting.key == "existing_key"
-        assert result.setting.value == "updated_value"
+        assert result.payload.key == "existing_key"
+        assert result.payload.value == "updated_value"
 
     @pytest.mark.asyncio
     async def test_update_setting_not_found(self) -> None:
@@ -382,7 +382,7 @@ class TestSettingsRoutes:
             )
         assert mock_session.execute.await_count == 2
         mock_session.commit.assert_called_once()
-        assert result.message == "Setting 'delete_key' deleted successfully"
+        assert result.payload == "Setting 'delete_key' deleted successfully"
 
     @pytest.mark.asyncio
     async def test_delete_setting_not_found(self) -> None:

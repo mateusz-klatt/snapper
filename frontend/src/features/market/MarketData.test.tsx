@@ -17,12 +17,12 @@ vi.mock('../../hooks/queries', () => ({
     isFetching: false,
   })),
   useExchanges: vi.fn(() => ({
-    data: { items: ['kraken', 'binance'], count: 2 },
+    data: { payload: ['kraken', 'binance'], count: 2 },
     isLoading: false,
     error: null,
   })),
   useExchangeInstruments: vi.fn(() => ({
-    data: { items: ['EUR-USD', 'GBP-USD', 'BTC-USD'], count: 3 },
+    data: { payload: ['EUR-USD', 'GBP-USD', 'BTC-USD'], count: 3 },
     isLoading: false,
     error: null,
   })),

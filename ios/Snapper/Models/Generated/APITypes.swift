@@ -233,7 +233,8 @@ struct AvailableProcessesResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [AvailableProcess]
+    let payload: [AvailableProcess]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -242,7 +243,7 @@ struct AvailableProcessesResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -334,7 +335,8 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [ConfiguredProcess]
+    let payload: [ConfiguredProcess]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -343,7 +345,7 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -411,7 +413,8 @@ struct ExchangeListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [String]
+    let payload: [String]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -420,7 +423,7 @@ struct ExchangeListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -471,7 +474,8 @@ struct ExecutionListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [ExecutionData]
+    let payload: [ExecutionData]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -480,7 +484,7 @@ struct ExecutionListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -599,7 +603,8 @@ struct InstrumentListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [String]
+    let payload: [String]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -608,7 +613,7 @@ struct InstrumentListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -663,7 +668,7 @@ struct MessageResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let message: String
+    let payload: String
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -671,7 +676,7 @@ struct MessageResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case message
+        case payload
     }
 }
 
@@ -729,7 +734,8 @@ struct OrderListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [OrderData]
+    let payload: [OrderData]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -738,7 +744,7 @@ struct OrderListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -777,7 +783,8 @@ struct PositionListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [PositionData]
+    let payload: [PositionData]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -786,7 +793,7 @@ struct PositionListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -947,7 +954,8 @@ struct ProcessRunsResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [ProcessRun]
+    let payload: [ProcessRun]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -956,7 +964,7 @@ struct ProcessRunsResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -1179,8 +1187,9 @@ struct SettingCategoriesResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    /// List of unique setting categories
-    let categories: [String]
+    let payload: [String]
+    /// Number of items in payload
+    let count: Int
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -1188,7 +1197,8 @@ struct SettingCategoriesResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case categories
+        case payload
+        case count
     }
 }
 
@@ -1198,7 +1208,8 @@ struct SettingListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [SettingRead]
+    let payload: [SettingRead]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1207,7 +1218,7 @@ struct SettingListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -1246,7 +1257,7 @@ struct SettingResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let setting: SettingRead
+    let payload: SettingRead
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -1254,7 +1265,7 @@ struct SettingResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case setting
+        case payload
     }
 }
 
@@ -1321,7 +1332,8 @@ struct SignalListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [SignalData]
+    let payload: [SignalData]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1330,7 +1342,7 @@ struct SignalListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -1341,7 +1353,8 @@ struct StrategyListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [StrategyProcess]
+    let payload: [StrategyProcess]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1350,7 +1363,7 @@ struct StrategyListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -1551,7 +1564,8 @@ struct UserListResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let items: [UserProfile]
+    let payload: [UserProfile]
+    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1560,7 +1574,7 @@ struct UserListResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case items
+        case payload
         case count
     }
 }
@@ -1597,7 +1611,7 @@ struct UserResponse: Codable, Sendable {
     let timestamp: Date?
     let sessionId: String
     let sequenceId: Int
-    let user: UserProfile
+    let payload: UserProfile
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -1605,7 +1619,7 @@ struct UserResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
-        case user
+        case payload
     }
 }
 

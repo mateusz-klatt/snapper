@@ -36,7 +36,7 @@ describe('UserList', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [],
+      payload: [],
       count: 0,
     })
   })
@@ -78,7 +78,7 @@ describe('UserList', () => {
   })
   it('displays users list', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'admin',
           email: 'admin@example.com',
@@ -96,7 +96,7 @@ describe('UserList', () => {
   })
   it('displays user roles with badges', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'testuser',
           email: 'test@example.com',
@@ -114,7 +114,7 @@ describe('UserList', () => {
   })
   it('displays inactive users badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'inactive_user',
           email: 'inactive@example.com',
@@ -132,7 +132,7 @@ describe('UserList', () => {
   })
   it('calls onEditUser when edit button clicked', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'testuser',
           email: 'test@example.com',
@@ -170,7 +170,7 @@ describe('UserList', () => {
   })
   it('formats dates correctly', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'testuser',
           email: 'test@example.com',
@@ -188,7 +188,7 @@ describe('UserList', () => {
   })
   it('cancels user deletion when cancel clicked in dialog', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           username: 'canceluser',
           email: 'cancel@example.com',
@@ -220,7 +220,7 @@ describe('UserList', () => {
   })
   it('calls delete API when user confirms deletion', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'deleteuser',
           email: 'del@example.com',
@@ -255,7 +255,7 @@ describe('UserList', () => {
   })
   it('handles delete API error', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'failuser',
           email: 'fail@example.com',
@@ -291,7 +291,7 @@ describe('UserList', () => {
     })
   })
   it('falls back to empty users list when response has no users field', async () => {
-    vi.mocked(apiClient.listUsers).mockResolvedValue({} as { items: []; count: 0 })
+    vi.mocked(apiClient.listUsers).mockResolvedValue({} as { payload: []; count: 0 })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('No users found')).toBeTruthy()
@@ -299,7 +299,7 @@ describe('UserList', () => {
   })
   it('handles delete error with empty message', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'emptyerror',
           email: 'empty@example.com',
@@ -334,7 +334,7 @@ describe('UserList', () => {
   })
   it('displays operator role badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'operator_user',
           email: 'operator@example.com',
@@ -352,7 +352,7 @@ describe('UserList', () => {
   })
   it('displays viewer role badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'viewer_user',
           email: 'viewer@example.com',
@@ -370,7 +370,7 @@ describe('UserList', () => {
   })
   it('displays unknown role badge with default styling', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'unknown_user',
           email: 'unknown@example.com',
@@ -388,7 +388,7 @@ describe('UserList', () => {
   })
   it('formats dates correctly', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'dateuser',
           email: 'date@example.com',
@@ -440,7 +440,7 @@ describe('UserList', () => {
   })
   it('displays user count badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'user1',
           email: 'user1@example.com',
@@ -465,7 +465,7 @@ describe('UserList', () => {
   })
   it('calls edit when edit button clicked', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'editableuser',
           email: 'edit@example.com',
@@ -495,7 +495,7 @@ describe('UserList', () => {
   })
   it('shows Unknown when user created_at is null', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'nocreated',
           email: 'nocreated@test.com',
@@ -513,7 +513,7 @@ describe('UserList', () => {
   })
   it('filters users by search term', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'alice',
           email: 'alice@example.com',
@@ -546,7 +546,7 @@ describe('UserList', () => {
   })
   it('shows no match message when search finds nothing', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'alice',
           email: 'alice@example.com',
@@ -570,7 +570,7 @@ describe('UserList', () => {
   })
   it('calls onEditUser from mobile card view', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'carduser',
           email: 'card@example.com',
@@ -598,7 +598,7 @@ describe('UserList', () => {
   })
   it('opens deactivate dialog from mobile card view', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      items: [
+      payload: [
         {
           username: 'carddelete',
           email: 'carddelete@example.com',

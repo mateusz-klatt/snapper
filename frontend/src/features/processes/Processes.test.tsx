@@ -132,7 +132,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -162,7 +162,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -175,7 +175,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: [], count: 0 },
+      data: { payload: [], count: 0 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -189,7 +189,7 @@ describe('Processes', () => {
 
     vi.mocked(useAvailableProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'executor',
             description: 'Trading Executor',
@@ -226,7 +226,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -255,7 +255,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -284,7 +284,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -327,7 +327,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 2 },
+      data: { payload: mockProcesses, count: 2 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -341,7 +341,7 @@ describe('Processes', () => {
 
     vi.mocked(useProcessRuns).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             run_id: '1',
             process_name: 'executor_kraken',
@@ -365,7 +365,7 @@ describe('Processes', () => {
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'task_process',
             enabled: true,
@@ -387,7 +387,7 @@ describe('Processes', () => {
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             run_id: 'latest',
             process_name: 'task_process',
@@ -421,7 +421,7 @@ describe('Processes', () => {
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             name: 'task_process',
             enabled: true,
@@ -443,7 +443,7 @@ describe('Processes', () => {
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
       data: {
-        items: [
+        payload: [
           {
             run_id: 'missing-time',
             process_name: 'task_process',
@@ -484,7 +484,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -514,7 +514,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -548,7 +548,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -603,7 +603,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -634,7 +634,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -679,7 +679,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 2 },
+      data: { payload: mockProcesses, count: 2 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -711,7 +711,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -746,7 +746,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -782,7 +782,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses },
+      data: { payload: mockProcesses },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -824,12 +824,12 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { items: mockAvailableProcesses },
+      data: { payload: mockAvailableProcesses },
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -858,7 +858,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -908,12 +908,12 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { items: [] },
+      data: { payload: [] },
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -960,7 +960,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1033,16 +1033,16 @@ describe('Processes', () => {
       await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { items: mockAvailableProcesses },
+      data: { payload: mockAvailableProcesses },
       isLoading: false,
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: { items: mockRuns },
+      data: { payload: mockRuns },
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1077,7 +1077,7 @@ describe('Processes', () => {
     } as never)
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1139,7 +1139,7 @@ describe('Processes', () => {
     } as never)
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1184,7 +1184,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1222,7 +1222,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1264,7 +1264,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1303,7 +1303,7 @@ describe('Processes', () => {
       const { useConfiguredProcesses } = await import('../../hooks/queries')
 
       vi.mocked(useConfiguredProcesses).mockReturnValue({
-        data: { items: mockProcesses, count: 1 },
+        data: { payload: mockProcesses, count: 1 },
         isLoading: false,
         refetch: vi.fn(),
       } as never)
@@ -1343,7 +1343,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1403,7 +1403,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1459,12 +1459,12 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useProcessRuns } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: { items: mockRuns },
+      data: { payload: mockRuns },
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1503,12 +1503,12 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useProcessRuns } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: { items: mockRuns },
+      data: { payload: mockRuns },
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1537,12 +1537,12 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { items: [] },
+      data: { payload: [] },
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1577,7 +1577,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1611,7 +1611,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1646,7 +1646,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1682,7 +1682,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1718,7 +1718,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1769,7 +1769,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 2 },
+      data: { payload: mockProcesses, count: 2 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1805,7 +1805,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1841,7 +1841,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1897,7 +1897,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1959,7 +1959,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2008,7 +2008,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2064,7 +2064,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2113,7 +2113,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { items: mockProcesses, count: 1 },
+      data: { payload: mockProcesses, count: 1 },
       isLoading: false,
       refetch: vi.fn(),
     } as never)

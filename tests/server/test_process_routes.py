@@ -109,11 +109,11 @@ class TestListAvailableProcesses:
         }
         result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
         assert result.count == 2
-        assert len(result.items) == 2
-        assert result.items[0].name == "zmq_broker"
-        assert result.items[0].class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
-        assert result.items[0].method == "run"
-        assert result.items[0].description == "ZMQ message broker"
+        assert len(result.payload) == 2
+        assert result.payload[0].name == "zmq_broker"
+        assert result.payload[0].class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
+        assert result.payload[0].method == "run"
+        assert result.payload[0].description == "ZMQ message broker"
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -127,7 +127,7 @@ class TestListAvailableProcesses:
         mock_get_registry.return_value = {}
         result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
         assert result.count == 0
-        assert result.items == []
+        assert result.payload == []
 
 
 class TestListConfiguredProcesses:
@@ -163,8 +163,8 @@ class TestListConfiguredProcesses:
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
         assert result.count == 1
-        assert len(result.items) == 1
-        process = result.items[0]
+        assert len(result.payload) == 1
+        process = result.payload[0]
         assert process.name == "zmq_broker"
         assert process.enabled is True
         assert process.mode == "thread"
@@ -192,7 +192,7 @@ class TestListConfiguredProcesses:
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
         assert result.count == 0
-        assert result.items == []
+        assert result.payload == []
 
 
 class TestGetProcessSummary:
@@ -834,7 +834,7 @@ class TestProcessRoutesEdgeCases:
         }
         result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
         assert result.count == 1
-        assert result.items[0].tags == []
+        assert result.payload[0].tags == []
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -1051,7 +1051,7 @@ class TestProcessRoutesEdgeCases:
             name=None,
         )
         assert result.count == 2
-        assert len(result.items) == 2
+        assert len(result.payload) == 2
         mock_factory.get_recent_runs.assert_awaited_once_with(limit=50, name=None)
 
     @pytest.mark.asyncio

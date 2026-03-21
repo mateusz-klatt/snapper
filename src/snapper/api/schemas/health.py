@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ComponentStatus
 from snapper.core.types import HealthStatus
@@ -270,15 +271,15 @@ class WsStatsResponse(StrictDataSchema):
     config: WsStatsConfig = Field(description="Configuration details")
 
 
-class SettingCategoriesResponse(StrictDataSchema):
+class SettingCategoriesResponse(PayloadListResponse[str]):
     """Setting categories list response.
 
     Attributes:
-        categories: List of unique setting categories.
+        payload: List of unique setting categories.
+        count: Number of categories.
     """
 
     type: Literal["setting_categories"] = "setting_categories"
-    categories: list[str] = Field(description="List of unique setting categories")
 
 
 __all__ = [

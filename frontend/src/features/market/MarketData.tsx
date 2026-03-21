@@ -82,7 +82,7 @@ export function MarketData() {
   const [instrumentDropdownOpen, setInstrumentDropdownOpen] = useState(false)
   const instrumentRef = useRef<HTMLDivElement>(null)
   const filteredInstruments = useMemo(() => {
-    const list = instruments?.items ?? []
+    const list = instruments?.payload ?? []
 
     if (!instrumentSearch) return list
 
@@ -187,7 +187,7 @@ export function MarketData() {
             <Select.Portal>
               <Select.Content className='z-50 overflow-hidden bg-alpine-50 rounded-md shadow-lg border border-dark-600'>
                 <Select.Viewport className='p-1'>
-                  {(exchanges?.items ?? []).map(ex => (
+                  {(exchanges?.payload ?? []).map(ex => (
                     <Select.Item
                       key={ex}
                       value={ex}

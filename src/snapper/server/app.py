@@ -593,7 +593,7 @@ def _create_candles_signals_router() -> APIRouter:
                     session_id=sid,
                     sequence_id=seq,
                     timestamp=ts,
-                    items=items,
+                    payload=items,
                     count=len(items),
                 )
         except HTTPException:
@@ -670,7 +670,7 @@ def _create_candles_signals_router() -> APIRouter:
                     session_id=sid,
                     sequence_id=seq,
                     timestamp=ts,
-                    items=items,
+                    payload=items,
                     count=len(items),
                 )
         except Exception as exc:
@@ -726,7 +726,7 @@ def _create_exchange_router() -> APIRouter:
                     session_id=sid,
                     sequence_id=seq,
                     timestamp=ts,
-                    items=items,
+                    payload=items,
                     count=len(items),
                 )
         except Exception as exc:
@@ -781,7 +781,7 @@ def _create_exchange_router() -> APIRouter:
                     session_id=sid,
                     sequence_id=seq,
                     timestamp=ts,
-                    items=items,
+                    payload=items,
                     count=len(items),
                 )
         except Exception as exc:
@@ -892,7 +892,7 @@ def _create_orders_executions_router() -> APIRouter:
                     session_id=sid,
                     sequence_id=seq,
                     timestamp=ts,
-                    items=items,
+                    payload=items,
                     count=len(items),
                 )
         except Exception as exc:
@@ -971,7 +971,7 @@ def _create_orders_executions_router() -> APIRouter:
                     session_id=sid,
                     sequence_id=seq,
                     timestamp=ts,
-                    items=items,
+                    payload=items,
                     count=len(items),
                 )
         except Exception as exc:
@@ -1031,7 +1031,7 @@ def _create_orders_executions_router() -> APIRouter:
                     session_id=sid,
                     sequence_id=seq,
                     timestamp=ts,
-                    items=items,
+                    payload=items,
                     count=len(items),
                 )
         except Exception as exc:

@@ -3172,8 +3172,8 @@ def test_get_current_user_profile_returns_user(
     assert response.status_code == 200
     payload = response.json()
     assert payload["type"] == "user_response"
-    assert payload["user"]["username"] == "alice"
-    assert payload["user"]["role"] == "admin"
+    assert payload["payload"]["username"] == "alice"
+    assert payload["payload"]["role"] == "admin"
     user_service.user_by_id = None
 
 
@@ -3295,8 +3295,8 @@ def test_get_current_user_info(
     assert response.status_code == 200
     data: dict[str, Any] = response.json()
     assert data["type"] == "user_response"
-    assert data["user"]["username"] == "alice"
-    assert data["user"]["role"] == UserRole.ADMIN.value
+    assert data["payload"]["username"] == "alice"
+    assert data["payload"]["role"] == UserRole.ADMIN.value
     user_service.user_by_id = None
 
 
@@ -3320,7 +3320,7 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
         include_inactive=False,
     )
     assert result.count == 2
-    assert [user.username for user in result.items] == ["alice", "bob"]
+    assert [user.username for user in result.payload] == ["alice", "bob"]
 
 
 @pytest.mark.asyncio()
@@ -3352,7 +3352,7 @@ async def test_create_user_success(monkeypatch: Any) -> None:
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.user.username == "charlie"
+    assert result.payload.username == "charlie"
 
 
 @pytest.mark.asyncio()
@@ -3446,7 +3446,7 @@ async def test_update_user_success(monkeypatch: Any) -> None:
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.user.username == "dora"
+    assert result.payload.username == "dora"
     assert stub_service.updated_users["u4"] == updated_user
 
 
@@ -3469,7 +3469,7 @@ async def test_delete_user_success(monkeypatch: Any) -> None:
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.message == "User 'user-2' has been deactivated"
+    assert result.payload == "User 'user-2' has been deactivated"
     assert stub_service.deleted_users == ["user-2"]
 
 
@@ -3541,7 +3541,7 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
         current_user=AuthPrincipal(username="self", role=UserRole.OPERATOR),
         _csrf=None,
     )
-    assert result.message == "Password changed successfully"
+    assert result.payload == "Password changed successfully"
     assert stub_service.change_password_calls == [("self", "old-pass", "new-password")]
 
 
@@ -3623,7 +3623,7 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.message == "Password changed successfully"
+    assert result.payload == "Password changed successfully"
     assert stub_service.change_password_calls == [("target", "irrelevant", "new-password")]
 
 
@@ -3700,7 +3700,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.message == "Password reset successfully for user user-1"
+    assert result.payload == "Password reset successfully for user user-1"
     assert stub_service.reset_calls == [("user-1", "super-secret")]
 
 
@@ -4021,7 +4021,7 @@ class TestAuthRoutesCoverage:
         try:
             response = client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf_token})
             assert response.status_code == 200
-            assert "Logged out successfully" in response.json()["message"]
+            assert "Logged out successfully" in response.json()["payload"]
         finally:
             client.cookies.clear()
 
@@ -4034,7 +4034,7 @@ class TestAuthRoutesCoverage:
         """
         response = client.post("/api/auth/logout")
         assert response.status_code == 200
-        assert "Logged out successfully" in response.json()["message"]
+        assert "Logged out successfully" in response.json()["payload"]
 
     def test_logout_invalid_token(self, client: TestClient) -> None:
         """Logout with invalid token still returns success.
@@ -4047,7 +4047,7 @@ class TestAuthRoutesCoverage:
             "/api/auth/logout", headers={"Authorization": "Bearer invalid_token"}
         )
         assert response.status_code == 200
-        assert "Logged out successfully" in response.json()["message"]
+        assert "Logged out successfully" in response.json()["payload"]
 
     def test_me_endpoint_success(self, client: TestClient) -> None:
         """Me endpoint returns authenticated user.
@@ -4071,8 +4071,8 @@ class TestAuthRoutesCoverage:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "user_response"
-        assert data["user"]["username"] == "admin"
-        assert data["user"]["role"] == "admin"
+        assert data["payload"]["username"] == "admin"
+        assert data["payload"]["role"] == "admin"
 
     def test_me_endpoint_no_token(self, auth_routes_app: FastAPI) -> None:
         """Me endpoint returns 401 without token.

@@ -93,7 +93,7 @@ export const ExchangeListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(z.string()),
+    payload: z.array(z.string()),
     count: z.number().int(),
   })
   .strict()
@@ -153,7 +153,7 @@ export const InstrumentListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(z.string()),
+    payload: z.array(z.string()),
     count: z.number().int(),
   })
   .strict()
@@ -178,7 +178,7 @@ export const MessageResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    message: z.string(),
+    payload: z.string(),
   })
   .strict()
 
@@ -368,7 +368,8 @@ export const SettingCategoriesResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    categories: z.array(z.string()),
+    payload: z.array(z.string()),
+    count: z.number().int(),
   })
   .strict()
 
@@ -567,7 +568,7 @@ export const AvailableProcessesResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(AvailableProcessSchema),
+    payload: z.array(AvailableProcessSchema),
     count: z.number().int(),
   })
   .strict()
@@ -579,7 +580,7 @@ export const ConfiguredProcessesResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(ConfiguredProcessSchema),
+    payload: z.array(ConfiguredProcessSchema),
     count: z.number().int(),
   })
   .strict()
@@ -591,7 +592,7 @@ export const ExecutionListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(ExecutionDataSchema),
+    payload: z.array(ExecutionDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -615,7 +616,7 @@ export const OrderListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(OrderDataSchema),
+    payload: z.array(OrderDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -627,7 +628,7 @@ export const PositionListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(PositionDataSchema),
+    payload: z.array(PositionDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -665,7 +666,7 @@ export const ProcessRunsResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(ProcessRunSchema),
+    payload: z.array(ProcessRunSchema),
     count: z.number().int(),
   })
   .strict()
@@ -677,7 +678,7 @@ export const SettingListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(SettingReadSchema),
+    payload: z.array(SettingReadSchema),
     count: z.number().int(),
   })
   .strict()
@@ -689,7 +690,7 @@ export const SettingResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    setting: SettingReadSchema,
+    payload: SettingReadSchema,
   })
   .strict()
 
@@ -700,7 +701,7 @@ export const SignalListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(SignalDataSchema),
+    payload: z.array(SignalDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -712,7 +713,7 @@ export const StrategyListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(StrategyProcessSchema),
+    payload: z.array(StrategyProcessSchema),
     count: z.number().int(),
   })
   .strict()
@@ -861,7 +862,7 @@ export const UserListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    items: z.array(UserProfileSchema),
+    payload: z.array(UserProfileSchema),
     count: z.number().int(),
   })
   .strict()
@@ -873,7 +874,7 @@ export const UserResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    user: UserProfileSchema,
+    payload: UserProfileSchema,
   })
   .strict()
 

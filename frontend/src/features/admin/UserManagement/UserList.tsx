@@ -85,7 +85,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
     )
   }
 
-  const allUsers = userListData?.items || []
+  const allUsers = userListData?.payload || []
   const users = allUsers.filter(user => {
     if (searchTerm === '') return true
     const term = searchTerm.toLowerCase()

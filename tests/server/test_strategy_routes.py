@@ -31,7 +31,7 @@ class TestListStrategies:
         mock_request.app.state.rest_tracker = SequenceTracker()
         result = await list_strategies(request=mock_request, _user=MagicMock())
         assert result.count == 0
-        assert result.items == []
+        assert result.payload == []
 
     @pytest.mark.asyncio
     async def test_returns_only_strategy_role_processes(self) -> None:
@@ -82,8 +82,8 @@ class TestListStrategies:
         mock_request.app.state.rest_tracker = SequenceTracker()
         result = await list_strategies(request=mock_request, _user=MagicMock())
         assert result.count == 1
-        assert len(result.items) == 1
-        strategy = result.items[0]
+        assert len(result.payload) == 1
+        strategy = result.payload[0]
         assert strategy.name == "strategy_macd"
         assert strategy.running is True
         assert strategy.enabled is True
@@ -128,8 +128,8 @@ class TestListStrategies:
         mock_request.app.state.rest_tracker = SequenceTracker()
         result = await list_strategies(request=mock_request, _user=MagicMock())
         assert result.count == 2
-        running = next(s for s in result.items if s.name == "strategy_running")
-        stopped = next(s for s in result.items if s.name == "strategy_stopped")
+        running = next(s for s in result.payload if s.name == "strategy_running")
+        stopped = next(s for s in result.payload if s.name == "strategy_stopped")
         assert running.running is True
         assert running.enabled is True
         assert running.mode == "process"

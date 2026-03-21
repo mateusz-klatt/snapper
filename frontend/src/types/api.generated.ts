@@ -1012,7 +1012,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of available process templates.
+         *         payload: List of available process templates.
          *         count: Total number of available processes.
          */
         AvailableProcessesResponse: {
@@ -1033,9 +1033,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["AvailableProcess"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["AvailableProcess"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -1203,7 +1206,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of configured processes.
+         *         payload: List of configured processes.
          *         count: Total number of configured processes.
          */
         ConfiguredProcessesResponse: {
@@ -1224,9 +1227,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["ConfiguredProcess"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["ConfiguredProcess"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -1340,7 +1346,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of exchange name strings.
+         *         payload: List of exchange name strings.
          *         count: Total number of exchanges in the response.
          */
         ExchangeListResponse: {
@@ -1361,9 +1367,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: string[];
-            /** Count */
+            /** Payload */
+            payload: string[];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -1452,7 +1461,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of execution data items.
+         *         payload: List of execution data items.
          *         count: Total number of executions in the response.
          */
         ExecutionListResponse: {
@@ -1473,9 +1482,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["ExecutionData"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["ExecutionData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -1670,7 +1682,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of instrument symbol strings.
+         *         payload: List of instrument symbol strings.
          *         count: Total number of instruments in the response.
          */
         InstrumentListResponse: {
@@ -1691,9 +1703,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: string[];
-            /** Count */
+            /** Payload */
+            payload: string[];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -1774,11 +1789,11 @@ export type Components = {
          * MessageResponse
          * @description Generic API response containing a single message.
          *
-         *     Used for simple acknowledgment responses.
+         *     Used for simple acknowledgment responses (logout, delete, password change).
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         message: Human-readable response message.
+         *         payload: Human-readable response message.
          */
         MessageResponse: {
             /** Public Id */
@@ -1798,8 +1813,8 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Message */
-            message: string;
+            /** Payload */
+            payload: string;
         };
         /**
          * OrderData
@@ -1900,7 +1915,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of order data items.
+         *         payload: List of order data items.
          *         count: Total number of orders in the response.
          */
         OrderListResponse: {
@@ -1921,9 +1936,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["OrderData"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["OrderData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -1984,7 +2002,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of position data items.
+         *         payload: List of position data items.
          *         count: Total number of positions in the response.
          */
         PositionListResponse: {
@@ -2005,9 +2023,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["PositionData"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["PositionData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -2299,7 +2320,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of process runs.
+         *         payload: List of process runs.
          *         count: Total number of runs.
          */
         ProcessRunsResponse: {
@@ -2320,9 +2341,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["ProcessRun"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["ProcessRun"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -2724,7 +2748,8 @@ export type Components = {
          * @description Setting categories list response.
          *
          *     Attributes:
-         *         categories: List of unique setting categories.
+         *         payload: List of unique setting categories.
+         *         count: Number of categories.
          */
         SettingCategoriesResponse: {
             /** Public Id */
@@ -2744,11 +2769,13 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
+            /** Payload */
+            payload: string[];
             /**
-             * Categories
-             * @description List of unique setting categories
+             * Count
+             * @description Number of items in payload
              */
-            categories: string[];
+            count: number;
         };
         /**
          * SettingListResponse
@@ -2758,7 +2785,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of setting data items.
+         *         payload: List of setting data items.
          *         count: Total number of settings in the response.
          */
         SettingListResponse: {
@@ -2779,9 +2806,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["SettingRead"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["SettingRead"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -2841,7 +2871,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         setting: The setting data.
+         *         payload: The setting data.
          */
         SettingResponse: {
             /** Public Id */
@@ -2861,7 +2891,7 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            setting: Components["schemas"]["SettingRead"];
+            payload: Components["schemas"]["SettingRead"];
         };
         /**
          * SettingUpdate
@@ -2979,7 +3009,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of signal data items.
+         *         payload: List of signal data items.
          *         count: Total number of signals in the response.
          */
         SignalListResponse: {
@@ -3000,9 +3030,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["SignalData"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["SignalData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -3011,7 +3044,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of strategy processes.
+         *         payload: List of strategy processes.
          *         count: Total number of strategies.
          */
         StrategyListResponse: {
@@ -3032,9 +3065,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["StrategyProcess"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["StrategyProcess"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -3402,7 +3438,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         items: List of user profiles.
+         *         payload: List of user profiles.
          *         count: Total number of users.
          */
         UserListResponse: {
@@ -3423,9 +3459,12 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Items */
-            items: Components["schemas"]["UserProfile"][];
-            /** Count */
+            /** Payload */
+            payload: Components["schemas"]["UserProfile"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
             count: number;
         };
         /**
@@ -3485,7 +3524,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         user: The user profile data.
+         *         payload: The user profile data.
          */
         UserResponse: {
             /** Public Id */
@@ -3505,7 +3544,7 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            user: Components["schemas"]["UserProfile"];
+            payload: Components["schemas"]["UserProfile"];
         };
         /**
          * UserRole

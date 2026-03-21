@@ -53,7 +53,7 @@ vi.mock('../../lib/apiClient', () => ({
       type: 'signal_list',
       session_id: '',
       sequence_id: 0,
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'BTC-USD',
@@ -210,7 +210,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'BTC-USD',
@@ -251,7 +251,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'BTC-USD',
@@ -304,7 +304,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'SOL-USD',
@@ -333,7 +333,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'XRP-USD',
@@ -362,7 +362,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'ADA-USD',
@@ -392,7 +392,7 @@ describe('Signals', () => {
     const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString()
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'DOT-USD',
@@ -422,7 +422,7 @@ describe('Signals', () => {
     const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'LINK-USD',
@@ -452,7 +452,7 @@ describe('Signals', () => {
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'AVAX-USD',
@@ -480,7 +480,7 @@ describe('Signals', () => {
   it('shows empty state when no signals are available', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({ items: [], count: 0 } as never)
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({ payload: [], count: 0 } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -498,7 +498,7 @@ describe('Signals', () => {
 
     vi.mocked(apiClient.getSignals)
       .mockResolvedValueOnce({
-        items: [
+        payload: [
           {
             type: 'signal',
             instrument: 'BTC-USD',
@@ -524,7 +524,7 @@ describe('Signals', () => {
         ],
         count: 2,
       } as never)
-      .mockResolvedValueOnce({ items: [], count: 0 } as never)
+      .mockResolvedValueOnce({ payload: [], count: 0 } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -545,7 +545,7 @@ describe('Signals', () => {
     const user = userEventModule.default.setup()
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'BTC-USD',
@@ -588,7 +588,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'BTC-USD',
@@ -632,7 +632,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'BTC-USD',
@@ -681,7 +681,7 @@ describe('Signals', () => {
   it('disables export button when no signals', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({ items: [], count: 0 } as never)
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({ payload: [], count: 0 } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -698,7 +698,7 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'SOL-USD',
@@ -730,7 +730,7 @@ describe('Signals', () => {
     const user = userEventModule.default.setup()
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'SOL-USD',
@@ -778,7 +778,7 @@ describe('Signals', () => {
     const user = userEventModule.default.setup()
 
     vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
-      items: [
+      payload: [
         {
           type: 'signal',
           instrument: 'BTC-USD',

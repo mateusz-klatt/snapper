@@ -341,7 +341,7 @@ class TestCreateApiRouter:
         data = response.json()
         assert data["type"] == "candle_list"
         assert data["count"] == 1
-        items = data["items"]
+        items = data["payload"]
         assert isinstance(items, list)
         assert len(items) == 1
         assert items[0]["instrument"] == "BTC-USD"
@@ -393,7 +393,7 @@ class TestCreateApiRouter:
         data = response.json()
         assert data["type"] == "candle_list"
         assert data["count"] == 0
-        assert data["items"] == []
+        assert data["payload"] == []
 
     @patch("snapper.server.app.get_settings")
     @patch("snapper.server.app.get_repository")
@@ -1448,7 +1448,7 @@ class TestOrdersSuccessPath:
         data = response.json()
         assert data["type"] == "order_list"
         assert data["count"] == 1
-        items = data["items"]
+        items = data["payload"]
         assert len(items) == 1
         assert items[0]["instrument"] == "BTC-USD"
         assert items[0]["exchange"] == "kraken"
@@ -1474,7 +1474,7 @@ class TestOrdersSuccessPath:
         assert response.status_code == 200
         data = response.json()
         assert data["count"] == 1
-        assert data["items"][0]["instrument"] == "ETH-USD"
+        assert data["payload"][0]["instrument"] == "ETH-USD"
 
     def test_get_orders_empty(self) -> None:
         """Verify orders endpoint returns empty list when no data.
@@ -1488,7 +1488,7 @@ class TestOrdersSuccessPath:
         response = client.get("/api/orders")
         assert response.status_code == 200
         data = response.json()
-        assert data["items"] == []
+        assert data["payload"] == []
         assert data["count"] == 0
 
 
@@ -1511,7 +1511,7 @@ class TestSignalsSuccessPath:
         data = response.json()
         assert data["type"] == "signal_list"
         assert data["count"] == 1
-        items = data["items"]
+        items = data["payload"]
         assert len(items) == 1
         assert items[0]["instrument"] == "BTC-USD"
         assert items[0]["exchange"] == "kraken"
@@ -1550,7 +1550,7 @@ class TestSignalsSuccessPath:
         response = client.get("/api/signals")
         assert response.status_code == 200
         data = response.json()
-        assert data["items"] == []
+        assert data["payload"] == []
         assert data["count"] == 0
 
 
@@ -1574,7 +1574,7 @@ class TestExecutionsSuccessPath:
         data = response.json()
         assert data["type"] == "execution_list"
         assert data["count"] == 1
-        items = data["items"]
+        items = data["payload"]
         assert len(items) == 1
         assert items[0]["price"] == pytest.approx(50000.0)
         assert items[0]["size"] == pytest.approx(1.0)
@@ -1601,7 +1601,7 @@ class TestExecutionsSuccessPath:
         response = client.get("/api/executions")
         assert response.status_code == 200
         data = response.json()
-        assert data["items"] == []
+        assert data["payload"] == []
         assert data["count"] == 0
 
 
@@ -1624,7 +1624,7 @@ class TestPositionsSuccessPath:
         data = response.json()
         assert data["type"] == "position_list"
         assert data["count"] == 1
-        items = data["items"]
+        items = data["payload"]
         assert len(items) == 1
         assert items[0]["instrument"] == "BTC-USD"
         assert items[0]["exchange"] == "kraken"
@@ -1645,7 +1645,7 @@ class TestPositionsSuccessPath:
         response = client.get("/api/positions")
         assert response.status_code == 200
         data = response.json()
-        assert data["items"] == []
+        assert data["payload"] == []
         assert data["count"] == 0
 
 
@@ -1782,7 +1782,7 @@ class TestSignalsExchangeFilter:
         data = response.json()
         assert data["type"] == "signal_list"
         assert data["count"] == 1
-        assert data["items"][0]["exchange"] == "kraken"
+        assert data["payload"][0]["exchange"] == "kraken"
 
 
 class TestOrdersExchangeFilter:
@@ -1804,7 +1804,7 @@ class TestOrdersExchangeFilter:
         data = response.json()
         assert data["type"] == "order_list"
         assert data["count"] == 1
-        assert data["items"][0]["exchange"] == "kraken"
+        assert data["payload"][0]["exchange"] == "kraken"
 
 
 class MockSymbolAlias:
@@ -1835,8 +1835,8 @@ class TestExchangesEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "exchange_list"
-        assert "kraken" in data["items"]
-        assert "zonda" in data["items"]
+        assert "kraken" in data["payload"]
+        assert "zonda" in data["payload"]
 
     def test_get_exchanges_empty(self) -> None:
         """Verify exchanges endpoint returns empty list when no data.
@@ -1850,7 +1850,7 @@ class TestExchangesEndpoint:
         response = client.get("/api/exchanges")
         assert response.status_code == 200
         data = response.json()
-        assert data["items"] == []
+        assert data["payload"] == []
         assert data["count"] == 0
 
     def test_get_exchanges_handles_database_error(self) -> None:
@@ -1883,8 +1883,8 @@ class TestExchangeInstrumentsEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "instrument_list"
-        assert "BTC-USD" in data["items"]
-        assert "ETH-USD" in data["items"]
+        assert "BTC-USD" in data["payload"]
+        assert "ETH-USD" in data["payload"]
 
     def test_get_exchange_instruments_empty(self) -> None:
         """Verify instruments endpoint returns empty list for unknown exchange.
@@ -1898,7 +1898,7 @@ class TestExchangeInstrumentsEndpoint:
         response = client.get("/api/exchanges/unknown/instruments")
         assert response.status_code == 200
         data = response.json()
-        assert data["items"] == []
+        assert data["payload"] == []
         assert data["count"] == 0
 
     def test_get_exchange_instruments_handles_database_error(self) -> None:

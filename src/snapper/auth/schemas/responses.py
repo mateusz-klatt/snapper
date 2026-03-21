@@ -7,6 +7,8 @@ API responses.
 from datetime import datetime
 from typing import Literal
 
+from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.schemas.user import UserProfile
 
@@ -51,31 +53,28 @@ class RefreshResponse(StrictDataSchema):
     user: UserProfile
 
 
-class UserResponse(StrictDataSchema):
+class UserResponse(PayloadResponse[UserProfile]):
     """Single user response wrapper.
 
     Wraps a UserProfile in a typed envelope for REST API consistency.
 
     Attributes:
         type: Payload item type discriminator.
-        user: The user profile data.
+        payload: The user profile data.
     """
 
     type: Literal["user_response"] = "user_response"
-    user: UserProfile
 
 
-class UserListResponse(StrictDataSchema):
+class UserListResponse(PayloadListResponse[UserProfile]):
     """User list response schema.
 
     Returned by user listing endpoints.
 
     Attributes:
         type: Payload item type discriminator.
-        items: List of user profiles.
+        payload: List of user profiles.
         count: Total number of users.
     """
 
     type: Literal["user_list"] = "user_list"
-    items: list[UserProfile]
-    count: int
