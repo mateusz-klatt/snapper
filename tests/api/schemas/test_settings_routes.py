@@ -130,6 +130,8 @@ class TestSettingsRoutes:
             description="Test description",
             updated_at=timestamp,
             updated_by="test_user",
+            session_id="test-sid",
+            sequence_id=1,
         )
         assert response.key == "test_key"
         assert response.value == "test_value"
@@ -149,6 +151,8 @@ class TestSettingsRoutes:
             value="new_value",
             category="new_category",
             description="New description",
+            session_id="test-sid",
+            sequence_id=1,
         )
         assert request.value == "new_value"
         assert request.category == "new_category"
@@ -281,6 +285,8 @@ class TestSettingsRoutes:
             value="updated_value",
             category="updated_category",
             description="Updated description",
+            session_id="test-sid",
+            sequence_id=1,
         )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
@@ -320,7 +326,9 @@ class TestSettingsRoutes:
         mock_session = MockSession()
         mock_session.execute.return_value = MockResult([])
         mock_repository.session.return_value = mock_session
-        request = SettingUpdate(value="updated_value", description=None)
+        request = SettingUpdate(
+            value="updated_value", description=None, session_id="test-sid", sequence_id=1
+        )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch(

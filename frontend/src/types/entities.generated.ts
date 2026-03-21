@@ -25,8 +25,8 @@ type TradeSide = 'buy' | 'sell'
 export interface Candle {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   instrument: string
   exchange: MarketDataExchange
   timeframe: string
@@ -47,8 +47,8 @@ export interface Candle {
 export interface Execution {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   tradeId?: string | null
   exchangeOrderId?: string | null
   clientOrderId: string
@@ -70,8 +70,8 @@ export interface Execution {
 export interface Heartbeat {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   component: string
   sequence: number
   status: 'healthy' | 'warning' | 'error'
@@ -86,8 +86,8 @@ export interface Heartbeat {
 export interface OrderCancel {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
@@ -101,8 +101,8 @@ export interface OrderCancel {
 export interface Order {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
@@ -128,8 +128,8 @@ export interface Order {
 export interface OrderEvent {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   exchangeOrderId: string
   clientOrderId: string
   exchange: OrderExchange
@@ -145,8 +145,8 @@ export interface OrderEvent {
 export interface OrderReplace {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
@@ -162,8 +162,8 @@ export interface OrderReplace {
 export interface OrderRequest {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   strategyId: string
   exchange: OrderExchange
   instrument: string
@@ -183,8 +183,8 @@ export interface OrderRequest {
 export interface Position {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   instrument: string
   exchange: OrderExchange
   quantity: number
@@ -200,8 +200,8 @@ export interface Position {
 export interface ReplayEnd {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
 }
 
 /**
@@ -211,8 +211,8 @@ export interface ReplayEnd {
 export interface ReplayStart {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   startedAt?: Date | null
 }
 
@@ -223,8 +223,8 @@ export interface ReplayStart {
 export interface SettingChanged {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   key: string
   value: string
   category: string
@@ -238,8 +238,8 @@ export interface SettingChanged {
 export interface Signal {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   instrument: string
   exchange: OrderExchange
   side: TradeSide
@@ -257,8 +257,8 @@ export interface Signal {
 export interface SymbolAliasUpdate {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   event: string
   action: string
 }
@@ -270,8 +270,8 @@ export interface SymbolAliasUpdate {
 export interface Tick {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   instrument: string
   exchange: MarketDataExchange
   volume: number
@@ -287,8 +287,8 @@ export interface Tick {
 export interface Trade {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   instrument: string
   exchange: MarketDataExchange
   executedAt?: Date | null
@@ -305,8 +305,8 @@ export interface Trade {
 export interface AdminResetPassword {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   newPassword: string
 }
 
@@ -317,8 +317,8 @@ export interface AdminResetPassword {
 export interface ChangePassword {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   currentPassword: string
   newPassword: string
 }
@@ -330,8 +330,8 @@ export interface ChangePassword {
 export interface CreateUser {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   username: string
   email?: string | null
   password: string
@@ -346,8 +346,8 @@ export interface CreateUser {
 export interface Login {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   username: string
   password: string
   rememberMe?: boolean
@@ -360,8 +360,8 @@ export interface Login {
 export interface ProcessCreate {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   name: string
   template: string
   enabled?: boolean | null
@@ -378,8 +378,8 @@ export interface ProcessCreate {
 export interface ProcessStart {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   mode?: 'thread' | 'process' | null
   args?: unknown[] | null
   kwargs?: Record<string, unknown> | null
@@ -393,8 +393,8 @@ export interface ProcessStart {
 export interface UpdateUser {
   publicId?: string
   timestamp?: Date
-  sessionId?: string
-  sequenceId?: number
+  sessionId: string
+  sequenceId: number
   email?: string | null
   role?: 'viewer' | 'operator' | 'admin' | null
   isActive?: boolean | null

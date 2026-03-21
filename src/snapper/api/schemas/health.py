@@ -105,10 +105,7 @@ class GapDetectionStats(StrictDataSchema):
     """
 
     type: Literal["gap_detection_stats"] = "gap_detection_stats"
-    bridge: GapStatsSchema = Field(
-        default_factory=GapStatsSchema,
-        description="ZMQ bridge gap detection stats",
-    )
+    bridge: GapStatsSchema = Field(description="ZMQ bridge gap detection stats")
     rest_clients: dict[str, GapStatsSchema] = Field(
         default_factory=dict,
         description="Per-session REST client gap stats",
@@ -136,10 +133,7 @@ class HealthCheckResponse(StrictDataSchema):
     version: str = Field(description="Application version")
     connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
     topics: HealthTopics = Field(description="Topics availability")
-    gap_detection: GapDetectionStats = Field(
-        default_factory=GapDetectionStats,
-        description="Gap detection statistics",
-    )
+    gap_detection: GapDetectionStats = Field(description="Gap detection statistics")
 
 
 class ZmqComponents(StrictDataSchema):

@@ -8,6 +8,7 @@ from fastapi import Request
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.strategy_routes import list_strategies
 
 
@@ -27,6 +28,7 @@ class TestListStrategies:
         mock_factory.started_processes = {}
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
+        mock_request.app.state.rest_tracker = SequenceTracker()
         result = await list_strategies(request=mock_request, _user=MagicMock())
         assert result.count == 0
         assert result.strategies == []
@@ -77,6 +79,7 @@ class TestListStrategies:
         mock_factory.started_processes = {"strategy_macd": MagicMock()}
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
+        mock_request.app.state.rest_tracker = SequenceTracker()
         result = await list_strategies(request=mock_request, _user=MagicMock())
         assert result.count == 1
         assert len(result.strategies) == 1
@@ -122,6 +125,7 @@ class TestListStrategies:
         mock_factory.started_processes = {"strategy_running": MagicMock()}
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
+        mock_request.app.state.rest_tracker = SequenceTracker()
         result = await list_strategies(request=mock_request, _user=MagicMock())
         assert result.count == 2
         running = next(s for s in result.strategies if s.name == "strategy_running")

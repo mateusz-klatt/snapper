@@ -588,7 +588,7 @@ export const GapDetectionStatsSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    bridge: GapStatsSchemaSchema.optional(),
+    bridge: GapStatsSchemaSchema,
     rest_clients: z.record(z.string(), GapStatsSchemaSchema).optional(),
   })
   .strict()
@@ -748,7 +748,7 @@ export const HealthCheckResponseSchema = z
     version: z.string(),
     connections: ConnectionStatsSchemaSchema,
     topics: HealthTopicsSchema,
-    gap_detection: GapDetectionStatsSchema.optional(),
+    gap_detection: GapDetectionStatsSchema,
   })
   .strict()
 

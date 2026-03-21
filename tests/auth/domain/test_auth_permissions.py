@@ -555,7 +555,13 @@ def _token_data() -> TokenClaims:
 
 
 def _token_pair(access_token: str) -> TokenPair:
-    return TokenPair(access_token=access_token, refresh_token="refresh", expires_in=120)
+    return TokenPair(
+        session_id="test-sid",
+        sequence_id=1,
+        access_token=access_token,
+        refresh_token="refresh",
+        expires_in=120,
+    )
 
 
 def test_update_and_get_connection_token() -> None:

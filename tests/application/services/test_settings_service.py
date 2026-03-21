@@ -1325,6 +1325,8 @@ class TestProcessRoutesTagsFallback:
             return_value=registry_data,
         ):
             request = ProcessCreateRequest(
+                session_id="test-sid",
+                sequence_id=1,
                 name="my_process",
                 template="test_process",
                 enabled=True,
@@ -1377,6 +1379,8 @@ class TestProcessRoutesTagsFallback:
             return_value=registry_data,
         ):
             request = ProcessCreateRequest(
+                session_id="test-sid",
+                sequence_id=1,
                 name="my_process",
                 template="test_process",
                 enabled=True,
@@ -1413,6 +1417,8 @@ class TestProcessRoutesListRuns:
             return_value=[
                 {
                     "public_id": "run-001",
+                    "session_id": "test-sid",
+                    "sequence_id": 1,
                     "process_name": "test_process",
                     "started_at": "2024-01-01T00:00:00",
                     "completed_at": "2024-01-01T01:00:00",
@@ -1426,6 +1432,8 @@ class TestProcessRoutesListRuns:
                 },
                 {
                     "public_id": "run-002",
+                    "session_id": "test-sid",
+                    "sequence_id": 2,
                     "process_name": "test_process_2",
                     "started_at": "2024-01-02T00:00:00",
                     "completed_at": None,
@@ -1463,6 +1471,8 @@ class TestProcessRoutesListRuns:
             return_value=[
                 {
                     "public_id": "run-001",
+                    "session_id": "test-sid",
+                    "sequence_id": 1,
                     "process_name": "filtered_process",
                     "started_at": "2024-01-01T00:00:00",
                     "completed_at": "2024-01-01T01:00:00",

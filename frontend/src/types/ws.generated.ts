@@ -258,8 +258,8 @@ export interface StrictDataSchema {
   public_id?: string;
   type: string;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
 }
 /**
  * OHLCV candlestick data for technical analysis.
@@ -284,8 +284,8 @@ export interface CandleData {
   public_id?: string;
   type: Type;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   instrument: string;
   exchange: Exchange;
   timeframe: string;
@@ -324,8 +324,8 @@ export interface ExecutionData {
   public_id?: string;
   type: Type1;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   trade_id?: TradeId;
   exchange_order_id?: ExchangeOrderId;
   client_order_id: string;
@@ -356,8 +356,8 @@ export interface HeartbeatData {
   public_id?: string;
   type: Type2;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   component: string;
   sequence: number;
   status: Status1;
@@ -383,8 +383,8 @@ export interface OrderCancelData {
   public_id?: string;
   type: Type3;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   exchange: Exchange2;
   instrument: string;
   exchange_order_id: string;
@@ -421,8 +421,8 @@ export interface OrderData {
   public_id?: string;
   type: Type4;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   exchange_order_id?: ExchangeOrderId1;
   client_order_id: string;
   instrument: string;
@@ -463,8 +463,8 @@ export interface OrderEventData {
   public_id?: string;
   type: Type5;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   exchange_order_id: string;
   client_order_id: string;
   exchange: Exchange4;
@@ -490,8 +490,8 @@ export interface OrderReplaceData {
   public_id?: string;
   type: Type6;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   exchange: Exchange5;
   instrument: string;
   exchange_order_id: string;
@@ -522,8 +522,8 @@ export interface OrderRequestData {
   public_id?: string;
   type: Type7;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   strategy_id: string;
   exchange: Exchange6;
   instrument: string;
@@ -554,8 +554,8 @@ export interface PositionData {
   public_id?: string;
   type: Type8;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   instrument: string;
   exchange: Exchange7;
   quantity: number;
@@ -573,8 +573,8 @@ export interface ReplayEndData {
   public_id?: string;
   type: Type9;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
 }
 /**
  * Historical data replay start marker.
@@ -589,8 +589,8 @@ export interface ReplayStartData {
   public_id?: string;
   type: Type10;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   started_at?: StartedAt;
 }
 /**
@@ -609,8 +609,8 @@ export interface SettingChangedData {
   public_id?: string;
   type: Type11;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   key: string;
   value: string;
   category: string;
@@ -636,8 +636,8 @@ export interface SignalData {
   public_id?: string;
   type: Type12;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   instrument: string;
   exchange: Exchange8;
   side: Side3;
@@ -661,8 +661,8 @@ export interface SymbolAliasUpdateData {
   public_id?: string;
   type: Type13;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   event: Event1;
   action: Action;
 }
@@ -684,8 +684,8 @@ export interface TickData {
   public_id?: string;
   type: Type14;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   instrument: string;
   exchange: Exchange9;
   volume: number;
@@ -711,8 +711,8 @@ export interface TradeData {
   public_id?: string;
   type: Type15;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   instrument: string;
   exchange: Exchange10;
   executed_at?: ExecutedAt;
@@ -736,8 +736,8 @@ export interface WSAuthCompleteResponse {
   public_id?: string;
   type: Type16;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   available_topics: AvailableTopics;
   user_role: UserRole;
   session_expires_at?: SessionExpiresAt;
@@ -758,8 +758,8 @@ export interface WSAuthExpiredResponse {
   public_id?: string;
   type: Type17;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
 }
 /**
  * Authentication failure message.
@@ -774,8 +774,8 @@ export interface WSAuthFailedResponse {
   public_id?: string;
   type: Type18;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   reason?: Reason2;
 }
 /**
@@ -791,8 +791,8 @@ export interface WSAuthOkResponse {
   public_id?: string;
   type: Type19;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * Token expiration (ISO 8601)
    */
@@ -811,8 +811,8 @@ export interface WSAuthRequiredResponse {
   public_id?: string;
   type: Type20;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * Authentication timeout in seconds
    */
@@ -831,8 +831,8 @@ export interface WSAuthenticateRequest {
   public_id?: string;
   type: Type21;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * WebSocket authentication token
    */
@@ -851,8 +851,8 @@ export interface WSErrorResponse {
   public_id?: string;
   type: Type22;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * Error description
    */
@@ -868,8 +868,8 @@ export interface WSGetSubscriptionsRequest {
   public_id?: string;
   type: Type23;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
 }
 /**
  * Ping request from client.
@@ -883,8 +883,8 @@ export interface WSPingRequest {
   public_id?: string;
   type: Type24;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
 }
 /**
  * Pong response to ping request.
@@ -903,8 +903,8 @@ export interface WSPongResponse {
    * Server timestamp (ISO 8601)
    */
   timestamp: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * Number of active WebSocket connections
    */
@@ -923,8 +923,8 @@ export interface WSReauthOkResponse {
   public_id?: string;
   type: Type26;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * New token expiration (ISO 8601)
    */
@@ -943,8 +943,8 @@ export interface WSReauthRequest {
   public_id?: string;
   type: Type27;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * New WebSocket authentication token
    */
@@ -963,8 +963,8 @@ export interface WSReauthRequiredResponse {
   public_id?: string;
   type: Type28;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   /**
    * Deadline for reauthentication (ISO 8601)
    */
@@ -981,8 +981,8 @@ export interface WSSubscribeRequest {
   public_id?: string;
   type: Type29;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   topics: Topics;
 }
 /**
@@ -1003,8 +1003,8 @@ export interface WSSubscriptionSuccessResponse {
   public_id?: string;
   type: Type30;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   action: Action1;
   status: Status2;
   topics: Topics1;
@@ -1027,8 +1027,8 @@ export interface WSSubscriptionsListResponse {
   public_id?: string;
   type: Type31;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   subscriptions: Subscriptions;
   available_topics: AvailableTopics1;
   /**
@@ -1047,7 +1047,7 @@ export interface WSUnsubscribeRequest {
   public_id?: string;
   type: Type32;
   timestamp?: string;
-  session_id?: string;
-  sequence_id?: number;
+  session_id: string;
+  sequence_id: number;
   topics: Topics2;
 }

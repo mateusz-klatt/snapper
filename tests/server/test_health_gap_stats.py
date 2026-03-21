@@ -149,7 +149,7 @@ class TestGapStatsSchemaValidation:
 
     def test_gap_stats_schema_defaults(self) -> None:
         """GapStatsSchema fields default to zero."""
-        schema = GapStatsSchema()
+        schema = GapStatsSchema(session_id="test-sid", sequence_id=1)
         assert schema.gaps_detected == 0
         assert schema.session_resets == 0
         assert schema.duplicates == 0
@@ -158,14 +158,17 @@ class TestGapStatsSchemaValidation:
 
     def test_gap_detection_stats_defaults(self) -> None:
         """GapDetectionStats has default bridge and empty rest_clients."""
-        stats = GapDetectionStats()
+        bridge = GapStatsSchema(session_id="test-sid", sequence_id=1)
+        stats = GapDetectionStats(bridge=bridge, session_id="test-sid", sequence_id=1)
         assert stats.bridge.gaps_detected == 0
         assert stats.rest_clients == {}
 
     def test_gap_detection_stats_with_data(self) -> None:
         """GapDetectionStats accepts populated bridge and rest_clients."""
-        bridge = GapStatsSchema(gaps_detected=5)
-        clients = {"sess-1": GapStatsSchema(duplicates=3)}
-        stats = GapDetectionStats(bridge=bridge, rest_clients=clients)
+        bridge = GapStatsSchema(gaps_detected=5, session_id="test-sid", sequence_id=1)
+        clients = {"sess-1": GapStatsSchema(duplicates=3, session_id="test-sid", sequence_id=1)}
+        stats = GapDetectionStats(
+            bridge=bridge, rest_clients=clients, session_id="test-sid", sequence_id=1
+        )
         assert stats.bridge.gaps_detected == 5
         assert stats.rest_clients["sess-1"].duplicates == 3

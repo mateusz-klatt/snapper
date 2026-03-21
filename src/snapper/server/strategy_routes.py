@@ -10,6 +10,7 @@ Endpoints:
 The endpoint requires only READ_STRATEGIES permission (viewer+).
 """
 
+import datetime as dt
 from typing import Annotated
 
 from fastapi import APIRouter
@@ -23,8 +24,11 @@ from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.auth.dependencies import require_permission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+_REST_STREAM = "rest.strategies"
 
 
 @router.get("")
@@ -44,6 +48,9 @@ async def list_strategies(
     Returns:
         Strategy list with running status.
     """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    ts = dt.datetime.now(dt.UTC)
     factory: ProcessLauncherService = request.app.state.process_factory
     configs = await factory.get_process_configs()
     strategies = [
@@ -52,8 +59,17 @@ async def list_strategies(
             running=config.name in factory.started_processes,
             enabled=config.enabled,
             mode=config.mode,
+            session_id=sid,
+            sequence_id=tracker.next_sequence(_REST_STREAM),
+            timestamp=ts,
         )
         for config in configs
         if config.role is ProcessRoleEnum.STRATEGY
     ]
-    return StrategyListResponse(strategies=strategies, count=len(strategies))
+    return StrategyListResponse(
+        strategies=strategies,
+        count=len(strategies),
+        session_id=sid,
+        sequence_id=tracker.next_sequence(_REST_STREAM),
+        timestamp=ts,
+    )

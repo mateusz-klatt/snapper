@@ -483,6 +483,8 @@ class TestStartProcess:
             args=["arg1"],
             kwargs={"endpoint": "tcp://0.0.0.0:6666"},
             autostart=True,
+            session_id="test-sid",
+            sequence_id=1,
         )
         result = await start_process(
             http_request=_make_rest_request(),
@@ -515,7 +517,14 @@ class TestStartProcess:
         mock_factory.start_process_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
-        body = ProcessStartRequest(mode=None, args=None, kwargs=None, autostart=None)
+        body = ProcessStartRequest(
+            mode=None,
+            args=None,
+            kwargs=None,
+            autostart=None,
+            session_id="test-sid",
+            sequence_id=1,
+        )
         result = await start_process(
             http_request=_make_rest_request(),
             name="zmq_broker",
@@ -572,6 +581,8 @@ class TestProcessStartRequest:
             args=["arg1", 2],
             kwargs={"key": "value"},
             autostart=False,
+            session_id="test-sid",
+            sequence_id=1,
         )
         assert request.mode == "process"
         assert request.args == ["arg1", 2]
@@ -585,7 +596,14 @@ class TestProcessStartRequest:
         When: ProcessStartRequest is created,
         Then: All fields are None.
         """
-        request = ProcessStartRequest(mode=None, args=None, kwargs=None, autostart=None)
+        request = ProcessStartRequest(
+            mode=None,
+            args=None,
+            kwargs=None,
+            autostart=None,
+            session_id="test-sid",
+            sequence_id=1,
+        )
         assert request.mode is None
         assert request.args is None
         assert request.kwargs is None
@@ -650,6 +668,8 @@ class TestCreateProcessConfiguration:
             args=[],
             kwargs={"name": "macd_custom"},
             note="UI created",
+            session_id="test-sid",
+            sequence_id=1,
         )
         settings = MagicMock()
         result = await create_process_configuration(
@@ -701,6 +721,8 @@ class TestCreateProcessConfiguration:
             args=None,
             kwargs=None,
             note=None,
+            session_id="test-sid",
+            sequence_id=1,
         )
         factory = MagicMock()
         settings = MagicMock()
@@ -763,6 +785,8 @@ class TestCreateProcessConfiguration:
             args=None,
             kwargs=None,
             note=None,
+            session_id="test-sid",
+            sequence_id=1,
         )
         with pytest.raises(HTTPException) as exc_info:
             await create_process_configuration(
@@ -856,6 +880,8 @@ class TestProcessRoutesEdgeCases:
             args=None,
             kwargs={"custom": "value"},
             note=None,
+            session_id="test-sid",
+            sequence_id=1,
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -906,6 +932,8 @@ class TestProcessRoutesEdgeCases:
             args=None,
             kwargs={"custom": "value"},
             note=None,
+            session_id="test-sid",
+            sequence_id=1,
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -957,6 +985,8 @@ class TestProcessRoutesEdgeCases:
             args=None,
             kwargs=None,
             note=None,
+            session_id="test-sid",
+            sequence_id=1,
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -993,6 +1023,8 @@ class TestProcessRoutesEdgeCases:
                     "tags": [],
                     "started_at": "2026-01-04T10:00:00Z",
                     "completed_at": "2026-01-04T11:00:00Z",
+                    "session_id": "test-sid",
+                    "sequence_id": 1,
                 },
                 {
                     "public_id": "run-002",
@@ -1006,6 +1038,8 @@ class TestProcessRoutesEdgeCases:
                     "tags": [],
                     "started_at": "2026-01-04T10:00:00Z",
                     "completed_at": None,
+                    "session_id": "test-sid",
+                    "sequence_id": 2,
                 },
             ]
         )
@@ -1043,6 +1077,8 @@ class TestProcessRoutesEdgeCases:
                     "tags": [],
                     "started_at": "2026-01-04T10:00:00Z",
                     "completed_at": "2026-01-04T11:00:00Z",
+                    "session_id": "test-sid",
+                    "sequence_id": 1,
                 },
             ]
         )

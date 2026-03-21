@@ -508,6 +508,22 @@ describe('domain API methods', () => {
           sequence_id: 0,
           active: 3,
         },
+        gap_detection: {
+          type: 'gap_detection_stats',
+          session_id: '',
+          sequence_id: 0,
+          bridge: {
+            type: 'gap_stats',
+            session_id: '',
+            sequence_id: 0,
+            gaps_detected: 0,
+            session_resets: 0,
+            duplicates: 0,
+            mid_stream_joins: 0,
+            rejected_unstamped: 0,
+          },
+          rest_clients: {},
+        },
       }),
     })
     const result = await apiClient.getHealth()

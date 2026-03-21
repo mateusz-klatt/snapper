@@ -138,7 +138,12 @@ def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
     test_client.cookies.clear()
     login_response = test_client.post(
         "/api/auth/login",
-        json={"username": username, "password": password},
+        json={
+            "session_id": "",
+            "sequence_id": 0,
+            "username": username,
+            "password": password,
+        },
     )
     assert login_response.status_code == 200
     response = test_client.post("/api/auth/refresh")
@@ -411,7 +416,12 @@ def test_websocket_stats_endpoint(test_client: Any) -> None:
 def _prepare_ws_token_v2(test_client: Any, *, username: str, password: str) -> tuple[str, str]:
     login_response = test_client.post(
         "/api/auth/login",
-        json={"username": username, "password": password},
+        json={
+            "session_id": "",
+            "sequence_id": 0,
+            "username": username,
+            "password": password,
+        },
     )
     assert login_response.status_code == 200
     response = test_client.post("/api/auth/refresh")
@@ -2890,6 +2900,8 @@ class StubTokenManager:
     def __init__(self) -> None:
         """Initialize the instance."""
         self.create_tokens_response = TokenPair(
+            session_id="test-sid",
+            sequence_id=1,
             access_token="access-token",
             refresh_token="refresh-token",
             expires_in=900,
@@ -2971,7 +2983,14 @@ class StubUserService:
             raise self.create_user_error
         if self.create_user_result:
             return self.create_user_result
-        user = UserProfile(username=username, email=email, role=role, is_active=is_active)
+        user = UserProfile(
+            session_id="test-sid",
+            sequence_id=1,
+            username=username,
+            email=email,
+            role=role,
+            is_active=is_active,
+        )
         self.created_users.append(
             {
                 "username": username,
@@ -3046,17 +3065,25 @@ def test_login_success_sets_cookies(
     Then: Sets access_token, refresh_token and csrf_token cookies.
     """
     client, user_service, token_manager, csrf_manager = auth_app
-    user = UserProfile(username="bob", email="bob@example.com", role=UserRole.OPERATOR)
+    user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        username="bob",
+        email="bob@example.com",
+        role=UserRole.OPERATOR,
+    )
     user_service.authenticated_user = user
     csrf_manager.token = "csrf-new"
     token_manager.create_tokens_response = TokenPair(
+        session_id="test-sid",
+        sequence_id=1,
         access_token="new-access",
         refresh_token="new-refresh",
         expires_in=600,
     )
     response = client.post(
         "/auth/login",
-        json={"username": "bob", "password": "secret"},
+        json={"session_id": "", "sequence_id": 0, "username": "bob", "password": "secret"},
     )
     assert response.status_code == 200
     body = response.json()
@@ -3082,7 +3109,7 @@ def test_login_failure_returns_401(
     user_service.authenticated_user = None
     response = client.post(
         "/auth/login",
-        json={"username": "bob", "password": "wrong"},
+        json={"session_id": "", "sequence_id": 0, "username": "bob", "password": "wrong"},
     )
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid username or password"
@@ -3108,9 +3135,11 @@ def test_refresh_token_success(
         jti="refresh-jti",
         sid="session-123",
     )
-    user = UserProfile(username="bob", role=UserRole.OPERATOR)
+    user = UserProfile(session_id="test-sid", sequence_id=1, username="bob", role=UserRole.OPERATOR)
     user_service.user_by_id = user
     token_manager.create_tokens_response = TokenPair(
+        session_id="test-sid",
+        sequence_id=1,
         access_token="rotated-access",
         refresh_token="rotated-refresh",
         expires_in=999,
@@ -3142,7 +3171,9 @@ def test_get_current_user_profile_returns_user(
     Then: Returns current user profile.
     """
     client, user_service, _token_manager, _csrf_manager = auth_app
-    user_service.user_by_id = UserProfile(username="alice", role=UserRole.ADMIN)
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid", sequence_id=1, username="alice", role=UserRole.ADMIN
+    )
     response = client.get("/auth/me")
     assert response.status_code == 200
     payload = response.json()
@@ -3262,7 +3293,9 @@ def test_get_current_user_info(
     Then: Returns username and role.
     """
     client, user_service, _, _ = auth_app
-    user_service.user_by_id = UserProfile(username="alice", role=UserRole.ADMIN)
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid", sequence_id=1, username="alice", role=UserRole.ADMIN
+    )
     response = client.get("/auth/me")
     assert response.status_code == 200
     data: dict[str, Any] = response.json()
@@ -3281,8 +3314,8 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     stub_service.all_users = [
-        UserProfile(username="alice", role=UserRole.ADMIN),
-        UserProfile(username="bob", role=UserRole.OPERATOR),
+        UserProfile(session_id="test-sid", sequence_id=1, username="alice", role=UserRole.ADMIN),
+        UserProfile(session_id="test-sid", sequence_id=1, username="bob", role=UserRole.OPERATOR),
     ]
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.get_users(
@@ -3303,10 +3336,14 @@ async def test_create_user_success(monkeypatch: Any) -> None:
     Then: Returns created user profile.
     """
     stub_service = StubUserService()
-    created_user = UserProfile(username="charlie", role=UserRole.VIEWER)
+    created_user = UserProfile(
+        session_id="test-sid", sequence_id=1, username="charlie", role=UserRole.VIEWER
+    )
     stub_service.create_user_result = created_user
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     request = CreateUserRequest(
+        session_id="test-sid",
+        sequence_id=1,
         username="charlie",
         password="pass-pass",
         email="c@example.com",
@@ -3333,6 +3370,8 @@ async def test_create_user_value_error(monkeypatch: Any) -> None:
     stub_service.create_user_error = ValueError("duplicate")
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     request = CreateUserRequest(
+        session_id="test-sid",
+        sequence_id=1,
         username="dup",
         password="pass-pass",
         email=None,
@@ -3360,6 +3399,8 @@ async def test_update_user_not_found(monkeypatch: Any) -> None:
     stub_service.update_user_result = None
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     request = UpdateUserRequest(
+        session_id="test-sid",
+        sequence_id=1,
         email=None,
         role=UserRole.VIEWER,
         is_active=False,
@@ -3383,10 +3424,18 @@ async def test_update_user_success(monkeypatch: Any) -> None:
     Then: Returns updated user profile.
     """
     stub_service = StubUserService()
-    updated_user = UserProfile(username="dora", role=UserRole.OPERATOR, is_active=True)
+    updated_user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        username="dora",
+        role=UserRole.OPERATOR,
+        is_active=True,
+    )
     stub_service.update_user_result = updated_user
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     request = UpdateUserRequest(
+        session_id="test-sid",
+        sequence_id=1,
         email="dora@example.com",
         role=UserRole.OPERATOR,
         is_active=True,
@@ -3479,7 +3528,12 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
+    pwd_request = ChangePasswordRequest(
+        session_id="test-sid",
+        sequence_id=1,
+        current_password="old-pass",
+        new_password="new-password",
+    )
     result = await routes.change_user_password(
         request=_make_rest_request(),
         user_id="self",
@@ -3501,7 +3555,12 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
+    pwd_request = ChangePasswordRequest(
+        session_id="test-sid",
+        sequence_id=1,
+        current_password="old-pass",
+        new_password="new-password",
+    )
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
             request=_make_rest_request(),
@@ -3524,7 +3583,12 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
     stub_service = StubUserService()
     stub_service.change_password_success = False
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
+    pwd_request = ChangePasswordRequest(
+        session_id="test-sid",
+        sequence_id=1,
+        current_password="old-pass",
+        new_password="new-password",
+    )
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
             request=_make_rest_request(),
@@ -3546,7 +3610,12 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    pwd_request = ChangePasswordRequest(current_password="irrelevant", new_password="new-password")
+    pwd_request = ChangePasswordRequest(
+        session_id="test-sid",
+        sequence_id=1,
+        current_password="irrelevant",
+        new_password="new-password",
+    )
     result = await routes.change_user_password(
         request=_make_rest_request(),
         user_id="target",
@@ -3594,7 +3663,9 @@ async def test_admin_reset_password_handles_repository_error(
         await routes.admin_reset_user_password(
             request=_make_rest_request(),
             user_id="user-1",
-            password_data=AdminResetPasswordRequest(new_password="super-secret"),
+            password_data=AdminResetPasswordRequest(
+                session_id="test-sid", sequence_id=1, new_password="super-secret"
+            ),
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
@@ -3623,7 +3694,9 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
     result = await routes.admin_reset_user_password(
         request=_make_rest_request(),
         user_id="user-1",
-        password_data=AdminResetPasswordRequest(new_password="super-secret"),
+        password_data=AdminResetPasswordRequest(
+            session_id="test-sid", sequence_id=1, new_password="super-secret"
+        ),
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
@@ -3650,7 +3723,9 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
         await routes.admin_reset_user_password(
             request=_make_rest_request(),
             user_id="missing",
-            password_data=AdminResetPasswordRequest(new_password="super-secret"),
+            password_data=AdminResetPasswordRequest(
+                session_id="test-sid", sequence_id=1, new_password="super-secret"
+            ),
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
@@ -3698,7 +3773,13 @@ class TestAuthRoutesCoverage:
         Then: Returns admin profile and sets cookies.
         """
         response = client.post(
-            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "admin",
+                "password": "AdminSnapper2026!",
+            },
         )
         assert response.status_code == 200
         data = response.json()
@@ -3717,7 +3798,13 @@ class TestAuthRoutesCoverage:
         Then: Returns operator role in response.
         """
         response = client.post(
-            "/api/auth/login", json={"username": "operator", "password": "OpSnapper2026!"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "operator",
+                "password": "OpSnapper2026!",
+            },
         )
         assert response.status_code == 200
         data = response.json()
@@ -3732,7 +3819,13 @@ class TestAuthRoutesCoverage:
         Then: Returns viewer role in response.
         """
         response = client.post(
-            "/api/auth/login", json={"username": "viewer", "password": "ViewSnapper2026!"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "viewer",
+                "password": "ViewSnapper2026!",
+            },
         )
         assert response.status_code == 200
         data = response.json()
@@ -3748,7 +3841,12 @@ class TestAuthRoutesCoverage:
         """
         response = client.post(
             "/api/auth/login",
-            json={"username": "nonexistent", "password": "AdminSnapper2026!"},
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "nonexistent",
+                "password": "AdminSnapper2026!",
+            },
         )
         assert response.status_code == 401
         assert "Invalid username or password" in response.json()["detail"]
@@ -3761,7 +3859,13 @@ class TestAuthRoutesCoverage:
         Then: Returns 401 error.
         """
         response = client.post(
-            "/api/auth/login", json={"username": "admin", "password": "wrongpassword"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "admin",
+                "password": "wrongpassword",
+            },
         )
         assert response.status_code == 401
         assert "Invalid username or password" in response.json()["detail"]
@@ -3810,7 +3914,13 @@ class TestAuthRoutesCoverage:
         Then: Returns rotated tokens and ws_token.
         """
         login_response = client.post(
-            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "admin",
+                "password": "AdminSnapper2026!",
+            },
         )
         assert login_response.status_code == 200
         refresh_token = login_response.cookies.get("refresh_token")
@@ -3853,7 +3963,13 @@ class TestAuthRoutesCoverage:
         Then: Raises WsTokenAlreadyUsedError.
         """
         login_response = client.post(
-            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "admin",
+                "password": "AdminSnapper2026!",
+            },
         )
         assert login_response.status_code == 200
         refresh_token = login_response.cookies.get("refresh_token")
@@ -3891,7 +4007,13 @@ class TestAuthRoutesCoverage:
         Then: Returns success message.
         """
         login_response = client.post(
-            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "admin",
+                "password": "AdminSnapper2026!",
+            },
         )
         csrf_token = login_response.cookies.get("csrf_token")
         assert csrf_token is not None
@@ -3935,7 +4057,13 @@ class TestAuthRoutesCoverage:
         Then: Returns current user profile.
         """
         login_response = client.post(
-            "/api/auth/login", json={"username": "admin", "password": "AdminSnapper2026!"}
+            "/api/auth/login",
+            json={
+                "session_id": "",
+                "sequence_id": 0,
+                "username": "admin",
+                "password": "AdminSnapper2026!",
+            },
         )
         assert login_response.status_code == 200
         client.cookies.update(login_response.cookies)
@@ -4316,7 +4444,11 @@ class TestUserManagementCoverage:
         Then: Fields populated correctly.
         """
         create_req = CreateUserRequest(
-            username="testuser", password="password123", role=UserRole.VIEWER
+            session_id="test-sid",
+            sequence_id=1,
+            username="testuser",
+            password="password123",
+            role=UserRole.VIEWER,
         )
         assert create_req.username == "testuser"
         assert create_req.role == UserRole.VIEWER
@@ -4329,6 +4461,8 @@ class TestUserManagementCoverage:
         Then: All fields accessible and correct.
         """
         user = UserProfile(
+            session_id="test-sid",
+            sequence_id=1,
             username="testuser",
             email="test@example.com",
             role=UserRole.ADMIN,
@@ -4420,7 +4554,13 @@ class TestUserManagementCoverage:
         When: Accessing fields,
         Then: All fields accessible and correct.
         """
-        login_req = LoginRequest(username="testuser", password="password123", remember_me=True)
+        login_req = LoginRequest(
+            session_id="test-sid",
+            sequence_id=1,
+            username="testuser",
+            password="password123",
+            remember_me=True,
+        )
         assert login_req.username == "testuser"
         assert login_req.password == "password123"
         assert login_req.remember_me is True
@@ -4432,10 +4572,16 @@ class TestUserManagementCoverage:
         When: Creating instances,
         Then: Fields populated correctly with correct types.
         """
-        auth_msg = WebSocketAuthMessage(token="test_token")
+        auth_msg = WebSocketAuthMessage(session_id="test-sid", sequence_id=1, token="test_token")
         assert auth_msg.type == "auth"
         assert auth_msg.token == "test_token"
-        auth_resp = WebSocketAuthResponse(success=True, user_id="user123", role=UserRole.ADMIN)
+        auth_resp = WebSocketAuthResponse(
+            session_id="test-sid",
+            sequence_id=1,
+            success=True,
+            user_id="user123",
+            role=UserRole.ADMIN,
+        )
         assert auth_resp.type == "auth_response"
         assert auth_resp.success is True
         assert auth_resp.user_id == "user123"

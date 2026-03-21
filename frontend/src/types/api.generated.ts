@@ -77,8 +77,8 @@ export type Paths = {
             cookie?: never;
         };
         /**
-         * Get Current User Info
-         * @description Get profile information for the currently authenticated user.
+         * Get Current User Profile
+         * @description Get current user's profile.
          *
          *     Args:
          *         current_user: Authenticated principal from dependency.
@@ -89,7 +89,7 @@ export type Paths = {
          *     Raises:
          *         HTTPException: 404 if user not found in database.
          */
-        get: Operations["get_current_user_info_api_auth_me_get"];
+        get: Operations["get_current_user_profile_api_auth_me_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -817,15 +817,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** New Password */
             new_password: string;
@@ -861,15 +855,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Name
@@ -939,15 +927,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Processes */
             processes: Components["schemas"]["AvailableProcess"][];
@@ -988,15 +970,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -1052,15 +1028,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Current Password */
             current_password: string;
@@ -1105,15 +1075,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Name
@@ -1221,15 +1185,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Processes */
             processes: Components["schemas"]["ConfiguredProcess"][];
@@ -1261,15 +1219,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Active Connections
@@ -1328,15 +1280,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Username */
             username: string;
@@ -1388,15 +1334,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Trade Id */
             trade_id?: string | null;
@@ -1457,18 +1397,12 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** @description ZMQ bridge gap detection stats */
-            bridge?: Components["schemas"]["GapStatsSchema"];
+            bridge: Components["schemas"]["GapStatsSchema"];
             /**
              * Rest Clients
              * @description Per-session REST client gap stats
@@ -1502,15 +1436,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Gaps Detected
@@ -1578,15 +1506,9 @@ export type Components = {
              * @description Timestamp of the health check
              */
             timestamp: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Status
@@ -1604,7 +1526,7 @@ export type Components = {
             /** @description Topics availability */
             topics: Components["schemas"]["HealthTopics"];
             /** @description Gap detection statistics */
-            gap_detection?: Components["schemas"]["GapDetectionStats"];
+            gap_detection: Components["schemas"]["GapDetectionStats"];
         };
         /**
          * HealthTopics
@@ -1627,15 +1549,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Active
@@ -1667,15 +1583,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Username */
             username: string;
@@ -1713,15 +1623,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Message */
             message: string;
@@ -1753,15 +1657,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Message */
             message: string;
@@ -1808,15 +1706,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Exchange Order Id */
             exchange_order_id?: string | null;
@@ -1893,15 +1785,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -1942,15 +1828,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Running
@@ -1993,15 +1873,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Name
@@ -2064,15 +1938,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Status
@@ -2106,15 +1974,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Name
@@ -2164,15 +2026,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Process Name
@@ -2255,15 +2111,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Runs */
             runs: Components["schemas"]["ProcessRun"][];
@@ -2302,15 +2152,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Name
@@ -2389,15 +2233,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Mode
@@ -2457,15 +2295,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Status
@@ -2518,15 +2350,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Status
@@ -2584,15 +2410,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Status
@@ -2636,15 +2456,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** @description Feed publisher process counts */
             feeds: Components["schemas"]["ProcessCategoryCount"];
@@ -2683,15 +2497,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Message */
             message: string;
@@ -2727,15 +2535,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Categories
@@ -2772,15 +2574,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Key */
             key: string;
@@ -2824,15 +2620,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Value
@@ -2882,15 +2672,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -2941,15 +2725,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Strategies */
             strategies: Components["schemas"]["StrategyProcess"][];
@@ -2981,15 +2759,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Name
@@ -3044,15 +2816,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Strategy Name
@@ -3129,15 +2895,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Per Topic
@@ -3180,15 +2940,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             trader: Components["schemas"]["ProcessStatus"];
             /** Backtests */
@@ -3232,15 +2986,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Active Subscribers
@@ -3333,15 +3081,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Email */
             email?: string | null;
@@ -3374,15 +3116,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Users */
             users: Components["schemas"]["UserProfile"][];
@@ -3418,15 +3154,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** Username */
             username: string;
@@ -3492,15 +3222,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Active Connections
@@ -3542,15 +3266,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Broker Xpub
@@ -3592,15 +3310,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /** @description WebSocket statistics */
             websocket: Components["schemas"]["WebSocketStats"];
@@ -3643,15 +3355,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Active Topics
@@ -3692,15 +3398,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Zmq Context
@@ -3741,15 +3441,9 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Available Topics
@@ -3788,15 +3482,9 @@ export type Components = {
              * @description Timestamp of the health check
              */
             timestamp: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
-            /**
-             * Sequence Id
-             * @default 0
-             */
+            /** Sequence Id */
             sequence_id: number;
             /**
              * Status
@@ -3885,7 +3573,7 @@ export interface Operations {
             };
         };
     };
-    get_current_user_info_api_auth_me_get: {
+    get_current_user_profile_api_auth_me_get: {
         parameters: {
             query?: never;
             header?: never;

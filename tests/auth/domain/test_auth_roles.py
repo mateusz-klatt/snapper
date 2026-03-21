@@ -36,6 +36,8 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
         is_active=True,
     )
     expected_profile = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
         username="testuser",
         role=UserRole.VIEWER,
         is_active=True,
@@ -165,6 +167,8 @@ class TestUserManagementBasic:
         mock_user_service = AsyncMock()
         mock_user_service.get_all_users.return_value = [
             UserProfile(
+                session_id="test-sid",
+                sequence_id=1,
                 username="testuser",
                 role=UserRole.VIEWER,
                 is_active=True,

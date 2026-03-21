@@ -180,8 +180,8 @@ struct AdminResetPasswordRequest: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let newPassword: String
 
     enum CodingKeys: String, CodingKey {
@@ -198,8 +198,8 @@ struct AvailableProcess: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Process identifier
     let name: String
     /// Full Python class path
@@ -238,8 +238,8 @@ struct AvailableProcessesResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let processes: [AvailableProcess]
     let count: Int
 
@@ -258,8 +258,8 @@ struct CandleData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let instrument: String
     let exchange: String
     let timeframe: String
@@ -296,8 +296,8 @@ struct ChangePasswordRequest: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let currentPassword: String
     let newPassword: String
 
@@ -316,8 +316,8 @@ struct ConfiguredProcess: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Unique process name
     let name: String
     /// Whether process autostarts on boot
@@ -377,8 +377,8 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let processes: [ConfiguredProcess]
     let count: Int
 
@@ -397,8 +397,8 @@ struct ConnectionStatsSchema: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Active WebSocket connections
     let activeConnections: Int?
     /// Active ZMQ subscriber sockets
@@ -428,8 +428,8 @@ struct CreateUserRequest: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let username: String
     let email: String?
     let password: String
@@ -454,8 +454,8 @@ struct ExecutionData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let tradeId: String?
     let exchangeOrderId: String?
     let clientOrderId: String
@@ -494,10 +494,10 @@ struct GapDetectionStats: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// ZMQ bridge gap detection stats
-    let bridge: GapStatsSchema?
+    let bridge: GapStatsSchema
     /// Per-session REST client gap stats
     let restClients: [String: GapStatsSchema]?
 
@@ -516,8 +516,8 @@ struct GapStatsSchema: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Total missing messages detected
     let gapsDetected: Int?
     /// Producer session resets observed
@@ -552,8 +552,8 @@ struct HealthCheckResponse: Codable, Sendable {
     let type: String?
     /// Timestamp of the health check
     let timestamp: Date
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Overall service health status
     let status: String
     /// Application version
@@ -563,7 +563,7 @@ struct HealthCheckResponse: Codable, Sendable {
     /// Topics availability
     let topics: HealthTopics
     /// Gap detection statistics
-    let gapDetection: GapDetectionStats?
+    let gapDetection: GapDetectionStats
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -583,8 +583,8 @@ struct HealthTopics: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Number of currently active topics
     let active: Int
 
@@ -602,8 +602,8 @@ struct LoginRequest: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let username: String
     let password: String
     let rememberMe: Bool?
@@ -624,8 +624,8 @@ struct LoginResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let message: String
     let expiresIn: Int
     let user: UserProfile
@@ -646,8 +646,8 @@ struct MessageResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let message: String
 
     enum CodingKeys: String, CodingKey {
@@ -664,8 +664,8 @@ struct OrderData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let exchangeOrderId: String?
     let clientOrderId: String
     let instrument: String
@@ -712,8 +712,8 @@ struct PositionData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let instrument: String
     let exchange: String
     let quantity: Double
@@ -740,8 +740,8 @@ struct ProcessCategoryCount: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Number of currently running processes
     let running: Int
     /// Total number of configured processes
@@ -762,8 +762,8 @@ struct ProcessCreateRequest: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Unique process name
     let name: String
     /// Registered process identifier used as template
@@ -799,8 +799,8 @@ struct ProcessCreateResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Operation status
     let status: String
     /// Created process info
@@ -821,8 +821,8 @@ struct ProcessCreatedInfo: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Unique process name
     let name: String
     /// Template used for creation
@@ -844,8 +844,8 @@ struct ProcessRun: Codable, Sendable {
     let publicId: String
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Process name
     let processName: String
     /// Run status
@@ -890,8 +890,8 @@ struct ProcessRunsResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let runs: [ProcessRun]
     let count: Int
 
@@ -910,8 +910,8 @@ struct ProcessSchemaResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Process identifier
     let name: String
     /// Human-readable description
@@ -953,8 +953,8 @@ struct ProcessStartRequest: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Execution mode (thread/process) - for ProcessLauncherService, not constructor
     let mode: String?
     /// Constructor positional arguments override
@@ -981,8 +981,8 @@ struct ProcessStartResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Operation status (success, already_running, error)
     let status: String
     /// Process name
@@ -1009,8 +1009,8 @@ struct ProcessStatus: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Process status: not_running, running, stopped, completed, error
     let status: String
     /// Process ID if running
@@ -1043,8 +1043,8 @@ struct ProcessStopResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Operation status (success, not_running, error)
     let status: String
     /// Process name
@@ -1068,8 +1068,8 @@ struct ProcessSummaryResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Feed publisher process counts
     let feeds: ProcessCategoryCount
     /// Strategy process counts
@@ -1096,8 +1096,8 @@ struct RefreshResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let message: String
     let wsToken: String
     let wsTokenExp: Date
@@ -1122,8 +1122,8 @@ struct SettingCategoriesResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// List of unique setting categories
     let categories: [String]
 
@@ -1141,8 +1141,8 @@ struct SettingRead: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let key: String
     let value: String
     let category: String
@@ -1169,8 +1169,8 @@ struct SettingUpdate: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Setting value as string
     let value: String
     /// Setting category
@@ -1194,8 +1194,8 @@ struct SignalData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let instrument: String
     let exchange: String
     let side: String
@@ -1226,8 +1226,8 @@ struct StrategyListResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let strategies: [StrategyProcess]
     let count: Int
 
@@ -1246,8 +1246,8 @@ struct StrategyProcess: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Unique process name
     let name: String
     /// Whether process is currently running
@@ -1274,8 +1274,8 @@ struct StrategyStatusPayload: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Strategy name
     let strategyName: String
     /// Current strategy status
@@ -1320,8 +1320,8 @@ struct SubscriptionsStats: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Subscriber count per topic
     let perTopic: [String: Int]
     /// Topics subscribed per client
@@ -1342,8 +1342,8 @@ struct SystemStatus: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let trader: ProcessStatus
     let backtests: [String: ProcessStatus]
     /// List of active strategies from strategy_runner
@@ -1365,8 +1365,8 @@ struct TopicMetricSnapshotSchema: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Current subscriber count
     let activeSubscribers: Int?
     /// Total messages received
@@ -1414,8 +1414,8 @@ struct UpdateUserRequest: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let email: String?
     let role: UserRole?
     let isActive: Bool?
@@ -1436,8 +1436,8 @@ struct UserListResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let users: [UserProfile]
     let totalCount: Int
 
@@ -1456,8 +1456,8 @@ struct UserProfile: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let username: String
     let email: String?
     let role: UserRole
@@ -1490,8 +1490,8 @@ struct WebSocketStats: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Number of active WebSocket connections
     let activeConnections: Int
     /// Subscriber count per topic
@@ -1515,8 +1515,8 @@ struct WsStatsConfig: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// ZMQ broker XPUB endpoint
     let brokerXpub: String
     /// Heartbeat interval in milliseconds
@@ -1537,8 +1537,8 @@ struct WsStatsResponse: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// WebSocket statistics
     let websocket: WebSocketStats
     /// ZMQ bridge statistics
@@ -1571,8 +1571,8 @@ struct ZmqBridgeStats: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Number of active ZMQ topics
     let activeTopics: Int
     /// Number of subscriber tasks
@@ -1596,8 +1596,8 @@ struct ZmqComponents: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// ZMQ context status
     let zmqContext: String
     /// WebSocket manager status
@@ -1621,8 +1621,8 @@ struct ZmqConfig: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// List of available ZMQ topics
     let availableTopics: [String]
 
@@ -1641,8 +1641,8 @@ struct ZmqHealthResponse: Codable, Sendable {
     let type: String?
     /// Timestamp of the health check
     let timestamp: Date
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Overall ZMQ bridge health status
     let status: String
     /// Component status details

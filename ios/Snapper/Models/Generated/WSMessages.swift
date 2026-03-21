@@ -94,8 +94,8 @@ struct WsMessageBase: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -110,8 +110,8 @@ struct HeartbeatData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let component: String
     let sequence: Int
     let status: String
@@ -136,8 +136,8 @@ struct OrderCancelData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
@@ -160,8 +160,8 @@ struct OrderEventData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let exchangeOrderId: String
     let clientOrderId: String
     let exchange: String
@@ -188,8 +188,8 @@ struct OrderReplaceData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
@@ -216,8 +216,8 @@ struct OrderRequestData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let strategyId: String
     let exchange: String
     let instrument: String
@@ -252,8 +252,8 @@ struct ReplayEndData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -268,8 +268,8 @@ struct ReplayStartData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let startedAt: Date?
 
     enum CodingKeys: String, CodingKey {
@@ -286,8 +286,8 @@ struct SettingChangedData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let key: String
     let value: String
     let category: String
@@ -310,8 +310,8 @@ struct SymbolAliasUpdateData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let event: String
     let action: String
 
@@ -330,8 +330,8 @@ struct TickData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let instrument: String
     let exchange: String
     let volume: Double
@@ -358,8 +358,8 @@ struct TradeData: Codable, Sendable {
     let publicId: String?
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     let instrument: String
     let exchange: String
     let executedAt: Date?
@@ -387,8 +387,8 @@ struct WSAuthCompleteResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Topics available for subscription
     let availableTopics: [String]
     /// Authenticated user role
@@ -416,8 +416,8 @@ struct WSAuthExpiredResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -433,8 +433,8 @@ struct WSAuthFailedResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Failure reason
     let reason: String?
 
@@ -453,8 +453,8 @@ struct WSAuthOkResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Token expiration (ISO 8601)
     let exp: Date
 
@@ -473,8 +473,8 @@ struct WSAuthRequiredResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Authentication timeout in seconds
     let timeout: Int?
 
@@ -493,8 +493,8 @@ struct WSAuthenticateRequest: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// WebSocket authentication token
     let wsToken: String
 
@@ -513,8 +513,8 @@ struct WSErrorResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Error description
     let message: String
 
@@ -533,8 +533,8 @@ struct WSGetSubscriptionsRequest: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -550,8 +550,8 @@ struct WSPingRequest: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -568,8 +568,8 @@ struct WSPongResponse: Codable, Sendable {
     let type: String
     /// Server timestamp (ISO 8601)
     let timestamp: Date
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Number of active WebSocket connections
     let activeConnections: Int
 
@@ -588,8 +588,8 @@ struct WSReauthOkResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// New token expiration (ISO 8601)
     let exp: Date
 
@@ -608,8 +608,8 @@ struct WSReauthRequest: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// New WebSocket authentication token
     let wsToken: String
 
@@ -628,8 +628,8 @@ struct WSReauthRequiredResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Deadline for reauthentication (ISO 8601)
     let deadline: Date
 
@@ -648,8 +648,8 @@ struct WSSubscribeRequest: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Topics to subscribe to
     let topics: [String]
 
@@ -668,8 +668,8 @@ struct WSSubscriptionSuccessResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// The subscription action performed
     let action: String
     /// Result status of the subscription operation
@@ -703,8 +703,8 @@ struct WSSubscriptionsListResponse: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Current active subscriptions
     let subscriptions: [String]
     /// Topics available for subscription
@@ -729,8 +729,8 @@ struct WSUnsubscribeRequest: Codable, Sendable {
     /// Message type discriminator
     let type: String
     let timestamp: Date?
-    let sessionId: String?
-    let sequenceId: Int?
+    let sessionId: String
+    let sequenceId: Int
     /// Topics to unsubscribe from
     let topics: [String]
 
