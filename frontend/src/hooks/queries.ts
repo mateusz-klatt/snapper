@@ -17,7 +17,7 @@ import type {
   ProcessCreateRequest,
   ProcessCreateResponse,
   StrategyListResponse,
-  SettingRead,
+  SettingResponse,
   SettingUpdate,
   UserListResponse,
   CreateUserRequest,
@@ -110,7 +110,7 @@ export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: 
   const { isAuthenticated } = useAuth()
   const selectOrders = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getOrders>>) =>
-      data.map(safeOrderFromAPI).filter((o): o is NonNullable<typeof o> => o !== null),
+      data.items.map(safeOrderFromAPI).filter((o): o is NonNullable<typeof o> => o !== null),
     []
   )
 
@@ -127,7 +127,7 @@ export const useExecutions = (filters?: { limit?: number }) => {
   const { isAuthenticated } = useAuth()
   const selectExecutions = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getExecutions>>) =>
-      data.map(safeExecutionFromAPI).filter((e): e is NonNullable<typeof e> => e !== null),
+      data.items.map(safeExecutionFromAPI).filter((e): e is NonNullable<typeof e> => e !== null),
     []
   )
 
@@ -148,7 +148,7 @@ const usePositions = () => {
     queryFn: async () => {
       const data = await apiClient.getPositions()
 
-      return data.map(positionFromAPI)
+      return data.items.map(positionFromAPI)
     },
     refetchInterval: isAuthenticated ? 10000 : false,
     enabled: isAuthenticated,
@@ -165,7 +165,7 @@ export const useSignals = (
   const { isAuthenticated } = useAuth()
   const selectSignals = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getSignals>>) =>
-      data.map(safeSignalFromAPI).filter((s): s is NonNullable<typeof s> => s !== null),
+      data.items.map(safeSignalFromAPI).filter((s): s is NonNullable<typeof s> => s !== null),
     []
   )
 
@@ -364,9 +364,10 @@ export const useCreateProcessConfig = () => {
 export const useSettings = (category?: string) => {
   const { isAuthenticated } = useAuth()
 
-  return useQuery<SettingRead[]>({
+  return useQuery({
     queryKey: queryKeys.settings(category),
     queryFn: () => apiClient.getSettings(category),
+    select: data => data.items,
     enabled: isAuthenticated,
     throwOnError: false,
   })
@@ -386,7 +387,7 @@ export const useSettingCategories = () => {
 export const useUpdateSetting = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<SettingRead, Error, { key: string; data: SettingUpdate }>({
+  return useMutation<SettingResponse, Error, { key: string; data: SettingUpdate }>({
     mutationFn: ({ key, data }) => apiClient.updateSetting(key, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings'] })

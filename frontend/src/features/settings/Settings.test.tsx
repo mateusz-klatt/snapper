@@ -92,7 +92,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'database'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('Settings')).toBeTruthy()
@@ -131,7 +134,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'database'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('api.url')).toBeTruthy()
@@ -166,7 +172,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'database'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('api.base_url')).toBeTruthy()
@@ -192,7 +201,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockResolvedValue({
       key: 'api.url',
       value: 'http://new',
@@ -228,7 +240,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockResolvedValue({
       key: 'app.name',
       value: 'NewAppName',
@@ -274,7 +289,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
 
     let resolveUpdate: (v: unknown) => void = () => {}
 
@@ -313,7 +331,9 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-    vi.mocked(apiClient.getSettings).mockResolvedValueOnce(mockSettings).mockResolvedValue([])
+    vi.mocked(apiClient.getSettings)
+      .mockResolvedValueOnce({ items: mockSettings, count: mockSettings.length } as never)
+      .mockResolvedValue({ items: [], count: 0 } as never)
 
     let resolveDelete: (v: unknown) => void = () => {}
 
@@ -339,7 +359,7 @@ describe('Settings', () => {
   })
   it('displays all categories option', async () => {
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'database'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue([])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('All Categories')).toBeTruthy()
@@ -347,7 +367,7 @@ describe('Settings', () => {
   })
   it('shows no settings found message when filtered list is empty', async () => {
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue([])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('No settings found matching your criteria.')).toBeTruthy()
@@ -366,7 +386,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.name')).toBeTruthy()
@@ -390,7 +413,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.name')).toBeTruthy()
@@ -421,7 +447,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockResolvedValue({
       key: 'app.name',
       value: 'NewAppName',
@@ -465,7 +494,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['auth'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('exchange.api_key')).toBeTruthy()
@@ -494,7 +526,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading', 'auth'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('trading.enabled')).toBeTruthy()
@@ -515,7 +550,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.config')).toBeTruthy()
@@ -535,7 +573,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockRejectedValue(new Error('Update failed'))
     renderSettings(<Settings />)
     await waitFor(() => {
@@ -568,7 +609,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.empty')).toBeTruthy()
@@ -588,7 +632,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.setting')).toBeTruthy()
@@ -608,7 +655,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.name')).toBeTruthy()
@@ -639,7 +689,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.config')).toBeTruthy()
@@ -668,7 +721,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['auth'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockResolvedValue({
       key: 'auth.api_key',
       value: 'gAAAAABencrypted_value',
@@ -708,7 +764,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['auth'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockResolvedValue({
       key: 'auth_secret_key',
       value: 'gAAAAABencrypted_value',
@@ -750,7 +809,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['auth'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('auth_secret_key')).toBeTruthy()
@@ -787,7 +849,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockRejectedValue('string error')
     renderSettings(<Settings />)
     await waitFor(() => {
@@ -858,7 +923,10 @@ describe('Settings', () => {
       'system',
       'unknown',
     ])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('risk')).toBeTruthy()
@@ -905,7 +973,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['auth'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('db.password')).toBeTruthy()
@@ -927,7 +998,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.name')).toBeTruthy()
@@ -947,7 +1021,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.nodesc')).toBeTruthy()
@@ -967,7 +1044,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['general'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.nouser')).toBeTruthy()
@@ -987,7 +1067,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['config'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockResolvedValue({
       key: 'config.json',
       value: '{"host": "newhost", "port": 8080}',
@@ -1023,7 +1106,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['config'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('config.json')).toBeTruthy()
@@ -1051,7 +1137,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['credentials'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     vi.mocked(apiClient.updateSetting).mockResolvedValue({
       key: 'api_key',
       value: 'ENC:encrypted',
@@ -1088,7 +1177,10 @@ describe('Settings', () => {
       ]
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+      vi.mocked(apiClient.getSettings).mockResolvedValue({
+        items: mockSettings,
+        count: mockSettings.length,
+      } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('test.setting')).toBeTruthy()
@@ -1113,7 +1205,10 @@ describe('Settings', () => {
       ]
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+      vi.mocked(apiClient.getSettings).mockResolvedValue({
+        items: mockSettings,
+        count: mockSettings.length,
+      } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('test.setting')).toBeTruthy()
@@ -1140,7 +1235,9 @@ describe('Settings', () => {
       ]
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-      vi.mocked(apiClient.getSettings).mockResolvedValueOnce(mockSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings)
+        .mockResolvedValueOnce({ items: mockSettings, count: mockSettings.length } as never)
+        .mockResolvedValue({ items: [], count: 0 } as never)
       vi.mocked(apiClient.deleteSetting).mockResolvedValue({ message: 'Setting deleted' })
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1172,7 +1269,10 @@ describe('Settings', () => {
       ]
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+      vi.mocked(apiClient.getSettings).mockResolvedValue({
+        items: mockSettings,
+        count: mockSettings.length,
+      } as never)
       vi.mocked(apiClient.deleteSetting).mockRejectedValue(new Error('Delete failed'))
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1202,7 +1302,10 @@ describe('Settings', () => {
       ]
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['test'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+      vi.mocked(apiClient.getSettings).mockResolvedValue({
+        items: mockSettings,
+        count: mockSettings.length,
+      } as never)
       vi.mocked(apiClient.deleteSetting).mockRejectedValue('unknown error')
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1223,7 +1326,7 @@ describe('Settings', () => {
   describe('Add Setting Modal', () => {
     it('opens Add Setting modal when clicking Add Setting button', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1246,7 +1349,9 @@ describe('Settings', () => {
       }
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValueOnce([]).mockResolvedValue([newSetting])
+      vi.mocked(apiClient.getSettings)
+        .mockResolvedValueOnce({ items: [], count: 0 } as never)
+        .mockResolvedValue({ items: [newSetting], count: 1 } as never)
       vi.mocked(apiClient.updateSetting).mockResolvedValue(newSetting)
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1295,7 +1400,7 @@ describe('Settings', () => {
       }
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       vi.mocked(apiClient.updateSetting).mockResolvedValue(newSetting)
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1325,7 +1430,7 @@ describe('Settings', () => {
     })
     it('shows validation error when key is empty', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1341,7 +1446,7 @@ describe('Settings', () => {
     })
     it('shows validation error when value is empty', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1358,7 +1463,7 @@ describe('Settings', () => {
     })
     it('shows validation error when category is empty', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1387,7 +1492,10 @@ describe('Settings', () => {
       ]
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue(existingSettings)
+      vi.mocked(apiClient.getSettings).mockResolvedValue({
+        items: existingSettings,
+        count: existingSettings.length,
+      } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('existing.key')).toBeTruthy()
@@ -1411,7 +1519,7 @@ describe('Settings', () => {
     })
     it('closes modal when clicking Cancel', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1427,7 +1535,7 @@ describe('Settings', () => {
     })
     it('handles API error when creating setting', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       vi.mocked(apiClient.updateSetting).mockRejectedValue(new Error('Server error'))
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1453,7 +1561,7 @@ describe('Settings', () => {
     })
     it('resets form when reopening modal', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1476,7 +1584,7 @@ describe('Settings', () => {
     })
     it('clears new category when selecting existing category', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'walutomat'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1498,7 +1606,7 @@ describe('Settings', () => {
     })
     it('does not clear new category when selecting empty option', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'walutomat'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1523,7 +1631,7 @@ describe('Settings', () => {
     })
     it('clears selected category when typing new category', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'walutomat'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1543,7 +1651,7 @@ describe('Settings', () => {
     })
     it('does not clear selected category when new category is cleared via typing', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api', 'walutomat'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1568,7 +1676,7 @@ describe('Settings', () => {
     })
     it('shows fallback error for non-Error exception when creating setting', async () => {
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
-      vi.mocked(apiClient.getSettings).mockResolvedValue([])
+      vi.mocked(apiClient.getSettings).mockResolvedValue({ items: [], count: 0 } as never)
       vi.mocked(apiClient.updateSetting).mockRejectedValue('String error')
       renderSettings(<Settings />)
       await waitFor(() => {
@@ -1610,7 +1718,10 @@ describe('Settings', () => {
     ]
 
     vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['config'])
-    vi.mocked(apiClient.getSettings).mockResolvedValue(mockSettings)
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      items: mockSettings,
+      count: mockSettings.length,
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('config.long_json')).toBeTruthy()

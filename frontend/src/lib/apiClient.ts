@@ -1,17 +1,12 @@
-import { z } from 'zod'
 import { v7 as uuid7 } from 'uuid'
 import { getCookie } from './utils'
 import { storeWsTicket } from './wsTicketCache'
 import { validateResponse } from './schemas/api'
 import { getTracker } from './sequenceTracker'
 import {
-  CandleDataSchema,
-  OrderDataSchema,
-  ExecutionDataSchema,
-  PositionDataSchema,
-  SignalDataSchema,
-  SettingReadSchema,
   SettingCategoriesResponseSchema,
+  SettingListResponseSchema,
+  SettingResponseSchema,
   SystemStatusSchema,
   ConfiguredProcessesResponseSchema,
   ProcessSummaryResponseSchema,
@@ -25,15 +20,19 @@ import {
   MessageResponseSchema,
   HealthCheckResponseSchema,
   UserListResponseSchema,
+  UserResponseSchema,
+  ExchangeListResponseSchema,
+  InstrumentListResponseSchema,
+  OrderListResponseSchema,
+  ExecutionListResponseSchema,
+  PositionListResponseSchema,
+  SignalListResponseSchema,
 } from './schemas/api.generated.zod'
 import type {
-  SystemStatus,
   CandleData,
-  OrderData,
-  ExecutionData,
-  PositionData,
-  SignalData,
-  SettingRead,
+  SystemStatus,
+  SettingListResponse,
+  SettingResponse,
   SettingUpdate,
   ConfiguredProcessesResponse,
   ProcessSummaryResponse,
@@ -48,9 +47,16 @@ import type {
   StrategyListResponse,
   ChangePasswordRequest,
   UserListResponse,
+  UserResponse,
   CreateUserRequest,
   UpdateUserRequest,
   AdminResetPasswordRequest,
+  ExchangeListResponse,
+  InstrumentListResponse,
+  OrderListResponse,
+  ExecutionListResponse,
+  PositionListResponse,
+  SignalListResponse,
 } from '../types/api'
 
 interface RequestOptions {
@@ -310,14 +316,14 @@ class APIClient {
 
     const data = await response.json()
 
-    return validateResponse(data, z.array(CandleDataSchema), '/candles')
+    return data.items ?? []
   }
   async getOrders(
     symbol?: string,
     limit: number = 100,
     offset: number = 0,
     exchange?: string
-  ): Promise<OrderData[]> {
+  ): Promise<OrderListResponse> {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
 
     if (symbol) {
@@ -330,18 +336,18 @@ class APIClient {
 
     const data = await this.getJSON(`/api/orders?${params}`)
 
-    return validateResponse(data, z.array(OrderDataSchema), '/orders')
+    return validateResponse(data, OrderListResponseSchema, '/orders')
   }
-  async getExecutions(limit: number = 100): Promise<ExecutionData[]> {
+  async getExecutions(limit: number = 100): Promise<ExecutionListResponse> {
     const params = new URLSearchParams({ limit: String(limit) })
     const data = await this.getJSON(`/api/executions?${params}`)
 
-    return validateResponse(data, z.array(ExecutionDataSchema), '/executions')
+    return validateResponse(data, ExecutionListResponseSchema, '/executions')
   }
-  async getPositions(): Promise<PositionData[]> {
+  async getPositions(): Promise<PositionListResponse> {
     const data = await this.getJSON('/api/positions')
 
-    return validateResponse(data, z.array(PositionDataSchema), '/positions')
+    return validateResponse(data, PositionListResponseSchema, '/positions')
   }
   async getSignals(
     strategy?: string,
@@ -349,7 +355,7 @@ class APIClient {
     instrument?: string,
     hours: number = 24,
     exchange?: string
-  ): Promise<SignalData[]> {
+  ): Promise<SignalListResponse> {
     const params = new URLSearchParams({
       limit: String(limit),
       hours: String(hours),
@@ -360,23 +366,27 @@ class APIClient {
     if (exchange) params.set('exchange', exchange)
     const data = await this.getJSON(`/api/signals?${params}`)
 
-    return validateResponse(data, z.array(SignalDataSchema), '/signals')
+    return validateResponse(data, SignalListResponseSchema, '/signals')
   }
-  async getExchanges(): Promise<string[]> {
+  async getExchanges(): Promise<ExchangeListResponse> {
     const data = await this.getJSON('/api/exchanges')
 
-    return validateResponse(data, z.array(z.string()), '/exchanges')
+    return validateResponse(data, ExchangeListResponseSchema, '/exchanges')
   }
-  async getExchangeInstruments(exchange: string): Promise<string[]> {
+  async getExchangeInstruments(exchange: string): Promise<InstrumentListResponse> {
     const data = await this.getJSON(`/api/exchanges/${encodeURIComponent(exchange)}/instruments`)
 
-    return validateResponse(data, z.array(z.string()), `/exchanges/${exchange}/instruments`)
+    return validateResponse(
+      data,
+      InstrumentListResponseSchema,
+      `/exchanges/${exchange}/instruments`
+    )
   }
-  async getSettings(category?: string): Promise<SettingRead[]> {
+  async getSettings(category?: string): Promise<SettingListResponse> {
     const params = category ? new URLSearchParams({ category }) : ''
     const data = await this.getJSON(`/api/settings${params ? '?' + params : ''}`)
 
-    return validateResponse(data, z.array(SettingReadSchema), '/settings')
+    return validateResponse(data, SettingListResponseSchema, '/settings')
   }
   async getSettingCategories(): Promise<string[]> {
     const data = await this.getJSON('/api/settings/categories')
@@ -384,10 +394,10 @@ class APIClient {
 
     return response.categories
   }
-  async updateSetting(key: string, data: SettingUpdate): Promise<SettingRead> {
+  async updateSetting(key: string, data: SettingUpdate): Promise<SettingResponse> {
     const response = await this.putJSON(`/api/settings/${encodeURIComponent(key)}`, data)
 
-    return validateResponse(response, SettingReadSchema, '/settings/:key')
+    return validateResponse(response, SettingResponseSchema, '/settings/:key')
   }
   async deleteSetting(key: string): Promise<{ message: string }> {
     const data = await this.deleteJSON(`/api/settings/${encodeURIComponent(key)}`)
@@ -471,15 +481,15 @@ class APIClient {
 
     return validateResponse(data, UserListResponseSchema, '/auth/users')
   }
-  async createUser(body: CreateUserRequest): Promise<{ message: string }> {
+  async createUser(body: CreateUserRequest): Promise<UserResponse> {
     const data = await this.postJSON('/api/auth/users', body)
 
-    return validateResponse(data, MessageResponseSchema, '/auth/users POST')
+    return validateResponse(data, UserResponseSchema, '/auth/users POST')
   }
-  async updateUser(userId: string, body: UpdateUserRequest): Promise<{ message: string }> {
+  async updateUser(userId: string, body: UpdateUserRequest): Promise<UserResponse> {
     const data = await this.putJSON(`/api/auth/users/${encodeURIComponent(userId)}`, body)
 
-    return validateResponse(data, MessageResponseSchema, '/auth/users/:id PUT')
+    return validateResponse(data, UserResponseSchema, '/auth/users/:id PUT')
   }
   async deactivateUser(userId: string): Promise<{ message: string }> {
     const data = await this.deleteJSON(`/api/auth/users/${encodeURIComponent(userId)}`)

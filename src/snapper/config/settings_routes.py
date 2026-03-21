@@ -38,7 +38,9 @@ from sqlalchemy import update
 
 from snapper.api.schemas.base import MessageResponse
 from snapper.api.schemas.health import SettingCategoriesResponse
+from snapper.api.schemas.settings import SettingListResponse
 from snapper.api.schemas.settings import SettingRead
+from snapper.api.schemas.settings import SettingResponse
 from snapper.api.schemas.settings import SettingUpdate
 from snapper.application.services.settings import get_settings_service
 from snapper.auth.dependencies import require_permission
@@ -53,30 +55,38 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
+_REST_STREAM = "rest.control"
+
 
 @router.get("")
 async def get_all_settings(
+    request: Request,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     category: str | None = None,
-) -> list[SettingRead]:
+) -> SettingListResponse:
     """Retrieve all application settings, optionally filtered by category.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         category: Optional category name to filter settings.
         user: Authenticated user with CONFIGURE_SYSTEM permission.
 
     Returns:
-        List of all settings matching the filter criteria.
+        SettingListResponse wrapping all settings matching the filter criteria.
     """
     settings = get_settings()
     repository = get_repository(settings.db_url)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = datetime.now(UTC)
     async with repository.session() as session:
         query = select(Setting).where(*where_active(Setting))
         if category:
             query = query.where(Setting.category == category)
         result = await session.execute(query)
         db_settings = result.scalars().all()
-        return [
+        items = [
             SettingRead(
                 public_id=setting.public_id,
                 timestamp=setting.timestamp,
@@ -91,6 +101,13 @@ async def get_all_settings(
             )
             for setting in db_settings
         ]
+        return SettingListResponse(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            items=items,
+            count=len(items),
+        )
 
 
 @router.get("/categories")
@@ -116,7 +133,7 @@ async def get_setting_categories(
         categories = [row[0] for row in result.fetchall()]
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
-        seq = tracker.next_sequence("rest.control")
+        seq = tracker.next_sequence(_REST_STREAM)
         ts = datetime.now(UTC)
         return SettingCategoriesResponse(
             session_id=sid,
@@ -128,20 +145,22 @@ async def get_setting_categories(
 
 @router.put("/{key}", responses={404: {"description": "Setting not found"}})
 async def update_setting(
+    http_request: Request,
     key: str,
-    request: SettingUpdate,
+    body: SettingUpdate,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
-) -> SettingRead:
+) -> SettingResponse:
     """Update or create a setting by key.
 
     Args:
+        http_request: FastAPI request (provides REST tracker for provenance).
         key: The setting key to update or create.
-        request: Setting update payload with value and metadata.
+        body: Setting update payload with value and metadata.
         user: Authenticated user with CONFIGURE_SYSTEM permission.
 
     Returns:
-        The updated setting.
+        SettingResponse wrapping the updated setting.
 
     Raises:
         HTTPException: If setting not found after update.
@@ -153,12 +172,16 @@ async def update_setting(
     )
     await settings_service.update_setting(
         key=key,
-        value=request.value,
-        category=request.category,
-        description=request.description,
+        value=body.value,
+        category=body.category,
+        description=body.description,
         updated_by=user.username,
     )
     repository = get_repository(settings.db_url)
+    tracker: SequenceTracker = http_request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = datetime.now(UTC)
     async with repository.session() as session:
         result = await session.execute(
             select(Setting).where(Setting.key == key, *where_active(Setting))
@@ -166,7 +189,7 @@ async def update_setting(
         setting = result.scalar_one_or_none()
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")
-        return SettingRead(
+        setting_read = SettingRead(
             public_id=setting.public_id,
             timestamp=setting.timestamp,
             session_id=setting.session_id,
@@ -177,6 +200,12 @@ async def update_setting(
             description=setting.description,
             updated_at=setting.timestamp,
             updated_by=setting.updated_by,
+        )
+        return SettingResponse(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            setting=setting_read,
         )
 
 
@@ -216,5 +245,5 @@ async def delete_setting(
     return MessageResponse(
         message=f"Setting '{key}' deleted successfully",
         session_id=tracker.session_id,
-        sequence_id=tracker.next_sequence("rest.control"),
+        sequence_id=tracker.next_sequence(_REST_STREAM),
     )

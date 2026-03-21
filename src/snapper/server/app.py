@@ -68,6 +68,13 @@ from sqlalchemy import distinct
 from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
+from snapper.api.schemas.data_responses import CandleListResponse
+from snapper.api.schemas.data_responses import ExchangeListResponse
+from snapper.api.schemas.data_responses import ExecutionListResponse
+from snapper.api.schemas.data_responses import InstrumentListResponse
+from snapper.api.schemas.data_responses import OrderListResponse
+from snapper.api.schemas.data_responses import PositionListResponse
+from snapper.api.schemas.data_responses import SignalListResponse
 from snapper.api.schemas.health import ConnectionStatsSchema
 from snapper.api.schemas.health import GapDetectionStats
 from snapper.api.schemas.health import GapStatsSchema
@@ -401,6 +408,7 @@ def _build_strategy_payload(
 
 TRADER_COORDINATOR_PROCESS = "trader_coordinator"
 _REST_HEALTH_STREAM = "rest.health"
+_REST_DATA_STREAM = "rest.data"
 
 
 def _resolve_trader_status(
@@ -501,10 +509,11 @@ def _create_candles_signals_router() -> APIRouter:
 
     @router.get(
         "/candles",
-        response_model=list[CandleData],
+        response_model=None,
         responses={500: {"description": "Internal server error"}},
     )
     async def get_candles(
+        request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         instrument: Annotated[str, Query(description="Instrument symbol")],
@@ -512,7 +521,22 @@ def _create_candles_signals_router() -> APIRouter:
         timeframe: Annotated[str, Query(description="Timeframe")],
         limit: Annotated[int, Query(le=1000, description="Number of candles to return")] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> list[CandleData] | Response:
+    ) -> CandleListResponse | Response:
+        """Fetch historical candle data for an instrument.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            instrument: Instrument symbol to query.
+            exchange: Exchange name to query.
+            timeframe: Candle timeframe (e.g. '1m', '1h').
+            limit: Maximum number of candles to return.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            CandleListResponse wrapping the candle data, or 204 if no instrument found.
+        """
         settings = get_settings()
         repo = get_repository(settings.db_url)
         processing_date = as_of or datetime.now(UTC)
@@ -541,7 +565,7 @@ def _create_candles_signals_router() -> APIRouter:
                     .limit(limit)
                 )
                 candles = candles_query.scalars().all()
-                return [
+                items = [
                     CandleData(
                         public_id=candle.public_id,
                         timestamp=candle.timestamp,
@@ -561,6 +585,17 @@ def _create_candles_signals_router() -> APIRouter:
                     )
                     for candle in reversed(candles)
                 ]
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                sid = tracker.session_id
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                return CandleListResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    items=items,
+                    count=len(items),
+                )
         except HTTPException:
             raise
         except Exception as exc:
@@ -569,6 +604,7 @@ def _create_candles_signals_router() -> APIRouter:
 
     @router.get("/signals", responses={500: {"description": "Internal server error"}})
     async def get_signals(
+        request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
@@ -578,7 +614,24 @@ def _create_candles_signals_router() -> APIRouter:
         hours: Annotated[int, Query(le=168, description="Hours of history to return")] = 24,
         limit: Annotated[int, Query(le=1000, description="Number of signals to return")] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> list[SignalData]:
+    ) -> SignalListResponse:
+        """Fetch trading signals with optional filters.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            instrument: Optional instrument symbol filter.
+            strategy: Optional strategy name filter.
+            exchange: Optional exchange filter.
+            hours: Hours of history to return.
+            limit: Maximum number of signals to return.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            SignalListResponse wrapping the signal data.
+        """
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
@@ -592,7 +645,7 @@ def _create_candles_signals_router() -> APIRouter:
                 query = query.order_by(desc(Signal.fired_at)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
-                return [
+                items = [
                     SignalData(
                         public_id=signal.public_id,
                         timestamp=signal.timestamp,
@@ -609,6 +662,17 @@ def _create_candles_signals_router() -> APIRouter:
                     )
                     for signal, inst in signals_with_instruments
                 ]
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                sid = tracker.session_id
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                return SignalListResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    items=items,
+                    count=len(items),
+                )
         except Exception as exc:
             logger.error(f"Failed to fetch signals: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch signals") from exc
@@ -626,11 +690,22 @@ def _create_exchange_router() -> APIRouter:
 
     @router.get("/exchanges", responses={500: {"description": "Internal server error"}})
     async def get_exchanges(
+        request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
-    ) -> list[str]:
-        """Return distinct exchange names from symbol_aliases."""
+    ) -> ExchangeListResponse:
+        """Return distinct exchange names from symbol_aliases.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+
+        Returns:
+            ExchangeListResponse wrapping the exchange name list.
+        """
         try:
             async with repo.session() as session:
                 now = datetime.now(UTC)
@@ -642,7 +717,18 @@ def _create_exchange_router() -> APIRouter:
                     )
                     .order_by(SymbolAlias.exchange)
                 )
-                return list(result.scalars().all())
+                items = list(result.scalars().all())
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                sid = tracker.session_id
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                return ExchangeListResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    items=items,
+                    count=len(items),
+                )
         except Exception as exc:
             logger.error(f"Failed to fetch exchanges: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch exchanges") from exc
@@ -652,12 +738,24 @@ def _create_exchange_router() -> APIRouter:
         responses={500: {"description": "Internal server error"}},
     )
     async def get_exchange_instruments(
+        request: Request,
         exchange: str,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
-    ) -> list[str]:
-        """Return distinct native symbols available on a given exchange."""
+    ) -> InstrumentListResponse:
+        """Return distinct native symbols available on a given exchange.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            exchange: Exchange name to query instruments for.
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+
+        Returns:
+            InstrumentListResponse wrapping the instrument symbol list.
+        """
         try:
             async with repo.session() as session:
                 now = datetime.now(UTC)
@@ -674,7 +772,18 @@ def _create_exchange_router() -> APIRouter:
                     )
                     .order_by(Symbol.native_symbol)
                 )
-                return list(result.scalars().all())
+                items = list(result.scalars().all())
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                sid = tracker.session_id
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                return InstrumentListResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    items=items,
+                    count=len(items),
+                )
         except Exception as exc:
             logger.error(f"Failed to fetch instruments for {exchange}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch instruments") from exc
@@ -714,6 +823,7 @@ def _create_orders_executions_router() -> APIRouter:
 
     @router.get("/orders", responses={500: {"description": "Internal server error"}})
     async def get_orders(
+        request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_ORDERS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
@@ -722,7 +832,23 @@ def _create_orders_executions_router() -> APIRouter:
         limit: Annotated[int, Query(ge=1, le=1000, description="Number of orders to return")] = 100,
         offset: Annotated[int, Query(ge=0, description="Number of orders to skip")] = 0,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> list[OrderData]:
+    ) -> OrderListResponse:
+        """Fetch orders with optional filters.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_ORDERS permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            symbol: Optional symbol filter.
+            exchange: Optional exchange filter.
+            limit: Maximum number of orders to return.
+            offset: Number of orders to skip.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            OrderListResponse wrapping the order data.
+        """
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
@@ -734,7 +860,7 @@ def _create_orders_executions_router() -> APIRouter:
                 query = query.order_by(desc(Order.created_at)).offset(offset).limit(limit)
                 result = await session.execute(query)
                 orders_with_instruments = result.all()
-                return [
+                items = [
                     OrderData(
                         public_id=order.public_id,
                         timestamp=order.timestamp,
@@ -758,18 +884,43 @@ def _create_orders_executions_router() -> APIRouter:
                     )
                     for order, inst in orders_with_instruments
                 ]
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                sid = tracker.session_id
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                return OrderListResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    items=items,
+                    count=len(items),
+                )
         except Exception as exc:
             logger.error(f"Failed to fetch orders: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
 
     @router.get("/executions", responses={500: {"description": "Internal server error"}})
     async def get_executions(
+        request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_ORDERS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         limit: Annotated[int, Query(le=1000, description="Number of executions to return")] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> list[ExecutionData]:
+    ) -> ExecutionListResponse:
+        """Fetch execution (fill) records.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_ORDERS permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            limit: Maximum number of executions to return.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            ExecutionListResponse wrapping the execution data.
+        """
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
@@ -791,7 +942,7 @@ def _create_orders_executions_router() -> APIRouter:
                 )
                 result = await session.execute(query)
                 rows = result.all()
-                return [
+                items = [
                     ExecutionData(
                         public_id=execution.public_id,
                         timestamp=execution.timestamp,
@@ -812,17 +963,41 @@ def _create_orders_executions_router() -> APIRouter:
                     )
                     for execution, order, instrument in rows
                 ]
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                sid = tracker.session_id
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                return ExecutionListResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    items=items,
+                    count=len(items),
+                )
         except Exception as exc:
             logger.error(f"Failed to fetch executions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch executions") from exc
 
     @router.get("/positions", responses={500: {"description": "Internal server error"}})
     async def get_positions(
+        request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_POSITIONS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> list[PositionData]:
+    ) -> PositionListResponse:
+        """Fetch current portfolio positions.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_POSITIONS permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            PositionListResponse wrapping the position data.
+        """
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
@@ -833,7 +1008,7 @@ def _create_orders_executions_router() -> APIRouter:
                 )
                 result = await session.execute(query)
                 positions_with_instruments = result.all()
-                return [
+                items = [
                     PositionData(
                         public_id=position.public_id,
                         timestamp=position.timestamp,
@@ -848,6 +1023,17 @@ def _create_orders_executions_router() -> APIRouter:
                     )
                     for position, inst in positions_with_instruments
                 ]
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                sid = tracker.session_id
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                return PositionListResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    items=items,
+                    count=len(items),
+                )
         except Exception as exc:
             logger.error(f"Failed to fetch positions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch positions") from exc

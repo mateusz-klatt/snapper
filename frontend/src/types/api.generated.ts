@@ -81,10 +81,11 @@ export type Paths = {
          * @description Get current user's profile.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         current_user: Authenticated principal from dependency.
          *
          *     Returns:
-         *         Current user's UserProfile.
+         *         UserResponse wrapping the current user's profile.
          *
          *     Raises:
          *         HTTPException: 404 if user not found in database.
@@ -153,11 +154,12 @@ export type Paths = {
          * @description Create a new user account.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         user_data: User creation payload with username, password, etc.
          *         current_user: Authenticated user with MANAGE_USERS permission.
          *
          *     Returns:
-         *         Created user profile.
+         *         UserResponse wrapping the created user profile.
          *
          *     Raises:
          *         HTTPException: If user creation fails.
@@ -182,12 +184,13 @@ export type Paths = {
          * @description Update an existing user's profile.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         user_id: Target user ID.
          *         user_data: Update payload with optional email, role, is_active.
          *         current_user: Authenticated user with MANAGE_USERS permission.
          *
          *     Returns:
-         *         Updated user profile.
+         *         UserResponse wrapping the updated user profile.
          *
          *     Raises:
          *         HTTPException: If user not found.
@@ -294,11 +297,12 @@ export type Paths = {
          * @description Retrieve all application settings, optionally filtered by category.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         category: Optional category name to filter settings.
          *         user: Authenticated user with CONFIGURE_SYSTEM permission.
          *
          *     Returns:
-         *         List of all settings matching the filter criteria.
+         *         SettingListResponse wrapping all settings matching the filter criteria.
          */
         get: Operations["get_all_settings_api_settings_get"];
         put?: never;
@@ -349,12 +353,13 @@ export type Paths = {
          * @description Update or create a setting by key.
          *
          *     Args:
+         *         http_request: FastAPI request (provides REST tracker for provenance).
          *         key: The setting key to update or create.
-         *         request: Setting update payload with value and metadata.
+         *         body: Setting update payload with value and metadata.
          *         user: Authenticated user with CONFIGURE_SYSTEM permission.
          *
          *     Returns:
-         *         The updated setting.
+         *         SettingResponse wrapping the updated setting.
          *
          *     Raises:
          *         HTTPException: If setting not found after update.
@@ -602,7 +607,23 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Get Candles */
+        /**
+         * Get Candles
+         * @description Fetch historical candle data for an instrument.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         instrument: Instrument symbol to query.
+         *         exchange: Exchange name to query.
+         *         timeframe: Candle timeframe (e.g. '1m', '1h').
+         *         limit: Maximum number of candles to return.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         CandleListResponse wrapping the candle data, or 204 if no instrument found.
+         */
         get: Operations["get_candles_api_candles_get"];
         put?: never;
         post?: never;
@@ -619,7 +640,25 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Get Signals */
+        /**
+         * Get Signals
+         * @description Fetch trading signals with optional filters.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         instrument: Optional instrument symbol filter.
+         *         strategy: Optional strategy name filter.
+         *         exchange: Optional exchange filter.
+         *         hours: Hours of history to return.
+         *         limit: Maximum number of signals to return.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         SignalListResponse wrapping the signal data.
+         */
         get: Operations["get_signals_api_signals_get"];
         put?: never;
         post?: never;
@@ -639,6 +678,15 @@ export type Paths = {
         /**
          * Get Exchanges
          * @description Return distinct exchange names from symbol_aliases.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *
+         *     Returns:
+         *         ExchangeListResponse wrapping the exchange name list.
          */
         get: Operations["get_exchanges_api_exchanges_get"];
         put?: never;
@@ -659,6 +707,16 @@ export type Paths = {
         /**
          * Get Exchange Instruments
          * @description Return distinct native symbols available on a given exchange.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         exchange: Exchange name to query instruments for.
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *
+         *     Returns:
+         *         InstrumentListResponse wrapping the instrument symbol list.
          */
         get: Operations["get_exchange_instruments_api_exchanges__exchange__instruments_get"];
         put?: never;
@@ -676,7 +734,24 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Get Orders */
+        /**
+         * Get Orders
+         * @description Fetch orders with optional filters.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_ORDERS permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         symbol: Optional symbol filter.
+         *         exchange: Optional exchange filter.
+         *         limit: Maximum number of orders to return.
+         *         offset: Number of orders to skip.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         OrderListResponse wrapping the order data.
+         */
         get: Operations["get_orders_api_orders_get"];
         put?: never;
         post?: never;
@@ -693,7 +768,21 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Get Executions */
+        /**
+         * Get Executions
+         * @description Fetch execution (fill) records.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_ORDERS permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         limit: Maximum number of executions to return.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         ExecutionListResponse wrapping the execution data.
+         */
         get: Operations["get_executions_api_executions_get"];
         put?: never;
         post?: never;
@@ -710,7 +799,20 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Get Positions */
+        /**
+         * Get Positions
+         * @description Fetch current portfolio positions.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_POSITIONS permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         PositionListResponse wrapping the position data.
+         */
         get: Operations["get_positions_api_positions_get"];
         put?: never;
         post?: never;
@@ -910,7 +1012,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         processes: List of available process templates.
+         *         items: List of available process templates.
          *         count: Total number of available processes.
          */
         AvailableProcessesResponse: {
@@ -931,77 +1033,10 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Processes */
-            processes: Components["schemas"]["AvailableProcess"][];
+            /** Items */
+            items: Components["schemas"]["AvailableProcess"][];
             /** Count */
             count: number;
-        };
-        /**
-         * CandleData
-         * @description OHLCV candlestick data for technical analysis.
-         *
-         *     Represents aggregated price action over a specific timeframe.
-         *     Used by strategies for pattern recognition and indicator calculation.
-         *
-         *     Attributes:
-         *         instrument: Trading pair symbol (e.g., 'BTC-USD').
-         *         exchange: Source exchange producing this candle data.
-         *         timeframe: Candle duration (e.g., '1m', '1h', '1d').
-         *         open_at: Exchange-provided candle interval start time.
-         *         open: Opening price of the candle.
-         *         high: Highest price during the candle.
-         *         low: Lowest price during the candle.
-         *         close: Closing price of the candle.
-         *         volume: Total traded volume during the candle.
-         *         vwap: Volume-weighted average price (optional).
-         *         trades: Number of trades in the candle (optional).
-         */
-        CandleData: {
-            /** Public Id */
-            public_id?: string;
-            /**
-             * Type
-             * @default candle
-             * @constant
-             */
-            type: "candle";
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp?: string;
-            /** Session Id */
-            session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
-            /** Instrument */
-            instrument: string;
-            /**
-             * Exchange
-             * @enum {string}
-             */
-            exchange: "kraken" | "zonda" | "walutomat" | "polygon";
-            /** Timeframe */
-            timeframe: string;
-            /**
-             * Open At
-             * Format: date-time
-             */
-            open_at: string;
-            /** Open */
-            open: number;
-            /** High */
-            high: number;
-            /** Low */
-            low: number;
-            /** Close */
-            close: number;
-            /** Volume */
-            volume: number;
-            /** Vwap */
-            vwap?: number | null;
-            /** Trades */
-            trades?: number | null;
         };
         /**
          * ChangePasswordRequest
@@ -1168,7 +1203,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         processes: List of configured processes.
+         *         items: List of configured processes.
          *         count: Total number of configured processes.
          */
         ConfiguredProcessesResponse: {
@@ -1189,8 +1224,8 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Processes */
-            processes: Components["schemas"]["ConfiguredProcess"][];
+            /** Items */
+            items: Components["schemas"]["ConfiguredProcess"][];
             /** Count */
             count: number;
         };
@@ -1298,6 +1333,40 @@ export type Components = {
             is_active: boolean;
         };
         /**
+         * ExchangeListResponse
+         * @description Exchange list response wrapper.
+         *
+         *     Wraps a list of exchange name strings with a count.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         items: List of exchange name strings.
+         *         count: Total number of exchanges in the response.
+         */
+        ExchangeListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default exchange_list
+             * @constant
+             */
+            type: "exchange_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            /** Items */
+            items: string[];
+            /** Count */
+            count: number;
+        };
+        /**
          * ExecutionData
          * @description Order fill/execution details from an exchange.
          *
@@ -1374,6 +1443,40 @@ export type Components = {
              * Format: date-time
              */
             executed_at?: string;
+        };
+        /**
+         * ExecutionListResponse
+         * @description Execution list response wrapper.
+         *
+         *     Wraps a list of ExecutionData items with a count.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         items: List of execution data items.
+         *         count: Total number of executions in the response.
+         */
+        ExecutionListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default execution_list
+             * @constant
+             */
+            type: "execution_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            /** Items */
+            items: Components["schemas"]["ExecutionData"][];
+            /** Count */
+            count: number;
         };
         /**
          * GapDetectionStats
@@ -1558,6 +1661,40 @@ export type Components = {
              * @description Number of currently active topics
              */
             active: number;
+        };
+        /**
+         * InstrumentListResponse
+         * @description Instrument list response wrapper.
+         *
+         *     Wraps a list of instrument symbol strings with a count.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         items: List of instrument symbol strings.
+         *         count: Total number of instruments in the response.
+         */
+        InstrumentListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default instrument_list
+             * @constant
+             */
+            type: "instrument_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            /** Items */
+            items: string[];
+            /** Count */
+            count: number;
         };
         /**
          * LoginRequest
@@ -1756,6 +1893,40 @@ export type Components = {
             updated_at?: string | null;
         };
         /**
+         * OrderListResponse
+         * @description Order list response wrapper.
+         *
+         *     Wraps a list of OrderData items with a count.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         items: List of order data items.
+         *         count: Total number of orders in the response.
+         */
+        OrderListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default order_list
+             * @constant
+             */
+            type: "order_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            /** Items */
+            items: Components["schemas"]["OrderData"][];
+            /** Count */
+            count: number;
+        };
+        /**
          * PositionData
          * @description Portfolio position snapshot.
          *
@@ -1804,6 +1975,40 @@ export type Components = {
             unrealized_pnl: number;
             /** Realized Pnl */
             realized_pnl: number;
+        };
+        /**
+         * PositionListResponse
+         * @description Position list response wrapper.
+         *
+         *     Wraps a list of PositionData items with a count.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         items: List of position data items.
+         *         count: Total number of positions in the response.
+         */
+        PositionListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default position_list
+             * @constant
+             */
+            type: "position_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            /** Items */
+            items: Components["schemas"]["PositionData"][];
+            /** Count */
+            count: number;
         };
         /**
          * ProcessCategoryCount
@@ -2094,7 +2299,7 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         runs: List of process runs.
+         *         items: List of process runs.
          *         count: Total number of runs.
          */
         ProcessRunsResponse: {
@@ -2115,8 +2320,8 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Runs */
-            runs: Components["schemas"]["ProcessRun"][];
+            /** Items */
+            items: Components["schemas"]["ProcessRun"][];
             /** Count */
             count: number;
         };
@@ -2546,6 +2751,40 @@ export type Components = {
             categories: string[];
         };
         /**
+         * SettingListResponse
+         * @description Setting list response wrapper.
+         *
+         *     Wraps a list of SettingRead items with a count for REST API consistency.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         items: List of setting data items.
+         *         count: Total number of settings in the response.
+         */
+        SettingListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default setting_list
+             * @constant
+             */
+            type: "setting_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            /** Items */
+            items: Components["schemas"]["SettingRead"][];
+            /** Count */
+            count: number;
+        };
+        /**
          * SettingRead
          * @description Setting read response schema.
          *
@@ -2593,6 +2832,36 @@ export type Components = {
             updated_at: string;
             /** Updated By */
             updated_by?: string | null;
+        };
+        /**
+         * SettingResponse
+         * @description Single setting response wrapper.
+         *
+         *     Wraps a SettingRead in a typed envelope for REST API consistency.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         setting: The setting data.
+         */
+        SettingResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default setting_response
+             * @constant
+             */
+            type: "setting_response";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            setting: Components["schemas"]["SettingRead"];
         };
         /**
          * SettingUpdate
@@ -2703,12 +2972,46 @@ export type Components = {
             fired_at?: string;
         };
         /**
+         * SignalListResponse
+         * @description Signal list response wrapper.
+         *
+         *     Wraps a list of SignalData items with a count.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         items: List of signal data items.
+         *         count: Total number of signals in the response.
+         */
+        SignalListResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default signal_list
+             * @constant
+             */
+            type: "signal_list";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            /** Items */
+            items: Components["schemas"]["SignalData"][];
+            /** Count */
+            count: number;
+        };
+        /**
          * StrategyListResponse
          * @description Strategy processes list response.
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         strategies: List of strategy processes.
+         *         items: List of strategy processes.
          *         count: Total number of strategies.
          */
         StrategyListResponse: {
@@ -2729,8 +3032,8 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Strategies */
-            strategies: Components["schemas"]["StrategyProcess"][];
+            /** Items */
+            items: Components["schemas"]["StrategyProcess"][];
             /** Count */
             count: number;
         };
@@ -3099,8 +3402,8 @@ export type Components = {
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         users: List of user profiles.
-         *         total_count: Total number of users.
+         *         items: List of user profiles.
+         *         count: Total number of users.
          */
         UserListResponse: {
             /** Public Id */
@@ -3120,10 +3423,10 @@ export type Components = {
             session_id: string;
             /** Sequence Id */
             sequence_id: number;
-            /** Users */
-            users: Components["schemas"]["UserProfile"][];
-            /** Total Count */
-            total_count: number;
+            /** Items */
+            items: Components["schemas"]["UserProfile"][];
+            /** Count */
+            count: number;
         };
         /**
          * UserProfile
@@ -3173,6 +3476,36 @@ export type Components = {
              * Format: date-time
              */
             created_at?: string;
+        };
+        /**
+         * UserResponse
+         * @description Single user response wrapper.
+         *
+         *     Wraps a UserProfile in a typed envelope for REST API consistency.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         user: The user profile data.
+         */
+        UserResponse: {
+            /** Public Id */
+            public_id?: string;
+            /**
+             * Type
+             * @default user_response
+             * @constant
+             */
+            type: "user_response";
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp?: string;
+            /** Session Id */
+            session_id: string;
+            /** Sequence Id */
+            sequence_id: number;
+            user: Components["schemas"]["UserProfile"];
         };
         /**
          * UserRole
@@ -3588,7 +3921,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["UserProfile"];
+                    "application/json": Components["schemas"]["UserResponse"];
                 };
             };
         };
@@ -3663,7 +3996,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["UserProfile"];
+                    "application/json": Components["schemas"]["UserResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3698,7 +4031,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["UserProfile"];
+                    "application/json": Components["schemas"]["UserResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3830,7 +4163,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["SettingRead"][];
+                    "application/json": Components["schemas"]["SettingListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3885,7 +4218,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["SettingRead"];
+                    "application/json": Components["schemas"]["SettingResponse"];
                 };
             };
             /** @description Setting not found */
@@ -4233,7 +4566,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["CandleData"][];
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -4282,7 +4615,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["SignalData"][];
+                    "application/json": Components["schemas"]["SignalListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4318,7 +4651,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": string[];
+                    "application/json": Components["schemas"]["ExchangeListResponse"];
                 };
             };
             /** @description Internal server error */
@@ -4347,7 +4680,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": string[];
+                    "application/json": Components["schemas"]["InstrumentListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4394,7 +4727,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["OrderData"][];
+                    "application/json": Components["schemas"]["OrderListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4435,7 +4768,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["ExecutionData"][];
+                    "application/json": Components["schemas"]["ExecutionListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4474,7 +4807,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["PositionData"][];
+                    "application/json": Components["schemas"]["PositionListResponse"];
                 };
             };
             /** @description Validation Error */

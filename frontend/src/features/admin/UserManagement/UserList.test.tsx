@@ -36,8 +36,8 @@ describe('UserList', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [],
-      total_count: 0,
+      items: [],
+      count: 0,
     })
   })
   it('renders user list', async () => {
@@ -78,7 +78,7 @@ describe('UserList', () => {
   })
   it('displays users list', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'admin',
           email: 'admin@example.com',
@@ -87,7 +87,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -96,7 +96,7 @@ describe('UserList', () => {
   })
   it('displays user roles with badges', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'testuser',
           email: 'test@example.com',
@@ -105,7 +105,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -114,7 +114,7 @@ describe('UserList', () => {
   })
   it('displays inactive users badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'inactive_user',
           email: 'inactive@example.com',
@@ -123,7 +123,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -132,7 +132,7 @@ describe('UserList', () => {
   })
   it('calls onEditUser when edit button clicked', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'testuser',
           email: 'test@example.com',
@@ -141,7 +141,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -170,7 +170,7 @@ describe('UserList', () => {
   })
   it('formats dates correctly', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'testuser',
           email: 'test@example.com',
@@ -179,7 +179,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -188,7 +188,7 @@ describe('UserList', () => {
   })
   it('cancels user deletion when cancel clicked in dialog', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValueOnce({
-      users: [
+      items: [
         {
           username: 'canceluser',
           email: 'cancel@example.com',
@@ -197,7 +197,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     const table = await screen.findByRole('table')
@@ -220,7 +220,7 @@ describe('UserList', () => {
   })
   it('calls delete API when user confirms deletion', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'deleteuser',
           email: 'del@example.com',
@@ -229,7 +229,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     vi.mocked(apiClient.deactivateUser).mockResolvedValue({ message: 'deactivated' })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
@@ -255,7 +255,7 @@ describe('UserList', () => {
   })
   it('handles delete API error', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'failuser',
           email: 'fail@example.com',
@@ -264,7 +264,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     vi.mocked(apiClient.deactivateUser).mockRejectedValue(
       new Error('HTTP 500: Internal Server Error')
@@ -291,7 +291,7 @@ describe('UserList', () => {
     })
   })
   it('falls back to empty users list when response has no users field', async () => {
-    vi.mocked(apiClient.listUsers).mockResolvedValue({} as { users: []; total_count: 0 })
+    vi.mocked(apiClient.listUsers).mockResolvedValue({} as { items: []; count: 0 })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
       expect(screen.getByText('No users found')).toBeTruthy()
@@ -299,7 +299,7 @@ describe('UserList', () => {
   })
   it('handles delete error with empty message', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'emptyerror',
           email: 'empty@example.com',
@@ -308,7 +308,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     vi.mocked(apiClient.deactivateUser).mockRejectedValue(new Error(''))
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
@@ -334,7 +334,7 @@ describe('UserList', () => {
   })
   it('displays operator role badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'operator_user',
           email: 'operator@example.com',
@@ -343,7 +343,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -352,7 +352,7 @@ describe('UserList', () => {
   })
   it('displays viewer role badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'viewer_user',
           email: 'viewer@example.com',
@@ -361,7 +361,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -370,7 +370,7 @@ describe('UserList', () => {
   })
   it('displays unknown role badge with default styling', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'unknown_user',
           email: 'unknown@example.com',
@@ -379,7 +379,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -388,7 +388,7 @@ describe('UserList', () => {
   })
   it('formats dates correctly', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'dateuser',
           email: 'date@example.com',
@@ -397,7 +397,7 @@ describe('UserList', () => {
           created_at: '2024-06-15T10:30:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -440,7 +440,7 @@ describe('UserList', () => {
   })
   it('displays user count badge', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'user1',
           email: 'user1@example.com',
@@ -456,7 +456,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 2,
+      count: 2,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -465,7 +465,7 @@ describe('UserList', () => {
   })
   it('calls edit when edit button clicked', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'editableuser',
           email: 'edit@example.com',
@@ -474,7 +474,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     const table = await screen.findByRole('table')
@@ -495,7 +495,7 @@ describe('UserList', () => {
   })
   it('shows Unknown when user created_at is null', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'nocreated',
           email: 'nocreated@test.com',
@@ -504,7 +504,7 @@ describe('UserList', () => {
           created_at: null,
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -513,7 +513,7 @@ describe('UserList', () => {
   })
   it('filters users by search term', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'alice',
           email: 'alice@example.com',
@@ -529,7 +529,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 2,
+      count: 2,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -546,7 +546,7 @@ describe('UserList', () => {
   })
   it('shows no match message when search finds nothing', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'alice',
           email: 'alice@example.com',
@@ -555,7 +555,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -570,7 +570,7 @@ describe('UserList', () => {
   })
   it('calls onEditUser from mobile card view', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'carduser',
           email: 'card@example.com',
@@ -579,7 +579,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {
@@ -598,7 +598,7 @@ describe('UserList', () => {
   })
   it('opens deactivate dialog from mobile card view', async () => {
     vi.mocked(apiClient.listUsers).mockResolvedValue({
-      users: [
+      items: [
         {
           username: 'carddelete',
           email: 'carddelete@example.com',
@@ -607,7 +607,7 @@ describe('UserList', () => {
           created_at: '2024-01-01T00:00:00Z',
         },
       ],
-      total_count: 1,
+      count: 1,
     })
     renderWithProviders(<UserList onCreateUser={mockOnCreateUser} onEditUser={mockOnEditUser} />)
     await waitFor(() => {

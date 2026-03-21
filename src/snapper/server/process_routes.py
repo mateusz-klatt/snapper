@@ -136,7 +136,7 @@ async def list_available_processes(
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
-        processes=processes,
+        items=processes,
         count=len(processes),
     )
 
@@ -176,7 +176,7 @@ async def list_configured_processes(
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
-        processes=processes,
+        items=processes,
         count=len(processes),
     )
 
@@ -456,6 +456,6 @@ async def list_process_runs(
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
-        runs=runs,
+        items=runs,
         count=len(runs),
     )

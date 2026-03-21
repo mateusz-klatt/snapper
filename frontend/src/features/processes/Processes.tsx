@@ -51,18 +51,18 @@ export const Processes: React.FC = () => {
   const registryByName = React.useMemo<Record<string, AvailableProcess>>(() => {
     const map: Record<string, AvailableProcess> = {}
 
-    availableProcesses?.processes.forEach(process => {
+    availableProcesses?.items.forEach(process => {
       map[process.name] = process
     })
 
     return map
   }, [availableProcesses])
   const latestRunByProcess = React.useMemo<Record<string, ProcessRun>>(() => {
-    if (!processRuns?.runs?.length) {
+    if (!processRuns?.items?.length) {
       return {}
     }
 
-    return processRuns.runs.reduce<Record<string, ProcessRun>>((acc, run) => {
+    return processRuns.items.reduce<Record<string, ProcessRun>>((acc, run) => {
       const previous = acc[run.process_name]
 
       if (!previous) {
@@ -84,7 +84,7 @@ export const Processes: React.FC = () => {
   const longRunningProcesses = React.useMemo<ConfiguredProcess[]>(() => {
     if (!configuredProcesses) return []
 
-    return configuredProcesses.processes.filter(
+    return configuredProcesses.items.filter(
       process =>
         process.lifecycle === 'long_running' &&
         process.role !== 'strategy' &&
@@ -94,7 +94,7 @@ export const Processes: React.FC = () => {
   const taskProcesses = React.useMemo<ConfiguredProcess[]>(() => {
     if (!configuredProcesses) return []
 
-    return configuredProcesses.processes.filter(
+    return configuredProcesses.items.filter(
       process =>
         process.lifecycle === 'one_shot' &&
         process.role !== 'strategy' &&

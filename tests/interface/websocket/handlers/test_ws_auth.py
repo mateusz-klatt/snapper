@@ -3171,8 +3171,9 @@ def test_get_current_user_profile_returns_user(
     response = client.get("/auth/me")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["username"] == "alice"
-    assert payload["role"] == "admin"
+    assert payload["type"] == "user_response"
+    assert payload["user"]["username"] == "alice"
+    assert payload["user"]["role"] == "admin"
     user_service.user_by_id = None
 
 
@@ -3293,8 +3294,9 @@ def test_get_current_user_info(
     response = client.get("/auth/me")
     assert response.status_code == 200
     data: dict[str, Any] = response.json()
-    assert data["username"] == "alice"
-    assert data["role"] == UserRole.ADMIN.value
+    assert data["type"] == "user_response"
+    assert data["user"]["username"] == "alice"
+    assert data["user"]["role"] == UserRole.ADMIN.value
     user_service.user_by_id = None
 
 
@@ -3317,8 +3319,8 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
         current_user=stub_service.all_users[0],
         include_inactive=False,
     )
-    assert result.total_count == 2
-    assert [user.username for user in result.users] == ["alice", "bob"]
+    assert result.count == 2
+    assert [user.username for user in result.items] == ["alice", "bob"]
 
 
 @pytest.mark.asyncio()
@@ -3345,11 +3347,12 @@ async def test_create_user_success(monkeypatch: Any) -> None:
         is_active=True,
     )
     result = await routes.create_user(
+        request=_make_rest_request(),
         user_data=request,
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.username == "charlie"
+    assert result.user.username == "charlie"
 
 
 @pytest.mark.asyncio()
@@ -3374,6 +3377,7 @@ async def test_create_user_value_error(monkeypatch: Any) -> None:
     )
     with pytest.raises(HTTPException) as exc:
         await routes.create_user(
+            request=_make_rest_request(),
             user_data=request,
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
@@ -3401,6 +3405,7 @@ async def test_update_user_not_found(monkeypatch: Any) -> None:
     )
     with pytest.raises(HTTPException) as exc:
         await routes.update_user(
+            request=_make_rest_request(),
             user_id="missing",
             user_data=request,
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
@@ -3435,12 +3440,13 @@ async def test_update_user_success(monkeypatch: Any) -> None:
         is_active=True,
     )
     result = await routes.update_user(
+        request=_make_rest_request(),
         user_id="u4",
         user_data=request,
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
-    assert result.username == "dora"
+    assert result.user.username == "dora"
     assert stub_service.updated_users["u4"] == updated_user
 
 
@@ -4064,8 +4070,9 @@ class TestAuthRoutesCoverage:
         response = client.get("/api/auth/me")
         assert response.status_code == 200
         data = response.json()
-        assert data["username"] == "admin"
-        assert data["role"] == "admin"
+        assert data["type"] == "user_response"
+        assert data["user"]["username"] == "admin"
+        assert data["user"]["role"] == "admin"
 
     def test_me_endpoint_no_token(self, auth_routes_app: FastAPI) -> None:
         """Me endpoint returns 401 without token.

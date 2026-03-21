@@ -85,7 +85,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
     )
   }
 
-  const allUsers = userListData?.users || []
+  const allUsers = userListData?.items || []
   const users = allUsers.filter(user => {
     if (searchTerm === '') return true
     const term = searchTerm.toLowerCase()
@@ -104,7 +104,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
         <div className='flex items-center space-x-4'>
           <h2 className='text-2xl font-bold text-alpine-900'>User Management</h2>
           <Badge variant='outline' className='text-sm'>
-            {userListData?.total_count || 0} users
+            {userListData?.count || 0} users
           </Badge>
         </div>
         <div className='flex items-center space-x-2'>

@@ -3,6 +3,13 @@
 
 import Foundation
 
+enum CandleDataExchange: String, Codable, Sendable {
+    case kraken
+    case zonda
+    case walutomat
+    case polygon
+}
+
 enum HeartbeatDataStatus: String, Codable, Sendable {
     case healthy
     case warning
@@ -103,6 +110,44 @@ struct WsMessageBase: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case sequenceId = "sequence_id"
+    }
+}
+
+struct CandleData: Codable, Sendable {
+    let publicId: String?
+    let type: String
+    let timestamp: Date?
+    let sessionId: String
+    let sequenceId: Int
+    let instrument: String
+    let exchange: String
+    let timeframe: String
+    let openAt: Date
+    let open: Double
+    let high: Double
+    let low: Double
+    let close: Double
+    let volume: Double
+    let vwap: Double?
+    let trades: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case publicId = "public_id"
+        case type
+        case timestamp
+        case sessionId = "session_id"
+        case sequenceId = "sequence_id"
+        case instrument
+        case exchange
+        case timeframe
+        case openAt = "open_at"
+        case open
+        case high
+        case low
+        case close
+        case volume
+        case vwap
+        case trades
     }
 }
 

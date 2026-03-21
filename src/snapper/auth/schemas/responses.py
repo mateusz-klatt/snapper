@@ -51,6 +51,20 @@ class RefreshResponse(StrictDataSchema):
     user: UserProfile
 
 
+class UserResponse(StrictDataSchema):
+    """Single user response wrapper.
+
+    Wraps a UserProfile in a typed envelope for REST API consistency.
+
+    Attributes:
+        type: Payload item type discriminator.
+        user: The user profile data.
+    """
+
+    type: Literal["user_response"] = "user_response"
+    user: UserProfile
+
+
 class UserListResponse(StrictDataSchema):
     """User list response schema.
 
@@ -58,10 +72,10 @@ class UserListResponse(StrictDataSchema):
 
     Attributes:
         type: Payload item type discriminator.
-        users: List of user profiles.
-        total_count: Total number of users.
+        items: List of user profiles.
+        count: Total number of users.
     """
 
     type: Literal["user_list"] = "user_list"
-    users: list[UserProfile]
-    total_count: int
+    items: list[UserProfile]
+    count: int

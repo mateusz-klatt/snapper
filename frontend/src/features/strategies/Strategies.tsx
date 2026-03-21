@@ -36,9 +36,9 @@ export const Strategies: React.FC = () => {
   const { data: strategiesData, isLoading } = useStrategies()
   const { data: availableProcesses } = useAvailableProcesses()
   const strategyTemplates = useMemo(() => {
-    return availableProcesses?.processes.filter(process => process.role === 'strategy') ?? []
-  }, [availableProcesses?.processes])
-  const strategies = useMemo(() => strategiesData?.strategies ?? [], [strategiesData?.strategies])
+    return availableProcesses?.items.filter(process => process.role === 'strategy') ?? []
+  }, [availableProcesses?.items])
+  const strategies = useMemo(() => strategiesData?.items ?? [], [strategiesData?.items])
 
   useEffect(() => {
     if (!wsClient) {

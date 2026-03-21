@@ -49,30 +49,36 @@ vi.mock('../../stores/auth', () => ({
 }))
 vi.mock('../../lib/apiClient', () => ({
   apiClient: {
-    getSignals: vi.fn(async () => [
-      {
-        type: 'signal',
-        instrument: 'BTC-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.85,
-        reason: 'Strong momentum breakout',
-        strategy_name: 'macd',
-        price: 42000,
-      },
-      {
-        type: 'signal',
-        instrument: 'ETH-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'sell',
-        strength: 0.65,
-        reason: 'Overbought RSI',
-        strategy_name: 'rsi',
-        price: 2800,
-      },
-    ]),
+    getSignals: vi.fn(async () => ({
+      type: 'signal_list',
+      session_id: '',
+      sequence_id: 0,
+      items: [
+        {
+          type: 'signal',
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'buy',
+          strength: 0.85,
+          reason: 'Strong momentum breakout',
+          strategy_name: 'macd',
+          price: 42000,
+        },
+        {
+          type: 'signal',
+          instrument: 'ETH-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'sell',
+          strength: 0.65,
+          reason: 'Overbought RSI',
+          strategy_name: 'rsi',
+          price: 2800,
+        },
+      ],
+      count: 2,
+    })),
   },
 }))
 const createTestQueryClient = () =>
@@ -203,30 +209,33 @@ describe('Signals', () => {
   it('displays all buy stats when buy signals dominate', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'BTC-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.9,
-        reason: 'Bullish momentum',
-        strategy_name: 'macd',
-        price: 42000,
-      },
-      {
-        type: 'signal',
-        instrument: 'ETH-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.7,
-        reason: 'Uptrend',
-        strategy_name: 'macd',
-        price: 2800,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'buy',
+          strength: 0.9,
+          reason: 'Bullish momentum',
+          strategy_name: 'macd',
+          price: 42000,
+        },
+        {
+          type: 'signal',
+          instrument: 'ETH-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'buy',
+          strength: 0.7,
+          reason: 'Uptrend',
+          strategy_name: 'macd',
+          price: 2800,
+        },
+      ],
+      count: 2,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -241,30 +250,33 @@ describe('Signals', () => {
   it('displays all sell stats when sell signals dominate', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'BTC-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'sell',
-        strength: 0.9,
-        reason: 'Bearish momentum',
-        strategy_name: 'rsi',
-        price: 42000,
-      },
-      {
-        type: 'signal',
-        instrument: 'ETH-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'sell',
-        strength: 0.7,
-        reason: 'Downtrend',
-        strategy_name: 'rsi',
-        price: 2800,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'sell',
+          strength: 0.9,
+          reason: 'Bearish momentum',
+          strategy_name: 'rsi',
+          price: 42000,
+        },
+        {
+          type: 'signal',
+          instrument: 'ETH-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'sell',
+          strength: 0.7,
+          reason: 'Downtrend',
+          strategy_name: 'rsi',
+          price: 2800,
+        },
+      ],
+      count: 2,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -291,19 +303,22 @@ describe('Signals', () => {
   it('displays weak strength label', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'SOL-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.45,
-        reason: 'Weak signal',
-        strategy_name: 'macd',
-        price: 100,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'SOL-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'buy',
+          strength: 0.45,
+          reason: 'Weak signal',
+          strategy_name: 'macd',
+          price: 100,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -317,19 +332,22 @@ describe('Signals', () => {
   it('displays very weak strength label', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'XRP-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'sell',
-        strength: 0.25,
-        reason: 'Very weak signal',
-        strategy_name: 'rsi',
-        price: 0.5,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'XRP-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'sell',
+          strength: 0.25,
+          reason: 'Very weak signal',
+          strategy_name: 'rsi',
+          price: 0.5,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -343,19 +361,22 @@ describe('Signals', () => {
   it('displays time as Just now for recent signals', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'ADA-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.75,
-        reason: 'Recent signal',
-        strategy_name: 'macd',
-        price: 0.3,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'ADA-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'buy',
+          strength: 0.75,
+          reason: 'Recent signal',
+          strategy_name: 'macd',
+          price: 0.3,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -370,19 +391,22 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
     const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString()
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'DOT-USD',
-        exchange: 'kraken',
-        fired_at: fifteenMinutesAgo,
-        side: 'sell',
-        strength: 0.8,
-        reason: 'Minutes ago signal',
-        strategy_name: 'rsi',
-        price: 5,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'DOT-USD',
+          exchange: 'kraken',
+          fired_at: fifteenMinutesAgo,
+          side: 'sell',
+          strength: 0.8,
+          reason: 'Minutes ago signal',
+          strategy_name: 'rsi',
+          price: 5,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -397,19 +421,22 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
     const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'LINK-USD',
-        exchange: 'kraken',
-        fired_at: threeHoursAgo,
-        side: 'buy',
-        strength: 0.9,
-        reason: 'Hours ago signal',
-        strategy_name: 'macd',
-        price: 15,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'LINK-USD',
+          exchange: 'kraken',
+          fired_at: threeHoursAgo,
+          side: 'buy',
+          strength: 0.9,
+          reason: 'Hours ago signal',
+          strategy_name: 'macd',
+          price: 15,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -424,19 +451,22 @@ describe('Signals', () => {
     const { apiClient } = await import('../../lib/apiClient')
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'AVAX-USD',
-        exchange: 'kraken',
-        fired_at: twoDaysAgo,
-        side: 'sell',
-        strength: 0.7,
-        reason: 'Old signal',
-        strategy_name: 'rsi',
-        price: 30,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'AVAX-USD',
+          exchange: 'kraken',
+          fired_at: twoDaysAgo,
+          side: 'sell',
+          strength: 0.7,
+          reason: 'Old signal',
+          strategy_name: 'rsi',
+          price: 30,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -450,7 +480,7 @@ describe('Signals', () => {
   it('shows empty state when no signals are available', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({ items: [], count: 0 } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -467,7 +497,55 @@ describe('Signals', () => {
     const user = userEventModule.default.setup()
 
     vi.mocked(apiClient.getSignals)
-      .mockResolvedValueOnce([
+      .mockResolvedValueOnce({
+        items: [
+          {
+            type: 'signal',
+            instrument: 'BTC-USD',
+            exchange: 'kraken',
+            fired_at: new Date().toISOString(),
+            side: 'buy',
+            strength: 0.85,
+            reason: 'MACD signal',
+            strategy_name: 'macd',
+            price: 42000,
+          },
+          {
+            type: 'signal',
+            instrument: 'ETH-USD',
+            exchange: 'kraken',
+            fired_at: new Date().toISOString(),
+            side: 'sell',
+            strength: 0.65,
+            reason: 'RSI signal',
+            strategy_name: 'rsi',
+            price: 2800,
+          },
+        ],
+        count: 2,
+      } as never)
+      .mockResolvedValueOnce({ items: [], count: 0 } as never)
+    const queryClient = createTestQueryClient()
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Signals />
+      </QueryClientProvider>
+    )
+    await screen.findByText('BTC-USD')
+    const select = screen.getByRole('combobox')
+
+    await user.selectOptions(select, 'macd')
+    await screen.findByText('No signals found')
+    expect(screen.getByText('No trading signals match your current filters.')).toBeInTheDocument()
+  })
+  it('filters signals by strategy', async () => {
+    const { apiClient } = await import('../../lib/apiClient')
+    const userEventModule = await import('@testing-library/user-event')
+    const user = userEventModule.default.setup()
+
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
         {
           type: 'signal',
           instrument: 'BTC-USD',
@@ -490,51 +568,9 @@ describe('Signals', () => {
           strategy_name: 'rsi',
           price: 2800,
         },
-      ])
-      .mockResolvedValueOnce([])
-    const queryClient = createTestQueryClient()
-
-    render(
-      <QueryClientProvider client={queryClient}>
-        <Signals />
-      </QueryClientProvider>
-    )
-    await screen.findByText('BTC-USD')
-    const select = screen.getByRole('combobox')
-
-    await user.selectOptions(select, 'macd')
-    await screen.findByText('No signals found')
-    expect(screen.getByText('No trading signals match your current filters.')).toBeInTheDocument()
-  })
-  it('filters signals by strategy', async () => {
-    const { apiClient } = await import('../../lib/apiClient')
-    const userEventModule = await import('@testing-library/user-event')
-    const user = userEventModule.default.setup()
-
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'BTC-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.85,
-        reason: 'MACD signal',
-        strategy_name: 'macd',
-        price: 42000,
-      },
-      {
-        type: 'signal',
-        instrument: 'ETH-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'sell',
-        strength: 0.65,
-        reason: 'RSI signal',
-        strategy_name: 'rsi',
-        price: 2800,
-      },
-    ])
+      ],
+      count: 2,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -551,19 +587,22 @@ describe('Signals', () => {
   it('displays N/A for null price', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'BTC-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.85,
-        reason: 'Strong momentum',
-        strategy_name: 'macd',
-        price: null as unknown as number,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'buy',
+          strength: 0.85,
+          reason: 'Strong momentum',
+          strategy_name: 'macd',
+          price: null as unknown as number,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -592,19 +631,22 @@ describe('Signals', () => {
   it('omits strategy badge when strategy name is missing', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'BTC-USD',
-        exchange: 'kraken',
-        fired_at: new Date().toISOString(),
-        side: 'buy',
-        strength: 0.85,
-        reason: 'No strategy label',
-        strategy_name: null as unknown as string,
-        price: 42000,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          fired_at: new Date().toISOString(),
+          side: 'buy',
+          strength: 0.85,
+          reason: 'No strategy label',
+          strategy_name: null as unknown as string,
+          price: 42000,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -639,7 +681,7 @@ describe('Signals', () => {
   it('disables export button when no signals', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({ items: [], count: 0 } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -655,19 +697,22 @@ describe('Signals', () => {
   it('renders signal with undefined fired_at as Just now', async () => {
     const { apiClient } = await import('../../lib/apiClient')
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'SOL-USD',
-        exchange: 'kraken',
-        fired_at: undefined as unknown as string,
-        side: 'buy',
-        strength: 0.5,
-        reason: 'test reason',
-        strategy_name: 'test',
-        price: 100,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'SOL-USD',
+          exchange: 'kraken',
+          fired_at: undefined as unknown as string,
+          side: 'buy',
+          strength: 0.5,
+          reason: 'test reason',
+          strategy_name: 'test',
+          price: 100,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -684,19 +729,22 @@ describe('Signals', () => {
     const userEventModule = await import('@testing-library/user-event')
     const user = userEventModule.default.setup()
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'SOL-USD',
-        exchange: 'kraken',
-        fired_at: undefined as unknown as string,
-        side: 'sell',
-        strength: 0.6,
-        reason: 'test',
-        strategy_name: null as unknown as string,
-        price: null as unknown as number,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'SOL-USD',
+          exchange: 'kraken',
+          fired_at: undefined as unknown as string,
+          side: 'sell',
+          strength: 0.6,
+          reason: 'test',
+          strategy_name: null as unknown as string,
+          price: null as unknown as number,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(
@@ -729,19 +777,22 @@ describe('Signals', () => {
     const userEventModule = await import('@testing-library/user-event')
     const user = userEventModule.default.setup()
 
-    vi.mocked(apiClient.getSignals).mockResolvedValueOnce([
-      {
-        type: 'signal',
-        instrument: 'BTC-USD',
-        exchange: 'kraken',
-        fired_at: '2024-01-01T00:00:00Z',
-        side: 'buy',
-        strength: 0.85,
-        reason: null as unknown as string,
-        strategy_name: null as unknown as string,
-        price: null as unknown as number,
-      },
-    ])
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      items: [
+        {
+          type: 'signal',
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          fired_at: '2024-01-01T00:00:00Z',
+          side: 'buy',
+          strength: 0.85,
+          reason: null as unknown as string,
+          strategy_name: null as unknown as string,
+          price: null as unknown as number,
+        },
+      ],
+      count: 1,
+    } as never)
     const queryClient = createTestQueryClient()
 
     render(

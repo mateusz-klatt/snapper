@@ -20,6 +20,14 @@ from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+
+def _make_rest_request() -> MagicMock:
+    """Create a mock FastAPI Request with rest_tracker."""
+    mock_request = MagicMock()
+    mock_request.app.state.rest_tracker = SequenceTracker()
+    return mock_request
 
 
 @pytest.mark.asyncio
@@ -45,10 +53,12 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
     mock_service = AsyncMock()
     mock_service.get_user_by_id = AsyncMock(return_value=expected_profile)
     with patch("snapper.auth.routes.get_user_service", return_value=mock_service):
-        result = await get_current_user_profile(current_user=principal)
-    assert result is expected_profile
-    assert result.username == "testuser"
-    assert result.role == UserRole.VIEWER
+        result = await get_current_user_profile(
+            request=_make_rest_request(), current_user=principal
+        )
+    assert result.user is expected_profile
+    assert result.user.username == "testuser"
+    assert result.user.role == UserRole.VIEWER
     mock_service.get_user_by_id.assert_awaited_once_with("testuser")
 
 
@@ -70,7 +80,7 @@ async def test_get_current_user_profile_user_deleted_returns_404() -> None:
         patch("snapper.auth.routes.get_user_service", return_value=mock_service),
         pytest.raises(HTTPException) as exc_info,
     ):
-        await get_current_user_profile(current_user=principal)
+        await get_current_user_profile(request=_make_rest_request(), current_user=principal)
     assert exc_info.value.status_code == 404
 
 

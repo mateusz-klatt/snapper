@@ -29,14 +29,16 @@ vi.mock('../lib/apiClient', () => ({
   apiClient: {
     getSystemStatus: vi.fn(() => Promise.resolve({ trader: { status: 'running' } })),
     getCandles: vi.fn(() => Promise.resolve([])),
-    getExchanges: vi.fn(() => Promise.resolve(['kraken', 'binance'])),
-    getExchangeInstruments: vi.fn(() => Promise.resolve(['BTC/USD', 'ETH/USD'])),
-    getOrders: vi.fn(() => Promise.resolve([])),
-    getExecutions: vi.fn(() => Promise.resolve([])),
-    getPositions: vi.fn(() => Promise.resolve([])),
-    getSignals: vi.fn(() => Promise.resolve([])),
+    getExchanges: vi.fn(() => Promise.resolve({ items: ['kraken', 'binance'], count: 2 })),
+    getExchangeInstruments: vi.fn(() =>
+      Promise.resolve({ items: ['BTC/USD', 'ETH/USD'], count: 2 })
+    ),
+    getOrders: vi.fn(() => Promise.resolve({ items: [], count: 0 })),
+    getExecutions: vi.fn(() => Promise.resolve({ items: [], count: 0 })),
+    getPositions: vi.fn(() => Promise.resolve({ items: [], count: 0 })),
+    getSignals: vi.fn(() => Promise.resolve({ items: [], count: 0 })),
     getAvailableProcesses: vi.fn(() => Promise.resolve({ available: [] })),
-    getConfiguredProcesses: vi.fn(() => Promise.resolve({ processes: [] })),
+    getConfiguredProcesses: vi.fn(() => Promise.resolve({ items: [] })),
     getProcessSummary: vi.fn(() =>
       Promise.resolve({
         feeds: { running: 0, total: 0 },
@@ -47,12 +49,12 @@ vi.mock('../lib/apiClient', () => ({
     ),
     getStrategies: vi.fn(() =>
       Promise.resolve({
-        strategies: [{ name: 'strategy_test', running: false, enabled: true, mode: 'thread' }],
+        items: [{ name: 'strategy_test', running: false, enabled: true, mode: 'thread' }],
         count: 1,
       })
     ),
     getProcessSchema: vi.fn(() => Promise.resolve({ schema: {} })),
-    getProcessRuns: vi.fn(() => Promise.resolve({ runs: [] })),
+    getProcessRuns: vi.fn(() => Promise.resolve({ items: [] })),
     startProcessByName: vi.fn(() => Promise.resolve({ status: 'success', message: 'started' })),
     stopProcessByName: vi.fn(() => Promise.resolve({ status: 'success', message: 'stopped' })),
     createProcessConfig: vi.fn(() => Promise.resolve({ name: 'test', id: '123' })),
@@ -162,7 +164,7 @@ describe('queries', () => {
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
       })
-      expect(result.current.data).toEqual(['kraken', 'binance'])
+      expect(result.current.data?.items).toEqual(['kraken', 'binance'])
     })
   })
   describe('useExchangeInstruments', () => {
@@ -174,7 +176,7 @@ describe('queries', () => {
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
       })
-      expect(result.current.data).toEqual(['BTC/USD', 'ETH/USD'])
+      expect(result.current.data?.items).toEqual(['BTC/USD', 'ETH/USD'])
     })
     it('does not fetch when exchange is null', async () => {
       const { result } = renderHook(() => useExchangeInstruments(null), {
@@ -200,7 +202,10 @@ describe('queries', () => {
   })
   describe('useExecutions', () => {
     it('returns data when authenticated', async () => {
-      mockedApiClient.getExecutions.mockResolvedValueOnce([null, { public_id: 'exec-1' }])
+      mockedApiClient.getExecutions.mockResolvedValueOnce({
+        items: [null, { public_id: 'exec-1' }],
+        count: 2,
+      })
       const { result } = renderHook(() => useExecutions(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -227,38 +232,41 @@ describe('queries', () => {
       expect(result.current.data).toBeDefined()
     })
     it('sorts signals by timestamp and applies limit', async () => {
-      mockedApiClient.getSignals.mockResolvedValueOnce([
-        {
-          exchange: 'kraken',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          strength: 0.5,
-          reason: 'oldest',
-          strategyName: 'test',
-          price: 50000,
-          firedAt: new Date('2026-01-15T10:00:00Z'),
-        },
-        {
-          exchange: 'kraken',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          strength: 0.6,
-          reason: 'newest',
-          strategyName: 'test',
-          price: 50100,
-          firedAt: new Date('2026-01-15T12:00:00Z'),
-        },
-        {
-          exchange: 'kraken',
-          instrument: 'BTC/USD',
-          side: 'sell',
-          strength: 0.4,
-          reason: 'middle',
-          strategyName: 'test',
-          price: 49900,
-          firedAt: new Date('2026-01-15T11:00:00Z'),
-        },
-      ] as never)
+      mockedApiClient.getSignals.mockResolvedValueOnce({
+        items: [
+          {
+            exchange: 'kraken',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            strength: 0.5,
+            reason: 'oldest',
+            strategyName: 'test',
+            price: 50000,
+            firedAt: new Date('2026-01-15T10:00:00Z'),
+          },
+          {
+            exchange: 'kraken',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            strength: 0.6,
+            reason: 'newest',
+            strategyName: 'test',
+            price: 50100,
+            firedAt: new Date('2026-01-15T12:00:00Z'),
+          },
+          {
+            exchange: 'kraken',
+            instrument: 'BTC/USD',
+            side: 'sell',
+            strength: 0.4,
+            reason: 'middle',
+            strategyName: 'test',
+            price: 49900,
+            firedAt: new Date('2026-01-15T11:00:00Z'),
+          },
+        ],
+        count: 3,
+      } as never)
       const { result } = renderHook(() => useLatestSignals(2), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -269,38 +277,41 @@ describe('queries', () => {
       expect(result.current.data?.[1].reason).toBe('middle')
     })
     it('handles signals with undefined timestamp in sorting', async () => {
-      mockedApiClient.getSignals.mockResolvedValueOnce([
-        {
-          exchange: 'kraken',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          strength: 0.5,
-          reason: 'with-timestamp',
-          strategyName: 'test',
-          price: 50000,
-          firedAt: new Date('2026-01-15T10:00:00Z'),
-        },
-        {
-          exchange: 'kraken',
-          instrument: 'ETH/USD',
-          side: 'sell',
-          strength: 0.6,
-          reason: 'no-timestamp',
-          strategyName: 'test',
-          price: 3000,
-          firedAt: undefined,
-        },
-        {
-          exchange: 'kraken',
-          instrument: 'SOL/USD',
-          side: 'buy',
-          strength: 0.4,
-          reason: 'newer-timestamp',
-          strategyName: 'test',
-          price: 100,
-          firedAt: new Date('2026-01-15T12:00:00Z'),
-        },
-      ] as never)
+      mockedApiClient.getSignals.mockResolvedValueOnce({
+        items: [
+          {
+            exchange: 'kraken',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            strength: 0.5,
+            reason: 'with-timestamp',
+            strategyName: 'test',
+            price: 50000,
+            firedAt: new Date('2026-01-15T10:00:00Z'),
+          },
+          {
+            exchange: 'kraken',
+            instrument: 'ETH/USD',
+            side: 'sell',
+            strength: 0.6,
+            reason: 'no-timestamp',
+            strategyName: 'test',
+            price: 3000,
+            firedAt: undefined,
+          },
+          {
+            exchange: 'kraken',
+            instrument: 'SOL/USD',
+            side: 'buy',
+            strength: 0.4,
+            reason: 'newer-timestamp',
+            strategyName: 'test',
+            price: 100,
+            firedAt: new Date('2026-01-15T12:00:00Z'),
+          },
+        ],
+        count: 3,
+      } as never)
       const { result } = renderHook(() => useLatestSignals(3), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -351,8 +362,8 @@ describe('queries', () => {
         expect(result.current.isLoading).toBe(false)
       })
       expect(result.current.data).toBeDefined()
-      expect(result.current.data?.strategies).toHaveLength(1)
-      expect(result.current.data?.strategies[0].name).toBe('strategy_test')
+      expect(result.current.data?.items).toHaveLength(1)
+      expect(result.current.data?.items[0].name).toBe('strategy_test')
     })
   })
   describe('useProcessSchema', () => {
@@ -397,56 +408,59 @@ describe('queries', () => {
   })
   describe('useOrdersGrouped', () => {
     it('groups orders by status', async () => {
-      mockedApiClient.getOrders.mockResolvedValueOnce([
-        {
-          public_id: '1',
-          status: 'NEW',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          price: 100,
-          quantity: 1,
-        },
-        {
-          public_id: '2',
-          status: 'OPEN',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          price: 100,
-          quantity: 1,
-        },
-        {
-          public_id: '3',
-          status: 'FILLED',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          price: 100,
-          quantity: 1,
-        },
-        {
-          public_id: '4',
-          status: 'PARTIALLY_FILLED',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          price: 100,
-          quantity: 1,
-        },
-        {
-          public_id: '5',
-          status: 'CANCELLED',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          price: 100,
-          quantity: 1,
-        },
-        {
-          public_id: '6',
-          status: 'REJECTED',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          price: 100,
-          quantity: 1,
-        },
-      ])
+      mockedApiClient.getOrders.mockResolvedValueOnce({
+        items: [
+          {
+            public_id: '1',
+            status: 'NEW',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            price: 100,
+            quantity: 1,
+          },
+          {
+            public_id: '2',
+            status: 'OPEN',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            price: 100,
+            quantity: 1,
+          },
+          {
+            public_id: '3',
+            status: 'FILLED',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            price: 100,
+            quantity: 1,
+          },
+          {
+            public_id: '4',
+            status: 'PARTIALLY_FILLED',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            price: 100,
+            quantity: 1,
+          },
+          {
+            public_id: '5',
+            status: 'CANCELLED',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            price: 100,
+            quantity: 1,
+          },
+          {
+            public_id: '6',
+            status: 'REJECTED',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            price: 100,
+            quantity: 1,
+          },
+        ],
+        count: 6,
+      })
       const { result } = renderHook(() => useOrdersGrouped(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -461,7 +475,7 @@ describe('queries', () => {
       expect(result.current.data?.rejected).toHaveLength(1)
     })
     it('returns null when no orders', async () => {
-      mockedApiClient.getOrders.mockResolvedValueOnce(null as unknown as [])
+      mockedApiClient.getOrders.mockResolvedValueOnce(null as never)
       const { result } = renderHook(() => useOrdersGrouped(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -472,30 +486,33 @@ describe('queries', () => {
   })
   describe('usePositionsSummary', () => {
     it('calculates position summary', async () => {
-      mockedApiClient.getPositions.mockResolvedValueOnce([
-        {
-          type: 'position' as const,
-          public_id: '1',
-          timestamp: new Date().toISOString(),
-          instrument: 'BTC/USD',
-          exchange: 'kraken' as const,
-          quantity: 10,
-          average_price: 100,
-          unrealized_pnl: 50,
-          realized_pnl: 20,
-        },
-        {
-          type: 'position' as const,
-          public_id: '2',
-          timestamp: new Date().toISOString(),
-          instrument: 'ETH/USD',
-          exchange: 'kraken' as const,
-          quantity: 5,
-          average_price: 200,
-          unrealized_pnl: -10,
-          realized_pnl: 30,
-        },
-      ])
+      mockedApiClient.getPositions.mockResolvedValueOnce({
+        items: [
+          {
+            type: 'position' as const,
+            public_id: '1',
+            timestamp: new Date().toISOString(),
+            instrument: 'BTC/USD',
+            exchange: 'kraken' as const,
+            quantity: 10,
+            average_price: 100,
+            unrealized_pnl: 50,
+            realized_pnl: 20,
+          },
+          {
+            type: 'position' as const,
+            public_id: '2',
+            timestamp: new Date().toISOString(),
+            instrument: 'ETH/USD',
+            exchange: 'kraken' as const,
+            quantity: 5,
+            average_price: 200,
+            unrealized_pnl: -10,
+            realized_pnl: 30,
+          },
+        ],
+        count: 2,
+      })
       const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -508,7 +525,7 @@ describe('queries', () => {
       expect(result.current.data?.totalPnL).toBe(90)
     })
     it('returns null when no positions', async () => {
-      mockedApiClient.getPositions.mockResolvedValueOnce(null as unknown as [])
+      mockedApiClient.getPositions.mockResolvedValueOnce(null as never)
       const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -517,16 +534,19 @@ describe('queries', () => {
       expect(result.current.data).toBeNull()
     })
     it('handles zero totalCost', async () => {
-      mockedApiClient.getPositions.mockResolvedValueOnce([
-        {
-          public_id: '1',
-          instrument: 'BTC/USD',
-          quantity: 0,
-          average_price: 0,
-          unrealized_pnl: 0,
-          realized_pnl: 0,
-        },
-      ])
+      mockedApiClient.getPositions.mockResolvedValueOnce({
+        items: [
+          {
+            public_id: '1',
+            instrument: 'BTC/USD',
+            quantity: 0,
+            average_price: 0,
+            unrealized_pnl: 0,
+            realized_pnl: 0,
+          },
+        ],
+        count: 1,
+      })
       const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
 
       await waitFor(() => {

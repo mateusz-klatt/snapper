@@ -328,12 +328,12 @@ class AvailableProcessesResponse(StrictDataSchema):
 
     Attributes:
         type: Payload item type discriminator.
-        processes: List of available process templates.
+        items: List of available process templates.
         count: Total number of available processes.
     """
 
     type: Literal["available_processes"] = "available_processes"
-    processes: list[AvailableProcess]
+    items: list[AvailableProcess]
     count: int
 
 
@@ -384,12 +384,12 @@ class ConfiguredProcessesResponse(StrictDataSchema):
 
     Attributes:
         type: Payload item type discriminator.
-        processes: List of configured processes.
+        items: List of configured processes.
         count: Total number of configured processes.
     """
 
     type: Literal["configured_processes"] = "configured_processes"
-    processes: list[ConfiguredProcess]
+    items: list[ConfiguredProcess]
     count: int
 
 
@@ -448,12 +448,12 @@ class StrategyListResponse(StrictDataSchema):
 
     Attributes:
         type: Payload item type discriminator.
-        strategies: List of strategy processes.
+        items: List of strategy processes.
         count: Total number of strategies.
     """
 
     type: Literal["strategy_list"] = "strategy_list"
-    strategies: list[StrategyProcess]
+    items: list[StrategyProcess]
     count: int
 
 
@@ -554,12 +554,12 @@ class ProcessRunsResponse(StrictDataSchema):
 
     Attributes:
         type: Payload item type discriminator.
-        runs: List of process runs.
+        items: List of process runs.
         count: Total number of runs.
     """
 
     type: Literal["process_runs"] = "process_runs"
-    runs: list[ProcessRun]
+    items: list[ProcessRun]
     count: int
 
 

@@ -34,27 +34,6 @@ export const AvailableProcessSchema = z
   })
   .strict()
 
-export const CandleDataSchema = z
-  .object({
-    public_id: z.string().optional(),
-    type: z.literal('candle'),
-    timestamp: z.iso.datetime().optional(),
-    session_id: z.string(),
-    sequence_id: z.number().int(),
-    instrument: z.string(),
-    exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
-    timeframe: z.string(),
-    open_at: z.iso.datetime(),
-    open: z.number(),
-    high: z.number(),
-    low: z.number(),
-    close: z.number(),
-    volume: z.number(),
-    vwap: z.number().nullable().optional(),
-    trades: z.number().int().nullable().optional(),
-  })
-  .strict()
-
 export const ChangePasswordRequestSchema = z
   .object({
     public_id: z.string().optional(),
@@ -107,6 +86,18 @@ export const ConnectionStatsSchemaSchema = z
   })
   .strict()
 
+export const ExchangeListResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('exchange_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    items: z.array(z.string()),
+    count: z.number().int(),
+  })
+  .strict()
+
 export const ExecutionDataSchema = z
   .object({
     public_id: z.string().optional(),
@@ -152,6 +143,18 @@ export const HealthTopicsSchema = z
     session_id: z.string(),
     sequence_id: z.number().int(),
     active: z.number().int(),
+  })
+  .strict()
+
+export const InstrumentListResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('instrument_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    items: z.array(z.string()),
+    count: z.number().int(),
   })
   .strict()
 
@@ -564,7 +567,7 @@ export const AvailableProcessesResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    processes: z.array(AvailableProcessSchema),
+    items: z.array(AvailableProcessSchema),
     count: z.number().int(),
   })
   .strict()
@@ -576,7 +579,19 @@ export const ConfiguredProcessesResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    processes: z.array(ConfiguredProcessSchema),
+    items: z.array(ConfiguredProcessSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const ExecutionListResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('execution_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    items: z.array(ExecutionDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -590,6 +605,30 @@ export const GapDetectionStatsSchema = z
     sequence_id: z.number().int(),
     bridge: GapStatsSchemaSchema,
     rest_clients: z.record(z.string(), GapStatsSchemaSchema).optional(),
+  })
+  .strict()
+
+export const OrderListResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('order_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    items: z.array(OrderDataSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const PositionListResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('position_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    items: z.array(PositionDataSchema),
+    count: z.number().int(),
   })
   .strict()
 
@@ -626,7 +665,42 @@ export const ProcessRunsResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    runs: z.array(ProcessRunSchema),
+    items: z.array(ProcessRunSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const SettingListResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('setting_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    items: z.array(SettingReadSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const SettingResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('setting_response'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    setting: SettingReadSchema,
+  })
+  .strict()
+
+export const SignalListResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('signal_list'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    items: z.array(SignalDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -638,7 +712,7 @@ export const StrategyListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    strategies: z.array(StrategyProcessSchema),
+    items: z.array(StrategyProcessSchema),
     count: z.number().int(),
   })
   .strict()
@@ -787,21 +861,33 @@ export const UserListResponseSchema = z
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
     sequence_id: z.number().int(),
-    users: z.array(UserProfileSchema),
-    total_count: z.number().int(),
+    items: z.array(UserProfileSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const UserResponseSchema = z
+  .object({
+    public_id: z.string().optional(),
+    type: z.literal('user_response'),
+    timestamp: z.iso.datetime().optional(),
+    session_id: z.string(),
+    sequence_id: z.number().int(),
+    user: UserProfileSchema,
   })
   .strict()
 
 // Type exports
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
-export type CandleData = z.infer<typeof CandleDataSchema>
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
 export type ConnectionStatsSchema = z.infer<typeof ConnectionStatsSchemaSchema>
+export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
 export type GapStatsSchema = z.infer<typeof GapStatsSchemaSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
+export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
@@ -832,10 +918,16 @@ export type ZmqComponents = z.infer<typeof ZmqComponentsSchema>
 export type ZmqConfig = z.infer<typeof ZmqConfigSchema>
 export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
 export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
+export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
+export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
+export type PositionListResponse = z.infer<typeof PositionListResponseSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
 export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
+export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
+export type SettingResponse = z.infer<typeof SettingResponseSchema>
+export type SignalListResponse = z.infer<typeof SignalListResponseSchema>
 export type StrategyListResponse = z.infer<typeof StrategyListResponseSchema>
 export type SystemStatus = z.infer<typeof SystemStatusSchema>
 export type CreateUserRequest = z.infer<typeof CreateUserRequestSchema>
@@ -848,3 +940,4 @@ export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
 export type LoginResponse = z.infer<typeof LoginResponseSchema>
 export type RefreshResponse = z.infer<typeof RefreshResponseSchema>
 export type UserListResponse = z.infer<typeof UserListResponseSchema>
+export type UserResponse = z.infer<typeof UserResponseSchema>

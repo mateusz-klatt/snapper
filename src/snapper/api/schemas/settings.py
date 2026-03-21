@@ -74,4 +74,40 @@ class SettingCreate(StrictDataSchema):
     description: str | None = Field(None, description="Setting description")
 
 
-__all__ = ["SettingRead", "SettingUpdate", "SettingCreate"]
+class SettingResponse(StrictDataSchema):
+    """Single setting response wrapper.
+
+    Wraps a SettingRead in a typed envelope for REST API consistency.
+
+    Attributes:
+        type: Payload item type discriminator.
+        setting: The setting data.
+    """
+
+    type: Literal["setting_response"] = "setting_response"
+    setting: SettingRead
+
+
+class SettingListResponse(StrictDataSchema):
+    """Setting list response wrapper.
+
+    Wraps a list of SettingRead items with a count for REST API consistency.
+
+    Attributes:
+        type: Payload item type discriminator.
+        items: List of setting data items.
+        count: Total number of settings in the response.
+    """
+
+    type: Literal["setting_list"] = "setting_list"
+    items: list[SettingRead]
+    count: int
+
+
+__all__ = [
+    "SettingRead",
+    "SettingUpdate",
+    "SettingCreate",
+    "SettingResponse",
+    "SettingListResponse",
+]

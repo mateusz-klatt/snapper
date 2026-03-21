@@ -191,12 +191,12 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
-            result = await get_all_settings(user=mock_user)
-        assert len(result) == 2
-        assert result[0].key == "key1"
-        assert result[0].value == "value1"
-        assert result[1].key == "key2"
-        assert result[1].value == "value2"
+            result = await get_all_settings(request=self._make_rest_request(), user=mock_user)
+        assert result.count == 2
+        assert result.items[0].key == "key1"
+        assert result.items[0].value == "value1"
+        assert result.items[1].key == "key2"
+        assert result.items[1].value == "value2"
 
     @pytest.mark.asyncio
     async def test_get_all_settings_with_category_filter(self) -> None:
@@ -224,9 +224,11 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
-            result = await get_all_settings(category="auth", user=mock_user)
-        assert len(result) == 1
-        assert result[0].category == "auth"
+            result = await get_all_settings(
+                request=self._make_rest_request(), category="auth", user=mock_user
+            )
+        assert result.count == 1
+        assert result.items[0].category == "auth"
 
     @pytest.mark.asyncio
     async def test_get_setting_categories(self) -> None:
@@ -297,7 +299,11 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
             result = await update_setting(
-                key="existing_key", request=request, user=mock_user, _csrf=None
+                http_request=self._make_rest_request(),
+                key="existing_key",
+                body=request,
+                user=mock_user,
+                _csrf=None,
             )
         mock_settings_service.update_setting.assert_called_once_with(
             key="existing_key",
@@ -306,8 +312,8 @@ class TestSettingsRoutes:
             description="Updated description",
             updated_by="test_user",
         )
-        assert result.key == "existing_key"
-        assert result.value == "updated_value"
+        assert result.setting.key == "existing_key"
+        assert result.setting.value == "updated_value"
 
     @pytest.mark.asyncio
     async def test_update_setting_not_found(self) -> None:
@@ -338,7 +344,13 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
             pytest.raises(HTTPException) as exc_info,
         ):
-            await update_setting(key="nonexistent_key", request=request, user=mock_user, _csrf=None)
+            await update_setting(
+                http_request=self._make_rest_request(),
+                key="nonexistent_key",
+                body=request,
+                user=mock_user,
+                _csrf=None,
+            )
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio

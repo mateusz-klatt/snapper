@@ -34,7 +34,7 @@ from snapper.auth.schemas.requests import UpdateUserRequest
 from snapper.auth.schemas.responses import LoginResponse
 from snapper.auth.schemas.responses import RefreshResponse
 from snapper.auth.schemas.responses import UserListResponse
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.responses import UserResponse
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -256,15 +256,17 @@ async def refresh_token(
 
 @router.get("/me")
 async def get_current_user_profile(
+    request: Request,
     current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
-) -> UserProfile:
+) -> UserResponse:
     """Get current user's profile.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         current_user: Authenticated principal from dependency.
 
     Returns:
-        Current user's UserProfile.
+        UserResponse wrapping the current user's profile.
 
     Raises:
         HTTPException: 404 if user not found in database.
@@ -276,7 +278,13 @@ async def get_current_user_profile(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=_USER_NOT_FOUND,
         )
-    return user
+    sid, seq, ts = _mint_provenance(request)
+    return UserResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        user=user,
+    )
 
 
 @router.post("/logout")
@@ -381,25 +389,27 @@ async def get_users(
         session_id=sid,
         sequence_id=seq,
         timestamp=ts,
-        users=users,
-        total_count=len(users),
+        items=users,
+        count=len(users),
     )
 
 
 @router.post("/users")
 async def create_user(
+    request: Request,
     user_data: CreateUserRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
-) -> UserProfile:
+) -> UserResponse:
     """Create a new user account.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         user_data: User creation payload with username, password, etc.
         current_user: Authenticated user with MANAGE_USERS permission.
 
     Returns:
-        Created user profile.
+        UserResponse wrapping the created user profile.
 
     Raises:
         HTTPException: If user creation fails.
@@ -413,7 +423,13 @@ async def create_user(
             role=user_data.role,
             is_active=user_data.is_active,
         )
-        return new_user
+        sid, seq, ts = _mint_provenance(request)
+        return UserResponse(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            user=new_user,
+        )
     except ValueError as e:
         logger.warning("User creation failed: {}", str(e))
         raise HTTPException(
@@ -423,20 +439,22 @@ async def create_user(
 
 @router.put("/users/{user_id}")
 async def update_user(
+    request: Request,
     user_id: str,
     user_data: UpdateUserRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
-) -> UserProfile:
+) -> UserResponse:
     """Update an existing user's profile.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         user_id: Target user ID.
         user_data: Update payload with optional email, role, is_active.
         current_user: Authenticated user with MANAGE_USERS permission.
 
     Returns:
-        Updated user profile.
+        UserResponse wrapping the updated user profile.
 
     Raises:
         HTTPException: If user not found.
@@ -449,7 +467,13 @@ async def update_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"
         )
-    return updated_user
+    sid, seq, ts = _mint_provenance(request)
+    return UserResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        user=updated_user,
+    )
 
 
 @router.delete("/users/{user_id}")

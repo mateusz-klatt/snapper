@@ -35,16 +35,17 @@ class TestDatabaseEndpoints:
         self.app.dependency_overrides.clear()
 
     def test_get_orders_endpoint_basic(self) -> None:
-        """Verify GET /orders endpoint returns 200 with list.
+        """Verify GET /orders endpoint returns 200 with wrapped list.
 
         Given: An authenticated client with CSRF bypassed,
         When: GET /api/orders is called,
-        Then: Response is 200 OK with a list body.
+        Then: Response is 200 OK with order_list wrapper.
         """
         response = self.client.get("/api/orders")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert data["type"] == "order_list"
+        assert isinstance(data["items"], list)
 
     def test_get_orders_with_parameters(self) -> None:
         """Verify GET /orders accepts query parameters.
@@ -56,19 +57,21 @@ class TestDatabaseEndpoints:
         response = self.client.get("/api/orders?symbol=BTCUSD&limit=50&offset=10")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert data["type"] == "order_list"
+        assert isinstance(data["items"], list)
 
     def test_get_signals_endpoint_basic(self) -> None:
-        """Verify GET /signals endpoint returns 200 with list.
+        """Verify GET /signals endpoint returns 200 with wrapped list.
 
         Given: An authenticated client,
         When: GET /api/signals is called,
-        Then: Response is 200 OK with a list body.
+        Then: Response is 200 OK with signal_list wrapper.
         """
         response = self.client.get("/api/signals")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert data["type"] == "signal_list"
+        assert isinstance(data["items"], list)
 
     def test_get_signals_with_parameters(self) -> None:
         """Verify GET /signals accepts query parameters.
@@ -82,19 +85,21 @@ class TestDatabaseEndpoints:
         )
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert data["type"] == "signal_list"
+        assert isinstance(data["items"], list)
 
     def test_get_executions_endpoint_basic(self) -> None:
-        """Verify GET /executions endpoint returns 200 with list.
+        """Verify GET /executions endpoint returns 200 with wrapped list.
 
         Given: An authenticated client,
         When: GET /api/executions is called,
-        Then: Response is 200 OK with a list body.
+        Then: Response is 200 OK with execution_list wrapper.
         """
         response = self.client.get("/api/executions")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert data["type"] == "execution_list"
+        assert isinstance(data["items"], list)
 
     def test_get_executions_with_parameters(self) -> None:
         """Verify GET /executions accepts limit parameter.
@@ -106,19 +111,21 @@ class TestDatabaseEndpoints:
         response = self.client.get("/api/executions?limit=25")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert data["type"] == "execution_list"
+        assert isinstance(data["items"], list)
 
     def test_get_positions_endpoint_basic(self) -> None:
-        """Verify GET /positions endpoint returns 200 with list.
+        """Verify GET /positions endpoint returns 200 with wrapped list.
 
         Given: An authenticated client,
         When: GET /api/positions is called,
-        Then: Response is 200 OK with a list body.
+        Then: Response is 200 OK with position_list wrapper.
         """
         response = self.client.get("/api/positions")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert data["type"] == "position_list"
+        assert isinstance(data["items"], list)
 
     def test_dependency_injection_is_used(self) -> None:
         """Verify endpoints use injected repository dependency.

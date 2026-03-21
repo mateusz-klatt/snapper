@@ -558,22 +558,28 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [
-        {
-          type: 'candle',
-          session_id: '',
-          sequence_id: 0,
-          instrument: 'BTC/USD',
-          exchange: 'kraken',
-          timeframe: '1h',
-          open_at: '2024-01-01T00:00:00Z',
-          open: 1,
-          high: 1.1,
-          low: 0.9,
-          close: 1.05,
-          volume: 1000,
-        },
-      ],
+      json: async () => ({
+        type: 'candle_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [
+          {
+            type: 'candle',
+            session_id: '',
+            sequence_id: 0,
+            instrument: 'BTC/USD',
+            exchange: 'kraken',
+            timeframe: '1h',
+            open_at: '2024-01-01T00:00:00Z',
+            open: 1,
+            high: 1.1,
+            low: 0.9,
+            close: 1.05,
+            volume: 1000,
+          },
+        ],
+        count: 1,
+      }),
     })
     const result = await apiClient.getCandles('BTC/USD', 'kraken', '1h', 50)
 
@@ -596,6 +602,16 @@ describe('domain API methods', () => {
 
     expect(result).toEqual([])
   })
+  it('getCandles returns empty array when items is missing', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ type: 'candle_list', session_id: '', sequence_id: 0, count: 0 }),
+    })
+    const result = await apiClient.getCandles('BTC/USD', 'kraken', '1h', 50)
+
+    expect(result).toEqual([])
+  })
   it('getCandles throws on non-ok response', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -610,29 +626,35 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [
-        {
-          type: 'order',
-          session_id: '',
-          sequence_id: 0,
-          instrument: 'BTC/USD',
-          exchange: 'kraken',
-          client_order_id: 'client-1',
-          exchange_order_id: 'ex-1',
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          side: 'buy',
-          order_type: 'limit',
-          price: 50000,
-          size: 1,
-          filled_size: 1,
-          status: 'filled',
-        },
-      ],
+      json: async () => ({
+        type: 'order_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [
+          {
+            type: 'order',
+            session_id: '',
+            sequence_id: 0,
+            instrument: 'BTC/USD',
+            exchange: 'kraken',
+            client_order_id: 'client-1',
+            exchange_order_id: 'ex-1',
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: '2024-01-01T00:00:00Z',
+            side: 'buy',
+            order_type: 'limit',
+            price: 50000,
+            size: 1,
+            filled_size: 1,
+            status: 'filled',
+          },
+        ],
+        count: 1,
+      }),
     })
     const result = await apiClient.getOrders('BTC/USD', 50, 10)
 
-    expect(result).toHaveLength(1)
+    expect(result.items).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('symbol=BTC%2FUSD'),
       expect.any(Object)
@@ -642,7 +664,13 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({
+        type: 'order_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [],
+        count: 0,
+      }),
     })
     await apiClient.getOrders()
     expect(mockFetch).toHaveBeenCalledWith(
@@ -654,102 +682,126 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [
-        {
-          type: 'execution',
-          session_id: '',
-          sequence_id: 0,
-          client_order_id: 'client-1',
-          executed_at: '2024-01-01T00:00:00Z',
-          price: 100,
-          size: 1,
-          fee: 0.1,
-          fee_asset: 'USD',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          exchange: 'kraken',
-          status: 'filled',
-        },
-      ],
+      json: async () => ({
+        type: 'execution_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [
+          {
+            type: 'execution',
+            session_id: '',
+            sequence_id: 0,
+            client_order_id: 'client-1',
+            executed_at: '2024-01-01T00:00:00Z',
+            price: 100,
+            size: 1,
+            fee: 0.1,
+            fee_asset: 'USD',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            exchange: 'kraken',
+            status: 'filled',
+          },
+        ],
+        count: 1,
+      }),
     })
     const result = await apiClient.getExecutions(50)
 
-    expect(result).toHaveLength(1)
+    expect(result.items).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=50'), expect.any(Object))
   })
   it('getExecutions uses default limit', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [
-        {
-          type: 'execution',
-          session_id: '',
-          sequence_id: 0,
-          client_order_id: 'client-1',
-          executed_at: '2024-01-01T00:00:00Z',
-          price: 100,
-          size: 1,
-          fee: 0.1,
-          fee_asset: 'USD',
-          instrument: 'BTC/USD',
-          side: 'buy',
-          exchange: 'kraken',
-          status: 'filled',
-        },
-      ],
+      json: async () => ({
+        type: 'execution_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [
+          {
+            type: 'execution',
+            session_id: '',
+            sequence_id: 0,
+            client_order_id: 'client-1',
+            executed_at: '2024-01-01T00:00:00Z',
+            price: 100,
+            size: 1,
+            fee: 0.1,
+            fee_asset: 'USD',
+            instrument: 'BTC/USD',
+            side: 'buy',
+            exchange: 'kraken',
+            status: 'filled',
+          },
+        ],
+        count: 1,
+      }),
     })
     const result = await apiClient.getExecutions()
 
-    expect(result).toHaveLength(1)
+    expect(result.items).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=100'), expect.any(Object))
   })
   it('getPositions returns positions', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [
-        {
-          type: 'position',
-          session_id: '',
-          sequence_id: 0,
-          instrument: 'BTC/USD',
-          exchange: 'kraken',
-          quantity: 1,
-          average_price: 50000,
-          unrealized_pnl: 100,
-          realized_pnl: 50,
-          timestamp: '2024-01-01T00:00:00Z',
-        },
-      ],
+      json: async () => ({
+        type: 'position_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [
+          {
+            type: 'position',
+            session_id: '',
+            sequence_id: 0,
+            instrument: 'BTC/USD',
+            exchange: 'kraken',
+            quantity: 1,
+            average_price: 50000,
+            unrealized_pnl: 100,
+            realized_pnl: 50,
+            timestamp: '2024-01-01T00:00:00Z',
+          },
+        ],
+        count: 1,
+      }),
     })
     const result = await apiClient.getPositions()
 
-    expect(result).toHaveLength(1)
+    expect(result.items).toHaveLength(1)
   })
   it('getSignals returns signals with optional filters', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [
-        {
-          type: 'signal',
-          session_id: '',
-          sequence_id: 0,
-          instrument: 'BTC/USD',
-          exchange: 'kraken',
-          fired_at: '2024-01-01T00:00:00Z',
-          side: 'buy',
-          strength: 0.8,
-          reason: 'momentum signal',
-          strategy_name: 'momentum',
-          price: 50000,
-        },
-      ],
+      json: async () => ({
+        type: 'signal_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [
+          {
+            type: 'signal',
+            session_id: '',
+            sequence_id: 0,
+            instrument: 'BTC/USD',
+            exchange: 'kraken',
+            fired_at: '2024-01-01T00:00:00Z',
+            side: 'buy',
+            strength: 0.8,
+            reason: 'momentum signal',
+            strategy_name: 'momentum',
+            price: 50000,
+          },
+        ],
+        count: 1,
+      }),
     })
     const result = await apiClient.getSignals('momentum', 50, 'BTC/USD', 48)
 
-    expect(result).toHaveLength(1)
+    expect(result.items).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('strategy=momentum'),
       expect.any(Object)
@@ -759,7 +811,13 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({
+        type: 'signal_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [],
+        count: 0,
+      }),
     })
     await apiClient.getSignals()
     const url = mockFetch.mock.calls[0][0] as string
@@ -773,7 +831,13 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({
+        type: 'signal_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [],
+        count: 0,
+      }),
     })
     await apiClient.getSignals('momentum', 50, 'BTC/USD', 48, 'kraken')
     const url = mockFetch.mock.calls[0][0] as string
@@ -784,7 +848,13 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({
+        type: 'order_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [],
+        count: 0,
+      }),
     })
     await apiClient.getOrders('BTC/USD', 50, 10, 'kraken')
     const url = mockFetch.mock.calls[0][0] as string
@@ -795,11 +865,17 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ['kraken', 'binance'],
+      json: async () => ({
+        type: 'exchange_list',
+        session_id: '',
+        sequence_id: 0,
+        items: ['kraken', 'binance'],
+        count: 2,
+      }),
     })
     const result = await apiClient.getExchanges()
 
-    expect(result).toEqual(['kraken', 'binance'])
+    expect(result.items).toEqual(['kraken', 'binance'])
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/exchanges'),
       expect.any(Object)
@@ -809,11 +885,17 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ['BTC/USD', 'ETH/USD'],
+      json: async () => ({
+        type: 'instrument_list',
+        session_id: '',
+        sequence_id: 0,
+        items: ['BTC/USD', 'ETH/USD'],
+        count: 2,
+      }),
     })
     const result = await apiClient.getExchangeInstruments('kraken')
 
-    expect(result).toEqual(['BTC/USD', 'ETH/USD'])
+    expect(result.items).toEqual(['BTC/USD', 'ETH/USD'])
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/exchanges/kraken/instruments'),
       expect.any(Object)
@@ -823,21 +905,27 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [
-        {
-          type: 'setting_read',
-          session_id: '',
-          sequence_id: 0,
-          key: 'setting1',
-          value: 'value1',
-          category: 'trading',
-          updated_at: '2024-01-01T00:00:00Z',
-        },
-      ],
+      json: async () => ({
+        type: 'setting_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [
+          {
+            type: 'setting_read',
+            session_id: '',
+            sequence_id: 0,
+            key: 'setting1',
+            value: 'value1',
+            category: 'trading',
+            updated_at: '2024-01-01T00:00:00Z',
+          },
+        ],
+        count: 1,
+      }),
     })
     const result = await apiClient.getSettings('trading')
 
-    expect(result).toHaveLength(1)
+    expect(result.items).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('category=trading'),
       expect.any(Object)
@@ -847,7 +935,13 @@ describe('domain API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({
+        type: 'setting_list',
+        session_id: '',
+        sequence_id: 0,
+        items: [],
+        count: 0,
+      }),
     })
     await apiClient.getSettings()
     expect(mockFetch).toHaveBeenCalledWith(
@@ -875,13 +969,18 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        type: 'setting_read',
+        type: 'setting_response',
         session_id: '',
         sequence_id: 0,
-        key: 'setting1',
-        value: 'new-value',
-        category: 'general',
-        updated_at: '2024-01-01T00:00:00Z',
+        setting: {
+          type: 'setting_read',
+          session_id: '',
+          sequence_id: 0,
+          key: 'setting1',
+          value: 'new-value',
+          category: 'general',
+          updated_at: '2024-01-01T00:00:00Z',
+        },
       }),
     })
     const result = await apiClient.updateSetting('setting1', {
@@ -889,8 +988,8 @@ describe('domain API methods', () => {
       category: 'general',
     })
 
-    expect(result.key).toBe('setting1')
-    expect(result.value).toBe('new-value')
+    expect(result.setting.key).toBe('setting1')
+    expect(result.setting.value).toBe('new-value')
   })
   it('deleteSetting deletes a setting', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -972,7 +1071,7 @@ describe('domain API methods', () => {
         type: 'configured_processes',
         session_id: '',
         sequence_id: 0,
-        processes: [],
+        items: [],
         count: 0,
       }),
     })
@@ -982,7 +1081,7 @@ describe('domain API methods', () => {
       type: 'configured_processes',
       session_id: '',
       sequence_id: 0,
-      processes: [],
+      items: [],
       count: 0,
     })
   })
@@ -1035,7 +1134,7 @@ describe('domain API methods', () => {
       type: 'strategy_list' as const,
       session_id: '',
       sequence_id: 0,
-      strategies: [
+      items: [
         {
           type: 'strategy_process' as const,
           session_id: '',
@@ -1066,7 +1165,7 @@ describe('domain API methods', () => {
         type: 'available_processes',
         session_id: '',
         sequence_id: 0,
-        processes: [],
+        items: [],
         count: 0,
       }),
     })
@@ -1076,7 +1175,7 @@ describe('domain API methods', () => {
       type: 'available_processes',
       session_id: '',
       sequence_id: 0,
-      processes: [],
+      items: [],
       count: 0,
     })
   })
@@ -1088,7 +1187,7 @@ describe('domain API methods', () => {
         type: 'process_runs',
         session_id: '',
         sequence_id: 0,
-        runs: [],
+        items: [],
         count: 0,
       }),
     })
@@ -1098,7 +1197,7 @@ describe('domain API methods', () => {
       type: 'process_runs',
       session_id: '',
       sequence_id: 0,
-      runs: [],
+      items: [],
       count: 0,
     })
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=10'), expect.any(Object))
@@ -1112,7 +1211,7 @@ describe('domain API methods', () => {
         type: 'process_runs',
         session_id: '',
         sequence_id: 0,
-        runs: [],
+        items: [],
         count: 0,
       }),
     })
@@ -1242,7 +1341,7 @@ describe('user management API methods', () => {
         type: 'user_list',
         session_id: '',
         sequence_id: 0,
-        users: [
+        items: [
           {
             type: 'user_profile',
             session_id: '',
@@ -1254,12 +1353,12 @@ describe('user management API methods', () => {
             created_at: '2024-01-01T00:00:00Z',
           },
         ],
-        total_count: 1,
+        count: 1,
       }),
     })
     const result = await apiClient.listUsers(true)
 
-    expect(result.users).toHaveLength(1)
+    expect(result.items).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users?include_inactive=true',
       expect.objectContaining({ method: 'GET' })
@@ -1269,10 +1368,18 @@ describe('user management API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        type: 'message',
+        type: 'user_response',
         session_id: '',
         sequence_id: 0,
-        message: 'User created',
+        user: {
+          type: 'user_profile',
+          session_id: '',
+          sequence_id: 0,
+          username: 'new',
+          email: 'e@e.com',
+          role: 'viewer',
+          is_active: true,
+        },
       }),
     })
     const result = await apiClient.createUser({
@@ -1283,7 +1390,7 @@ describe('user management API methods', () => {
       is_active: true,
     })
 
-    expect(result.message).toBe('User created')
+    expect(result.user.username).toBe('new')
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users',
       expect.objectContaining({ method: 'POST' })
@@ -1293,10 +1400,18 @@ describe('user management API methods', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        type: 'message',
+        type: 'user_response',
         session_id: '',
         sequence_id: 0,
-        message: 'User updated',
+        user: {
+          type: 'user_profile',
+          session_id: '',
+          sequence_id: 0,
+          username: 'admin',
+          email: 'new@e.com',
+          role: 'admin',
+          is_active: true,
+        },
       }),
     })
     const result = await apiClient.updateUser('admin', {
@@ -1305,7 +1420,7 @@ describe('user management API methods', () => {
       is_active: true,
     })
 
-    expect(result.message).toBe('User updated')
+    expect(result.user.username).toBe('admin')
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users/admin',
       expect.objectContaining({ method: 'PUT' })
