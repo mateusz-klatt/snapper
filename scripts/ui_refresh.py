@@ -211,7 +211,7 @@ def upgrade_dependencies(ui_dir: Path) -> None:
         print(f"Skipping dependency upgrade (missing {package_json})")
         return
 
-    protected_dependency_names = ["eslint", "@eslint/js"]
+    protected_dependency_names = ["eslint", "@eslint/js", "@tanstack/react-query"]
     package_data_before = read_package_json(package_json)
     protected_specs: dict[str, tuple[str, str]] = {}
     for dep_name in protected_dependency_names:
