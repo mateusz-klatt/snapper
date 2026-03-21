@@ -18,7 +18,6 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi import HTTPException
-from fastapi import Request
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -74,6 +73,14 @@ from snapper.server.app import create_app
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.authenticated_websocket import get_allowed_topics_for_role
 from snapper.server.authenticated_websocket import has_trading_permission
+
+
+def _make_rest_request() -> MagicMock:
+    """Build a mock FastAPI Request with REST tracker on app.state."""
+    mock = MagicMock()
+    mock.app.state.rest_tracker = SequenceTracker()
+    return mock
+
 
 pytest = cast(Any, pytest)
 create_app = cast(Any, create_app)
@@ -3019,6 +3026,7 @@ def auth_app(
     monkeypatch.setattr(routes, "get_csrf_manager", lambda: csrf_manager)
     app = FastAPI()
     app.state.settings = settings
+    app.state.rest_tracker = SequenceTracker()
     app.include_router(routes.router)
     current_user = UserProfile(username="alice", role=UserRole.ADMIN)
     app.dependency_overrides[validate_csrf_token] = lambda: None
@@ -3393,7 +3401,10 @@ async def test_delete_user_success(monkeypatch: Any) -> None:
     stub_service = StubUserService()
     stub_service.delete_user_success = True
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
+    mock_request = MagicMock()
+    mock_request.app.state.rest_tracker = SequenceTracker()
     result = await routes.delete_user(
+        request=mock_request,
         user_id="user-2",
         current_user=UserProfile(username="admin", role=UserRole.ADMIN),
         _csrf=None,
@@ -3412,8 +3423,11 @@ async def test_delete_user_self_forbidden(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
+    mock_request = MagicMock()
+    mock_request.app.state.rest_tracker = SequenceTracker()
     with pytest.raises(HTTPException) as exc:
         await routes.delete_user(
+            request=mock_request,
             user_id="self",
             current_user=UserProfile(username="self", role=UserRole.ADMIN),
             _csrf=None,
@@ -3432,8 +3446,11 @@ async def test_delete_user_not_found(monkeypatch: Any) -> None:
     stub_service = StubUserService()
     stub_service.delete_user_success = False
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
+    mock_request = MagicMock()
+    mock_request.app.state.rest_tracker = SequenceTracker()
     with pytest.raises(HTTPException) as exc:
         await routes.delete_user(
+            request=mock_request,
             user_id="missing",
             current_user=UserProfile(username="admin", role=UserRole.ADMIN),
             _csrf=None,
@@ -3453,7 +3470,7 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
     result = await routes.change_user_password(
-        request=MagicMock(spec=Request),
+        request=_make_rest_request(),
         user_id="self",
         password_data=pwd_request,
         current_user=UserProfile(username="self", role=UserRole.OPERATOR),
@@ -3476,7 +3493,7 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
     pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
-            request=MagicMock(spec=Request),
+            request=_make_rest_request(),
             user_id="other",
             password_data=pwd_request,
             current_user=UserProfile(username="self", role=UserRole.VIEWER),
@@ -3499,7 +3516,7 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
     pwd_request = ChangePasswordRequest(current_password="old-pass", new_password="new-password")
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
-            request=MagicMock(spec=Request),
+            request=_make_rest_request(),
             user_id="self",
             password_data=pwd_request,
             current_user=UserProfile(username="self", role=UserRole.OPERATOR),
@@ -3520,7 +3537,7 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     pwd_request = ChangePasswordRequest(current_password="irrelevant", new_password="new-password")
     result = await routes.change_user_password(
-        request=MagicMock(spec=Request),
+        request=_make_rest_request(),
         user_id="target",
         password_data=pwd_request,
         current_user=UserProfile(username="admin", role=UserRole.ADMIN),
@@ -3564,7 +3581,7 @@ async def test_admin_reset_password_handles_repository_error(
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     with pytest.raises(HTTPException) as exc:
         await routes.admin_reset_user_password(
-            request=MagicMock(spec=Request),
+            request=_make_rest_request(),
             user_id="user-1",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(username="admin", role=UserRole.ADMIN),
@@ -3593,7 +3610,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
     stub_service = ResetUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.admin_reset_user_password(
-        request=MagicMock(spec=Request),
+        request=_make_rest_request(),
         user_id="user-1",
         password_data=AdminResetPasswordRequest(new_password="super-secret"),
         current_user=UserProfile(username="admin", role=UserRole.ADMIN),
@@ -3620,7 +3637,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     with pytest.raises(HTTPException) as exc:
         await routes.admin_reset_user_password(
-            request=MagicMock(spec=Request),
+            request=_make_rest_request(),
             user_id="missing",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
             current_user=UserProfile(username="admin", role=UserRole.ADMIN),

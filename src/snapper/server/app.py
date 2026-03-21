@@ -117,6 +117,7 @@ from snapper.data.repository import get_repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
@@ -305,11 +306,14 @@ def create_app() -> FastAPI:
     app.state.provenance_gap_detectors = provenance_gap_detectors
     app.add_exception_handler(RateLimitExceeded, handle_rate_limit_exceeded)
     app.add_middleware(SlowAPIMiddleware)
+    rest_tracker = SequenceTracker()
+    app.state.rest_tracker = rest_tracker
     app.add_middleware(
         ClientProvenanceMiddleware,
         db_url=settings.db_url,
         telemetry_enabled=settings.telemetry_recording_enabled,
         gap_detectors=provenance_gap_detectors,
+        tracker=rest_tracker,
     )
     app.add_middleware(
         CORSMiddleware,

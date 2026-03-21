@@ -40,10 +40,9 @@ class StrictDataSchema(BaseModel):
 
     Also provides to_json/from_json for ZMQ serialization.
 
-    Provenance fields (session_id, sequence_id) default to sentinel values
-    for backward compatibility. ZMQ producers already provide real values
-    at construction. REST/WS paths will be migrated to do the same, after
-    which the defaults will be removed.
+    Provenance fields (session_id, sequence_id) are required at construction.
+    Producers must obtain these from a SequenceTracker before creating the
+    event. This ensures every event is complete and identifiable from birth.
 
     Attributes:
         public_id: Unique identifier (UUID7), generated at creation time.

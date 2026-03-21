@@ -74,6 +74,7 @@ class ClientProvenanceMiddleware:
         db_url: str | None = None,
         telemetry_enabled: bool = False,
         gap_detectors: dict[str, GapDetector] | None = None,
+        tracker: SequenceTracker | None = None,
     ) -> None:
         """Initialize middleware wrapping the given ASGI app.
 
@@ -87,12 +88,15 @@ class ClientProvenanceMiddleware:
             gap_detectors: Optional shared dictionary for per-session
                 gap detectors. When provided, the health endpoint can
                 read REST client gap stats from this dict.
+            tracker: Optional shared SequenceTracker. When provided,
+                the middleware uses this tracker instead of creating
+                its own. Allows REST routes to share the same tracker.
         """
         self.app = app
         self.gap_detectors: dict[str, GapDetector] = (
             gap_detectors if gap_detectors is not None else {}
         )
-        self.tracker = SequenceTracker()
+        self.tracker = tracker or SequenceTracker()
         self.db_url = db_url
         self.telemetry_enabled = telemetry_enabled
 

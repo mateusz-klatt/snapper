@@ -17,6 +17,7 @@ from snapper.config.settings_routes import delete_setting
 from snapper.config.settings_routes import get_all_settings
 from snapper.config.settings_routes import get_setting_categories
 from snapper.config.settings_routes import update_setting
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class MockRepository:
@@ -332,7 +333,11 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
-            result = await delete_setting(key="delete_key", user=mock_user, _csrf=None)
+            mock_request = MagicMock()
+            mock_request.app.state.rest_tracker = SequenceTracker()
+            result = await delete_setting(
+                request=mock_request, key="delete_key", user=mock_user, _csrf=None
+            )
         assert mock_session.execute.await_count == 2
         mock_session.commit.assert_called_once()
         assert result.message == "Setting 'delete_key' deleted successfully"
@@ -357,5 +362,9 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
             pytest.raises(HTTPException) as exc_info,
         ):
-            await delete_setting(key="nonexistent_key", user=mock_user, _csrf=None)
+            mock_request = MagicMock()
+            mock_request.app.state.rest_tracker = SequenceTracker()
+            await delete_setting(
+                request=mock_request, key="nonexistent_key", user=mock_user, _csrf=None
+            )
         assert exc_info.value.status_code == 404

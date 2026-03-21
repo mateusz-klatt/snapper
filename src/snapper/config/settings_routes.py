@@ -32,6 +32,7 @@ from typing import Annotated
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy import update
 
@@ -48,6 +49,7 @@ from snapper.config.settings import get_settings
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -161,6 +163,7 @@ async def update_setting(
 
 @router.delete("/{key}", responses={404: {"description": "Setting not found"}})
 async def delete_setting(
+    request: Request,
     key: str,
     user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
@@ -168,6 +171,7 @@ async def delete_setting(
     """Delete a setting by key.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         key: The setting key to delete.
         user: Authenticated user with CONFIGURE_SYSTEM permission.
 
@@ -189,4 +193,9 @@ async def delete_setting(
         now = datetime.now(UTC)
         await session.execute(update(Setting).where(Setting.id == setting.id).values(known_to=now))
         await session.commit()
-    return MessageResponse(message=f"Setting '{key}' deleted successfully")
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    return MessageResponse(
+        message=f"Setting '{key}' deleted successfully",
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence("rest.control"),
+    )

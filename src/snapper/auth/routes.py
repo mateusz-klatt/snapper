@@ -34,6 +34,7 @@ from snapper.auth.schemas.responses import UserListResponse
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
@@ -42,6 +43,25 @@ from snapper.server.rate_limiting import limiter
 from snapper.server.rate_limiting import register_failed_login_attempt
 
 _AUTH_API_PATH = "/api/auth"
+
+
+def _message_response(request: Request, message: str) -> MessageResponse:
+    """Create a stamped MessageResponse with provenance from the REST tracker.
+
+    Args:
+        request: FastAPI request (provides access to app.state.rest_tracker).
+        message: Response message string.
+
+    Returns:
+        MessageResponse with session_id and sequence_id from the REST tracker.
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    return MessageResponse(
+        message=message,
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence("rest.control"),
+    )
+
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -292,7 +312,7 @@ async def logout(
         path="/",
         max_age=0,
     )
-    return MessageResponse(message="Logged out successfully")
+    return _message_response(request, "Logged out successfully")
 
 
 @router.get("/me")
@@ -397,6 +417,7 @@ async def update_user(
 
 @router.delete("/users/{user_id}")
 async def delete_user(
+    request: Request,
     user_id: str,
     current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
@@ -404,6 +425,7 @@ async def delete_user(
     """Deactivate a user account.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         user_id: Target user ID to deactivate.
         current_user: Authenticated user with MANAGE_USERS permission.
 
@@ -423,7 +445,7 @@ async def delete_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"
         )
-    return MessageResponse(message=f"User '{user_id}' has been deactivated")
+    return _message_response(request, f"User '{user_id}' has been deactivated")
 
 
 @router.post("/users/{user_id}/change-password")
@@ -469,7 +491,7 @@ async def change_user_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid current password or user not found",
         )
-    return MessageResponse(message="Password changed successfully")
+    return _message_response(request, "Password changed successfully")
 
 
 @router.post("/users/{user_id}/admin-reset-password")
@@ -499,7 +521,7 @@ async def admin_reset_user_password(
     user_service = get_user_service()
     try:
         await user_service.admin_reset_password(user_id, password_data.new_password)
-        return MessageResponse(message=f"Password reset successfully for user {user_id}")
+        return _message_response(request, f"Password reset successfully for user {user_id}")
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

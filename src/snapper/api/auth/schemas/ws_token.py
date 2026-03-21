@@ -6,22 +6,21 @@ for secure WebSocket connection establishment.
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
 
+from pydantic import BaseModel
 from pydantic import ConfigDict
-
-from snapper.api.schemas.base import StrictDataSchema
 
 __all__ = ["WsTokenPayload", "WsTokenResult"]
 
 
-class WsTokenPayload(StrictDataSchema):
+class WsTokenPayload(BaseModel):
     """WebSocket token JWT payload schema.
 
     Contains claims for a single-use WebSocket connection token.
+    Does not inherit StrictDataSchema because JWT payloads are
+    internal token DTOs, not canonical Snapper events.
 
     Attributes:
-        type: Payload item type discriminator.
         purpose: Token purpose (must be 'ws_connect').
         sub: Subject (user ID).
         sid_hash: SHA-256 hash of the session ID.
@@ -30,19 +29,19 @@ class WsTokenPayload(StrictDataSchema):
         jti: Unique token identifier for replay prevention.
     """
 
-    type: Literal["ws_token_payload"] = "ws_token_payload"
-    purpose: str
-    sub: str
-    sid_hash: str
-    iat: int
-    exp: int
-    jti: str
     model_config = ConfigDict(
         extra="ignore",
         strict=True,
         validate_default=True,
         populate_by_name=True,
     )
+
+    purpose: str
+    sub: str
+    sid_hash: str
+    iat: int
+    exp: int
+    jti: str
 
 
 @dataclass(slots=True)
