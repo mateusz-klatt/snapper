@@ -258,8 +258,8 @@ struct CandleData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String
-    let sequenceId: Int
+    let sessionId: String?
+    let sequenceId: Int?
     let instrument: String
     let exchange: String
     let timeframe: String
@@ -454,8 +454,8 @@ struct ExecutionData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String
-    let sequenceId: Int
+    let sessionId: String?
+    let sequenceId: Int?
     let tradeId: String?
     let exchangeOrderId: String?
     let clientOrderId: String
@@ -664,8 +664,8 @@ struct OrderData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String
-    let sequenceId: Int
+    let sessionId: String?
+    let sequenceId: Int?
     let exchangeOrderId: String?
     let clientOrderId: String
     let instrument: String
@@ -712,8 +712,8 @@ struct PositionData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String
-    let sequenceId: Int
+    let sessionId: String?
+    let sequenceId: Int?
     let instrument: String
     let exchange: String
     let quantity: Double
@@ -1194,8 +1194,8 @@ struct SignalData: Codable, Sendable {
     let publicId: String?
     let type: String?
     let timestamp: Date?
-    let sessionId: String
-    let sequenceId: Int
+    let sessionId: String?
+    let sequenceId: Int?
     let instrument: String
     let exchange: String
     let side: String

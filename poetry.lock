@@ -2275,23 +2275,23 @@ testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "pytest-cov", "pytest-ena
 
 [[package]]
 name = "jaraco-context"
-version = "6.1.1"
+version = "6.1.2"
 description = "Useful decorators and context managers"
 optional = false
-python-versions = ">=3.9"
+python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "jaraco_context-6.1.1-py3-none-any.whl", hash = "sha256:0df6a0287258f3e364072c3e40d5411b20cafa30cb28c4839d24319cecf9f808"},
-    {file = "jaraco_context-6.1.1.tar.gz", hash = "sha256:bc046b2dc94f1e5532bd02402684414575cc11f565d929b6563125deb0a6e581"},
+    {file = "jaraco_context-6.1.2-py3-none-any.whl", hash = "sha256:bf8150b79a2d5d91ae48629d8b427a8f7ba0e1097dd6202a9059f29a36379535"},
+    {file = "jaraco_context-6.1.2.tar.gz", hash = "sha256:f1a6c9d391e661cc5b8d39861ff077a7dc24dc23833ccee564b234b81c82dfe3"},
 ]
 
 [package.extras]
-check = ["pytest-checkdocs (>=2.4)", "pytest-ruff (>=0.2.1) ; sys_platform != \"cygwin\""]
+check = ["pytest-checkdocs (>=2.14)", "pytest-ruff (>=0.2.1) ; sys_platform != \"cygwin\""]
 cover = ["pytest-cov"]
 doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "rst.linker (>=1.9)", "sphinx (>=3.5)", "sphinx-lint"]
 enabler = ["pytest-enabler (>=3.4)"]
 test = ["jaraco.test (>=5.6.0)", "portend", "pytest (>=6,!=8.1.*)"]
-type = ["mypy (<1.19) ; platform_python_implementation == \"PyPy\"", "pytest-mypy (>=1.0.1)"]
+type = ["pytest-mypy (>=1.0.1) ; platform_python_implementation != \"PyPy\""]
 
 [[package]]
 name = "jaraco-functools"
@@ -3785,14 +3785,14 @@ test = ["pytest", "pytest-cov", "scipy"]
 
 [[package]]
 name = "pbs-installer"
-version = "2026.3.10"
+version = "2026.3.20"
 description = "Installer for Python Build Standalone"
 optional = false
 python-versions = ">=3.8"
 groups = ["dev"]
 files = [
-    {file = "pbs_installer-2026.3.10-py3-none-any.whl", hash = "sha256:cbe0dfea88ed3e02520462ba068c6ff28691ee401d2ca0af8edc9a2f92485a8c"},
-    {file = "pbs_installer-2026.3.10.tar.gz", hash = "sha256:a0a79509de89d6a2b12033b43b2685627b1428d12fc2d706d4ba8b245b85eda0"},
+    {file = "pbs_installer-2026.3.20-py3-none-any.whl", hash = "sha256:09f6363b490176952f2a3f62f673e5380cf3c470bbbf214b2f2027f33c4d5f22"},
+    {file = "pbs_installer-2026.3.20.tar.gz", hash = "sha256:6ba456ca6e0f47d8ce47d4ba8817bc69de8bf3fca819582073ead21a65e0d2a7"},
 ]
 
 [package.dependencies]

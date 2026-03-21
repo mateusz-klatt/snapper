@@ -978,9 +978,15 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /** Session Id */
+            /**
+             * Session Id
+             * @default
+             */
             session_id: string;
-            /** Sequence Id */
+            /**
+             * Sequence Id
+             * @default 0
+             */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -1372,9 +1378,15 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /** Session Id */
+            /**
+             * Session Id
+             * @default
+             */
             session_id: string;
-            /** Sequence Id */
+            /**
+             * Sequence Id
+             * @default 0
+             */
             sequence_id: number;
             /** Trade Id */
             trade_id?: string | null;
@@ -1786,9 +1798,15 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /** Session Id */
+            /**
+             * Session Id
+             * @default
+             */
             session_id: string;
-            /** Sequence Id */
+            /**
+             * Sequence Id
+             * @default 0
+             */
             sequence_id: number;
             /** Exchange Order Id */
             exchange_order_id?: string | null;
@@ -1865,9 +1883,15 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /** Session Id */
+            /**
+             * Session Id
+             * @default
+             */
             session_id: string;
-            /** Sequence Id */
+            /**
+             * Sequence Id
+             * @default 0
+             */
             sequence_id: number;
             /** Instrument */
             instrument: string;
@@ -2848,9 +2872,15 @@ export type Components = {
              * Format: date-time
              */
             timestamp?: string;
-            /** Session Id */
+            /**
+             * Session Id
+             * @default
+             */
             session_id: string;
-            /** Sequence Id */
+            /**
+             * Sequence Id
+             * @default 0
+             */
             sequence_id: number;
             /** Instrument */
             instrument: string;
