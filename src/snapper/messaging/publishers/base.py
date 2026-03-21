@@ -44,6 +44,7 @@ from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.data import TradeData
 from snapper.messaging.schemas.messages import MarketDataMessage
+from snapper.messaging.topics.builders import heartbeat_topic_from_component
 from snapper.messaging.topics.builders import market_topic
 from snapper.utils.logging import set_log_context
 
@@ -346,10 +347,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 public_id = self._resolve_candle_public_id(
                     instrument_id, timeframe, candle.interval_begin
                 )
+                topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
                 candle_msg = CandleData(
                     public_id=public_id,
-                    session_id="",
-                    sequence_id=0,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
                     instrument=native_symbol,
                     volume=candle.volume,
@@ -362,7 +364,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     vwap=candle.vwap,
                     trades=candle.trades,
                 )
-                topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
                 published = await self._publish_message(topic, candle_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
                 await self._save_to_db(
@@ -386,9 +387,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if not self.running:
                     break
                 native_symbol = message.symbol
+                topic = self._build_data_topic(native_symbol, "ticks")
                 tick_msg = TickData(
-                    session_id="",
-                    sequence_id=0,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
                     instrument=native_symbol,
                     volume=message.volume,
@@ -396,7 +398,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     ask=message.ask if not math.isclose(message.ask, 0.0) else None,
                     last=message.last,
                 )
-                topic = self._build_data_topic(native_symbol, "ticks")
                 await self._publish_message(topic, tick_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
         except Exception as e:
@@ -417,9 +418,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if not self.running:
                     break
                 native_symbol = trade.symbol
+                topic = self._build_data_topic(native_symbol, "trades")
                 trade_msg = TradeData(
-                    session_id="",
-                    sequence_id=0,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
                     instrument=native_symbol,
                     executed_at=trade.timestamp,
@@ -427,7 +429,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     volume=trade.quantity,
                     side=trade.side if trade.side in ["buy", "sell"] else None,
                 )
-                topic = self._build_data_topic(native_symbol, "trades")
                 await self._publish_message(topic, trade_msg)
                 self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
         except Exception as e:
@@ -436,21 +437,21 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _publish_message(
         self, topic: str, message: MarketDataMessage
     ) -> MarketDataMessage | None:
-        """Publish market data message to ZMQ topic.
+        """Send a complete market data message to ZMQ topic.
 
         Args:
             topic: ZMQ topic string for message routing.
-            message: Market data message to publish.
+            message: Complete market data message with provenance set.
 
         Returns:
-            The stamped message copy with provenance fields, or None if not published.
+            The message if sent, or None if not published.
         """
         if not self.msg_publisher or not self.running:
             return None
         try:
-            stamped = await self.msg_publisher.publish(message, topic=topic)
+            await self.msg_publisher.send(topic, message)
             logger.debug(f"Published {message.type} for {topic}")
-            return cast(MarketDataMessage, stamped)
+            return message
         except Exception as e:
             logger.error(f"Error publishing message: {e}")
             return None
@@ -470,9 +471,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     last_data_time = self._last_data_timestamps.get(symbol, current_time)
                     lag_ms = int(current_time - last_data_time)
                     max_lag_ms = max(max_lag_ms, lag_ms)
+                hb_topic = heartbeat_topic_from_component(component_name)
                 hb_msg = HeartbeatData(
-                    session_id="",
-                    sequence_id=0,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(hb_topic),
                     component=component_name,
                     sequence=self.heartbeat_seq,
                     status="healthy",
@@ -483,20 +485,21 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                         "running": self.running,
                     },
                 )
-                await self._publish_heartbeat(hb_msg)
+                await self._publish_heartbeat(hb_topic, hb_msg)
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
 
-    async def _publish_heartbeat(self, message: HeartbeatData) -> None:
-        """Publish heartbeat message to ZMQ via MessagePublisher.
+    async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
+        """Send a complete heartbeat message to ZMQ.
 
         Args:
-            message: HeartbeatData containing status information.
+            topic: Heartbeat ZMQ topic string.
+            message: Complete HeartbeatData with provenance set.
         """
         if not self.msg_publisher or not self.running:
             return
         try:
-            await self.msg_publisher.publish(message)
+            await self.msg_publisher.send(topic, message)
         except Exception as e:
             logger.error(f"Error publishing heartbeat: {e}")
 

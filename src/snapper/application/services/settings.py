@@ -33,6 +33,7 @@ from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import SettingChangedData
+from snapper.messaging.topics.builders import system_topic
 
 
 class SettingsService:
@@ -293,16 +294,17 @@ class SettingsService:
         if not self._msg_publisher:
             logger.warning("ZMQ publisher not available, skipping broadcast")
             return
+        topic = system_topic("settings")
         envelope = SettingChangedData(
-            session_id="",
-            sequence_id=0,
+            session_id=self._msg_publisher.tracker.session_id,
+            sequence_id=self._msg_publisher.tracker.next_sequence(topic),
             key=key,
             value=value,
             category=category,
             updated_by=updated_by,
         )
         try:
-            await self._msg_publisher.publish(envelope)
+            await self._msg_publisher.send(topic, envelope)
             logger.debug(f"Broadcasted setting change: {key}")
         except Exception as e:
             logger.error(f"Failed to broadcast setting change: {e}")

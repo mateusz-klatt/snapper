@@ -20,6 +20,7 @@ from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.topics.builders import order_command_topic
 
 
 class TradingEngineService:
@@ -179,9 +180,10 @@ class TradingEngineService:
         signaled_at_dt = None
         if signaled_at is not None:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
+        topic = order_command_topic(self.exchange, self.instrument, "submit")
         order = OrderRequestData(
-            session_id="",
-            sequence_id=0,
+            session_id=self.execution_socket.tracker.session_id,
+            sequence_id=self.execution_socket.tracker.next_sequence(topic),
             strategy_id=reason,
             instrument=self.instrument,
             mode=self.mode,
@@ -193,7 +195,7 @@ class TradingEngineService:
             exchange=self.exchange,
             signaled_at=signaled_at_dt,
         )
-        await self.execution_socket.publish(order, flags=zmq.NOBLOCK)
+        await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
         logger.debug(f"Published order command: {order.client_order_id}")
 
     async def execute_desired_units(

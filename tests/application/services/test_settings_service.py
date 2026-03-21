@@ -151,10 +151,24 @@ class TestSettingsService:
     """Test cases for SettingsService functionality."""
 
     class _StubMsgPublisher:
-        def __init__(self) -> None:
-            self.published: list[Any] = []
+        """Stub message publisher that records sent data."""
 
-        async def publish(self, data: Any, *, topic: str | None = None, flags: int = 0) -> Any:
+        def __init__(self) -> None:
+            """Initialize with empty published list and a tracker."""
+            self.published: list[Any] = []
+            self._tracker = SequenceTracker()
+
+        @property
+        def tracker(self) -> SequenceTracker:
+            """Expose sequence tracker for provenance stamping."""
+            return self._tracker
+
+        @property
+        def session_id(self) -> str:
+            """Expose session_id from tracker."""
+            return self._tracker.session_id
+
+        async def send(self, stream_key: str, data: Any, *, flags: int = 0) -> Any:
             """Record published data and return it unchanged."""
             self.published.append(data)
             return data
@@ -379,7 +393,9 @@ class TestSettingsService:
             zmq_broker_xpub="tcp://127.0.0.1:7501",
         )
         publisher = MagicMock()
-        publisher.publish = AsyncMock(side_effect=RuntimeError("fail"))
+        publisher.send = AsyncMock(side_effect=RuntimeError("fail"))
+        publisher.tracker = SequenceTracker()
+        publisher.session_id = publisher.tracker.session_id
         cast(Any, service)._msg_publisher = publisher
         with patch("snapper.application.services.settings.logger.error") as log_error:
             await cast(Any, service)._broadcast_change("api_key", "secure", "auth")
@@ -899,10 +915,12 @@ async def test_broadcast_change_when_send_multipart_raises() -> None:
         zmq_broker_xpub="tcp://127.0.0.1:7501",
     )
     mock_publisher = MagicMock()
-    mock_publisher.publish = AsyncMock(side_effect=Exception("ZMQ error"))
+    mock_publisher.send = AsyncMock(side_effect=Exception("ZMQ error"))
+    mock_publisher.tracker = SequenceTracker()
+    mock_publisher.session_id = mock_publisher.tracker.session_id
     service._msg_publisher = mock_publisher
     await service._broadcast_change("test_key", "test_value", "system", "user1")
-    assert mock_publisher.publish.called
+    assert mock_publisher.send.called
 
 
 @pytest.mark.asyncio

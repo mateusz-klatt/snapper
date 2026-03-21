@@ -1,25 +1,22 @@
-"""Provenance-stamping message publisher for ZMQ transport.
+"""Message publisher for ZMQ transport with provenance tracking.
 
-Provides SequenceTracker (session + per-topic counters) and MessagePublisher
-(derives topic, stamps provenance, serializes, sends). Together they ensure
-every published payload item carries session_id and sequence_id for downstream
-gap detection.
+Provides SequenceTracker (session + per-stream counters) and MessagePublisher
+(serializes and sends complete events). Every published payload item must
+carry session_id and sequence_id set by the producer at construction time.
 
-SequenceTracker owns one session_id and per-topic monotonic counters for
-one component lifetime. MessagePublisher wraps ValidatedPublisher, delegates
-session/counter state to the injected SequenceTracker, and stamps a copied
-model before sending.
+SequenceTracker owns one session_id and per-stream monotonic counters for
+one component lifetime. MessagePublisher wraps ValidatedPublisher and
+delegates routing to the caller via explicit stream_key.
 """
 
 from uuid import uuid7
 
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.topics.builders import topic_for_message
 
 
 class SequenceTracker:
-    """Per-component session identity and per-topic sequence counters.
+    """Per-component session identity and per-stream sequence counters.
 
     Created once at component start and shared across all MessagePublisher
     instances within that component. Generates a stable session_id (UUID7)
@@ -68,16 +65,14 @@ class SequenceTracker:
 
 
 class MessagePublisher:
-    """Stamp provenance metadata and publish typed messages via ZMQ.
+    """Serialize and send complete event payloads via ZMQ.
 
-    Wraps a ValidatedPublisher and injects session_id / sequence_id
-    into every outgoing message. Topic is derived automatically from
-    the message payload via topic_for_message(), or can be overridden
-    explicitly for cases where derivation is not possible (e.g. paper
-    market data with source_exchange in the topic path).
+    Wraps a ValidatedPublisher and sends already-complete events
+    (with session_id and sequence_id set by the producer) to the
+    specified stream_key. No stamping or model_copy occurs here.
 
-    The original data object is never mutated; a model_copy is created
-    with the provenance fields stamped before serialization.
+    Exposes the tracker property so producers can obtain session_id
+    and allocate sequence_id before constructing the event.
     """
 
     def __init__(self, publisher: ValidatedPublisher, tracker: SequenceTracker) -> None:
@@ -90,35 +85,37 @@ class MessagePublisher:
         self._publisher = publisher
         self._tracker = tracker
 
-    async def publish(
+    async def send(
         self,
+        stream_key: str,
         data: StrictDataSchema,
         *,
-        topic: str | None = None,
         flags: int = 0,
-    ) -> StrictDataSchema:
-        """Stamp provenance and publish a payload item.
+    ) -> None:
+        """Serialize and send a complete event payload.
+
+        The data object must already have session_id and sequence_id
+        set by the producer. This method only serializes and sends.
 
         Args:
-            data: Payload item (any StrictDataSchema subclass).
-            topic: Explicit ZMQ topic override. When None, topic is derived
-                from the payload via topic_for_message().
+            stream_key: Routing key (ZMQ topic or logical channel).
+            data: Complete payload item with provenance already set.
             flags: Optional ZMQ send flags (e.g. zmq.NOBLOCK).
+        """
+        payload = data.to_json().encode("utf-8")
+        await self._publisher.send_multipart(stream_key, payload, flags=flags)
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Access the shared sequence tracker.
+
+        Producers use this to obtain session_id and allocate sequence_id
+        before constructing events.
 
         Returns:
-            The stamped copy with session_id and sequence_id set.
+            The SequenceTracker instance.
         """
-        resolved_topic = topic or topic_for_message(data)
-        seq = self._tracker.next_sequence(resolved_topic)
-        stamped = data.model_copy(
-            update={
-                "session_id": self._tracker.session_id,
-                "sequence_id": seq,
-            }
-        )
-        payload = stamped.to_json().encode("utf-8")
-        await self._publisher.send_multipart(resolved_topic, payload, flags=flags)
-        return stamped
+        return self._tracker
 
     @property
     def session_id(self) -> str:

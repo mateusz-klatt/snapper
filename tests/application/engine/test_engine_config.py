@@ -17,6 +17,7 @@ from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import SignalData
 
 
@@ -26,8 +27,14 @@ class FakeSocket:
     def __init__(self) -> None:
         """Initialize the instance."""
         self.sent: list[Any] = []
+        self._tracker = SequenceTracker()
 
-    async def publish(self, data: Any, *, topic: str | None = None, flags: int = 0) -> None:
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Expose sequence tracker for provenance stamping."""
+        return self._tracker
+
+    async def send(self, stream_key: str, data: Any, *, flags: int = 0) -> None:
         """Collect sent data objects."""
         self.sent.append(data)
 
@@ -160,8 +167,11 @@ async def test_engine_execute_desired_units_sell_flow() -> None:
 
 
 def _replace_execution_publisher_with_async_stub(trader: TraderCoordinator) -> MagicMock:
+    """Replace the trader msg_publisher with an async stub."""
     async_publisher = MagicMock()
-    async_publisher.publish = AsyncMock(return_value=None)
+    async_publisher.send = AsyncMock(return_value=None)
+    async_publisher.tracker = SequenceTracker()
+    async_publisher.session_id = async_publisher.tracker.session_id
     async_publisher.close = MagicMock()
     trader.msg_publisher = cast(Any, async_publisher)
     return async_publisher
@@ -179,7 +189,9 @@ class TestEngineExecuteDesiredUnits:
         Then: Buy order is published with correct topic and quantity.
         """
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -191,8 +203,8 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.1
         current_price = 50000.0
         await engine.execute_desired_units(desired_units, current_price)
-        assert mock_socket.publish.called
-        order = mock_socket.publish.call_args[0][0]
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
         assert order.instrument == "BTC-USD"
         assert order.side == "buy"
         assert order.mode == "live"
@@ -211,7 +223,9 @@ class TestEngineExecuteDesiredUnits:
         Then: Entire position is sold and entry price is cleared.
         """
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -226,8 +240,8 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.0
         current_price = 52000.0
         await engine.execute_desired_units(desired_units, current_price)
-        assert mock_socket.publish.called
-        order = mock_socket.publish.call_args[0][0]
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
         assert order.instrument == "BTC-USD"
         assert order.side == "sell"
         assert order.quantity == pytest.approx(0.1)
@@ -243,7 +257,9 @@ class TestEngineExecuteDesiredUnits:
         Then: Cash never goes negative and position is constrained.
         """
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -268,7 +284,9 @@ class TestEngineExecuteDesiredUnits:
         Then: Position quantity increases.
         """
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -293,7 +311,9 @@ class TestEngineExecuteDesiredUnits:
         Then: No order is sent and position remains zero.
         """
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -306,7 +326,7 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.0
         current_price = 50000.0
         await engine.execute_desired_units(desired_units, current_price)
-        assert not mock_socket.publish.called
+        assert not mock_socket.send.called
         assert engine.position_qty == pytest.approx(0.0)
 
     @pytest.mark.asyncio
@@ -318,7 +338,9 @@ class TestEngineExecuteDesiredUnits:
         Then: Order quantity is rounded to valid lot size.
         """
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         engine = TradingEngineService(
             instrument="BTC-USD",
             execution_socket=mock_socket,
@@ -330,8 +352,8 @@ class TestEngineExecuteDesiredUnits:
         desired_units = 0.0123
         current_price = 50000.0
         await engine.execute_desired_units(desired_units, current_price)
-        if mock_socket.publish.called:
-            order = mock_socket.publish.call_args[0][0]
+        if mock_socket.send.called:
+            order = mock_socket.send.call_args[0][1]
             lot_size = 0.001
             qty = order.quantity
             assert qty % lot_size == pytest.approx(0.0) or abs(qty % lot_size) < 1e-10
@@ -366,7 +388,9 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -429,7 +453,9 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -485,7 +511,9 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -550,7 +578,9 @@ class TestTraderSignalHandling:
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
         mock_socket = MagicMock()
-        mock_socket.publish = AsyncMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
         mock_zmq_context.return_value.socket.return_value = mock_socket
         trader = TraderCoordinator(
             signal_topics=["signals."],
@@ -579,9 +609,17 @@ class _SocketStub:
     """Test stub for MessagePublisher."""
 
     def __init__(self) -> None:
+        """Initialize the instance."""
         self.sent: list[Any] = []
+        self._tracker = SequenceTracker()
 
-    async def publish(self, data: Any, *, topic: str | None = None, flags: int = 0) -> None:
+    @property
+    def tracker(self) -> SequenceTracker:
+        """Expose sequence tracker for provenance stamping."""
+        return self._tracker
+
+    async def send(self, stream_key: str, data: Any, *, flags: int = 0) -> None:
+        """Collect sent data objects."""
         self.sent.append(data)
 
 

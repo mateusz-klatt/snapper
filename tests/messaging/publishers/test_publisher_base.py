@@ -251,7 +251,7 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
-    pub.msg_publisher.publish.assert_awaited()
+    pub.msg_publisher.send.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -305,7 +305,7 @@ async def test_publish_message_skips_when_not_running() -> None:
             open_at=datetime.now(UTC),
         ),
     )
-    pub.msg_publisher.publish.assert_not_awaited()
+    pub.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -318,7 +318,7 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     failing = AsyncMock()
-    failing.publish.side_effect = RuntimeError("boom")
+    failing.send.side_effect = RuntimeError("boom")
     pub.msg_publisher = failing
     pub.running = True
     await pub._publish_message(
@@ -337,7 +337,7 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
             open_at=datetime.now(UTC),
         ),
     )
-    failing.publish.assert_awaited_once()
+    failing.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -354,8 +354,8 @@ async def test_publish_heartbeat_when_running() -> None:
     msg = HeartbeatData(
         session_id="", sequence_id=0, component="c", sequence=1, status="healthy", lag_ms=0
     )
-    await pub._publish_heartbeat(msg)
-    pub.msg_publisher.publish.assert_awaited()
+    await pub._publish_heartbeat("heartbeat.c", msg)
+    pub.msg_publisher.send.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -598,7 +598,7 @@ async def test_tick_loop_breaks_when_stopped(monkeypatch: pytest.MonkeyPatch) ->
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
-    pub.msg_publisher.publish.assert_not_awaited()
+    pub.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -620,7 +620,7 @@ async def test_tick_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> N
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
-    pub.msg_publisher.publish.assert_awaited_once()
+    pub.msg_publisher.send.assert_awaited_once()
     assert pub._last_data_timestamps["BTC-USD"] > 0
 
 
@@ -660,9 +660,9 @@ async def test_heartbeat_loop_runs_once(monkeypatch: pytest.MonkeyPatch) -> None
     pub._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000
     publish = AsyncMock()
 
-    async def publish_and_stop(message: HeartbeatData) -> None:
+    async def publish_and_stop(topic: str, message: HeartbeatData) -> None:
         pub.running = False
-        await publish(message)
+        await publish(topic, message)
 
     monkeypatch.setattr(pub, "_publish_heartbeat", publish_and_stop)
     await pub._heartbeat_loop()
@@ -682,11 +682,12 @@ async def test_publish_heartbeat_skips_when_not_running() -> None:
     pub.msg_publisher = AsyncMock()
     pub.running = False
     await pub._publish_heartbeat(
+        "heartbeat.c",
         HeartbeatData(
             session_id="", sequence_id=0, component="c", sequence=1, status="healthy", lag_ms=0
         ),
     )
-    pub.msg_publisher.publish.assert_not_awaited()
+    pub.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -699,15 +700,16 @@ async def test_publish_heartbeat_logs_errors() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     failing = AsyncMock()
-    failing.publish.side_effect = RuntimeError("boom")
+    failing.send.side_effect = RuntimeError("boom")
     pub.msg_publisher = failing
     pub.running = True
     await pub._publish_heartbeat(
+        "heartbeat.c",
         HeartbeatData(
             session_id="", sequence_id=0, component="c", sequence=1, status="healthy", lag_ms=0
         ),
     )
-    failing.publish.assert_awaited_once()
+    failing.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -859,7 +861,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
     pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
-    pub.msg_publisher.publish.assert_awaited_once()
+    pub.msg_publisher.send.assert_awaited_once()
     pub._ensure_instrument.assert_awaited()
     pub.repository.upsert_candles.assert_awaited_once()
     assert pub._last_data_timestamps["BTC-USD"] > 0
@@ -885,7 +887,7 @@ async def test_trade_loop_breaks_when_not_running(monkeypatch: pytest.MonkeyPatc
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
-    pub.msg_publisher.publish.assert_not_awaited()
+    pub.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1084,7 +1086,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
     pub._ensure_instrument = AsyncMock(return_value=1)
     await pub._candle_loop(["BTC-USD"], "1m")
-    pub.msg_publisher.publish.assert_not_awaited()
+    pub.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1438,7 +1440,7 @@ class TestFeedPublisherCoverage:
             last=100.0,
         )
         await publisher_any._publish_message("market.kraken.BTC-USD.ticks", message)
-        publisher_any.msg_publisher.publish.assert_awaited_once()
+        publisher_any.msg_publisher.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1465,7 +1467,7 @@ class TestFeedPublisherCoverage:
             last=100.0,
         )
         await publisher_any._publish_message("market.kraken.BTC-USD.ticks", message)
-        publisher_any.msg_publisher.publish.assert_not_called()
+        publisher_any.msg_publisher.send.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("asyncio.sleep", new_callable=AsyncMock)
@@ -1492,7 +1494,7 @@ class TestFeedPublisherCoverage:
         publisher_any._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000 - 25
         publish_heartbeat_mock = AsyncMock()
 
-        async def publish_side_effect(message: HeartbeatData) -> None:
+        async def publish_side_effect(topic: str, message: HeartbeatData) -> None:
             assert "symbols" in message.meta
             assert "BTC-USD" in message.meta["symbols"]
             assert message.meta["symbol_count"] == 1
@@ -1533,8 +1535,8 @@ class TestFeedPublisherCoverage:
             status="healthy",
             lag_ms=0,
         )
-        await publisher_any._publish_heartbeat(heartbeat)
-        publisher_any.msg_publisher.publish.assert_awaited_once()
+        await publisher_any._publish_heartbeat("heartbeat.feed.kraken.BTC-USD", heartbeat)
+        publisher_any.msg_publisher.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1918,14 +1920,14 @@ class MessagePublisherStub:
 
     def __init__(self, error: Exception | None = None) -> None:
         """Initialize the instance."""
-        self.calls: list[tuple[Any, str | None]] = []
+        self.calls: list[tuple[str, Any]] = []
         self.error = error
 
-    async def publish(self, message: Any, topic: str | None = None) -> None:
-        """Publish a message."""
+    async def send(self, stream_key: str, data: Any, *, flags: int = 0) -> None:
+        """Send a message."""
         if self.error is not None:
             raise self.error
-        self.calls.append((message, topic))
+        self.calls.append((stream_key, data))
 
 
 @pytest.mark.asyncio
@@ -2146,7 +2148,7 @@ class TestFeedPublisherPublishMessage:
             message,
         )
         assert len(msg_pub.calls) == 1
-        sent_message, sent_topic = msg_pub.calls[0]
+        sent_topic, sent_message = msg_pub.calls[0]
         assert sent_topic == "market.kraken.BTC-USD.candles.1m"
         assert sent_message.type == "candle"
         assert sent_message.instrument == "BTC-USD"

@@ -392,15 +392,17 @@ async def test_broadcast_cache_invalidation_uses_socket(
     """
     updater = updater_factory(2, False)
     mock_msg_pub = MagicMock()
-    mock_msg_pub.publish = AsyncMock()
+    mock_msg_pub.send = AsyncMock()
+    mock_msg_pub.tracker = SequenceTracker()
+    mock_msg_pub.session_id = mock_msg_pub.tracker.session_id
 
     def fake_setup() -> None:
         updater.msg_publisher = mock_msg_pub
 
     monkeypatch.setattr(updater, "_setup_zmq", fake_setup)
     await updater.broadcast_cache_invalidation()
-    mock_msg_pub.publish.assert_called_once()
-    called_data = mock_msg_pub.publish.call_args.args[0]
+    mock_msg_pub.send.assert_called_once()
+    called_data = mock_msg_pub.send.call_args.args[1]
     assert called_data.event == "symbol_aliases_updated"
     assert called_data.action == "clear_cache"
     assert called_data.timestamp is not None
@@ -419,7 +421,9 @@ async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
     """
     updater = updater_factory(1, False)
     mock_msg_pub = MagicMock()
-    mock_msg_pub.publish = AsyncMock()
+    mock_msg_pub.send = AsyncMock()
+    mock_msg_pub.tracker = SequenceTracker()
+    mock_msg_pub.session_id = mock_msg_pub.tracker.session_id
     setup_called = False
 
     def fake_setup() -> None:
@@ -430,8 +434,8 @@ async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
     monkeypatch.setattr(updater, "_setup_zmq", fake_setup)
     await updater.broadcast_cache_invalidation()
     assert setup_called is False
-    mock_msg_pub.publish.assert_called_once()
-    called_data = mock_msg_pub.publish.call_args.args[0]
+    mock_msg_pub.send.assert_called_once()
+    called_data = mock_msg_pub.send.call_args.args[1]
     assert called_data.event == "symbol_aliases_updated"
 
 

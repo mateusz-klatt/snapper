@@ -348,7 +348,7 @@ async def test_publish_order_status_skips_when_not_running() -> None:
     ex.msg_publisher = AsyncMock()
     ex.running = False
     await ex._publish_order_status(make_order(), "submitted")
-    ex.msg_publisher.publish.assert_not_awaited()
+    ex.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -766,7 +766,7 @@ async def test_process_execution_none_exchange_order_id() -> None:
     ex.pending_orders[order.client_order_id] = order
     published_fills: list[Any] = []
 
-    async def track_publish_execution(fill: Any) -> None:
+    async def track_publish_execution(topic: str, fill: Any) -> None:
         published_fills.append(fill)
 
     ex._publish_execution = track_publish_execution
@@ -796,7 +796,7 @@ async def test_process_execution_orphaned_client_by_exchange() -> None:
     ex.client_by_exchange["ex1"] = "orphaned_client_id"
     published_fills: list[Any] = []
 
-    async def track_publish_execution(fill: Any) -> None:
+    async def track_publish_execution(topic: str, fill: Any) -> None:
         published_fills.append(fill)
 
     ex._publish_execution = track_publish_execution
@@ -825,7 +825,7 @@ async def test_process_execution_duplicate_fill_idempotent() -> None:
     ex.running = True
     published_fills: list[Any] = []
 
-    async def track_publish_execution(fill: Any) -> None:
+    async def track_publish_execution(topic: str, fill: Any) -> None:
         published_fills.append(fill)
 
     ex._publish_execution = track_publish_execution
@@ -857,7 +857,7 @@ async def test_process_execution_orphan_buffering_and_replay() -> None:
     ex.pending_orders[order.client_order_id] = order
     published_fills: list[Any] = []
 
-    async def track_publish_execution(fill: Any) -> None:
+    async def track_publish_execution(topic: str, fill: Any) -> None:
         published_fills.append(fill)
 
     ex._publish_execution = track_publish_execution
@@ -963,10 +963,10 @@ async def test_publish_heartbeat_skips_when_not_running() -> None:
     """
     ex: Any = MergedDummyExecutor()
     ex.running = False
-    ex.msg_publisher = SimpleNamespace(publish=AsyncMock())
+    ex.msg_publisher = SimpleNamespace(send=AsyncMock())
     msg = SimpleNamespace(to_json=lambda: "{}", component="c")
-    await ex._publish_heartbeat(cast(Any, msg))
-    ex.msg_publisher.publish.assert_not_awaited()
+    await ex._publish_heartbeat("heartbeat.test", cast(Any, msg))
+    ex.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1374,7 +1374,7 @@ class TestProcessOrder:
         service_any.running = True
         published_statuses: list[tuple[Any, str]] = []
 
-        async def track_publish_execution(fill: Any) -> None:
+        async def track_publish_execution(topic: str, fill: Any) -> None:
             """Intentionally empty async stub for testing."""
             pass
 
@@ -1456,7 +1456,7 @@ class TestProcessExecution:
         service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
-        async def track_publish_execution(fill: Any) -> None:
+        async def track_publish_execution(topic: str, fill: Any) -> None:
             published_fills.append(fill)
 
         service_any._publish_execution = track_publish_execution
@@ -1507,7 +1507,7 @@ class TestProcessExecution:
         service_any.client_by_exchange = {"exchange_order_789": order.client_order_id}
         published_fills: list[Any] = []
 
-        async def track_publish_execution(fill: Any) -> None:
+        async def track_publish_execution(topic: str, fill: Any) -> None:
             published_fills.append(fill)
 
         service_any._publish_execution = track_publish_execution
@@ -1555,7 +1555,7 @@ class TestProcessExecution:
         service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
-        async def track_publish_execution(fill: Any) -> None:
+        async def track_publish_execution(topic: str, fill: Any) -> None:
             published_fills.append(fill)
 
         service_any._publish_execution = track_publish_execution
@@ -1609,7 +1609,7 @@ class TestHeartbeat:
             status="healthy",
             lag_ms=0,
         )
-        await service_any._publish_heartbeat(hb)
+        await service_any._publish_heartbeat("heartbeat.test", hb)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1626,7 +1626,7 @@ class TestHeartbeat:
         service_any = cast(Any, service)
         service_any.running = True
         mock_msg_publisher = MagicMock()
-        mock_msg_publisher.publish = AsyncMock(side_effect=Exception("Send failed"))
+        mock_msg_publisher.send = AsyncMock(side_effect=Exception("Send failed"))
         service_any.msg_publisher = mock_msg_publisher
         hb = HeartbeatData(
             session_id="",
@@ -1636,7 +1636,7 @@ class TestHeartbeat:
             status="healthy",
             lag_ms=0,
         )
-        await service_any._publish_heartbeat(hb)
+        await service_any._publish_heartbeat("heartbeat.test", hb)
 
 
 class TestSymbolAliasUpdate:
@@ -2597,8 +2597,8 @@ class TestExecutorCoverage:
             fee_asset="USD",
             status="filled",
         )
-        await service_any._publish_execution(fill_msg)
-        mock_publisher.publish.assert_awaited_once()
+        await service_any._publish_execution("orders.events.kraken.BTC-USD.executed", fill_msg)
+        mock_publisher.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2629,7 +2629,7 @@ class TestExecutorCoverage:
             fee_asset="USD",
             status="filled",
         )
-        await service_any._publish_execution(fill_msg)
+        await service_any._publish_execution("orders.events.kraken.BTC-USD.executed", fill_msg)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2746,7 +2746,7 @@ class TestExecutorCoverage:
         service_any.msg_publisher = AsyncMock()
         order = self._create_order()
         await service_any._publish_order_status(order, "submitted")
-        service_any.msg_publisher.publish.assert_awaited_once()
+        service_any.msg_publisher.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2914,7 +2914,7 @@ class TestExecutorCoverage:
         service_any.running = True
         publish_heartbeat_mock = AsyncMock()
 
-        async def publish_side_effect(message: HeartbeatData) -> None:
+        async def publish_side_effect(topic: str, message: HeartbeatData) -> None:
             assert message.component == "executor.kraken"
             service_any.running = False
 
@@ -2952,8 +2952,8 @@ class TestExecutorCoverage:
             status="healthy",
             lag_ms=0,
         )
-        await service_any._publish_heartbeat(hb)
-        service_any.msg_publisher.publish.assert_awaited_once()
+        await service_any._publish_heartbeat("heartbeat.executor.kraken", hb)
+        service_any.msg_publisher.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3231,10 +3231,10 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.msg_publisher = AsyncMock()
-        service_any.msg_publisher.publish.side_effect = RuntimeError("send failed")
+        service_any.msg_publisher.send.side_effect = RuntimeError("send failed")
         order = self._create_order()
         await service_any._publish_order_status(order, "submitted")
-        service_any.msg_publisher.publish.assert_awaited_once()
+        service_any.msg_publisher.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3254,7 +3254,7 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         service_any.running = True
         service_any.msg_publisher = AsyncMock()
-        service_any.msg_publisher.publish.side_effect = RuntimeError("fill failed")
+        service_any.msg_publisher.send.side_effect = RuntimeError("fill failed")
         fill_msg = ExecutionData(
             session_id="",
             sequence_id=0,
@@ -3270,8 +3270,8 @@ class TestExecutorCoverage:
             fee_asset="USD",
             status="filled",
         )
-        await service_any._publish_execution(fill_msg)
-        service_any.msg_publisher.publish.assert_awaited_once()
+        await service_any._publish_execution("orders.events.kraken.BTC-USD.executed", fill_msg)
+        service_any.msg_publisher.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3718,7 +3718,7 @@ class TestExecutorWebSocketExecutions:
         with patch.object(service, "_publish_execution", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
             mock_publish.assert_called_once()
-            fill: ExecutionData = mock_publish.call_args[0][0]
+            fill: ExecutionData = mock_publish.call_args[0][1]
             assert isinstance(fill, ExecutionData)
             assert fill.client_order_id == "test-order-123"
             assert fill.exchange_order_id == "KRAKEN-ORDER-ABC123"
@@ -3775,7 +3775,7 @@ class TestExecutorWebSocketExecutions:
         )
         with patch.object(service, "_publish_execution", new_callable=AsyncMock) as mock_publish:
             await service._process_execution(execution)
-            fill: ExecutionData = mock_publish.call_args[0][0]
+            fill: ExecutionData = mock_publish.call_args[0][1]
             assert fill.size == pytest.approx(0.5)
             assert fill.status == "partial"
             assert order.client_order_id in service.pending_orders
@@ -4506,8 +4506,8 @@ class TestCancelReplaceHandlers:
             client_order_id="client_456",
         )
         await service_any._publish_cancel_event(cancel_envelope, "cancelled")
-        mock_publisher.publish.assert_awaited_once()
-        published_data = mock_publisher.publish.call_args[0][0]
+        mock_publisher.send.assert_awaited_once()
+        published_data = mock_publisher.send.call_args[0][1]
         assert published_data.event == "cancelled"
         assert published_data.instrument == "BTC-USD"
         assert published_data.exchange == "kraken"
@@ -4558,7 +4558,7 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         mock_publisher = AsyncMock()
-        mock_publisher.publish = AsyncMock(side_effect=Exception("Network error"))
+        mock_publisher.send = AsyncMock(side_effect=Exception("Network error"))
         service_any.msg_publisher = mock_publisher
         cancel_envelope = OrderCancelData(
             session_id="",
@@ -4600,8 +4600,8 @@ class TestCancelReplaceHandlers:
             new_price=48000.0,
         )
         await service_any._publish_replace_event(replace_envelope, "rejected")
-        mock_publisher.publish.assert_awaited_once()
-        published_data = mock_publisher.publish.call_args[0][0]
+        mock_publisher.send.assert_awaited_once()
+        published_data = mock_publisher.send.call_args[0][1]
         assert published_data.event == "rejected"
         assert published_data.instrument == "BTC-USD"
         assert published_data.exchange == "kraken"
@@ -4652,7 +4652,7 @@ class TestCancelReplaceHandlers:
         service_any = cast(Any, service)
         service_any.running = True
         mock_publisher = AsyncMock()
-        mock_publisher.publish = AsyncMock(side_effect=Exception("Network error"))
+        mock_publisher.send = AsyncMock(side_effect=Exception("Network error"))
         service_any.msg_publisher = mock_publisher
         replace_envelope = OrderReplaceData(
             session_id="",

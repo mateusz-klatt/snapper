@@ -54,7 +54,9 @@ from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
+from snapper.messaging.topics.builders import heartbeat_topic_from_component
 from snapper.messaging.topics.builders import order_commands_prefix
+from snapper.messaging.topics.builders import order_event_topic
 from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.utils.logging import set_log_context
 
@@ -482,16 +484,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         exchange_name = self._get_exchange_name()
         try:
+            topic = order_event_topic(exchange_name, cancel.instrument, event)
             order_event = OrderEventData(
-                session_id="",
-                sequence_id=0,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=cancel.exchange_order_id,
                 client_order_id=cancel.client_order_id,
                 exchange=exchange_name,
                 instrument=cancel.instrument,
                 event=event,
             )
-            await self.msg_publisher.publish(order_event)
+            await self.msg_publisher.send(topic, order_event)
             logger.info(
                 f"[{exchange_name}] Published cancel event: {cancel.exchange_order_id} - {event}"
             )
@@ -514,16 +517,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         exchange_name = self._get_exchange_name()
         try:
+            topic = order_event_topic(exchange_name, replace.instrument, event)
             order_event = OrderEventData(
-                session_id="",
-                sequence_id=0,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=replace.exchange_order_id,
                 client_order_id=replace.client_order_id,
                 exchange=exchange_name,
                 instrument=replace.instrument,
                 event=event,
             )
-            await self.msg_publisher.publish(order_event)
+            await self.msg_publisher.send(topic, order_event)
             logger.info(
                 f"[{exchange_name}] Published replace event: {replace.exchange_order_id} - {event}"
             )
@@ -564,17 +568,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"[{exchange_name}] Live execution error: {e}")
             return None
 
-    async def _publish_execution(self, fill: ExecutionData) -> None:
-        """Publish a fill notification to the ZMQ topic.
+    async def _publish_execution(self, topic: str, fill: ExecutionData) -> None:
+        """Send a complete fill notification to ZMQ.
 
         Args:
-            fill: ExecutionData containing execution details.
+            topic: ZMQ topic for routing.
+            fill: Complete ExecutionData with provenance set.
         """
         if not self.msg_publisher or not self.running:
             return
         exchange_name = self._get_exchange_name()
         try:
-            await self.msg_publisher.publish(fill)
+            await self.msg_publisher.send(topic, fill)
             logger.info(
                 f"[{exchange_name}] Published fill: {fill.client_order_id} - "
                 f"{fill.size}@{fill.price}"
@@ -716,7 +721,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_order_id: str,
         original_order: OrderRequestData,
         exchange_name: OrderExchange,
-    ) -> ExecutionData:
+    ) -> tuple[str, ExecutionData]:
         """Build an ExecutionData from execution and order data.
 
         Args:
@@ -726,13 +731,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name: Exchange name.
 
         Returns:
-            ExecutionData ready for publishing.
+            Tuple of (stream_key, ExecutionData) ready for publishing.
         """
         status = to_fill_status(execution)
         total_fee = execution.fee_usd_equiv or 0.0
-        return ExecutionData(
-            session_id="",
-            sequence_id=0,
+        topic = order_event_topic(exchange_name, original_order.instrument, "executed")
+        return topic, ExecutionData(
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
             trade_id=execution.exec_id,
             exchange_order_id=exchange_order_id,
             client_order_id=original_order.client_order_id,
@@ -770,10 +776,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 execution, exchange_order_id, client_order_id, exchange_name
             ):
                 return
-            fill = self._build_execution_data(
+            topic, fill = self._build_execution_data(
                 execution, exchange_order_id, original_order, exchange_name
             )
-            await self._publish_execution(fill)
+            await self._publish_execution(topic, fill)
             if fill.status == "filled":
                 self.pending_orders.pop(client_order_id, None)
                 self.client_by_exchange.pop(exchange_order_id, None)
@@ -803,9 +809,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         exchange_name = self._get_exchange_name()
         try:
+            topic = order_event_topic(exchange_name, order.instrument, status)
             order_status = OrderData(
-                session_id="",
-                sequence_id=0,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=exchange_order_id,
                 client_order_id=order.client_order_id,
                 instrument=order.instrument,
@@ -817,7 +824,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 filled_size=0.0 if status == "rejected" else order.quantity,
                 price=order.price,
             )
-            await self.msg_publisher.publish(order_status)
+            await self.msg_publisher.send(topic, order_status)
             logger.info(
                 f"[{exchange_name}] Published order event: {order.client_order_id} - {status}"
             )
@@ -835,10 +842,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self._cleanup_expired_orphans()
                 self.heartbeat_seq += 1
                 lag_ms = 0
+                component = f"executor.{exchange_name}"
+                hb_topic = heartbeat_topic_from_component(component)
                 hb_msg = HeartbeatData(
-                    session_id="",
-                    sequence_id=0,
-                    component=f"executor.{exchange_name}",
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(hb_topic),
+                    component=component,
                     sequence=self.heartbeat_seq,
                     status="healthy",
                     lag_ms=lag_ms,
@@ -849,20 +858,21 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "broker_xpub": self.settings.zmq_broker_xpub,
                     },
                 )
-                await self._publish_heartbeat(hb_msg)
+                await self._publish_heartbeat(hb_topic, hb_msg)
             except Exception as e:
                 logger.error(f"[{exchange_name}] Execution service heartbeat error: {e}")
 
-    async def _publish_heartbeat(self, message: HeartbeatData) -> None:
-        """Publish heartbeat message to ZMQ via MessagePublisher.
+    async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
+        """Send a complete heartbeat message to ZMQ.
 
         Args:
-            message: HeartbeatData to publish.
+            topic: Heartbeat ZMQ topic string.
+            message: Complete HeartbeatData with provenance set.
         """
         if not self.msg_publisher or not self.running:
             return
         try:
-            await self.msg_publisher.publish(message)
+            await self.msg_publisher.send(topic, message)
         except Exception as e:
             logger.error(f"Error publishing heartbeat: {e}")
 

@@ -29,6 +29,7 @@ from snapper.cli.app import _alembic_cfg
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.data import CandleData
@@ -637,7 +638,10 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
         _strategy_config(exchange="paper", inputs=["market.paper.kraken.BTC-USD.candles.1h"])
     )
     strategy._running = True
-    mock_msg_publisher = AsyncMock()
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
     strategy.msg_publisher = mock_msg_publisher
     strategy.subscriber = cast(ValidatedSubscriber, DummySubscriber(strategy, messages))
     await strategy._listen_loop()
@@ -646,8 +650,8 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
     assert strategy._feed_heartbeats["kraken"]["status"] == "healthy"
     assert strategy._last_data_ts == pytest.approx(123.0)
     assert strategy.received[0][0] == "BTC-USD"
-    mock_msg_publisher.publish.assert_called_once()
-    published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+    mock_msg_publisher.send.assert_called_once()
+    published_signal: SignalData = mock_msg_publisher.send.call_args[0][1]
     assert published_signal.instrument == "BTC-USD"
     assert published_signal.fired_at.timestamp() == pytest.approx(123.0)
 
@@ -713,7 +717,10 @@ async def test_emit_signal_validates_outputs(monkeypatch: pytest.MonkeyPatch) ->
     Then: StrategySignal is published without error.
     """
     strategy = FakeStrategy(_strategy_config(exchange="paper"))
-    mock_msg_publisher = AsyncMock()
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
     strategy.msg_publisher = mock_msg_publisher
     strategy._last_data_ts = 321.0
     await strategy.emit_signal(
@@ -725,7 +732,7 @@ async def test_emit_signal_validates_outputs(monkeypatch: pytest.MonkeyPatch) ->
             price=10.0,
         )
     )
-    mock_msg_publisher.publish.assert_called_once()
+    mock_msg_publisher.send.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -749,8 +756,11 @@ async def test_emit_signal_persists_with_stamped_provenance(
         session_id="test-session-123",
         sequence_id=7,
     )
-    mock_publisher = AsyncMock()
-    mock_publisher.publish = AsyncMock(return_value=stamped)
+    mock_publisher = MagicMock()
+    mock_publisher.send = AsyncMock(return_value=stamped)
+    mock_publisher.tracker = SequenceTracker()
+    mock_publisher.tracker._session_id = "test-session-123"
+    mock_publisher.session_id = mock_publisher.tracker.session_id
     strategy.msg_publisher = mock_publisher
     strategy._last_data_ts = 100.0
 
@@ -786,9 +796,9 @@ async def test_emit_signal_persists_with_stamped_provenance(
 
     assert len(captured) == 1
     assert captured[0]["session_id"] == "test-session-123"
-    assert captured[0]["sequence_id"] == 7
-    assert captured[0]["public_id"] == stamped.public_id
-    assert captured[0]["timestamp"] == stamped.timestamp
+    assert captured[0]["sequence_id"] == 1
+    assert captured[0]["public_id"] is not None
+    assert captured[0]["timestamp"] is not None
     assert captured[0]["tracker"] is strategy._tracker
 
 
@@ -802,7 +812,10 @@ async def test_listen_loop_ignores_non_market_topics() -> None:
     """
     strategy = FakeStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]))
     strategy._running = True
-    mock_msg_publisher = AsyncMock()
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
     strategy.msg_publisher = mock_msg_publisher
     messages = [
         (
@@ -813,7 +826,7 @@ async def test_listen_loop_ignores_non_market_topics() -> None:
     strategy.subscriber = cast(ValidatedSubscriber, DummySubscriber(strategy, messages))
     await strategy._listen_loop()
     assert strategy._last_data_ts is None
-    mock_msg_publisher.publish.assert_not_called()
+    mock_msg_publisher.send.assert_not_called()
     assert len(strategy.received) == 0
 
 
@@ -837,7 +850,10 @@ async def test_listen_loop_handles_tick_data() -> None:
 
     strategy = TickStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.ticks"]))
     strategy._running = True
-    mock_msg_publisher = AsyncMock()
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
     strategy.msg_publisher = mock_msg_publisher
     tick = TickData(
         session_id="",
@@ -877,7 +893,10 @@ async def test_listen_loop_handles_trade_data() -> None:
 
     strategy = TradeStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.trades"]))
     strategy._running = True
-    mock_msg_publisher = AsyncMock()
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
     strategy.msg_publisher = mock_msg_publisher
     trade = TradeData(
         session_id="",
@@ -922,7 +941,10 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
     strategy = FakeStrategy(_strategy_config())
     strategy._last_data_ts = None
     captured_time = 123.456
-    mock_msg_publisher = AsyncMock()
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
 
     async def fake_setup(self: BaseStrategy) -> None:
         self.msg_publisher = mock_msg_publisher
@@ -938,8 +960,8 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
             price=200.0,
         )
     )
-    mock_msg_publisher.publish.assert_called_once()
-    published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+    mock_msg_publisher.send.assert_called_once()
+    published_signal: SignalData = mock_msg_publisher.send.call_args[0][1]
     assert published_signal.fired_at.timestamp() == captured_time
     assert published_signal.instrument == "BTC-USD"
     with pytest.raises(ValueError, match="not allowed"):
@@ -1060,13 +1082,15 @@ async def test_heartbeat_loop_emits_and_evaluates_health(monkeypatch: pytest.Mon
 
     published_messages: list[Any] = []
 
-    async def capture_and_stop(data: Any, **kwargs: Any) -> None:
+    async def capture_and_stop(topic: str, data: Any, **kwargs: Any) -> None:
         published_messages.append(data)
         strategy._running = False
 
     mock_msg_pub = AsyncMock(side_effect=capture_and_stop)
     strategy.msg_publisher = MagicMock()
-    strategy.msg_publisher.publish = mock_msg_pub
+    strategy.msg_publisher.send = mock_msg_pub
+    strategy.msg_publisher.tracker = SequenceTracker()
+    strategy.msg_publisher.session_id = strategy.msg_publisher.tracker.session_id
     strategy._running = True
     strategy.last_data_timestamp = time.time() - 5
     strategy._feed_heartbeats = {
@@ -2120,7 +2144,10 @@ class TestEmitSignal:
         Then: StrategySignal published to output topic.
         """
         strategy = SimpleTestStrategy(strategy_config)
-        mock_msg_publisher = AsyncMock()
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.send = AsyncMock()
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -2130,8 +2157,8 @@ class TestEmitSignal:
             reason="Test signal",
         )
         await strategy.emit_signal(signal)
-        mock_msg_publisher.publish.assert_called_once()
-        published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+        mock_msg_publisher.send.assert_called_once()
+        published_signal: SignalData = mock_msg_publisher.send.call_args[0][1]
         assert published_signal.instrument == "BTC-USD"
         assert published_signal.side == "buy"
         assert published_signal.strength == pytest.approx(0.8)
@@ -2151,7 +2178,10 @@ class TestEmitSignal:
         Then: Same publisher instance used.
         """
         strategy = SimpleTestStrategy(strategy_config)
-        mock_msg_publisher = AsyncMock()
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.send = AsyncMock()
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -2175,7 +2205,10 @@ class TestEmitSignal:
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._last_data_ts = 1234.5
-        mock_msg_publisher = AsyncMock()
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.send = AsyncMock()
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -2186,8 +2219,8 @@ class TestEmitSignal:
         )
         await strategy.emit_signal(signal)
         assert signal.timestamp == datetime.fromtimestamp(1234.5, tz=UTC)
-        mock_msg_publisher.publish.assert_awaited_once()
-        published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+        mock_msg_publisher.send.assert_awaited_once()
+        published_signal: SignalData = mock_msg_publisher.send.call_args[0][1]
         assert published_signal.exchange == "paper"
         assert published_signal.strategy_name == "test_strategy"
         assert published_signal.fired_at is not None
@@ -2209,7 +2242,10 @@ class TestEmitSignal:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = 777.7
-        mock_msg_publisher = AsyncMock()
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.send = AsyncMock()
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -2220,8 +2256,8 @@ class TestEmitSignal:
         )
         await strategy.emit_signal(signal)
         assert signal.timestamp == datetime.fromtimestamp(777.7, tz=UTC)
-        mock_msg_publisher.publish.assert_awaited_once()
-        published_signal: SignalData = mock_msg_publisher.publish.call_args[0][0]
+        mock_msg_publisher.send.assert_awaited_once()
+        published_signal: SignalData = mock_msg_publisher.send.call_args[0][1]
         assert published_signal.exchange == "kraken"
 
     @pytest.mark.asyncio
@@ -2240,7 +2276,10 @@ class TestEmitSignal:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = 999.0
-        mock_msg_publisher = AsyncMock()
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.send = AsyncMock()
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -2748,13 +2787,15 @@ class TestHeartbeatLoop:
         published_messages: list[Any] = []
         sleep_calls: list[float] = []
 
-        async def capture_and_stop(data: Any, **kwargs: Any) -> None:
+        async def capture_and_stop(topic: str, data: Any, **kwargs: Any) -> None:
             published_messages.append(data)
             strategy._running = False
 
         mock_msg_pub = AsyncMock(side_effect=capture_and_stop)
         mock_msg_publisher = MagicMock()
-        mock_msg_publisher.publish = mock_msg_pub
+        mock_msg_publisher.send = mock_msg_pub
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         strategy._running = True
 
@@ -2857,11 +2898,17 @@ class TestHeartbeatLoop:
         strategy._running = True
 
         class FailingMsgPublisher:
+            """Test stub that fails on send."""
+
             def __init__(self, owner: ReplayAwareStrategy):
+                """Initialize the instance."""
                 self.owner = owner
                 self.calls = 0
+                self.tracker = SequenceTracker()
+                self.session_id = self.tracker.session_id
 
-            async def publish(self, data: Any, **kwargs: Any) -> None:
+            async def send(self, topic: str, data: Any, **kwargs: Any) -> None:
+                """Raise error on send."""
                 self.calls += 1
                 self.owner._running = False
                 raise RuntimeError("publisher failure")
@@ -3077,10 +3124,16 @@ class TestHeartbeatWithFeedHealth:
         published_messages: list[Any] = []
 
         class CapturingMsgPublisher:
-            def __init__(self, owner: SimpleTestStrategy) -> None:
-                self.owner = owner
+            """Test stub that captures published messages."""
 
-            async def publish(self, data: Any, **kwargs: Any) -> None:
+            def __init__(self, owner: SimpleTestStrategy) -> None:
+                """Initialize the instance."""
+                self.owner = owner
+                self.tracker = SequenceTracker()
+                self.session_id = self.tracker.session_id
+
+            async def send(self, topic: str, data: Any, **kwargs: Any) -> None:
+                """Capture sent data and stop."""
                 published_messages.append(data)
                 self.owner._running = False
 
@@ -3441,7 +3494,10 @@ class TestEmitSignalTimestamp:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = 1700000000.0
-        mock_msg_publisher = AsyncMock()
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.send = AsyncMock()
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -3470,7 +3526,10 @@ class TestEmitSignalTimestamp:
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = None
-        mock_msg_publisher = AsyncMock()
+        mock_msg_publisher = MagicMock()
+        mock_msg_publisher.send = AsyncMock()
+        mock_msg_publisher.tracker = SequenceTracker()
+        mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
         strategy.msg_publisher = mock_msg_publisher
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -3671,7 +3730,7 @@ class TestExecutorBasePhase4:
             executor = KrakenOrderExecutor()
             executor.running = True
             mock_msg_publisher = MagicMock()
-            mock_msg_publisher.publish = AsyncMock(side_effect=Exception("Connection failed"))
+            mock_msg_publisher.send = AsyncMock(side_effect=Exception("Connection failed"))
             executor.msg_publisher = mock_msg_publisher
             heartbeat = HeartbeatData(
                 session_id="",
@@ -3682,7 +3741,7 @@ class TestExecutorBasePhase4:
                 status="healthy",
                 lag_ms=0,
             )
-            await executor._publish_heartbeat(heartbeat)
+            await executor._publish_heartbeat("system.heartbeats.test.executor", heartbeat)
 
 
 class TestCliAppPhase4:

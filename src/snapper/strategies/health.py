@@ -11,6 +11,7 @@ from typing import Any
 
 from snapper.interface.websocket.schemas import HealthStatus
 from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.topics.builders import heartbeat_topic_from_component
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +70,20 @@ class StrategyHealthMonitor:
             }
         return feed_health
 
-    def build_heartbeat_envelope(self, lag_ms: int) -> HeartbeatData:
+    def build_heartbeat_envelope(self, lag_ms: int, topic: str) -> HeartbeatData:
         """Build a heartbeat envelope with current strategy state.
 
         Args:
             lag_ms: Milliseconds since last data received.
+            topic: Heartbeat ZMQ topic for provenance allocation.
 
         Returns:
-            Heartbeat data ready for publishing.
+            Complete heartbeat data with provenance set.
         """
+        tracker = self.strategy.msg_publisher.tracker if self.strategy.msg_publisher else None
         return HeartbeatData(
-            session_id="",
-            sequence_id=0,
+            session_id=tracker.session_id if tracker else "",
+            sequence_id=tracker.next_sequence(topic) if tracker else 0,
             component=f"strategy.{self.strategy.name}",
             sequence=self.strategy.heartbeat_seq,
             status=self.classify_health_status(lag_ms),
@@ -103,9 +106,11 @@ class StrategyHealthMonitor:
                 try:
                     self.strategy.heartbeat_seq += 1
                     lag_ms = int((time.time() - self.strategy.last_data_timestamp) * 1000)
-                    hb_msg = self.build_heartbeat_envelope(lag_ms)
+                    component = f"strategy.{self.strategy.name}"
+                    hb_topic = heartbeat_topic_from_component(component)
+                    hb_msg = self.build_heartbeat_envelope(lag_ms, hb_topic)
                     if self.strategy.msg_publisher:
-                        await self.strategy.msg_publisher.publish(hb_msg)
+                        await self.strategy.msg_publisher.send(hb_topic, hb_msg)
                 except Exception as e:
                     logger.error(f"Strategy {self.strategy.name}: Heartbeat error: {e}")
         except asyncio.CancelledError:

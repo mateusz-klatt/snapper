@@ -12,10 +12,19 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import TickData
 
 
-def _make_tick(exchange: str = "kraken", instrument: str = "BTC-USD") -> TickData:
-    """Build a minimal TickData instance for testing."""
+def _make_tick(
+    tracker: SequenceTracker,
+    topic: str = "market.kraken.BTC-USD.ticks",
+    exchange: str = "kraken",
+    instrument: str = "BTC-USD",
+) -> TickData:
+    """Build a complete TickData instance with provenance from tracker."""
     return TickData(
-        session_id="", sequence_id=0, exchange=exchange, instrument=instrument, volume=1.0
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence(topic),
+        exchange=exchange,
+        instrument=instrument,
+        volume=1.0,
     )
 
 
@@ -68,67 +77,114 @@ class TestSequenceTracker:
 
 
 class TestMessagePublisher:
-    """Tests for MessagePublisher provenance stamping and delegation."""
+    """Tests for MessagePublisher send and delegation."""
 
     @pytest.mark.asyncio
-    async def test_publish_stamps_session_and_sequence(self) -> None:
-        """Publish stamps session_id and sequence_id on the payload.
+    async def test_send_serializes_and_routes(self) -> None:
+        """Send serializes data and calls send_multipart with stream_key.
 
-        Given: MessagePublisher with mock publisher and tracker,
-        When: Publishing a TickData message,
-        Then: The serialized payload contains session_id and sequence_id.
+        Given: MessagePublisher with mock publisher,
+        When: Sending a complete TickData with stream_key,
+        Then: send_multipart receives the stream_key and serialized bytes.
         """
         mock_pub = _make_mock_publisher()
         tracker = SequenceTracker()
         mp = MessagePublisher(mock_pub, tracker)
 
-        tick = _make_tick()
-        await mp.publish(tick)
+        topic = "market.kraken.BTC-USD.ticks"
+        tick = _make_tick(tracker, topic)
+        await mp.send(topic, tick)
 
         mock_pub.send_multipart.assert_awaited_once()
         call_args = mock_pub.send_multipart.call_args
-        payload_bytes: bytes = call_args[0][1]
-        payload = json.loads(payload_bytes)
+        assert call_args[0][0] == topic
+        payload = json.loads(call_args[0][1])
         assert payload["session_id"] == tracker.session_id
         assert payload["sequence_id"] == 1
 
     @pytest.mark.asyncio
-    async def test_publish_with_explicit_topic_override(self) -> None:
-        """Publish uses explicit topic when provided.
+    async def test_send_preserves_provenance_from_producer(self) -> None:
+        """Send does not modify the data — provenance comes from the producer.
 
         Given: MessagePublisher,
-        When: Publishing with topic override,
-        Then: send_multipart receives the overridden topic.
+        When: Sending a TickData with sequence_id=42,
+        Then: The serialized payload has sequence_id=42 (no overwriting).
         """
         mock_pub = _make_mock_publisher()
         tracker = SequenceTracker()
         mp = MessagePublisher(mock_pub, tracker)
 
-        tick = _make_tick()
-        await mp.publish(tick, topic="custom.topic.override")
+        tick = TickData(
+            session_id="custom-session",
+            sequence_id=42,
+            exchange="kraken",
+            instrument="BTC-USD",
+            volume=1.0,
+        )
+        await mp.send("market.kraken.BTC-USD.ticks", tick)
 
-        call_args = mock_pub.send_multipart.call_args
-        assert call_args[0][0] == "custom.topic.override"
+        payload = json.loads(mock_pub.send_multipart.call_args[0][1])
+        assert payload["session_id"] == "custom-session"
+        assert payload["sequence_id"] == 42
 
     @pytest.mark.asyncio
-    async def test_publish_increments_sequence_per_topic(self) -> None:
-        """Publish increments sequence_id for each call on the same topic.
+    async def test_send_with_flags(self) -> None:
+        """Send passes flags to send_multipart.
 
         Given: MessagePublisher,
-        When: Publishing two messages to the same topic,
-        Then: sequence_id is 1 then 2 in the payloads.
+        When: Sending with flags=1,
+        Then: send_multipart receives flags=1.
         """
         mock_pub = _make_mock_publisher()
         tracker = SequenceTracker()
         mp = MessagePublisher(mock_pub, tracker)
 
-        await mp.publish(_make_tick())
-        await mp.publish(_make_tick())
+        tick = _make_tick(tracker)
+        await mp.send("market.kraken.BTC-USD.ticks", tick, flags=1)
 
-        first_payload = json.loads(mock_pub.send_multipart.call_args_list[0][0][1])
-        second_payload = json.loads(mock_pub.send_multipart.call_args_list[1][0][1])
+        call_kwargs = mock_pub.send_multipart.call_args[1]
+        assert call_kwargs["flags"] == 1
+
+    @pytest.mark.asyncio
+    async def test_tracker_property_exposes_shared_tracker(self) -> None:
+        """Tracker property returns the injected SequenceTracker.
+
+        Given: MessagePublisher created with a tracker,
+        When: Accessing .tracker,
+        Then: Returns the same tracker instance.
+        """
+        mock_pub = _make_mock_publisher()
+        tracker = SequenceTracker()
+        mp = MessagePublisher(mock_pub, tracker)
+
+        assert mp.tracker is tracker
+
+    @pytest.mark.asyncio
+    async def test_reconnect_continues_counters(self) -> None:
+        """New MessagePublisher with same tracker continues counter state.
+
+        Given: A tracker used by one MessagePublisher that sent one message,
+        When: Creating a new MessagePublisher with the same tracker and sending,
+        Then: The sequence_id continues from where the first left off.
+        """
+        tracker = SequenceTracker()
+        topic = "market.kraken.BTC-USD.ticks"
+
+        mock_pub1 = _make_mock_publisher()
+        mp1 = MessagePublisher(mock_pub1, tracker)
+        tick1 = _make_tick(tracker, topic)
+        await mp1.send(topic, tick1)
+
+        mock_pub2 = _make_mock_publisher()
+        mp2 = MessagePublisher(mock_pub2, tracker)
+        tick2 = _make_tick(tracker, topic)
+        await mp2.send(topic, tick2)
+
+        first_payload = json.loads(mock_pub1.send_multipart.call_args[0][1])
+        second_payload = json.loads(mock_pub2.send_multipart.call_args[0][1])
         assert first_payload["sequence_id"] == 1
         assert second_payload["sequence_id"] == 2
+        assert first_payload["session_id"] == second_payload["session_id"]
 
     def test_close_delegates_to_inner_publisher(self) -> None:
         """Close delegates to the underlying ValidatedPublisher.
@@ -172,63 +228,3 @@ class TestMessagePublisher:
         mp = MessagePublisher(mock_pub, tracker)
 
         assert mp.session_id == tracker.session_id
-
-    @pytest.mark.asyncio
-    async def test_publish_calls_send_multipart_with_topic_and_bytes(self) -> None:
-        """Publish calls send_multipart with derived topic and encoded payload.
-
-        Given: MessagePublisher,
-        When: Publishing a TickData,
-        Then: send_multipart receives the correct topic string and bytes payload.
-        """
-        mock_pub = _make_mock_publisher()
-        tracker = SequenceTracker()
-        mp = MessagePublisher(mock_pub, tracker)
-
-        tick = _make_tick(exchange="kraken", instrument="ETH-USD")
-        await mp.publish(tick)
-
-        call_args = mock_pub.send_multipart.call_args
-        assert call_args[0][0] == "market.kraken.ETH-USD.ticks"
-        assert isinstance(call_args[0][1], bytes)
-
-    @pytest.mark.asyncio
-    async def test_publish_does_not_mutate_original(self) -> None:
-        """Publish creates a model_copy and does not mutate the original data.
-
-        Given: MessagePublisher and a TickData with default session_id/sequence_id,
-        When: Publishing,
-        Then: The original data still has empty session_id and zero sequence_id.
-        """
-        mock_pub = _make_mock_publisher()
-        tracker = SequenceTracker()
-        mp = MessagePublisher(mock_pub, tracker)
-
-        tick = _make_tick()
-        await mp.publish(tick)
-
-        assert tick.session_id == ""
-        assert tick.sequence_id == 0
-
-    @pytest.mark.asyncio
-    async def test_reconnect_continues_counters(self) -> None:
-        """New MessagePublisher with same tracker continues counter state.
-
-        Given: A tracker used by one MessagePublisher that published one message,
-        When: Creating a new MessagePublisher with the same tracker and publishing,
-        Then: The sequence_id continues from where the first left off.
-        """
-        mock_pub1 = _make_mock_publisher()
-        tracker = SequenceTracker()
-        mp1 = MessagePublisher(mock_pub1, tracker)
-        await mp1.publish(_make_tick())
-
-        mock_pub2 = _make_mock_publisher()
-        mp2 = MessagePublisher(mock_pub2, tracker)
-        await mp2.publish(_make_tick())
-
-        first_payload = json.loads(mock_pub1.send_multipart.call_args[0][1])
-        second_payload = json.loads(mock_pub2.send_multipart.call_args[0][1])
-        assert first_payload["sequence_id"] == 1
-        assert second_payload["sequence_id"] == 2
-        assert first_payload["session_id"] == second_payload["session_id"]

@@ -21,7 +21,6 @@ from typing import Any
 import zmq
 import zmq.asyncio
 
-from snapper.api.schemas.base import StrictDataSchema
 from snapper.application.services.signals.service import signal_service
 from snapper.config.settings import get_bootstrap_settings
 from snapper.messaging.infrastructure.gap_detector import GapDetector
@@ -504,9 +503,10 @@ class BaseStrategy(ABC):
             )
         if not self.msg_publisher:
             await self._setup_publisher()
+        tracker = self.msg_publisher.tracker if self.msg_publisher else self._tracker
         signal_envelope = SignalData(
-            session_id="",
-            sequence_id=0,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence(topic),
             instrument=signal.instrument,
             side=signal.side,
             strength=signal.strength,
@@ -517,18 +517,17 @@ class BaseStrategy(ABC):
             fired_at=signal.timestamp or datetime.now(UTC),
         )
 
-        stamped: StrictDataSchema | None = None
         if self.msg_publisher is not None:
-            stamped = await self.msg_publisher.publish(signal_envelope)
+            await self.msg_publisher.send(topic, signal_envelope)
         await signal_service.store_signal(
             signal,
             exchange=self.exchange,
             strategy_name=self.name,
             price=signal.price,
-            session_id=stamped.session_id if stamped else self._tracker.session_id,
-            sequence_id=stamped.sequence_id if stamped else self._tracker.next_sequence("signals"),
-            public_id=stamped.public_id if stamped else None,
-            timestamp=stamped.timestamp if stamped else None,
+            session_id=signal_envelope.session_id,
+            sequence_id=signal_envelope.sequence_id,
+            public_id=signal_envelope.public_id,
+            timestamp=signal_envelope.timestamp,
             tracker=self._tracker,
         )
         logger.debug(

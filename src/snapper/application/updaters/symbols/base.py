@@ -42,6 +42,7 @@ from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
+from snapper.messaging.topics.builders import system_topic
 from snapper.utils.logging import set_log_context
 
 
@@ -117,8 +118,12 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not self.msg_publisher:
             self._setup_zmq()
         if self.msg_publisher:
-            envelope = SymbolAliasUpdateData(session_id="", sequence_id=0)
-            await self.msg_publisher.publish(envelope)
+            topic = system_topic("symbol_aliases")
+            envelope = SymbolAliasUpdateData(
+                session_id=self.msg_publisher.tracker.session_id,
+                sequence_id=self.msg_publisher.tracker.next_sequence(topic),
+            )
+            await self.msg_publisher.send(topic, envelope)
             logger.info("Broadcasted cache invalidation: system.symbol_aliases")
         else:
             logger.warning("ZMQ publisher not available, skipping cache invalidation broadcast")
