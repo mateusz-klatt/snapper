@@ -7,10 +7,10 @@ structures like CSRF tokens.
 from datetime import datetime
 from typing import Literal
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 
 
-class CsrfToken(StrictApiSchema):
+class CsrfToken(StrictDataSchema):
     """CSRF token schema.
 
     Attributes:

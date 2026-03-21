@@ -9,14 +9,14 @@ from typing import Literal
 
 from pydantic import Field
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ComponentStatus
 from snapper.core.types import HealthStatus
 
 _CONN_STATS_DESC = "Connection statistics"
 
 
-class ConnectionStatsSchema(StrictApiSchema):
+class ConnectionStatsSchema(StrictDataSchema):
     """Connection-level statistics from the ZMQ-WebSocket bridge.
 
     Attributes:
@@ -35,7 +35,7 @@ class ConnectionStatsSchema(StrictApiSchema):
     active_clients: int = Field(default=0, description="Unique connected clients")
 
 
-class TopicMetricSnapshotSchema(StrictApiSchema):
+class TopicMetricSnapshotSchema(StrictDataSchema):
     """Point-in-time snapshot of metrics for a single topic.
 
     Attributes:
@@ -66,7 +66,7 @@ class TopicMetricSnapshotSchema(StrictApiSchema):
     pattern: str | None = Field(default=None, description="ZMQ subscription pattern")
 
 
-class HealthTopics(StrictApiSchema):
+class HealthTopics(StrictDataSchema):
     """Topic subscription statistics.
 
     Attributes:
@@ -77,7 +77,7 @@ class HealthTopics(StrictApiSchema):
     active: int = Field(description="Number of currently active topics")
 
 
-class GapStatsSchema(StrictApiSchema):
+class GapStatsSchema(StrictDataSchema):
     """Gap detection telemetry counters for a single detector.
 
     Attributes:
@@ -96,7 +96,7 @@ class GapStatsSchema(StrictApiSchema):
     rejected_unstamped: int = Field(default=0, description="Messages without provenance")
 
 
-class GapDetectionStats(StrictApiSchema):
+class GapDetectionStats(StrictDataSchema):
     """Aggregated gap detection statistics from all detectors.
 
     Attributes:
@@ -115,7 +115,7 @@ class GapDetectionStats(StrictApiSchema):
     )
 
 
-class HealthCheckResponse(StrictApiSchema):
+class HealthCheckResponse(StrictDataSchema):
     """Main health check endpoint response.
 
     Provides overall service health status including version,
@@ -142,7 +142,7 @@ class HealthCheckResponse(StrictApiSchema):
     )
 
 
-class ZmqComponents(StrictApiSchema):
+class ZmqComponents(StrictDataSchema):
     """ZMQ infrastructure component status.
 
     Attributes:
@@ -157,7 +157,7 @@ class ZmqComponents(StrictApiSchema):
     active_connections: int = Field(description="Number of active WebSocket connections")
 
 
-class ZmqConfig(StrictApiSchema):
+class ZmqConfig(StrictDataSchema):
     """ZMQ configuration information.
 
     Attributes:
@@ -168,7 +168,7 @@ class ZmqConfig(StrictApiSchema):
     available_topics: list[str] = Field(description="List of available ZMQ topics")
 
 
-class ZmqHealthResponse(StrictApiSchema):
+class ZmqHealthResponse(StrictDataSchema):
     """ZMQ bridge health check response.
 
     Provides detailed status of the ZMQ-to-WebSocket bridge including
@@ -196,7 +196,7 @@ class ZmqHealthResponse(StrictApiSchema):
     errors: list[str] = Field(default_factory=list, description="Error messages if not healthy")
 
 
-class WebSocketStats(StrictApiSchema):
+class WebSocketStats(StrictDataSchema):
     """WebSocket connection statistics.
 
     Attributes:
@@ -211,7 +211,7 @@ class WebSocketStats(StrictApiSchema):
     client_count: int = Field(description="Total client count")
 
 
-class ZmqBridgeStats(StrictApiSchema):
+class ZmqBridgeStats(StrictDataSchema):
     """ZMQ bridge statistics.
 
     Attributes:
@@ -226,7 +226,7 @@ class ZmqBridgeStats(StrictApiSchema):
     available_topics: list[str] = Field(description="List of available topics")
 
 
-class WsStatsConfig(StrictApiSchema):
+class WsStatsConfig(StrictDataSchema):
     """WebSocket statistics configuration.
 
     Attributes:
@@ -239,7 +239,7 @@ class WsStatsConfig(StrictApiSchema):
     heartbeat_interval_ms: int = Field(description="Heartbeat interval in milliseconds")
 
 
-class SubscriptionsStats(StrictApiSchema):
+class SubscriptionsStats(StrictDataSchema):
     """Subscription statistics.
 
     Attributes:
@@ -252,7 +252,7 @@ class SubscriptionsStats(StrictApiSchema):
     per_client: dict[str, list[str]] = Field(description="Topics subscribed per client")
 
 
-class WsStatsResponse(StrictApiSchema):
+class WsStatsResponse(StrictDataSchema):
     """WebSocket statistics endpoint response.
 
     Comprehensive statistics about WebSocket connections, ZMQ bridge,
@@ -276,7 +276,7 @@ class WsStatsResponse(StrictApiSchema):
     config: WsStatsConfig = Field(description="Configuration details")
 
 
-class SettingCategoriesResponse(StrictApiSchema):
+class SettingCategoriesResponse(StrictDataSchema):
     """Setting categories list response.
 
     Attributes:

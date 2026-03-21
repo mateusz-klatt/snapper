@@ -1738,7 +1738,7 @@ class TestExportWsSchemas:
         """Exports WS schemas to JSON."""
         with (
             patch("scripts.generate_types.discover_ws_schemas") as mock_discover,
-            patch("scripts.generate_types.WsMessageSchema"),
+            patch("scripts.generate_types.StrictDataSchema"),
         ):
             mock_model = MagicMock()
             mock_model.model_json_schema.return_value = {
@@ -1758,7 +1758,7 @@ class TestExportWsSchemas:
         """Exports WS schemas with $defs to JSON."""
         with (
             patch("scripts.generate_types.discover_ws_schemas") as mock_discover,
-            patch("scripts.generate_types.WsMessageSchema"),
+            patch("scripts.generate_types.StrictDataSchema"),
         ):
             mock_model = MagicMock()
             mock_model.model_json_schema.return_value = {
@@ -1782,7 +1782,7 @@ class TestExportWsSchemas:
         """Exports WS schemas with non-dict $defs value."""
         with (
             patch("scripts.generate_types.discover_ws_schemas") as mock_discover,
-            patch("scripts.generate_types.WsMessageSchema"),
+            patch("scripts.generate_types.StrictDataSchema"),
         ):
             mock_model = MagicMock()
             mock_model.model_json_schema.return_value = {
@@ -1803,7 +1803,7 @@ class TestExportWsSchemas:
         """Handles non-dict schema_fixed (unlikely but covered)."""
         with (
             patch("scripts.generate_types.discover_ws_schemas") as mock_discover,
-            patch("scripts.generate_types.WsMessageSchema"),
+            patch("scripts.generate_types.StrictDataSchema"),
             patch("scripts.generate_types.fix_refs_pydantic") as mock_fix,
         ):
             mock_model = MagicMock()

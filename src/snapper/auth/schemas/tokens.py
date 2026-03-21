@@ -6,15 +6,19 @@ and token pair responses.
 
 from typing import Literal
 
-from snapper.api.schemas.base import StrictApiSchema
-from snapper.api.schemas.base import StrictWsSchema
+from pydantic import BaseModel
+from pydantic import ConfigDict
+
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
-class TokenClaims(StrictWsSchema):
+class TokenClaims(BaseModel):
     """JWT token claims schema.
 
     Contains all claims embedded in access and refresh tokens.
+    Does not inherit StrictDataSchema because JWT claims are external
+    tokens parsed from JWTs, not internal bus messages.
 
     Attributes:
         sub: Subject (user ID).
@@ -27,6 +31,8 @@ class TokenClaims(StrictWsSchema):
         sid: Session ID for token rotation tracking.
     """
 
+    model_config = ConfigDict(extra="forbid", strict=False)
+
     sub: str
     username: str
     role: UserRole
@@ -37,7 +43,7 @@ class TokenClaims(StrictWsSchema):
     sid: str
 
 
-class TokenPair(StrictApiSchema):
+class TokenPair(StrictDataSchema):
     """Token pair response schema.
 
     Returned after successful authentication containing both

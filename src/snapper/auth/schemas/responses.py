@@ -7,11 +7,11 @@ API responses.
 from datetime import datetime
 from typing import Literal
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.schemas.user import UserProfile
 
 
-class LoginResponse(StrictApiSchema):
+class LoginResponse(StrictDataSchema):
     """Login response schema.
 
     Returned after successful authentication.
@@ -29,7 +29,7 @@ class LoginResponse(StrictApiSchema):
     user: UserProfile
 
 
-class RefreshResponse(StrictApiSchema):
+class RefreshResponse(StrictDataSchema):
     """Token refresh response schema.
 
     Returned after successful token refresh.
@@ -51,7 +51,7 @@ class RefreshResponse(StrictApiSchema):
     user: UserProfile
 
 
-class UserListResponse(StrictApiSchema):
+class UserListResponse(StrictDataSchema):
     """User list response schema.
 
     Returned by user listing endpoints.

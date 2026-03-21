@@ -10,12 +10,12 @@ from typing import Literal
 
 from pydantic import ConfigDict
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 
 __all__ = ["WsTokenPayload", "WsTokenResult"]
 
 
-class WsTokenPayload(StrictApiSchema):
+class WsTokenPayload(StrictDataSchema):
     """WebSocket token JWT payload schema.
 
     Contains claims for a single-use WebSocket connection token.

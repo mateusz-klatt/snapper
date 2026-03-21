@@ -6,11 +6,11 @@ messages and responses.
 
 from typing import Literal
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
-class WebSocketAuthMessage(StrictApiSchema):
+class WebSocketAuthMessage(StrictDataSchema):
     """WebSocket authentication message schema.
 
     Sent by client to authenticate WebSocket connection.
@@ -24,7 +24,7 @@ class WebSocketAuthMessage(StrictApiSchema):
     token: str
 
 
-class WebSocketAuthResponse(StrictApiSchema):
+class WebSocketAuthResponse(StrictDataSchema):
     """WebSocket authentication response schema.
 
     Sent by server after authentication attempt.

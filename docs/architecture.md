@@ -93,9 +93,9 @@ Persistence layer with SQLAlchemy:
     - `session_id` (str, required) — producer session identity
     - `sequence_id` (int, required) — per-table monotonic counter for gap detection
 
-    `StrictDataSchema` (Pydantic base) enforces these as required fields with
-    no defaults. `StrictApiSchema` and `WsMessageSchema` provide sentinel defaults
-    since their objects are stamped by middleware/handlers before delivery.
+    `StrictDataSchema` (Pydantic base) provides sentinel defaults for these
+    fields. Objects published via MessagePublisher, REST middleware, or WS
+    handlers get real values stamped before delivery.
 
     All ORM models use a dual-key pattern:
 
@@ -199,7 +199,7 @@ FastAPI application:
 Shared API schemas and WebSocket auth helpers (not route definitions):
 
 - **Schemas** (`schemas/`) — Pydantic request/response models (health, process, settings).
-  `StrictApiSchema` inherits from `StrictDataSchema`, so all REST API responses carry
+  All REST API response models inherit from `StrictDataSchema`, so they carry
   per-item provenance (`public_id`, `session_id`, `sequence_id`, `timestamp`, `type`)
 - **Auth** (`auth/`) — WebSocket token service and schemas
 

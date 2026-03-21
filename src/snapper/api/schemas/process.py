@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleType
@@ -55,7 +55,7 @@ __all__ = [
 ]
 
 
-class ProcessStartRequest(StrictApiSchema):
+class ProcessStartRequest(StrictDataSchema):
     """Process start request schema.
 
     Used to start a configured process with optional parameter overrides.
@@ -90,7 +90,7 @@ class ProcessStartRequest(StrictApiSchema):
     )
 
 
-class ProcessCreateRequest(StrictApiSchema):
+class ProcessCreateRequest(StrictDataSchema):
     """Process creation request schema.
 
     Used to create a new process configuration from a template.
@@ -141,7 +141,7 @@ class ProcessCreateRequest(StrictApiSchema):
     )
 
 
-class TradeStartRequest(StrictApiSchema):
+class TradeStartRequest(StrictDataSchema):
     """Trade execution start request schema.
 
     Used to start live trading with a specific strategy.
@@ -157,7 +157,7 @@ class TradeStartRequest(StrictApiSchema):
     paper: bool = Field(default=False, description="Enable paper trading mode")
 
 
-class BacktestRequest(StrictApiSchema):
+class BacktestRequest(StrictDataSchema):
     """Backtest request schema.
 
     Used to start a backtest run.
@@ -175,7 +175,7 @@ class BacktestRequest(StrictApiSchema):
     end: str = Field(description="End date in YYYY-MM-DD format")
 
 
-class ProcessStatus(StrictApiSchema):
+class ProcessStatus(StrictDataSchema):
     """Process status response schema.
 
     Represents the current status of a single process.
@@ -201,7 +201,7 @@ class ProcessStatus(StrictApiSchema):
     error: str | None = Field(default=None, description="Error message if failed")
 
 
-class StrategyStatusPayload(StrictApiSchema):
+class StrategyStatusPayload(StrictDataSchema):
     """Strategy process status payload for the system status endpoint.
 
     Attributes:
@@ -231,7 +231,7 @@ class StrategyStatusPayload(StrictApiSchema):
     uptime: str | None = Field(None, description="Process uptime")
 
 
-class SystemStatus(StrictApiSchema):
+class SystemStatus(StrictDataSchema):
     """System-wide status response schema.
 
     Provides status of the trader process, backtests, and active strategies.
@@ -251,7 +251,7 @@ class SystemStatus(StrictApiSchema):
     )
 
 
-class BacktestStatus(StrictApiSchema):
+class BacktestStatus(StrictDataSchema):
     """Backtest status response schema.
 
     Represents the current status of a backtest run.
@@ -277,7 +277,7 @@ class BacktestStatus(StrictApiSchema):
     error: str | None = None
 
 
-class BacktestOutput(StrictApiSchema):
+class BacktestOutput(StrictDataSchema):
     """Backtest output response schema.
 
     Contains output lines from a backtest run.
@@ -295,7 +295,7 @@ class BacktestOutput(StrictApiSchema):
     status: SpawnerProcessStatus
 
 
-class AvailableProcess(StrictApiSchema):
+class AvailableProcess(StrictDataSchema):
     """Available process template response schema.
 
     Describes a registered process that can be instantiated.
@@ -323,7 +323,7 @@ class AvailableProcess(StrictApiSchema):
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
 
 
-class AvailableProcessesResponse(StrictApiSchema):
+class AvailableProcessesResponse(StrictDataSchema):
     """Available processes list response schema.
 
     Attributes:
@@ -337,7 +337,7 @@ class AvailableProcessesResponse(StrictApiSchema):
     count: int
 
 
-class ConfiguredProcess(StrictApiSchema):
+class ConfiguredProcess(StrictDataSchema):
     """Configured process response schema.
 
     Describes a process configuration with its current runtime state.
@@ -379,7 +379,7 @@ class ConfiguredProcess(StrictApiSchema):
     active_public_id: str | None = Field(None, description="Active public ID if running")
 
 
-class ConfiguredProcessesResponse(StrictApiSchema):
+class ConfiguredProcessesResponse(StrictDataSchema):
     """Configured processes list response schema.
 
     Attributes:
@@ -393,7 +393,7 @@ class ConfiguredProcessesResponse(StrictApiSchema):
     count: int
 
 
-class ProcessCategoryCount(StrictApiSchema):
+class ProcessCategoryCount(StrictDataSchema):
     """Running/total count for a process category.
 
     Attributes:
@@ -407,7 +407,7 @@ class ProcessCategoryCount(StrictApiSchema):
     total: int = Field(description="Total number of configured processes")
 
 
-class ProcessSummaryResponse(StrictApiSchema):
+class ProcessSummaryResponse(StrictDataSchema):
     """Lightweight process summary for the overview dashboard.
 
     Attributes:
@@ -425,7 +425,7 @@ class ProcessSummaryResponse(StrictApiSchema):
     brokers: ProcessCategoryCount = Field(description="Broker process counts")
 
 
-class StrategyProcess(StrictApiSchema):
+class StrategyProcess(StrictDataSchema):
     """Lightweight strategy process info for read-only views.
 
     Attributes:
@@ -443,7 +443,7 @@ class StrategyProcess(StrictApiSchema):
     mode: ProcessMode = Field(description="Execution mode (thread/process)")
 
 
-class StrategyListResponse(StrictApiSchema):
+class StrategyListResponse(StrictDataSchema):
     """Strategy processes list response.
 
     Attributes:
@@ -457,7 +457,7 @@ class StrategyListResponse(StrictApiSchema):
     count: int
 
 
-class ProcessCreatedInfo(StrictApiSchema):
+class ProcessCreatedInfo(StrictDataSchema):
     """Process creation info schema.
 
     Attributes:
@@ -471,7 +471,7 @@ class ProcessCreatedInfo(StrictApiSchema):
     template: str = Field(description="Template used for creation")
 
 
-class ProcessCreateResponse(StrictApiSchema):
+class ProcessCreateResponse(StrictDataSchema):
     """Process creation response schema.
 
     Attributes:
@@ -485,7 +485,7 @@ class ProcessCreateResponse(StrictApiSchema):
     process: ProcessCreatedInfo = Field(description="Created process info")
 
 
-class ProcessSchemaResponse(StrictApiSchema):
+class ProcessSchemaResponse(StrictDataSchema):
     """Process schema response.
 
     Describes a process template schema with default values.
@@ -515,7 +515,7 @@ class ProcessSchemaResponse(StrictApiSchema):
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 
 
-class ProcessRun(StrictApiSchema):
+class ProcessRun(StrictDataSchema):
     """Process run record response schema.
 
     Represents a single execution run of a process.
@@ -549,7 +549,7 @@ class ProcessRun(StrictApiSchema):
     completed_at: str | None = Field(None, description="Completion time if finished")
 
 
-class ProcessRunsResponse(StrictApiSchema):
+class ProcessRunsResponse(StrictDataSchema):
     """Process runs list response schema.
 
     Attributes:
@@ -563,7 +563,7 @@ class ProcessRunsResponse(StrictApiSchema):
     count: int
 
 
-class ProcessRuntimeStatus(StrictApiSchema):
+class ProcessRuntimeStatus(StrictDataSchema):
     """Process runtime status response schema.
 
     Represents the current runtime state of a process.
@@ -587,7 +587,7 @@ class ProcessRuntimeStatus(StrictApiSchema):
     details: dict[str, Any] | None = Field(None, description="Additional process details")
 
 
-class ProcessStartResponse(StrictApiSchema):
+class ProcessStartResponse(StrictDataSchema):
     """Process start response schema.
 
     Attributes:
@@ -607,7 +607,7 @@ class ProcessStartResponse(StrictApiSchema):
     message: str | None = Field(None, description="Additional message")
 
 
-class ProcessStopResponse(StrictApiSchema):
+class ProcessStopResponse(StrictDataSchema):
     """Process stop response schema.
 
     Attributes:

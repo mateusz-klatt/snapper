@@ -565,11 +565,11 @@ payload, so they must always be published with an explicit topic override.
 
 ## WebSocket Message Provenance
 
-`WsMessageSchema` inherits from `StrictDataSchema`, so all WebSocket protocol messages
-(authentication, subscription management, ping/pong, errors) carry the same provenance
+All WebSocket protocol messages (authentication, subscription management, ping/pong,
+errors) inherit directly from `StrictDataSchema`, so they carry the same provenance
 fields as ZMQ data payloads: `public_id`, `session_id`, `sequence_id`, and `timestamp`.
-This means every payload item in the system — whether it flows over ZMQ, REST, or
-WebSocket — has a uniform provenance envelope.
+Every payload item in the system — whether it flows over ZMQ, REST, or WebSocket — has
+a uniform provenance envelope.
 
 ## Audit Tables: Control and Telemetry
 

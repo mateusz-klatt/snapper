@@ -1195,8 +1195,8 @@ There is no `"data"` wrapper. Messages with malformed JSON are dropped by the br
 before forwarding and are counted in the `invalid_messages` metric for the topic.
 
 All data messages carry `session_id` and `sequence_id` provenance fields (see REST section
-above). `WsMessageSchema` inherits from `StrictDataSchema`, so WebSocket control messages
-(auth, subscribe, ping/pong, errors) also carry the same provenance envelope. Clients can
+above). All WebSocket control messages (auth, subscribe, ping/pong, errors) inherit from
+`StrictDataSchema`, so they also carry the same provenance envelope. Clients can
 use these fields to detect gaps without server-side replay support.
 
 #### Candle

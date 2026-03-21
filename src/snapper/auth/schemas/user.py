@@ -10,11 +10,11 @@ from typing import Literal
 
 from pydantic import Field
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
-class UserProfile(StrictApiSchema):
+class UserProfile(StrictDataSchema):
     """User profile schema.
 
     Represents authenticated user information returned by API

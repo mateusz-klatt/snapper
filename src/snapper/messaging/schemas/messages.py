@@ -111,6 +111,6 @@ def parse_message(data: str) -> StrictDataSchema:
     if not message_class:
         raise MessageParseError(f"Unknown message type: {msg_type}")
     try:
-        return message_class.model_validate(raw_data)
+        return message_class.model_validate_json(data)
     except Exception as e:
         raise MessageParseError(f"Failed to validate {msg_type} message: {e}") from e

@@ -463,7 +463,7 @@ async def test_broadcast_cache_invalidation_stamped_envelope(
     assert data["session_id"] == tracker.session_id
     assert data["session_id"] != ""
     assert data["sequence_id"] >= 1
-    stamped = SymbolAliasUpdateData.model_validate(data)
+    stamped = SymbolAliasUpdateData.model_validate_json(raw)
     assert isinstance(stamped, SymbolAliasUpdateData)
 
 

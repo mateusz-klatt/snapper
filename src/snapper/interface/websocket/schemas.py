@@ -16,7 +16,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from snapper.api.schemas.base import WsMessageSchema
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 from snapper.core.types import ExecutionMode
 from snapper.core.types import FillStatus
@@ -39,7 +39,7 @@ __all__ = [
 ]
 
 
-class WSErrorResponse(WsMessageSchema):
+class WSErrorResponse(StrictDataSchema):
     """WebSocket error response message.
 
     Sent when an error occurs during message processing.
@@ -53,7 +53,7 @@ class WSErrorResponse(WsMessageSchema):
     message: str = Field(..., description="Error description")
 
 
-class WSAuthOkResponse(WsMessageSchema):
+class WSAuthOkResponse(StrictDataSchema):
     """Authentication success acknowledgment.
 
     Sent after successful ws_token verification.
@@ -67,7 +67,7 @@ class WSAuthOkResponse(WsMessageSchema):
     exp: datetime = Field(..., description="Token expiration (ISO 8601)")
 
 
-class WSAuthRequiredResponse(WsMessageSchema):
+class WSAuthRequiredResponse(StrictDataSchema):
     """Authentication request message.
 
     Sent immediately after WebSocket connection to request authentication.
@@ -81,7 +81,7 @@ class WSAuthRequiredResponse(WsMessageSchema):
     timeout: int = Field(default=30, description="Authentication timeout in seconds")
 
 
-class WSAuthFailedResponse(WsMessageSchema):
+class WSAuthFailedResponse(StrictDataSchema):
     """Authentication failure message.
 
     Sent when authentication fails for any reason.
@@ -95,7 +95,7 @@ class WSAuthFailedResponse(WsMessageSchema):
     reason: str | None = Field(default=None, description="Failure reason")
 
 
-class WSReauthRequiredResponse(WsMessageSchema):
+class WSReauthRequiredResponse(StrictDataSchema):
     """Reauthentication warning message.
 
     Sent before token expiration to prompt client to refresh.
@@ -109,7 +109,7 @@ class WSReauthRequiredResponse(WsMessageSchema):
     deadline: datetime = Field(..., description="Deadline for reauthentication (ISO 8601)")
 
 
-class WSReauthOkResponse(WsMessageSchema):
+class WSReauthOkResponse(StrictDataSchema):
     """Reauthentication success acknowledgment.
 
     Sent after successful token refresh.
@@ -123,7 +123,7 @@ class WSReauthOkResponse(WsMessageSchema):
     exp: datetime = Field(..., description="New token expiration (ISO 8601)")
 
 
-class WSAuthExpiredResponse(WsMessageSchema):
+class WSAuthExpiredResponse(StrictDataSchema):
     """Authentication expiration notification.
 
     Sent when token expires and grace period ends.
@@ -135,7 +135,7 @@ class WSAuthExpiredResponse(WsMessageSchema):
     type: Literal["auth_expired"] = Field("auth_expired", description=_TYPE_DESC)
 
 
-class WSAuthCompleteResponse(WsMessageSchema):
+class WSAuthCompleteResponse(StrictDataSchema):
     """Authentication complete message with session info.
 
     Sent after successful authentication with available topics.
@@ -157,7 +157,7 @@ class WSAuthCompleteResponse(WsMessageSchema):
     ws_token_exp: datetime = Field(..., description="WS token expiration (ISO 8601)")
 
 
-class WSSubscribeRequest(WsMessageSchema):
+class WSSubscribeRequest(StrictDataSchema):
     """Topic subscription request from client.
 
     Attributes:
@@ -169,7 +169,7 @@ class WSSubscribeRequest(WsMessageSchema):
     topics: list[str] = Field(..., description="Topics to subscribe to")
 
 
-class WSUnsubscribeRequest(WsMessageSchema):
+class WSUnsubscribeRequest(StrictDataSchema):
     """Topic unsubscription request from client.
 
     Attributes:
@@ -181,7 +181,7 @@ class WSUnsubscribeRequest(WsMessageSchema):
     topics: list[str] = Field(..., description="Topics to unsubscribe from")
 
 
-class WSSubscriptionSuccessResponse(WsMessageSchema):
+class WSSubscriptionSuccessResponse(StrictDataSchema):
     """Subscription operation result message.
 
     Sent after subscribe/unsubscribe operations with detailed status.
@@ -211,7 +211,7 @@ class WSSubscriptionSuccessResponse(WsMessageSchema):
     )
 
 
-class WSSubscriptionsListResponse(WsMessageSchema):
+class WSSubscriptionsListResponse(StrictDataSchema):
     """Active subscriptions list response.
 
     Sent in response to get_subscriptions request.
@@ -229,7 +229,7 @@ class WSSubscriptionsListResponse(WsMessageSchema):
     total_available: int = Field(..., description="Total number of available topics")
 
 
-class WSPongResponse(WsMessageSchema):
+class WSPongResponse(StrictDataSchema):
     """Pong response to ping request.
 
     Includes server timestamp and connection count.
@@ -245,7 +245,7 @@ class WSPongResponse(WsMessageSchema):
     active_connections: int = Field(..., description="Number of active WebSocket connections")
 
 
-class WSAuthenticateRequest(WsMessageSchema):
+class WSAuthenticateRequest(StrictDataSchema):
     """Initial authentication request from client.
 
     Sent in response to auth_required message.
@@ -259,7 +259,7 @@ class WSAuthenticateRequest(WsMessageSchema):
     ws_token: str = Field(..., description="WebSocket authentication token")
 
 
-class WSReauthRequest(WsMessageSchema):
+class WSReauthRequest(StrictDataSchema):
     """Reauthentication request from client.
 
     Sent to refresh token before expiration.
@@ -273,7 +273,7 @@ class WSReauthRequest(WsMessageSchema):
     ws_token: str = Field(..., description="New WebSocket authentication token")
 
 
-class WSPingRequest(WsMessageSchema):
+class WSPingRequest(StrictDataSchema):
     """Ping request from client.
 
     Used for connection health checks.
@@ -285,7 +285,7 @@ class WSPingRequest(WsMessageSchema):
     type: Literal["ping"] = Field(default="ping", description=_TYPE_DESC)
 
 
-class WSGetSubscriptionsRequest(WsMessageSchema):
+class WSGetSubscriptionsRequest(StrictDataSchema):
     """Request current subscriptions list.
 
     Attributes:

@@ -9,11 +9,11 @@ from typing import Literal
 
 from pydantic import Field
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
-class LoginRequest(StrictApiSchema):
+class LoginRequest(StrictDataSchema):
     """Login request schema.
 
     Attributes:
@@ -29,7 +29,7 @@ class LoginRequest(StrictApiSchema):
     remember_me: bool = False
 
 
-class CreateUserRequest(StrictApiSchema):
+class CreateUserRequest(StrictDataSchema):
     """Create user request schema.
 
     Attributes:
@@ -49,7 +49,7 @@ class CreateUserRequest(StrictApiSchema):
     is_active: bool = True
 
 
-class UpdateUserRequest(StrictApiSchema):
+class UpdateUserRequest(StrictDataSchema):
     """Update user request schema.
 
     All fields are optional - only provided fields are updated.
@@ -67,7 +67,7 @@ class UpdateUserRequest(StrictApiSchema):
     is_active: bool | None = None
 
 
-class ChangePasswordRequest(StrictApiSchema):
+class ChangePasswordRequest(StrictDataSchema):
     """Change password request schema.
 
     Used by authenticated users to change their own password.
@@ -83,7 +83,7 @@ class ChangePasswordRequest(StrictApiSchema):
     new_password: str = Field(min_length=8)
 
 
-class AdminResetPasswordRequest(StrictApiSchema):
+class AdminResetPasswordRequest(StrictDataSchema):
     """Admin password reset request schema.
 
     Used by admins to reset another user's password

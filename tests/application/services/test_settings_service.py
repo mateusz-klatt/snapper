@@ -349,7 +349,7 @@ class TestSettingsService:
         assert data["session_id"] == tracker.session_id
         assert data["session_id"] != ""
         assert data["sequence_id"] >= 1
-        stamped = SettingChangedData.model_validate(data)
+        stamped = SettingChangedData.model_validate_json(raw)
         assert isinstance(stamped, SettingChangedData)
 
     @pytest.mark.asyncio

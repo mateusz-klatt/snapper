@@ -9,10 +9,10 @@ from typing import Literal
 
 from pydantic import Field
 
-from snapper.api.schemas.base import StrictApiSchema
+from snapper.api.schemas.base import StrictDataSchema
 
 
-class SettingRead(StrictApiSchema):
+class SettingRead(StrictDataSchema):
     """Setting read response schema.
 
     Returned when fetching a setting from the database.
@@ -36,7 +36,7 @@ class SettingRead(StrictApiSchema):
     updated_by: str | None = None
 
 
-class SettingUpdate(StrictApiSchema):
+class SettingUpdate(StrictDataSchema):
     """Setting update request schema.
 
     Used when updating an existing setting.
@@ -54,7 +54,7 @@ class SettingUpdate(StrictApiSchema):
     description: str | None = Field(None, description="Setting description")
 
 
-class SettingCreate(StrictApiSchema):
+class SettingCreate(StrictDataSchema):
     """Setting creation request schema.
 
     Used when creating a new setting.

@@ -24,7 +24,6 @@ from typing import Any
 from pydantic import BaseModel
 
 from snapper.api.schemas.base import StrictDataSchema
-from snapper.api.schemas.base import WsMessageSchema
 from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS as BACKEND_RESOURCE_PERMISSIONS
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS as BACKEND_ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
@@ -260,7 +259,7 @@ def discover_ws_schemas() -> list[tuple[str, type[BaseModel]]]:
         List of tuples containing schema name and model class.
     """
     discovered: list[tuple[str, type[BaseModel]]] = []
-    discovered.append(("WsMessageBase", WsMessageSchema))
+    discovered.append(("WsMessageBase", StrictDataSchema))
 
     for name, obj in inspect.getmembers(data_schemas):
         if (
