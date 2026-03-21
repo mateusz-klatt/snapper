@@ -24,7 +24,7 @@ from pydantic import ValidationError
 
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config.settings import get_settings
 from snapper.core.redact import redact
@@ -186,7 +186,7 @@ async def _record_ws_telemetry(
 async def send_auth_complete(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: UserProfile,
+    user: AuthPrincipal,
     ws_payload: WsTokenPayload,
     ws_auth_manager: WebSocketAuthManager,
     db_url: str | None = None,
@@ -249,7 +249,7 @@ def _try_parse_message(
 async def _handle_one_message(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: UserProfile,
+    user: AuthPrincipal,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     raw_message: str,
@@ -319,7 +319,7 @@ async def _handle_one_message(
 async def dispatch_messages(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: UserProfile,
+    user: AuthPrincipal,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     db_url: str | None = None,
@@ -375,7 +375,7 @@ async def dispatch_messages(
 def _build_dispatch_table(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: UserProfile,
+    user: AuthPrincipal,
 ) -> dict[type, Callable[[Any], Awaitable[None]]]:
     """Build a message-type-to-handler dispatch table.
 
@@ -401,7 +401,7 @@ async def _dispatch_single_message(
     websocket: WebSocket,
     message: WSClientMessage,
     manager: WebSocketConnectionManager,
-    user: UserProfile,
+    user: AuthPrincipal,
 ) -> None:
     """Route a validated message to its handler.
 

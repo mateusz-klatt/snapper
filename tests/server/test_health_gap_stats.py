@@ -12,7 +12,7 @@ from snapper.api.schemas.health import GapStatsSchema
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
 from snapper.server.app import _collect_gap_detection_stats
@@ -110,8 +110,8 @@ class TestHealthEndpointGapStats:
         def skip_csrf_validation() -> None:
             return None
 
-        def skip_authentication() -> UserProfile:
-            return UserProfile(username="test_user", role=UserRole.ADMIN)
+        def skip_authentication() -> AuthPrincipal:
+            return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication

@@ -22,7 +22,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.auth.dependencies import require_permission
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/strategies", tags=["strategies"])
 @router.get("")
 async def list_strategies(
     request: Request,
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.READ_STRATEGIES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_STRATEGIES))],
 ) -> StrategyListResponse:
     """List configured strategy processes with lightweight status.
 

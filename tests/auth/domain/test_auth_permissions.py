@@ -28,9 +28,9 @@ from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
-from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import BLACKLIST_GRACE_PERIOD_SECONDS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
@@ -615,7 +615,7 @@ class TestTokenManager:
         Then: TokenPair with valid JWTs and claims is returned.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             email="test@example.com",
             role=UserRole.OPERATOR,
@@ -654,7 +654,7 @@ class TestTokenManager:
         Then: Refresh token has longer expiration.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -682,7 +682,7 @@ class TestTokenManager:
         """
         token_manager = TokenManager()
         for role in UserRole:
-            user = UserProfile(
+            user = AuthPrincipal(
                 username=f"user_{role.value}",
                 role=role,
                 is_active=True,
@@ -701,7 +701,7 @@ class TestTokenManager:
         Then: TokenClaims with user data is returned.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -835,7 +835,7 @@ class TestTokenManager:
         Then: None is returned.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -871,7 +871,7 @@ class TestTokenManager:
         Then: New token pair with different tokens is returned.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -906,7 +906,7 @@ class TestTokenManager:
         Then: None is returned.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -936,7 +936,7 @@ class TestTokenManager:
         Then: verify_token returns None for that token.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -1026,7 +1026,7 @@ class TestWebSocketTokenRotator:
         """
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1087,7 +1087,7 @@ class TestWebSocketTokenRotator:
         """
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1137,7 +1137,7 @@ class TestWebSocketTokenRotator:
         """
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -1173,7 +1173,7 @@ class TestWebSocketTokenRotator:
         """
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1247,7 +1247,7 @@ class TestIntegrationScenarios:
         Then: Each step behaves correctly.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="lifecycleuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1277,7 +1277,7 @@ class TestIntegrationScenarios:
         """
         token_manager = TokenManager()
         rotator = WebSocketTokenRotator(token_manager)
-        user = UserProfile(
+        user = AuthPrincipal(
             username="wsuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -1331,7 +1331,7 @@ class TestIntegrationScenarios:
         """
         token_manager = TokenManager()
         for role in UserRole:
-            user = UserProfile(
+            user = AuthPrincipal(
                 username=f"user_{role.value}",
                 role=role,
                 is_active=True,
@@ -1350,7 +1350,7 @@ class TestIntegrationScenarios:
         Then: Other tokens remain valid.
         """
         token_manager = TokenManager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="concurrentuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -1443,7 +1443,7 @@ class TestRequireAuthentication:
         When: require_authentication is called,
         Then: Same user is returned.
         """
-        user = UserProfile(username="testuser", role=UserRole.OPERATOR)
+        user = AuthPrincipal(username="testuser", role=UserRole.OPERATOR)
         result = require_authentication(user)
         assert result == user
 
@@ -1470,7 +1470,7 @@ class TestRequirePermission:
         When: Permission checker is called,
         Then: User is returned.
         """
-        user = UserProfile(username="testuser", role=UserRole.ADMIN)
+        user = AuthPrincipal(username="testuser", role=UserRole.ADMIN)
         permission_checker = require_permission(Permission.MANAGE_PROCESSES)
         with patch(
             "snapper.auth.domain.permissions.ROLE_PERMISSIONS",
@@ -1486,7 +1486,7 @@ class TestRequirePermission:
         When: Permission checker is called,
         Then: HTTPException with 403 status is raised.
         """
-        user = UserProfile(username="testuser", role=UserRole.VIEWER)
+        user = AuthPrincipal(username="testuser", role=UserRole.VIEWER)
         permission_checker = require_permission(Permission.MANAGE_PROCESSES)
         with patch("snapper.auth.domain.permissions.ROLE_PERMISSIONS", {UserRole.VIEWER: set()}):
             with pytest.raises(HTTPException) as exc_info:
@@ -1567,7 +1567,7 @@ class TestRequireRole:
         When: Role checker is called,
         Then: User is returned.
         """
-        user = UserProfile(username="testuser", role=UserRole.ADMIN)
+        user = AuthPrincipal(username="testuser", role=UserRole.ADMIN)
         role_checker = require_role(UserRole.OPERATOR)
         result = role_checker(user)
         assert result == user
@@ -1579,7 +1579,7 @@ class TestRequireRole:
         When: Role checker is called,
         Then: User is returned.
         """
-        user = UserProfile(username="testuser", role=UserRole.OPERATOR)
+        user = AuthPrincipal(username="testuser", role=UserRole.OPERATOR)
         role_checker = require_role(UserRole.OPERATOR)
         result = role_checker(user)
         assert result == user
@@ -1591,7 +1591,7 @@ class TestRequireRole:
         When: Role checker is called,
         Then: HTTPException with 403 status is raised.
         """
-        user = UserProfile(username="testuser", role=UserRole.VIEWER)
+        user = AuthPrincipal(username="testuser", role=UserRole.VIEWER)
         role_checker = require_role(UserRole.ADMIN)
         with pytest.raises(HTTPException) as exc_info:
             role_checker(user)

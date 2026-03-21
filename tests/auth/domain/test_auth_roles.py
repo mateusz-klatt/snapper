@@ -8,11 +8,13 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from snapper.auth.domain.roles import UserRole
-from snapper.auth.routes import get_current_user_info
+from snapper.auth.routes import get_current_user_profile
 from snapper.auth.routes import router
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
@@ -21,22 +23,53 @@ from snapper.data.models import User
 
 
 @pytest.mark.asyncio
-async def test_get_current_user_info_returns_user_directly() -> None:
-    """Test get_current_user_info returns the user object directly.
+async def test_get_current_user_profile_returns_user_from_db() -> None:
+    """Test get_current_user_profile loads user from DB via user_service.
 
-    Given: A mock UserProfile with test data.
-    When: get_current_user_info is called with the mock user.
-    Then: The same user object is returned unchanged.
+    Given: An AuthPrincipal and a mocked user_service returning a UserProfile.
+    When: get_current_user_profile is called with the principal.
+    Then: The UserProfile from the service is returned.
     """
-    mock_user = UserProfile(
+    principal = AuthPrincipal(
         username="testuser",
         role=UserRole.VIEWER,
         is_active=True,
     )
-    result = await get_current_user_info(current_user=mock_user)
-    assert result is mock_user
+    expected_profile = UserProfile(
+        username="testuser",
+        role=UserRole.VIEWER,
+        is_active=True,
+    )
+    mock_service = AsyncMock()
+    mock_service.get_user_by_id = AsyncMock(return_value=expected_profile)
+    with patch("snapper.auth.routes.get_user_service", return_value=mock_service):
+        result = await get_current_user_profile(current_user=principal)
+    assert result is expected_profile
     assert result.username == "testuser"
     assert result.role == UserRole.VIEWER
+    mock_service.get_user_by_id.assert_awaited_once_with("testuser")
+
+
+@pytest.mark.asyncio
+async def test_get_current_user_profile_user_deleted_returns_404() -> None:
+    """Test get_current_user_profile returns 404 when user no longer exists.
+
+    Given: An AuthPrincipal for a user that was deleted after token issuance.
+    When: get_current_user_profile is called.
+    Then: HTTPException with 404 status is raised.
+    """
+    principal = AuthPrincipal(
+        username="deleted_user",
+        role=UserRole.VIEWER,
+    )
+    mock_service = AsyncMock()
+    mock_service.get_user_by_id = AsyncMock(return_value=None)
+    with (
+        patch("snapper.auth.routes.get_user_service", return_value=mock_service),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await get_current_user_profile(current_user=principal)
+    assert exc_info.value.status_code == 404
 
 
 app = FastAPI()
@@ -138,7 +171,7 @@ class TestUserManagementBasic:
             )
         ]
         mock_get_service.return_value = mock_user_service
-        mock_admin_user = UserProfile(
+        mock_admin_user = AuthPrincipal(
             username="admin",
             role=UserRole.ADMIN,
             is_active=True,

@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from snapper.api.schemas.settings import SettingRead
 from snapper.api.schemas.settings import SettingUpdate
 from snapper.auth.domain.roles import UserRole
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings_routes import delete_setting
 from snapper.config.settings_routes import get_all_settings
 from snapper.config.settings_routes import get_setting_categories
@@ -88,8 +88,8 @@ class TestSettingsRoutes:
     """Tests for settings API routes and schemas."""
 
     @staticmethod
-    def _make_user(role: UserRole = UserRole.ADMIN) -> UserProfile:
-        return UserProfile(
+    def _make_user(role: UserRole = UserRole.ADMIN) -> AuthPrincipal:
+        return AuthPrincipal(
             username="test_user",
             email="test@example.com",
             role=role,

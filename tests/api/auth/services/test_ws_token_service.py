@@ -10,7 +10,7 @@ from fastapi import WebSocketDisconnect
 
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.auth.domain.roles import UserRole
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.dispatcher import dispatch_messages
@@ -73,7 +73,7 @@ async def test_dispatch_messages_handles_unknown_type() -> None:
     manager = DummyManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(username="alice", role=UserRole.VIEWER)
+    user = AuthPrincipal(username="alice", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
@@ -111,7 +111,7 @@ async def test_dispatch_messages_handles_disconnect() -> None:
     manager = DummyManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(username="alice", role=UserRole.VIEWER)
+    user = AuthPrincipal(username="alice", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
@@ -149,7 +149,7 @@ async def test_dispatch_messages_handles_unexpected_exception() -> None:
     manager = DummyManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(username="bob", role=UserRole.VIEWER)
+    user = AuthPrincipal(username="bob", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
@@ -215,7 +215,7 @@ async def test_dispatch_messages_loop_continues_after_ping() -> None:
     manager = MockConnectionManager()
     ws_auth_manager = DummyWsAuthManager()
     token_service = DummyTokenService()
-    user = UserProfile(username="alice", role=UserRole.VIEWER)
+    user = AuthPrincipal(username="alice", role=UserRole.VIEWER)
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),

@@ -25,6 +25,7 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
 from snapper.auth.schemas.requests import ChangePasswordRequest
 from snapper.auth.schemas.requests import CreateUserRequest
@@ -46,6 +47,7 @@ from snapper.server.rate_limiting import register_failed_login_attempt
 
 _AUTH_API_PATH = "/api/auth"
 _REST_STREAM = "rest.control"
+_USER_NOT_FOUND = "User not found"
 
 
 def _mint_provenance(request: Request) -> tuple[str, int, datetime]:
@@ -119,7 +121,7 @@ async def login(
         )
     clear_failed_login_attempts(request, login_data.username)
     token_manager = get_token_manager()
-    token_pair = token_manager.create_tokens(user)
+    token_pair = token_manager.create_tokens(AuthPrincipal(username=user.username, role=user.role))
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure
@@ -199,10 +201,13 @@ async def refresh_token(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
+            detail=_USER_NOT_FOUND,
         )
     token_manager.blacklist_token(token_data.jti)
-    new_token_pair = token_manager.create_tokens(user, session_id=token_data.sid)
+    new_token_pair = token_manager.create_tokens(
+        AuthPrincipal(username=user.username, role=user.role),
+        session_id=token_data.sid,
+    )
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure
@@ -251,17 +256,27 @@ async def refresh_token(
 
 @router.get("/me")
 async def get_current_user_profile(
-    current_user: Annotated[UserProfile, Depends(require_authentication)],
+    current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
 ) -> UserProfile:
     """Get current user's profile.
 
     Args:
-        current_user: Authenticated user from dependency.
+        current_user: Authenticated principal from dependency.
 
     Returns:
         Current user's UserProfile.
+
+    Raises:
+        HTTPException: 404 if user not found in database.
     """
-    return current_user
+    user_service = get_user_service()
+    user = await user_service.get_user_by_id(current_user.username)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_USER_NOT_FOUND,
+        )
+    return user
 
 
 @router.post("/logout")
@@ -343,25 +358,10 @@ async def logout(
     return _message_response(request, "Logged out successfully")
 
 
-@router.get("/me")
-async def get_current_user_info(
-    current_user: Annotated[UserProfile, Depends(require_authentication)],
-) -> UserProfile:
-    """Get profile information for the currently authenticated user.
-
-    Args:
-        current_user: Authenticated user from dependency.
-
-    Returns:
-        Current user's UserProfile.
-    """
-    return current_user
-
-
 @router.get("/users")
 async def get_users(
     request: Request,
-    current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     include_inactive: bool = False,
 ) -> UserListResponse:
     """List all users in the system.
@@ -389,7 +389,7 @@ async def get_users(
 @router.post("/users")
 async def create_user(
     user_data: CreateUserRequest,
-    current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> UserProfile:
     """Create a new user account.
@@ -425,7 +425,7 @@ async def create_user(
 async def update_user(
     user_id: str,
     user_data: UpdateUserRequest,
-    current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> UserProfile:
     """Update an existing user's profile.
@@ -456,7 +456,7 @@ async def update_user(
 async def delete_user(
     request: Request,
     user_id: str,
-    current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Deactivate a user account.
@@ -491,7 +491,7 @@ async def change_user_password(
     request: Request,
     user_id: str,
     password_data: ChangePasswordRequest,
-    current_user: Annotated[UserProfile, Depends(require_authentication)],
+    current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Change a user's password.
@@ -537,7 +537,7 @@ async def admin_reset_user_password(
     request: Request,
     user_id: str,
     password_data: AdminResetPasswordRequest,
-    current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
+    current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Admin endpoint to reset a user's password without current password.
@@ -562,7 +562,7 @@ async def admin_reset_user_password(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
+            detail=_USER_NOT_FOUND,
         ) from e
     except Exception as e:
         logger.error("Failed to reset password for user {}: {}", user_id, str(e))

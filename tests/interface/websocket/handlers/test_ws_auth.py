@@ -35,6 +35,7 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
 from snapper.auth.schemas.requests import ChangePasswordRequest
 from snapper.auth.schemas.requests import CreateUserRequest
@@ -106,8 +107,8 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
     def skip_csrf_validation() -> None:
         return None
 
-    def skip_authentication() -> UserProfile:
-        return UserProfile(username="test_user", role=UserRole.ADMIN)
+    def skip_authentication() -> AuthPrincipal:
+        return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
     app.dependency_overrides[require_authentication] = skip_authentication
@@ -1221,7 +1222,7 @@ async def test_bridge_creation_when_manager_zmq_bridge_is_none() -> None:
     )
     with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
         mock_auth_manager = MagicMock()
-        user = UserProfile(username="alice", role=UserRole.OPERATOR)
+        user = AuthPrincipal(username="alice", role=UserRole.OPERATOR)
         mock_auth_manager.verify_session_cookie.return_value = (user, token_data)
         mock_auth_manager.get_connection_expiration.return_value = datetime.now(UTC)
         mock_auth.return_value = mock_auth_manager
@@ -1269,7 +1270,7 @@ async def test_websocket_endpoint_handles_unexpected_exception() -> None:
     )
     with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
         mock_auth_manager = MagicMock()
-        user = UserProfile(username="alice", role=UserRole.OPERATOR)
+        user = AuthPrincipal(username="alice", role=UserRole.OPERATOR)
         mock_auth_manager.verify_session_cookie.return_value = (user, token_data)
         mock_auth_manager.get_connection_expiration.return_value = datetime.now(UTC)
         mock_auth.return_value = mock_auth_manager
@@ -2225,9 +2226,9 @@ def mock_websocket() -> MagicMock:
 
 
 @pytest.fixture
-def mock_user() -> UserProfile:
-    """Provide mock admin user profile."""
-    return UserProfile(
+def mock_user() -> AuthPrincipal:
+    """Provide mock admin auth principal."""
+    return AuthPrincipal(
         username="testuser",
         email="test@example.com",
         role=UserRole.ADMIN,
@@ -2285,7 +2286,7 @@ class TestAuthResult:
     """Tests for AuthResult data class."""
 
     def test_auth_result_success(
-        self, mock_user: UserProfile, mock_ws_payload: WsTokenPayload
+        self, mock_user: AuthPrincipal, mock_ws_payload: WsTokenPayload
     ) -> None:
         """AuthResult holds success state with user and payload.
 
@@ -2432,7 +2433,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_token_data: MagicMock,
         tracker: SequenceTracker,
     ) -> None:
@@ -2462,7 +2463,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_token_data: MagicMock,
         tracker: SequenceTracker,
     ) -> None:
@@ -2492,7 +2493,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_token_data: MagicMock,
         tracker: SequenceTracker,
     ) -> None:
@@ -2521,7 +2522,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_token_data: MagicMock,
         tracker: SequenceTracker,
     ) -> None:
@@ -2550,7 +2551,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_token_data: MagicMock,
         tracker: SequenceTracker,
     ) -> None:
@@ -2585,7 +2586,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_token_data: MagicMock,
         tracker: SequenceTracker,
     ) -> None:
@@ -2620,7 +2621,7 @@ class TestAuthenticateWebsocket:
         mock_websocket: MagicMock,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_token_data: MagicMock,
         mock_ws_payload: WsTokenPayload,
         tracker: SequenceTracker,
@@ -2664,7 +2665,7 @@ class TestHandleReauth:
     async def test_missing_session_state(
         self,
         mock_websocket: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
         tracker: SequenceTracker,
@@ -2692,7 +2693,7 @@ class TestHandleReauth:
     async def test_ws_token_replay_attack(
         self,
         mock_websocket: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
         tracker: SequenceTracker,
@@ -2723,7 +2724,7 @@ class TestHandleReauth:
     async def test_invalid_ws_token(
         self,
         mock_websocket: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
         tracker: SequenceTracker,
@@ -2754,7 +2755,7 @@ class TestHandleReauth:
     async def test_successful_reauth(
         self,
         mock_websocket: MagicMock,
-        mock_user: UserProfile,
+        mock_user: AuthPrincipal,
         mock_ws_auth_manager: MagicMock,
         mock_ws_token_service: MagicMock,
         mock_ws_payload: WsTokenPayload,
@@ -2896,13 +2897,13 @@ class StubTokenManager:
         self.verify_response: TokenClaims | None = None
         self.invalidated_tokens: list[str] = []
         self.blacklisted: list[str] = []
-        self.last_created_user: UserProfile | None = None
+        self.last_created_user: AuthPrincipal | None = None
         self.last_verified_token: str | None = None
         self.last_session_id: str | None = None
 
     def create_tokens(
         self,
-        user: UserProfile,
+        user: AuthPrincipal,
         remember_me: bool = False,
         *,
         session_id: str | None = None,
@@ -3028,7 +3029,7 @@ def auth_app(
     app.state.settings = settings
     app.state.rest_tracker = SequenceTracker()
     app.include_router(routes.router)
-    current_user = UserProfile(username="alice", role=UserRole.ADMIN)
+    current_user = AuthPrincipal(username="alice", role=UserRole.ADMIN)
     app.dependency_overrides[validate_csrf_token] = lambda: None
     app.dependency_overrides[require_authentication] = lambda: current_user
     client = TestClient(app)
@@ -3060,7 +3061,9 @@ def test_login_success_sets_cookies(
     assert response.status_code == 200
     body = response.json()
     assert body["message"] == "Login successful"
-    assert token_manager.last_created_user == user
+    assert token_manager.last_created_user is not None
+    assert token_manager.last_created_user.username == user.username
+    assert token_manager.last_created_user.role == user.role
     assert response.cookies.get("access_token") == "new-access"
     assert response.cookies.get("refresh_token") == "new-refresh"
     assert response.cookies.get("csrf_token") == "csrf-new"
@@ -3138,12 +3141,14 @@ def test_get_current_user_profile_returns_user(
     When: Calling /me endpoint,
     Then: Returns current user profile.
     """
-    client, _user_service, _token_manager, _csrf_manager = auth_app
+    client, user_service, _token_manager, _csrf_manager = auth_app
+    user_service.user_by_id = UserProfile(username="alice", role=UserRole.ADMIN)
     response = client.get("/auth/me")
     assert response.status_code == 200
     payload = response.json()
     assert payload["username"] == "alice"
     assert payload["role"] == "admin"
+    user_service.user_by_id = None
 
 
 def test_refresh_token_missing_cookie_returns_401(
@@ -3256,12 +3261,14 @@ def test_get_current_user_info(
     When: Calling /me endpoint,
     Then: Returns username and role.
     """
-    client, _, _, _ = auth_app
+    client, user_service, _, _ = auth_app
+    user_service.user_by_id = UserProfile(username="alice", role=UserRole.ADMIN)
     response = client.get("/auth/me")
     assert response.status_code == 200
     data: dict[str, Any] = response.json()
     assert data["username"] == "alice"
     assert data["role"] == UserRole.ADMIN.value
+    user_service.user_by_id = None
 
 
 @pytest.mark.asyncio()
@@ -3308,7 +3315,7 @@ async def test_create_user_success(monkeypatch: Any) -> None:
     )
     result = await routes.create_user(
         user_data=request,
-        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+        current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.username == "charlie"
@@ -3335,7 +3342,7 @@ async def test_create_user_value_error(monkeypatch: Any) -> None:
     with pytest.raises(HTTPException) as exc:
         await routes.create_user(
             user_data=request,
-            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+            current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 400
@@ -3361,7 +3368,7 @@ async def test_update_user_not_found(monkeypatch: Any) -> None:
         await routes.update_user(
             user_id="missing",
             user_data=request,
-            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+            current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 404
@@ -3387,7 +3394,7 @@ async def test_update_user_success(monkeypatch: Any) -> None:
     result = await routes.update_user(
         user_id="u4",
         user_data=request,
-        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+        current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.username == "dora"
@@ -3410,7 +3417,7 @@ async def test_delete_user_success(monkeypatch: Any) -> None:
     result = await routes.delete_user(
         request=mock_request,
         user_id="user-2",
-        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+        current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.message == "User 'user-2' has been deactivated"
@@ -3433,7 +3440,7 @@ async def test_delete_user_self_forbidden(monkeypatch: Any) -> None:
         await routes.delete_user(
             request=mock_request,
             user_id="self",
-            current_user=UserProfile(username="self", role=UserRole.ADMIN),
+            current_user=AuthPrincipal(username="self", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 400
@@ -3456,7 +3463,7 @@ async def test_delete_user_not_found(monkeypatch: Any) -> None:
         await routes.delete_user(
             request=mock_request,
             user_id="missing",
-            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+            current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 404
@@ -3477,7 +3484,7 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
         request=_make_rest_request(),
         user_id="self",
         password_data=pwd_request,
-        current_user=UserProfile(username="self", role=UserRole.OPERATOR),
+        current_user=AuthPrincipal(username="self", role=UserRole.OPERATOR),
         _csrf=None,
     )
     assert result.message == "Password changed successfully"
@@ -3500,7 +3507,7 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
             request=_make_rest_request(),
             user_id="other",
             password_data=pwd_request,
-            current_user=UserProfile(username="self", role=UserRole.VIEWER),
+            current_user=AuthPrincipal(username="self", role=UserRole.VIEWER),
             _csrf=None,
         )
     assert exc.value.status_code == 403
@@ -3523,7 +3530,7 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
             request=_make_rest_request(),
             user_id="self",
             password_data=pwd_request,
-            current_user=UserProfile(username="self", role=UserRole.OPERATOR),
+            current_user=AuthPrincipal(username="self", role=UserRole.OPERATOR),
             _csrf=None,
         )
     assert exc.value.status_code == 400
@@ -3544,7 +3551,7 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
         request=_make_rest_request(),
         user_id="target",
         password_data=pwd_request,
-        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+        current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.message == "Password changed successfully"
@@ -3588,7 +3595,7 @@ async def test_admin_reset_password_handles_repository_error(
             request=_make_rest_request(),
             user_id="user-1",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
-            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+            current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 500
@@ -3617,7 +3624,7 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
         request=_make_rest_request(),
         user_id="user-1",
         password_data=AdminResetPasswordRequest(new_password="super-secret"),
-        current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+        current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.message == "Password reset successfully for user user-1"
@@ -3644,7 +3651,7 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
             request=_make_rest_request(),
             user_id="missing",
             password_data=AdminResetPasswordRequest(new_password="super-secret"),
-            current_user=UserProfile(username="admin", role=UserRole.ADMIN),
+            current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 404
@@ -3973,7 +3980,7 @@ class TestTokenManager:
         Then: Returns valid token data with user info.
         """
         token_manager = get_token_manager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             email="test@example.com",
             role=UserRole.OPERATOR,
@@ -4000,7 +4007,7 @@ class TestTokenManager:
         Then: Returns valid refresh token.
         """
         token_manager = get_token_manager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -4019,7 +4026,7 @@ class TestTokenManager:
         Then: Returns different access and refresh tokens.
         """
         token_manager = get_token_manager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.ADMIN,
             is_active=True,
@@ -4051,7 +4058,7 @@ class TestTokenManager:
         Then: Returns None.
         """
         token_manager = get_token_manager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -4125,7 +4132,7 @@ class TestWebSocketAuthManager:
         """
         ws_auth_manager = get_ws_auth_manager()
         token_manager = get_token_manager()
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.OPERATOR,
             is_active=True,
@@ -4148,7 +4155,7 @@ class TestWebSocketAuthManager:
         """
         ws_auth_manager = get_ws_auth_manager()
         websocket = MagicMock(spec=WebSocket)
-        user = UserProfile(
+        user = AuthPrincipal(
             username="testuser",
             role=UserRole.VIEWER,
             is_active=True,
@@ -4175,9 +4182,9 @@ class TestWebSocketAuthManager:
         ws1 = MagicMock(spec=WebSocket)
         ws2 = MagicMock(spec=WebSocket)
         ws3 = MagicMock(spec=WebSocket)
-        user1 = UserProfile(username="user1", role=UserRole.VIEWER, is_active=True)
-        user2 = UserProfile(username="user2", role=UserRole.OPERATOR, is_active=True)
-        user3 = UserProfile(username="user3", role=UserRole.ADMIN, is_active=True)
+        user1 = AuthPrincipal(username="user1", role=UserRole.VIEWER, is_active=True)
+        user2 = AuthPrincipal(username="user2", role=UserRole.OPERATOR, is_active=True)
+        user3 = AuthPrincipal(username="user3", role=UserRole.ADMIN, is_active=True)
         ws_auth_manager.authenticated_connections[ws1] = user1
         ws_auth_manager.authenticated_connections[ws2] = user2
         ws_auth_manager.authenticated_connections[ws3] = user3

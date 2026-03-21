@@ -61,7 +61,7 @@ from snapper.application.process_manager.registry import get_registered_processe
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -111,7 +111,7 @@ def get_process_factory(request: Request) -> ProcessLauncherService:
 @router.get("/available")
 async def list_available_processes(
     request: Request,
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> AvailableProcessesResponse:
     sid, seq, ts = _mint_provenance(request)
     registry = get_registered_processes()
@@ -145,7 +145,7 @@ async def list_available_processes(
 async def list_configured_processes(
     request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ConfiguredProcessesResponse:
     sid, seq, ts = _mint_provenance(request)
     configs = await factory.get_process_configs()
@@ -185,7 +185,7 @@ async def list_configured_processes(
 async def get_process_summary(
     request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
 ) -> ProcessSummaryResponse:
     """Lightweight process summary returning category counts.
 
@@ -277,7 +277,7 @@ async def create_process_configuration(
     body: ProcessCreateRequest,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     settings: Annotated[AppSettings, Depends(get_settings)],
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessCreateResponse:
     """Create a new process configuration from a template.
@@ -351,7 +351,7 @@ async def get_process_schema(
     request: Request,
     name: str,
     settings: Annotated[AppSettings, Depends(get_settings)],
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ProcessSchemaResponse:
     """Get the configuration schema for a registered process.
 
@@ -399,7 +399,7 @@ async def start_process(
     name: str,
     body: ProcessStartRequest,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStartResponse:
     result = await factory.start_process_by_name(
@@ -426,7 +426,7 @@ async def stop_process(
     request: Request,
     name: str,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStopResponse:
     result = await factory.stop_process_by_name(name)
@@ -445,7 +445,7 @@ async def stop_process(
 async def list_process_runs(
     request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     limit: int = 50,
     name: str | None = None,
 ) -> ProcessRunsResponse:

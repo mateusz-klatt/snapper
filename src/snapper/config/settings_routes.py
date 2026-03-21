@@ -44,7 +44,7 @@ from snapper.application.services.settings import get_settings_service
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import get_settings
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
@@ -56,7 +56,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 @router.get("")
 async def get_all_settings(
-    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     category: str | None = None,
 ) -> list[SettingRead]:
     """Retrieve all application settings, optionally filtered by category.
@@ -96,7 +96,7 @@ async def get_all_settings(
 @router.get("/categories")
 async def get_setting_categories(
     request: Request,
-    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
 ) -> SettingCategoriesResponse:
     """Retrieve all distinct setting category names.
 
@@ -130,7 +130,7 @@ async def get_setting_categories(
 async def update_setting(
     key: str,
     request: SettingUpdate,
-    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> SettingRead:
     """Update or create a setting by key.
@@ -184,7 +184,7 @@ async def update_setting(
 async def delete_setting(
     request: Request,
     key: str,
-    user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
     """Delete a setting by key.

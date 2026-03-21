@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
@@ -23,8 +23,8 @@ class TestDatabaseEndpoints:
         def skip_csrf_validation() -> None:
             return None
 
-        def skip_authentication() -> UserProfile:
-            return UserProfile(username="test_user", role=UserRole.ADMIN)
+        def skip_authentication() -> AuthPrincipal:
+            return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication

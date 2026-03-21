@@ -94,7 +94,7 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.routes import router as auth_router
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
@@ -505,7 +505,7 @@ def _create_candles_signals_router() -> APIRouter:
         responses={500: {"description": "Internal server error"}},
     )
     async def get_candles(
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         instrument: Annotated[str, Query(description="Instrument symbol")],
         exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
@@ -569,7 +569,7 @@ def _create_candles_signals_router() -> APIRouter:
 
     @router.get("/signals", responses={500: {"description": "Internal server error"}})
     async def get_signals(
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         instrument: Annotated[str | None, Query(description="Filter by instrument")] = None,
@@ -626,7 +626,7 @@ def _create_exchange_router() -> APIRouter:
 
     @router.get("/exchanges", responses={500: {"description": "Internal server error"}})
     async def get_exchanges(
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
     ) -> list[str]:
@@ -653,7 +653,7 @@ def _create_exchange_router() -> APIRouter:
     )
     async def get_exchange_instruments(
         exchange: str,
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
     ) -> list[str]:
@@ -714,7 +714,7 @@ def _create_orders_executions_router() -> APIRouter:
 
     @router.get("/orders", responses={500: {"description": "Internal server error"}})
     async def get_orders(
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_ORDERS))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_ORDERS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         symbol: Annotated[str | None, Query(description="Symbol to filter by")] = None,
@@ -764,7 +764,7 @@ def _create_orders_executions_router() -> APIRouter:
 
     @router.get("/executions", responses={500: {"description": "Internal server error"}})
     async def get_executions(
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_ORDERS))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_ORDERS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         limit: Annotated[int, Query(le=1000, description="Number of executions to return")] = 100,
@@ -818,7 +818,7 @@ def _create_orders_executions_router() -> APIRouter:
 
     @router.get("/positions", responses={500: {"description": "Internal server error"}})
     async def get_positions(
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_POSITIONS))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_POSITIONS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
@@ -981,7 +981,7 @@ def _create_monitoring_endpoints_router(
     @router.get("/ws/stats")
     async def websocket_stats(
         request: Request,
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> WsStatsResponse:
         tracker: SequenceTracker = request.app.state.rest_tracker
@@ -1047,7 +1047,7 @@ def _create_monitoring_endpoints_router(
     @router.get("/zmq/health")
     async def zmq_health_check(
         request: Request,
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> ZmqHealthResponse:
         error_messages: list[str] = []
@@ -1106,7 +1106,7 @@ def _create_monitoring_endpoints_router(
     @router.get("/status")
     async def get_system_status(
         request: Request,
-        _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> SystemStatus:
         process_factory: ProcessLauncherService = request.app.state.process_factory

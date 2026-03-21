@@ -21,8 +21,8 @@ from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
-from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
@@ -32,14 +32,14 @@ from snapper.interface.websocket.helpers import build_allowed_origins
 
 def get_current_user(
     request: Request,
-) -> UserProfile | None:
-    """Extract current user from access token cookie.
+) -> AuthPrincipal | None:
+    """Extract current auth principal from access token cookie.
 
     Args:
         request: FastAPI request object.
 
     Returns:
-        UserProfile if authenticated, None otherwise.
+        AuthPrincipal if authenticated, None otherwise.
     """
     access_token = request.cookies.get("access_token")
     if not access_token:
@@ -48,25 +48,25 @@ def get_current_user(
     token_data: TokenClaims | None = token_manager.verify_token(access_token)
     if not token_data:
         return None
-    user = UserProfile(
+    principal = AuthPrincipal(
         username=token_data.username,
         role=token_data.role,
     )
-    request.state.user = user
+    request.state.user = principal
     request.state.token_data = token_data
-    return user
+    return principal
 
 
 def require_authentication(
-    current_user: Annotated[UserProfile | None, Depends(get_current_user)],
-) -> UserProfile:
+    current_user: Annotated[AuthPrincipal | None, Depends(get_current_user)],
+) -> AuthPrincipal:
     """Require authenticated user dependency.
 
     Args:
-        current_user: Current user from get_current_user.
+        current_user: Current principal from get_current_user.
 
     Returns:
-        UserProfile if authenticated.
+        AuthPrincipal if authenticated.
 
     Raises:
         HTTPException: 401 if not authenticated.
@@ -91,8 +91,8 @@ def require_permission(permission: Permission) -> Any:
     """
 
     def permission_checker(
-        current_user: Annotated[UserProfile, Depends(require_authentication)],
-    ) -> UserProfile:
+        current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+    ) -> AuthPrincipal:
         user_permissions = ROLE_PERMISSIONS.get(current_user.role, set())
         if permission not in user_permissions:
             raise HTTPException(
@@ -120,8 +120,8 @@ def require_role(role: UserRole) -> Any:
     }
 
     def role_checker(
-        current_user: Annotated[UserProfile, Depends(require_authentication)],
-    ) -> UserProfile:
+        current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+    ) -> AuthPrincipal:
         if role_hierarchy[current_user.role] < role_hierarchy[role]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -377,13 +377,13 @@ def validate_csrf_token(
         )
 
 
-AuthenticatedUser = Annotated[UserProfile, Depends(require_authentication)]
-OperatorUser = Annotated[UserProfile, Depends(require_role(UserRole.OPERATOR))]
-AdminUser = Annotated[UserProfile, Depends(require_role(UserRole.ADMIN))]
+AuthenticatedUser = Annotated[AuthPrincipal, Depends(require_authentication)]
+OperatorUser = Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))]
+AdminUser = Annotated[AuthPrincipal, Depends(require_role(UserRole.ADMIN))]
 ReadMarketDataUser = Annotated[
-    UserProfile, Depends(require_permission(Permission.READ_MARKET_DATA))
+    AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))
 ]
-CreateOrdersUser = Annotated[UserProfile, Depends(require_permission(Permission.CREATE_ORDERS))]
+CreateOrdersUser = Annotated[AuthPrincipal, Depends(require_permission(Permission.CREATE_ORDERS))]
 ManageProcessesUser = Annotated[
-    UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))
+    AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))
 ]

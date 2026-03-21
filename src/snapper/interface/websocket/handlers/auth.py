@@ -18,7 +18,7 @@ from snapper.api.auth.errors.ws_token import WsTokenError
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
-from snapper.auth.schemas.user import UserProfile
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.interface.websocket.schemas import WSAuthenticateRequest
 from snapper.interface.websocket.schemas import WSAuthExpiredResponse
@@ -63,7 +63,7 @@ class AuthResult:
     def __init__(
         self,
         success: bool,
-        user: UserProfile | None = None,
+        user: AuthPrincipal | None = None,
         ws_payload: WsTokenPayload | None = None,
         warn_task: asyncio.Task[None] | None = None,
         hard_task: asyncio.Task[None] | None = None,
@@ -249,7 +249,7 @@ async def authenticate_websocket(
 async def handle_reauth(
     websocket: WebSocket,
     message: WSReauthRequest,
-    user: UserProfile,
+    user: AuthPrincipal,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     tracker: SequenceTracker,

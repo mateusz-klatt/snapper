@@ -81,10 +81,13 @@ export type Paths = {
          * @description Get profile information for the currently authenticated user.
          *
          *     Args:
-         *         current_user: Authenticated user from dependency.
+         *         current_user: Authenticated principal from dependency.
          *
          *     Returns:
          *         Current user's UserProfile.
+         *
+         *     Raises:
+         *         HTTPException: 404 if user not found in database.
          */
         get: Operations["get_current_user_info_api_auth_me_get"];
         put?: never;

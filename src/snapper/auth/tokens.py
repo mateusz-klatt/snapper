@@ -17,9 +17,9 @@ from pydantic import ValidationError
 
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
-from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
@@ -88,7 +88,7 @@ class TokenManager:
 
     def create_tokens(
         self,
-        user: UserProfile,
+        user: AuthPrincipal,
         remember_me: bool = False,
         *,
         session_id: str | None = None,
@@ -236,12 +236,12 @@ class TokenManager:
             logger.warning("Attempted to refresh with non-refresh token")
             return None
         self.blacklist_token(token_data.jti)
-        user = UserProfile(
+        principal = AuthPrincipal(
             username=token_data.username,
             role=token_data.role,
         )
-        new_tokens = self.create_tokens(user, session_id=token_data.sid)
-        logger.info(f"Refreshed tokens for user {user.username}")
+        new_tokens = self.create_tokens(principal, session_id=token_data.sid)
+        logger.info(f"Refreshed tokens for user {principal.username}")
         return new_tokens
 
     def blacklist_token(self, jti: str) -> None:

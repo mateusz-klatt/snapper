@@ -15,8 +15,8 @@ from loguru import logger
 
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
-from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 
 
@@ -95,17 +95,19 @@ class WebSocketAuthManager:
             return
         self._initialized = True
         self.token_manager = get_token_manager()
-        self.authenticated_connections: dict[WebSocket, UserProfile] = {}
+        self.authenticated_connections: dict[WebSocket, AuthPrincipal] = {}
         self._connection_states: dict[WebSocket, ConnectionState] = {}
 
-    def verify_session_cookie(self, websocket: WebSocket) -> tuple[UserProfile, TokenClaims] | None:
+    def verify_session_cookie(
+        self, websocket: WebSocket
+    ) -> tuple[AuthPrincipal, TokenClaims] | None:
         """Verify session from WebSocket cookies.
 
         Args:
             websocket: WebSocket connection.
 
         Returns:
-            Tuple of (UserProfile, TokenClaims) if valid, None otherwise.
+            Tuple of (AuthPrincipal, TokenClaims) if valid, None otherwise.
         """
         token = websocket.cookies.get("access_token")
         if not token:
@@ -113,7 +115,7 @@ class WebSocketAuthManager:
         token_data = self.token_manager.verify_token(token)
         if not token_data:
             return None
-        user = UserProfile(
+        user = AuthPrincipal(
             username=token_data.username,
             role=token_data.role,
         )
@@ -122,7 +124,7 @@ class WebSocketAuthManager:
     def register_connection(
         self,
         websocket: WebSocket,
-        user: UserProfile,
+        user: AuthPrincipal,
         token_data: TokenClaims,
         ws_payload: WsTokenPayload,
         *,
@@ -179,14 +181,14 @@ class WebSocketAuthManager:
         state.hard_task = hard_task
         state.session_expires_at = datetime.fromtimestamp(payload.exp, UTC)
 
-    def get_authenticated_user(self, websocket: WebSocket) -> UserProfile | None:
+    def get_authenticated_user(self, websocket: WebSocket) -> AuthPrincipal | None:
         """Get authenticated user for connection.
 
         Args:
             websocket: WebSocket connection.
 
         Returns:
-            UserProfile or None if not authenticated.
+            AuthPrincipal or None if not authenticated.
         """
         return self.authenticated_connections.get(websocket)
 
