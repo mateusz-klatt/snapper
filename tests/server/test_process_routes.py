@@ -16,6 +16,7 @@ from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import ProcessStopResult
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import get_process_factory
 from snapper.server.process_routes import get_process_schema
@@ -25,6 +26,13 @@ from snapper.server.process_routes import list_configured_processes
 from snapper.server.process_routes import list_process_runs
 from snapper.server.process_routes import start_process
 from snapper.server.process_routes import stop_process
+
+
+def _make_rest_request() -> MagicMock:
+    """Create a mock FastAPI Request with rest_tracker."""
+    mock_request = MagicMock()
+    mock_request.app.state.rest_tracker = SequenceTracker()
+    return mock_request
 
 
 class TestGetProcessFactory:
@@ -99,7 +107,7 @@ class TestListAvailableProcesses:
                 args=[],
             ),
         }
-        result = await list_available_processes(_user=MagicMock())
+        result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
         assert result.count == 2
         assert len(result.processes) == 2
         assert result.processes[0].name == "zmq_broker"
@@ -117,7 +125,7 @@ class TestListAvailableProcesses:
         Then: Empty list with zero count is returned.
         """
         mock_get_registry.return_value = {}
-        result = await list_available_processes(_user=MagicMock())
+        result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
         assert result.count == 0
         assert result.processes == []
 
@@ -151,7 +159,9 @@ class TestListConfiguredProcesses:
         )
         mock_factory.started_processes = {"zmq_broker": MagicMock()}
         mock_factory.active_runs = {}
-        result = await list_configured_processes(factory=mock_factory, _user=MagicMock())
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
         assert result.count == 1
         assert len(result.processes) == 1
         process = result.processes[0]
@@ -178,7 +188,9 @@ class TestListConfiguredProcesses:
         mock_factory = MagicMock()
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.started_processes = {}
-        result = await list_configured_processes(factory=mock_factory, _user=MagicMock())
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
         assert result.count == 0
         assert result.processes == []
 
@@ -192,7 +204,9 @@ class TestGetProcessSummary:
         mock_factory = MagicMock()
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.started_processes = {}
-        result = await get_process_summary(factory=mock_factory, _user=MagicMock())
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
         assert result.feeds.running == 0
         assert result.feeds.total == 0
         assert result.strategies.running == 0
@@ -261,7 +275,9 @@ class TestGetProcessSummary:
             "momentum_strategy": MagicMock(),
             "zmq_broker": MagicMock(),
         }
-        result = await get_process_summary(factory=mock_factory, _user=MagicMock())
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
         assert result.feeds.running == 1
         assert result.feeds.total == 2
         assert result.strategies.running == 1
@@ -290,7 +306,9 @@ class TestGetProcessSummary:
             ]
         )
         mock_factory.started_processes = {"backfill_symbols": MagicMock()}
-        result = await get_process_summary(factory=mock_factory, _user=MagicMock())
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
         assert result.feeds.total == 0
         assert result.strategies.total == 0
         assert result.executors.total == 0
@@ -328,7 +346,9 @@ class TestGetProcessSchema:
             )
         }
         settings = MagicMock()
-        result = await get_process_schema(name="zmq_broker", settings=settings, _user=MagicMock())
+        result = await get_process_schema(
+            request=_make_rest_request(), name="zmq_broker", settings=settings, _user=MagicMock()
+        )
         assert result.name == "zmq_broker"
         assert result.description == "ZMQ message broker"
         assert result.class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
@@ -367,7 +387,10 @@ class TestGetProcessSchema:
         }
         settings = MagicMock()
         result = await get_process_schema(
-            name="custom_process", settings=settings, _user=MagicMock()
+            request=_make_rest_request(),
+            name="custom_process",
+            settings=settings,
+            _user=MagicMock(),
         )
         assert result.name == "custom_process"
         assert result.default_enabled is False
@@ -406,7 +429,10 @@ class TestGetProcessSchema:
         }
         settings = MagicMock()
         result = await get_process_schema(
-            name="failing_process", settings=settings, _user=MagicMock()
+            request=_make_rest_request(),
+            name="failing_process",
+            settings=settings,
+            _user=MagicMock(),
         )
         assert result.default_kwargs == {}
         assert result.default_enabled is True
@@ -425,7 +451,12 @@ class TestGetProcessSchema:
         mock_get_registry.return_value = {}
         settings = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
-            await get_process_schema(name="nonexistent", settings=settings, _user=MagicMock())
+            await get_process_schema(
+                request=_make_rest_request(),
+                name="nonexistent",
+                settings=settings,
+                _user=MagicMock(),
+            )
         assert exc_info.value.status_code == 404
         assert "not found in registry" in exc_info.value.detail
 
@@ -447,15 +478,16 @@ class TestStartProcess:
                 status="success", message="started", public_id="run-001"
             )
         )
-        request = ProcessStartRequest(
+        body = ProcessStartRequest(
             mode="process",
             args=["arg1"],
             kwargs={"endpoint": "tcp://0.0.0.0:6666"},
             autostart=True,
         )
         result = await start_process(
+            http_request=_make_rest_request(),
             name="zmq_broker",
-            request=request,
+            body=body,
             factory=mock_factory,
             _user=MagicMock(),
             _csrf=None,
@@ -483,10 +515,11 @@ class TestStartProcess:
         mock_factory.start_process_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
-        request = ProcessStartRequest(mode=None, args=None, kwargs=None, autostart=None)
+        body = ProcessStartRequest(mode=None, args=None, kwargs=None, autostart=None)
         result = await start_process(
+            http_request=_make_rest_request(),
             name="zmq_broker",
-            request=request,
+            body=body,
             factory=mock_factory,
             _user=MagicMock(),
             _csrf=None,
@@ -513,7 +546,11 @@ class TestStopProcess:
             return_value=ProcessStopResult(status="success", message="stopped")
         )
         result = await stop_process(
-            name="zmq_broker", factory=mock_factory, _user=MagicMock(), _csrf=None
+            request=_make_rest_request(),
+            name="zmq_broker",
+            factory=mock_factory,
+            _user=MagicMock(),
+            _csrf=None,
         )
         assert result.status == "success"
         assert result.name == "zmq_broker"
@@ -616,7 +653,8 @@ class TestCreateProcessConfiguration:
         )
         settings = MagicMock()
         result = await create_process_configuration(
-            request=request,
+            http_request=_make_rest_request(),
+            body=request,
             factory=mock_factory,
             settings=settings,
             _user=MagicMock(),
@@ -668,7 +706,8 @@ class TestCreateProcessConfiguration:
         settings = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await create_process_configuration(
-                request=request,
+                http_request=_make_rest_request(),
+                body=request,
                 factory=factory,
                 settings=settings,
                 _user=MagicMock(),
@@ -727,7 +766,8 @@ class TestCreateProcessConfiguration:
         )
         with pytest.raises(HTTPException) as exc_info:
             await create_process_configuration(
-                request=request,
+                http_request=_make_rest_request(),
+                body=request,
                 factory=mock_factory,
                 settings=MagicMock(),
                 _user=MagicMock(),
@@ -768,7 +808,7 @@ class TestProcessRoutesEdgeCases:
                 args=[],
             ),
         }
-        result = await list_available_processes(_user=MagicMock())
+        result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
         assert result.count == 1
         assert result.processes[0].tags == []
 
@@ -818,7 +858,8 @@ class TestProcessRoutesEdgeCases:
             note=None,
         )
         await create_process_configuration(
-            request=request,
+            http_request=_make_rest_request(),
+            body=request,
             factory=mock_factory,
             settings=MagicMock(),
             _user=MagicMock(),
@@ -867,7 +908,8 @@ class TestProcessRoutesEdgeCases:
             note=None,
         )
         await create_process_configuration(
-            request=request,
+            http_request=_make_rest_request(),
+            body=request,
             factory=mock_factory,
             settings=MagicMock(),
             _user=MagicMock(),
@@ -917,7 +959,8 @@ class TestProcessRoutesEdgeCases:
             note=None,
         )
         await create_process_configuration(
-            request=request,
+            http_request=_make_rest_request(),
+            body=request,
             factory=mock_factory,
             settings=MagicMock(),
             _user=MagicMock(),
@@ -967,6 +1010,7 @@ class TestProcessRoutesEdgeCases:
             ]
         )
         result = await list_process_runs(
+            request=_make_rest_request(),
             factory=mock_factory,
             _user=MagicMock(),
             limit=50,
@@ -1003,6 +1047,7 @@ class TestProcessRoutesEdgeCases:
             ]
         )
         result = await list_process_runs(
+            request=_make_rest_request(),
             factory=mock_factory,
             _user=MagicMock(),
             limit=10,

@@ -103,6 +103,7 @@ from snapper.config.settings_routes import router as settings_router
 from snapper.core.types import HealthStatus
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderExchange
+from snapper.core.types import SpawnerProcessStatus
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
@@ -359,13 +360,21 @@ def _normalize_strategy_status(status: dict[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in status.items()}
 
 
-def _build_strategy_payload(raw_status: dict[str, Any]) -> StrategyStatusPayload | None:
+def _build_strategy_payload(
+    raw_status: dict[str, Any],
+    sid: str,
+    seq: int,
+    ts: dt.datetime,
+) -> StrategyStatusPayload | None:
     """Build a strategy payload from a raw process status.
 
     Returns None if the raw status does not represent a strategy.
 
     Args:
         raw_status: Raw process status dictionary.
+        sid: Shared session_id for the response tree.
+        seq: Shared sequence_id for the response tree.
+        ts: Shared timestamp for the response tree.
 
     Returns:
         StrategyStatusPayload or None if not a strategy status.
@@ -380,6 +389,9 @@ def _build_strategy_payload(raw_status: dict[str, Any]) -> StrategyStatusPayload
         if key in normalized:
             extra[key] = normalized[key]
     return StrategyStatusPayload(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         strategy_name=str(normalized.get("strategy_name", "unknown")),
         status=normalized.get("status", "unknown"),
         details=normalized,
@@ -388,9 +400,15 @@ def _build_strategy_payload(raw_status: dict[str, Any]) -> StrategyStatusPayload
 
 
 TRADER_COORDINATOR_PROCESS = "trader_coordinator"
+_REST_HEALTH_STREAM = "rest.health"
 
 
-def _resolve_trader_status(process_factory: ProcessLauncherService) -> ProcessStatus:
+def _resolve_trader_status(
+    process_factory: ProcessLauncherService,
+    sid: str,
+    seq: int,
+    ts: dt.datetime,
+) -> ProcessStatus:
     """Derive trader coordinator status from the process launcher.
 
     Checks whether the trader_coordinator process is currently running
@@ -398,22 +416,39 @@ def _resolve_trader_status(process_factory: ProcessLauncherService) -> ProcessSt
 
     Args:
         process_factory: Process launcher service with started processes.
+        sid: Shared session_id for the response tree.
+        seq: Shared sequence_id for the response tree.
+        ts: Shared timestamp for the response tree.
 
     Returns:
         ProcessStatus reflecting actual trader coordinator state.
     """
-    if TRADER_COORDINATOR_PROCESS in process_factory.started_processes:
-        return ProcessStatus(status="running")
-    return ProcessStatus(status="not_running")
+    ps_status: SpawnerProcessStatus = (
+        "running"
+        if TRADER_COORDINATOR_PROCESS in process_factory.started_processes
+        else "not_running"
+    )
+    return ProcessStatus(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        status=ps_status,
+    )
 
 
 def _collect_strategy_statuses(
     process_factory: ProcessLauncherService,
+    sid: str,
+    seq: int,
+    ts: dt.datetime,
 ) -> list[StrategyStatusPayload]:
     """Collect strategy statuses from all running processes.
 
     Args:
         process_factory: Process launcher service with started processes.
+        sid: Shared session_id for the response tree.
+        seq: Shared sequence_id for the response tree.
+        ts: Shared timestamp for the response tree.
 
     Returns:
         List of StrategyStatusPayload instances.
@@ -422,7 +457,7 @@ def _collect_strategy_statuses(
     for process_name, process_instance in process_factory.started_processes.items():
         try:
             raw = process_instance.get_status()
-            payload = _build_strategy_payload(raw)
+            payload = _build_strategy_payload(raw, sid, seq, ts)
             if payload is not None:
                 strategies.append(payload)
         except Exception as exc:
@@ -820,16 +855,27 @@ def _create_orders_executions_router() -> APIRouter:
     return router
 
 
-def _gap_detector_stats_to_schema(stats: GapDetectorStats) -> GapStatsSchema:
+def _gap_detector_stats_to_schema(
+    stats: GapDetectorStats,
+    sid: str,
+    seq: int,
+    ts: dt.datetime,
+) -> GapStatsSchema:
     """Convert a GapDetectorStats dataclass to a GapStatsSchema.
 
     Args:
         stats: Gap detector statistics dataclass.
+        sid: Shared session_id for the response tree.
+        seq: Shared sequence_id for the response tree.
+        ts: Shared timestamp for the response tree.
 
     Returns:
         Pydantic schema with the same counter values.
     """
     return GapStatsSchema(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         gaps_detected=stats.gaps_detected,
         session_resets=stats.session_resets,
         duplicates=stats.duplicates,
@@ -841,6 +887,9 @@ def _gap_detector_stats_to_schema(stats: GapDetectorStats) -> GapStatsSchema:
 def _collect_gap_detection_stats(
     manager: WebSocketConnectionManager,
     middleware_gap_detectors: dict[str, Any] | None,
+    sid: str,
+    seq: int,
+    ts: dt.datetime,
 ) -> GapDetectionStats:
     """Aggregate gap detection stats from bridge and REST middleware.
 
@@ -848,18 +897,35 @@ def _collect_gap_detection_stats(
         manager: WebSocket connection manager with ZMQ bridge.
         middleware_gap_detectors: Per-session gap detectors from the
             provenance middleware (may be None).
+        sid: Shared session_id for the response tree.
+        seq: Shared sequence_id for the response tree.
+        ts: Shared timestamp for the response tree.
 
     Returns:
         Aggregated gap detection statistics.
     """
     bridge_stats = _gap_detector_stats_to_schema(
         manager.zmq_bridge._gap_detector.stats,
+        sid,
+        seq,
+        ts,
     )
     rest_clients: dict[str, GapStatsSchema] = {}
     if middleware_gap_detectors:
-        for session_id, detector in middleware_gap_detectors.items():
-            rest_clients[session_id] = _gap_detector_stats_to_schema(detector.stats)
-    return GapDetectionStats(bridge=bridge_stats, rest_clients=rest_clients)
+        for det_session_id, detector in middleware_gap_detectors.items():
+            rest_clients[det_session_id] = _gap_detector_stats_to_schema(
+                detector.stats,
+                sid,
+                seq,
+                ts,
+            )
+    return GapDetectionStats(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        bridge=bridge_stats,
+        rest_clients=rest_clients,
+    )
 
 
 def _create_monitoring_endpoints_router(
@@ -878,15 +944,35 @@ def _create_monitoring_endpoints_router(
 
     @router.get("/health")
     async def health_check(request: Request) -> HealthCheckResponse:
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_HEALTH_STREAM)
+        ts = dt.datetime.now(dt.UTC)
         stats = manager.get_stats()
         middleware_detectors = getattr(request.app.state, "provenance_gap_detectors", None)
-        gap_stats = _collect_gap_detection_stats(manager, middleware_detectors)
+        gap_stats = _collect_gap_detection_stats(
+            manager,
+            middleware_detectors,
+            sid,
+            seq,
+            ts,
+        )
         return HealthCheckResponse(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
             status="healthy",
-            timestamp=dt.datetime.now(dt.UTC),
             version="0.1.0",
-            connections=ConnectionStatsSchema(**asdict(stats.connections)),
+            connections=ConnectionStatsSchema(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
+                **asdict(stats.connections),
+            ),
             topics=HealthTopics(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
                 active=stats.connections.active_topics,
             ),
             gap_detection=gap_stats,
@@ -894,34 +980,65 @@ def _create_monitoring_endpoints_router(
 
     @router.get("/ws/stats")
     async def websocket_stats(
+        request: Request,
         _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> WsStatsResponse:
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_HEALTH_STREAM)
+        ts = dt.datetime.now(dt.UTC)
         stats = manager.get_stats()
-        websocket_section = WebSocketStats(
-            active_connections=len(manager.active_connections),
-            topic_subscribers={
-                topic: len(subs) for topic, subs in manager.topic_subscribers.items()
-            },
-            client_count=len(manager.active_connections),
-        )
-        bridge_section = ZmqBridgeStats(
-            active_topics=len(zmq_bridge.topic_subscriptions),
-            subscriber_tasks=len(zmq_bridge.subscriber_tasks),
-            available_topics=list(zmq_bridge.available_topics),
-        )
         return WsStatsResponse(
-            websocket=websocket_section,
-            zmq_bridge=bridge_section,
-            connections=ConnectionStatsSchema(**asdict(stats.connections)),
-            topics={k: TopicMetricSnapshotSchema(**asdict(v)) for k, v in stats.topics.items()},
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            websocket=WebSocketStats(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
+                active_connections=len(manager.active_connections),
+                topic_subscribers={
+                    topic: len(subs) for topic, subs in manager.topic_subscribers.items()
+                },
+                client_count=len(manager.active_connections),
+            ),
+            zmq_bridge=ZmqBridgeStats(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
+                active_topics=len(zmq_bridge.topic_subscriptions),
+                subscriber_tasks=len(zmq_bridge.subscriber_tasks),
+                available_topics=list(zmq_bridge.available_topics),
+            ),
+            connections=ConnectionStatsSchema(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
+                **asdict(stats.connections),
+            ),
+            topics={
+                k: TopicMetricSnapshotSchema(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    **asdict(v),
+                )
+                for k, v in stats.topics.items()
+            },
             subscriptions=SubscriptionsStats(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
                 per_topic={topic: len(subs) for topic, subs in manager.topic_subscribers.items()},
                 per_client={
                     str(id(ws)): list(subs) for ws, subs in manager.client_subscriptions.items()
                 },
             ),
             config=WsStatsConfig(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
                 broker_xpub=zmq_bridge.settings.zmq_broker_xpub,
                 heartbeat_interval_ms=zmq_bridge.settings.zmq_heartbeat_interval_ms,
             ),
@@ -929,6 +1046,7 @@ def _create_monitoring_endpoints_router(
 
     @router.get("/zmq/health")
     async def zmq_health_check(
+        request: Request,
         _auth: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> ZmqHealthResponse:
@@ -944,18 +1062,43 @@ def _create_monitoring_endpoints_router(
             available_topics = zmq_bridge.get_available_topics()
         stats = manager.get_stats()
         status: HealthStatus = "healthy" if not error_messages else "error"
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_HEALTH_STREAM)
+        ts = dt.datetime.now(dt.UTC)
         return ZmqHealthResponse(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
             status=status,
-            timestamp=dt.datetime.now(dt.UTC),
             components=ZmqComponents(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
                 zmq_context="ok" if not error_messages else "error",
                 websocket_manager="ok",
                 active_connections=stats.connections.active_connections,
             ),
-            config=ZmqConfig(available_topics=available_topics),
-            connections=ConnectionStatsSchema(**asdict(stats.connections)),
+            config=ZmqConfig(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
+                available_topics=available_topics,
+            ),
+            connections=ConnectionStatsSchema(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
+                **asdict(stats.connections),
+            ),
             message_stats={
-                k: TopicMetricSnapshotSchema(**asdict(v)) for k, v in stats.topics.items()
+                k: TopicMetricSnapshotSchema(
+                    session_id=sid,
+                    sequence_id=seq,
+                    timestamp=ts,
+                    **asdict(v),
+                )
+                for k, v in stats.topics.items()
             },
             errors=error_messages,
         )
@@ -967,11 +1110,18 @@ def _create_monitoring_endpoints_router(
         _csrf: Annotated[None, Depends(validate_csrf_token)],
     ) -> SystemStatus:
         process_factory: ProcessLauncherService = request.app.state.process_factory
-        trader_status = _resolve_trader_status(process_factory)
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_HEALTH_STREAM)
+        ts = dt.datetime.now(dt.UTC)
+        trader_status = _resolve_trader_status(process_factory, sid, seq, ts)
         return SystemStatus(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
             trader=trader_status,
             backtests={},
-            strategies=_collect_strategy_statuses(process_factory),
+            strategies=_collect_strategy_statuses(process_factory, sid, seq, ts),
         )
 
     return router

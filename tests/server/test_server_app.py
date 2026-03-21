@@ -2077,4 +2077,4 @@ def test_build_strategy_payload_returns_none_for_non_dict() -> None:
     When _build_strategy_payload is called,
     Then it returns None without raising.
     """
-    assert _build_strategy_payload("not_a_dict") is None
+    assert _build_strategy_payload("not_a_dict", "sid", 1, datetime.now()) is None

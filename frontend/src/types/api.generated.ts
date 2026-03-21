@@ -136,6 +136,7 @@ export type Paths = {
          * @description List all users in the system.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         current_user: Authenticated user with MANAGE_USERS permission.
          *         include_inactive: Whether to include deactivated users.
          *
@@ -195,6 +196,7 @@ export type Paths = {
          * @description Deactivate a user account.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         user_id: Target user ID to deactivate.
          *         current_user: Authenticated user with MANAGE_USERS permission.
          *
@@ -316,6 +318,7 @@ export type Paths = {
          * @description Retrieve all distinct setting category names.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         user: Authenticated user with CONFIGURE_SYSTEM permission.
          *
          *     Returns:
@@ -360,6 +363,7 @@ export type Paths = {
          * @description Delete a setting by key.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         key: The setting key to delete.
          *         user: Authenticated user with CONFIGURE_SYSTEM permission.
          *
@@ -425,6 +429,7 @@ export type Paths = {
          *     READ_SYSTEM_STATUS permission so viewers can see process health.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         factory: Process launcher service.
          *         _user: Authenticated user with READ_SYSTEM_STATUS permission.
          *
@@ -454,7 +459,8 @@ export type Paths = {
          * @description Create a new process configuration from a template.
          *
          *     Args:
-         *         request: Process creation request with template name and config.
+         *         http_request: FastAPI request (provides REST tracker for provenance).
+         *         body: Process creation request with template name and config.
          *         factory: Process launcher service.
          *         settings: Application settings.
          *         _user: Authenticated user with MANAGE_PROCESSES permission.
@@ -485,6 +491,7 @@ export type Paths = {
          * @description Get the configuration schema for a registered process.
          *
          *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
          *         name: Process name from registry.
          *         settings: Application settings.
          *         _user: Authenticated user with MANAGE_PROCESSES permission.

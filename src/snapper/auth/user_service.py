@@ -89,6 +89,10 @@ class UserService:
             UserProfile schema instance.
         """
         return UserProfile(
+            public_id=db_user.public_id,
+            timestamp=db_user.timestamp,
+            session_id=db_user.session_id,
+            sequence_id=db_user.sequence_id,
             username=db_user.username,
             email=db_user.email,
             role=UserRole(db_user.role),

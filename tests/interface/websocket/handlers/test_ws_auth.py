@@ -3278,7 +3278,11 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
         UserProfile(username="bob", role=UserRole.OPERATOR),
     ]
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
-    result = await routes.get_users(current_user=stub_service.all_users[0], include_inactive=False)
+    result = await routes.get_users(
+        request=_make_rest_request(),
+        current_user=stub_service.all_users[0],
+        include_inactive=False,
+    )
     assert result.total_count == 2
     assert [user.username for user in result.users] == ["alice", "bob"]
 

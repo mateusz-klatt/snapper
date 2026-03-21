@@ -1,6 +1,7 @@
 """Tests for health endpoint gap detection statistics."""
 
 import contextlib
+import datetime as dt
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -18,6 +19,10 @@ from snapper.server.app import _collect_gap_detection_stats
 from snapper.server.app import _gap_detector_stats_to_schema
 from snapper.server.app import create_app
 
+_SID = "test-session"
+_SEQ = 1
+_TS = dt.datetime.now(dt.UTC)
+
 
 class TestGapDetectorStatsToSchema:
     """Tests for _gap_detector_stats_to_schema helper."""
@@ -31,7 +36,7 @@ class TestGapDetectorStatsToSchema:
             mid_stream_joins=4,
             rejected_unstamped=5,
         )
-        schema = _gap_detector_stats_to_schema(stats)
+        schema = _gap_detector_stats_to_schema(stats, _SID, _SEQ, _TS)
         assert schema.gaps_detected == 3
         assert schema.session_resets == 1
         assert schema.duplicates == 2
@@ -40,7 +45,7 @@ class TestGapDetectorStatsToSchema:
 
     def test_zero_defaults(self) -> None:
         """Default GapDetectorStats converts to all-zero schema."""
-        schema = _gap_detector_stats_to_schema(GapDetectorStats())
+        schema = _gap_detector_stats_to_schema(GapDetectorStats(), _SID, _SEQ, _TS)
         assert schema.gaps_detected == 0
         assert schema.session_resets == 0
         assert schema.duplicates == 0
@@ -61,7 +66,7 @@ class TestCollectGapDetectionStats:
         mock_manager = MagicMock()
         mock_manager.zmq_bridge = mock_bridge
 
-        result = _collect_gap_detection_stats(mock_manager, None)
+        result = _collect_gap_detection_stats(mock_manager, None, _SID, _SEQ, _TS)
         assert result.bridge.gaps_detected == 7
         assert result.rest_clients == {}
 
@@ -78,7 +83,7 @@ class TestCollectGapDetectionStats:
         client_detector.stats.session_resets = 1
         middleware_detectors: dict[str, Any] = {"abc-session": client_detector}
 
-        result = _collect_gap_detection_stats(mock_manager, middleware_detectors)
+        result = _collect_gap_detection_stats(mock_manager, middleware_detectors, _SID, _SEQ, _TS)
         assert "abc-session" in result.rest_clients
         assert result.rest_clients["abc-session"].gaps_detected == 2
         assert result.rest_clients["abc-session"].session_resets == 1
@@ -91,7 +96,7 @@ class TestCollectGapDetectionStats:
         mock_manager = MagicMock()
         mock_manager.zmq_bridge = mock_bridge
 
-        result = _collect_gap_detection_stats(mock_manager, {})
+        result = _collect_gap_detection_stats(mock_manager, {}, _SID, _SEQ, _TS)
         assert result.rest_clients == {}
 
 

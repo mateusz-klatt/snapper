@@ -160,6 +160,8 @@ class TestUserService:
         db_user = MagicMock(spec=User)
         db_user.id = 1
         db_user.public_id = "fake-public-id"
+        db_user.session_id = "fake-session-id"
+        db_user.sequence_id = 1
         db_user.username = "testuser"
         db_user.email = "test@example.com"
         db_user.password_hash = "hashed_password"
@@ -385,16 +387,12 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
-        created_user = MagicMock(spec=User)
-        created_user.id = 2
-        created_user.public_id = "fake-new-public-id"
-        created_user.username = "newuser"
-        created_user.email = "new@example.com"
-        created_user.role = "viewer"
-        created_user.is_active = True
-        created_user.created_at = datetime.now(UTC)
-        created_user.timestamp = datetime.now(UTC)
-        created_user.known_to = KNOWN_TO_MAX
+
+        def _fake_refresh(obj: User) -> None:
+            """Simulate session.refresh populating server-side defaults."""
+            obj.public_id = "fake-new-public-id"
+
+        mock_session.refresh = AsyncMock(side_effect=_fake_refresh)
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -443,6 +441,12 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+
+        def _fake_refresh(obj: User) -> None:
+            """Simulate session.refresh populating server-side defaults."""
+            obj.public_id = "fake-new-public-id"
+
+        mock_session.refresh = AsyncMock(side_effect=_fake_refresh)
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session

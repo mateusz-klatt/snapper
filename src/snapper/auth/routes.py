@@ -4,6 +4,8 @@ This module provides FastAPI routes for user authentication
 including login, logout, token refresh, and user management.
 """
 
+from datetime import UTC
+from datetime import datetime
 from typing import Annotated
 from typing import Literal
 
@@ -43,6 +45,23 @@ from snapper.server.rate_limiting import limiter
 from snapper.server.rate_limiting import register_failed_login_attempt
 
 _AUTH_API_PATH = "/api/auth"
+_REST_STREAM = "rest.control"
+
+
+def _mint_provenance(request: Request) -> tuple[str, int, datetime]:
+    """Extract one sid/seq/ts triple from the REST tracker.
+
+    Called once per handler. All nested minted DTOs in the response
+    tree share the same provenance triple.
+
+    Args:
+        request: FastAPI request with app.state.rest_tracker.
+
+    Returns:
+        Tuple of (session_id, sequence_id, timestamp).
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    return tracker.session_id, tracker.next_sequence(_REST_STREAM), datetime.now(UTC)
 
 
 def _message_response(request: Request, message: str) -> MessageResponse:
@@ -55,11 +74,12 @@ def _message_response(request: Request, message: str) -> MessageResponse:
     Returns:
         MessageResponse with session_id and sequence_id from the REST tracker.
     """
-    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid, seq, ts = _mint_provenance(request)
     return MessageResponse(
         message=message,
-        session_id=tracker.session_id,
-        sequence_id=tracker.next_sequence("rest.control"),
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
     )
 
 
@@ -130,7 +150,11 @@ async def login(
         samesite=cookie_samesite,
         path="/",
     )
+    sid, seq, ts = _mint_provenance(request)
     return LoginResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         message="Login successful",
         expires_in=15 * 60,
         user=user,
@@ -212,7 +236,11 @@ async def refresh_token(
     ws_token_service = get_ws_token_service()
     session_id = token_data.sid
     ws_token_result = ws_token_service.generate(user_id=user.username, session_id=session_id)
+    sid, seq, ts = _mint_provenance(request)
     return RefreshResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         message="session refreshed",
         ws_token=ws_token_result.token,
         ws_token_exp=ws_token_result.expires_at,
@@ -332,12 +360,14 @@ async def get_current_user_info(
 
 @router.get("/users")
 async def get_users(
+    request: Request,
     current_user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_USERS))],
     include_inactive: bool = False,
 ) -> UserListResponse:
     """List all users in the system.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         current_user: Authenticated user with MANAGE_USERS permission.
         include_inactive: Whether to include deactivated users.
 
@@ -346,7 +376,14 @@ async def get_users(
     """
     user_service = get_user_service()
     users = await user_service.get_all_users(include_inactive=include_inactive)
-    return UserListResponse(users=users, total_count=len(users))
+    sid, seq, ts = _mint_provenance(request)
+    return UserListResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        users=users,
+        total_count=len(users),
+    )
 
 
 @router.post("/users")

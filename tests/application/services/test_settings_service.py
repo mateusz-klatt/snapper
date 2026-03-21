@@ -82,6 +82,13 @@ async def feed_bar_to_strategy(
     return await strategy.on_candle(instrument, candle)
 
 
+def _make_rest_request() -> MagicMock:
+    """Create a mock FastAPI Request with rest_tracker."""
+    mock_request = MagicMock()
+    mock_request.app.state.rest_tracker = SequenceTracker()
+    return mock_request
+
+
 @pytest.fixture(autouse=True)
 def clear_settings_singleton() -> Iterator[None]:
     """Clear singleton instances before and after each test."""
@@ -1327,7 +1334,8 @@ class TestProcessRoutesTagsFallback:
             )
             settings = MagicMock()
             await create_process_configuration(
-                request=request,
+                http_request=_make_rest_request(),
+                body=request,
                 factory=mock_factory,
                 settings=settings,
                 _user=MagicMock(),
@@ -1378,7 +1386,8 @@ class TestProcessRoutesTagsFallback:
             )
             settings = MagicMock()
             await create_process_configuration(
-                request=request,
+                http_request=_make_rest_request(),
+                body=request,
                 factory=mock_factory,
                 settings=settings,
                 _user=MagicMock(),
@@ -1431,6 +1440,7 @@ class TestProcessRoutesListRuns:
             ]
         )
         result = await list_process_runs(
+            request=_make_rest_request(),
             limit=50,
             name=None,
             factory=mock_factory,
@@ -1467,6 +1477,7 @@ class TestProcessRoutesListRuns:
             ]
         )
         result = await list_process_runs(
+            request=_make_rest_request(),
             limit=10,
             name="filtered_process",
             factory=mock_factory,

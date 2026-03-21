@@ -28,6 +28,8 @@ Example:
         {"mode": "process", "autostart": true}
 """
 
+from datetime import UTC
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter
@@ -62,6 +64,26 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+_REST_STREAM = "rest.control"
+
+
+def _mint_provenance(request: Request) -> tuple[str, int, datetime]:
+    """Extract one sid/seq/ts triple from the REST tracker.
+
+    Called once per handler. All nested minted DTOs in the response
+    tree share the same provenance triple.
+
+    Args:
+        request: FastAPI request with app.state.rest_tracker.
+
+    Returns:
+        Tuple of (session_id, sequence_id, timestamp).
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    return tracker.session_id, tracker.next_sequence(_REST_STREAM), datetime.now(UTC)
+
 
 __all__ = [
     "router",
@@ -88,13 +110,18 @@ def get_process_factory(request: Request) -> ProcessLauncherService:
 
 @router.get("/available")
 async def list_available_processes(
+    request: Request,
     _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> AvailableProcessesResponse:
+    sid, seq, ts = _mint_provenance(request)
     registry = get_registered_processes()
     processes: list[AvailableProcess] = []
     for name, entry in registry.items():
         processes.append(
             AvailableProcess(
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
                 name=name,
                 class_path=entry.class_path,
                 method=entry.method,
@@ -105,17 +132,28 @@ async def list_available_processes(
                 parameters_schema=entry.parameters_schema,
             )
         )
-    return AvailableProcessesResponse(processes=processes, count=len(processes))
+    return AvailableProcessesResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        processes=processes,
+        count=len(processes),
+    )
 
 
 @router.get("/configured")
 async def list_configured_processes(
+    request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ConfiguredProcessesResponse:
+    sid, seq, ts = _mint_provenance(request)
     configs = await factory.get_process_configs()
     processes: list[ConfiguredProcess] = [
         ConfiguredProcess(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
             name=config.name,
             enabled=config.enabled,
             mode=config.mode,
@@ -134,11 +172,18 @@ async def list_configured_processes(
         )
         for config in configs
     ]
-    return ConfiguredProcessesResponse(processes=processes, count=len(processes))
+    return ConfiguredProcessesResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        processes=processes,
+        count=len(processes),
+    )
 
 
 @router.get("/summary")
 async def get_process_summary(
+    request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[UserProfile, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
 ) -> ProcessSummaryResponse:
@@ -149,6 +194,7 @@ async def get_process_summary(
     READ_SYSTEM_STATUS permission so viewers can see process health.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         factory: Process launcher service.
         _user: Authenticated user with READ_SYSTEM_STATUS permission.
 
@@ -182,11 +228,39 @@ async def get_process_summary(
             brokers_total += 1
             brokers_running += int(is_running)
 
+    sid, seq, ts = _mint_provenance(request)
     return ProcessSummaryResponse(
-        feeds=ProcessCategoryCount(running=feeds_running, total=feeds_total),
-        strategies=ProcessCategoryCount(running=strategies_running, total=strategies_total),
-        executors=ProcessCategoryCount(running=executors_running, total=executors_total),
-        brokers=ProcessCategoryCount(running=brokers_running, total=brokers_total),
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        feeds=ProcessCategoryCount(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            running=feeds_running,
+            total=feeds_total,
+        ),
+        strategies=ProcessCategoryCount(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            running=strategies_running,
+            total=strategies_total,
+        ),
+        executors=ProcessCategoryCount(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            running=executors_running,
+            total=executors_total,
+        ),
+        brokers=ProcessCategoryCount(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            running=brokers_running,
+            total=brokers_total,
+        ),
     )
 
 
@@ -199,7 +273,8 @@ async def get_process_summary(
     },
 )
 async def create_process_configuration(
-    request: ProcessCreateRequest,
+    http_request: Request,
+    body: ProcessCreateRequest,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     settings: Annotated[AppSettings, Depends(get_settings)],
     _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
@@ -208,7 +283,8 @@ async def create_process_configuration(
     """Create a new process configuration from a template.
 
     Args:
-        request: Process creation request with template name and config.
+        http_request: FastAPI request (provides REST tracker for provenance).
+        body: Process creation request with template name and config.
         factory: Process launcher service.
         settings: Application settings.
         _user: Authenticated user with MANAGE_PROCESSES permission.
@@ -221,22 +297,22 @@ async def create_process_configuration(
         HTTPException: If template not found or name already exists.
     """
     registry = get_registered_processes()
-    entry = registry.get(request.template)
+    entry = registry.get(body.template)
     if entry is None:
-        raise HTTPException(status_code=404, detail=f"Template '{request.template}' not found")
+        raise HTTPException(status_code=404, detail=f"Template '{body.template}' not found")
     cls: type[RegisterableProcess] = entry.class_ref
     try:
         base_kwargs = cls.get_default_kwargs(settings)
     except Exception:
         base_kwargs = {}
-    if request.kwargs:
-        base_kwargs.update(request.kwargs)
-    final_args = request.args if request.args is not None else list(entry.args)
-    final_mode = request.mode or resolve_mode(entry.mode, request.name)
-    final_enabled = entry.enabled if request.enabled is None else request.enabled
+    if body.kwargs:
+        base_kwargs.update(body.kwargs)
+    final_args = body.args if body.args is not None else list(entry.args)
+    final_mode = body.mode or resolve_mode(entry.mode, body.name)
+    final_enabled = entry.enabled if body.enabled is None else body.enabled
     try:
         await factory.create_process_config(
-            name=request.name,
+            name=body.name,
             class_path=entry.class_path,
             method=entry.method,
             enabled=bool(final_enabled),
@@ -247,15 +323,22 @@ async def create_process_configuration(
             role=entry.role,
             tags=entry.tags,
             parameters_schema=entry.parameters_schema,
-            note=request.note,
+            note=body.note,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    sid, seq, ts = _mint_provenance(http_request)
     return ProcessCreateResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         status="created",
         process=ProcessCreatedInfo(
-            name=request.name,
-            template=request.template,
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            name=body.name,
+            template=body.template,
         ),
     )
 
@@ -265,6 +348,7 @@ async def create_process_configuration(
     responses={404: {"description": "Process not found in registry"}},
 )
 async def get_process_schema(
+    request: Request,
     name: str,
     settings: Annotated[AppSettings, Depends(get_settings)],
     _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
@@ -272,6 +356,7 @@ async def get_process_schema(
     """Get the configuration schema for a registered process.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         name: Process name from registry.
         settings: Application settings.
         _user: Authenticated user with MANAGE_PROCESSES permission.
@@ -291,7 +376,11 @@ async def get_process_schema(
         default_kwargs = cls.get_default_kwargs(settings)
     except Exception:
         default_kwargs = {}
+    sid, seq, ts = _mint_provenance(request)
     return ProcessSchemaResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         name=name,
         description=entry.description,
         class_path=entry.class_path,
@@ -306,20 +395,25 @@ async def get_process_schema(
 
 @router.post("/{name}/start")
 async def start_process(
+    http_request: Request,
     name: str,
-    request: ProcessStartRequest,
+    body: ProcessStartRequest,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStartResponse:
     result = await factory.start_process_by_name(
         name=name,
-        mode=request.mode,
-        args=request.args,
-        kwargs=request.kwargs,
-        autostart=request.autostart,
+        mode=body.mode,
+        args=body.args,
+        kwargs=body.kwargs,
+        autostart=body.autostart,
     )
+    sid, seq, ts = _mint_provenance(http_request)
     return ProcessStartResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         status=result.status,
         name=name,
         process_public_id=result.public_id,
@@ -329,13 +423,18 @@ async def start_process(
 
 @router.post("/{name}/stop")
 async def stop_process(
+    request: Request,
     name: str,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStopResponse:
     result = await factory.stop_process_by_name(name)
+    sid, seq, ts = _mint_provenance(request)
     return ProcessStopResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
         status=result.status,
         name=name,
         message=result.message,
@@ -344,6 +443,7 @@ async def stop_process(
 
 @router.get("/runs")
 async def list_process_runs(
+    request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[UserProfile, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     limit: int = 50,
@@ -351,4 +451,11 @@ async def list_process_runs(
 ) -> ProcessRunsResponse:
     runs_data = await factory.get_recent_runs(limit=limit, name=name)
     runs = [ProcessRun(**run) for run in runs_data]
-    return ProcessRunsResponse(runs=runs, count=len(runs))
+    sid, seq, ts = _mint_provenance(request)
+    return ProcessRunsResponse(
+        session_id=sid,
+        sequence_id=seq,
+        timestamp=ts,
+        runs=runs,
+        count=len(runs),
+    )

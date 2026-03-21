@@ -96,6 +96,25 @@ class TestSettingsRoutes:
             is_active=True,
         )
 
+    @staticmethod
+    def _make_mock_setting(**overrides: object) -> MagicMock:
+        """Create a mock Setting row with provenance fields."""
+        mock = MagicMock()
+        mock.public_id = "test-public-id"
+        mock.session_id = "test-session-id"
+        mock.sequence_id = 1
+        mock.timestamp = datetime.now(UTC)
+        for key, value in overrides.items():
+            setattr(mock, key, value)
+        return mock
+
+    @staticmethod
+    def _make_rest_request() -> MagicMock:
+        """Create a mock FastAPI Request with rest_tracker."""
+        mock_request = MagicMock()
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        return mock_request
+
     def test_setting_response_model(self) -> None:
         """Verify SettingRead response model maps fields correctly.
 
@@ -148,20 +167,20 @@ class TestSettingsRoutes:
         mock_settings.db_url = "sqlite:///:memory:"
         mock_repository = MockRepository()
         mock_session = MockSession()
-        mock_setting1 = MagicMock()
-        mock_setting1.key = "key1"
-        mock_setting1.value = "value1"
-        mock_setting1.category = "category1"
-        mock_setting1.description = "desc1"
-        mock_setting1.timestamp = datetime.now(UTC)
-        mock_setting1.updated_by = "user1"
-        mock_setting2 = MagicMock()
-        mock_setting2.key = "key2"
-        mock_setting2.value = "value2"
-        mock_setting2.category = "category2"
-        mock_setting2.description = "desc2"
-        mock_setting2.timestamp = datetime.now(UTC)
-        mock_setting2.updated_by = "user2"
+        mock_setting1 = self._make_mock_setting(
+            key="key1",
+            value="value1",
+            category="category1",
+            description="desc1",
+            updated_by="user1",
+        )
+        mock_setting2 = self._make_mock_setting(
+            key="key2",
+            value="value2",
+            category="category2",
+            description="desc2",
+            updated_by="user2",
+        )
         mock_session.execute.return_value = MockResult([mock_setting1, mock_setting2])
         mock_repository.session.return_value = mock_session
         with (
@@ -188,13 +207,13 @@ class TestSettingsRoutes:
         mock_settings.db_url = "sqlite:///:memory:"
         mock_repository = MockRepository()
         mock_session = MockSession()
-        mock_setting = MagicMock()
-        mock_setting.key = "key1"
-        mock_setting.value = "value1"
-        mock_setting.category = "auth"
-        mock_setting.description = "desc1"
-        mock_setting.timestamp = datetime.now(UTC)
-        mock_setting.updated_by = "user1"
+        mock_setting = self._make_mock_setting(
+            key="key1",
+            value="value1",
+            category="auth",
+            description="desc1",
+            updated_by="user1",
+        )
         mock_session.execute.return_value = MockResult([mock_setting])
         mock_repository.session.return_value = mock_session
         with (
@@ -228,7 +247,10 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
-            result = await get_setting_categories(user=mock_user)
+            result = await get_setting_categories(
+                request=self._make_rest_request(),
+                user=mock_user,
+            )
         assert result.categories == ["auth", "system"]
 
     @pytest.mark.asyncio
@@ -246,13 +268,13 @@ class TestSettingsRoutes:
         mock_settings_service = AsyncMock()
         mock_repository = MockRepository()
         mock_session = MockSession()
-        mock_setting = MagicMock()
-        mock_setting.key = "existing_key"
-        mock_setting.value = "updated_value"
-        mock_setting.category = "updated_category"
-        mock_setting.description = "Updated description"
-        mock_setting.timestamp = datetime.now(UTC)
-        mock_setting.updated_by = "test_user"
+        mock_setting = self._make_mock_setting(
+            key="existing_key",
+            value="updated_value",
+            category="updated_category",
+            description="Updated description",
+            updated_by="test_user",
+        )
         mock_session.execute.return_value = MockResult([mock_setting])
         mock_repository.session.return_value = mock_session
         request = SettingUpdate(

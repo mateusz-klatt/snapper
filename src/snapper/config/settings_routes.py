@@ -78,6 +78,10 @@ async def get_all_settings(
         db_settings = result.scalars().all()
         return [
             SettingRead(
+                public_id=setting.public_id,
+                timestamp=setting.timestamp,
+                session_id=setting.session_id,
+                sequence_id=setting.sequence_id,
                 key=setting.key,
                 value=setting.value,
                 category=setting.category,
@@ -91,11 +95,13 @@ async def get_all_settings(
 
 @router.get("/categories")
 async def get_setting_categories(
+    request: Request,
     user: Annotated[UserProfile, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
 ) -> SettingCategoriesResponse:
     """Retrieve all distinct setting category names.
 
     Args:
+        request: FastAPI request (provides REST tracker for provenance).
         user: Authenticated user with CONFIGURE_SYSTEM permission.
 
     Returns:
@@ -108,7 +114,16 @@ async def get_setting_categories(
             select(Setting.category).where(*where_active(Setting)).distinct()
         )
         categories = [row[0] for row in result.fetchall()]
-        return SettingCategoriesResponse(categories=sorted(categories))
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence("rest.control")
+        ts = datetime.now(UTC)
+        return SettingCategoriesResponse(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            categories=sorted(categories),
+        )
 
 
 @router.put("/{key}", responses={404: {"description": "Setting not found"}})
@@ -152,6 +167,10 @@ async def update_setting(
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")
         return SettingRead(
+            public_id=setting.public_id,
+            timestamp=setting.timestamp,
+            session_id=setting.session_id,
+            sequence_id=setting.sequence_id,
             key=setting.key,
             value=setting.value,
             category=setting.category,
