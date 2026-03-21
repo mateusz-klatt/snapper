@@ -7,22 +7,22 @@ import { z } from 'zod'
 
 export const AdminResetPasswordRequestSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('admin_reset_password_request'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     new_password: z.string().min(8),
   })
   .strict()
 
 export const AvailableProcessSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('available_process'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     name: z.string(),
     class_path: z.string(),
     method: z.string(),
@@ -36,11 +36,11 @@ export const AvailableProcessSchema = z
 
 export const ChangePasswordRequestSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('change_password_request'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     current_password: z.string(),
     new_password: z.string().min(8),
   })
@@ -48,11 +48,11 @@ export const ChangePasswordRequestSchema = z
 
 export const ConfiguredProcessSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('configured_process'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     name: z.string(),
     enabled: z.boolean(),
     running: z.boolean(),
@@ -73,11 +73,11 @@ export const ConfiguredProcessSchema = z
 
 export const ConnectionStatsSchemaSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('connection_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     active_connections: z.number().int(),
     zmq_subscribers: z.number().int(),
     subscriber_tasks: z.number().int(),
@@ -88,11 +88,11 @@ export const ConnectionStatsSchemaSchema = z
 
 export const ExchangeListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('exchange_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(z.string()),
     count: z.number().int(),
   })
@@ -100,11 +100,11 @@ export const ExchangeListResponseSchema = z
 
 export const ExecutionDataSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('execution'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     trade_id: z.string().nullable().optional(),
     exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
@@ -122,11 +122,11 @@ export const ExecutionDataSchema = z
 
 export const GapStatsSchemaSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('gap_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     gaps_detected: z.number().int(),
     session_resets: z.number().int(),
     duplicates: z.number().int(),
@@ -137,22 +137,22 @@ export const GapStatsSchemaSchema = z
 
 export const HealthTopicsSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('health_topics'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     active: z.number().int(),
   })
   .strict()
 
 export const InstrumentListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('instrument_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(z.string()),
     count: z.number().int(),
   })
@@ -160,11 +160,11 @@ export const InstrumentListResponseSchema = z
 
 export const LoginRequestSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('login_request'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     username: z.string(),
     password: z.string(),
     remember_me: z.boolean(),
@@ -173,22 +173,22 @@ export const LoginRequestSchema = z
 
 export const MessageResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('message'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.string(),
   })
   .strict()
 
 export const OrderDataSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('order'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
     instrument: z.string(),
@@ -210,11 +210,11 @@ export const OrderDataSchema = z
 
 export const PositionDataSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('position'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     quantity: z.number(),
@@ -226,11 +226,11 @@ export const PositionDataSchema = z
 
 export const ProcessCategoryCountSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_category_count'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     running: z.number().int(),
     total: z.number().int(),
   })
@@ -238,11 +238,11 @@ export const ProcessCategoryCountSchema = z
 
 export const ProcessCreateRequestSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_create_request'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     name: z.string().min(3).max(64),
     template: z.string(),
     enabled: z.boolean().nullable().optional(),
@@ -255,11 +255,11 @@ export const ProcessCreateRequestSchema = z
 
 export const ProcessCreatedInfoSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_created_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     name: z.string(),
     template: z.string(),
   })
@@ -267,11 +267,11 @@ export const ProcessCreatedInfoSchema = z
 
 export const ProcessRunSchema = z
   .object({
-    public_id: z.string(),
     type: z.literal('process_run'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     process_name: z.string(),
     status: z.enum(['running', 'succeeded', 'failed', 'cancelled']),
     role: z.enum(['core', 'task', 'strategy', 'backtest']),
@@ -287,11 +287,11 @@ export const ProcessRunSchema = z
 
 export const ProcessSchemaResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_schema'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     name: z.string(),
     description: z.string(),
     class_path: z.string(),
@@ -306,11 +306,11 @@ export const ProcessSchemaResponseSchema = z
 
 export const ProcessStartRequestSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_start_request'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     mode: z.enum(['thread', 'process']).nullable().optional(),
     args: z.array(z.unknown()).nullable().optional(),
     kwargs: z.record(z.string(), z.unknown()).nullable().optional(),
@@ -320,11 +320,11 @@ export const ProcessStartRequestSchema = z
 
 export const ProcessStartResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_start_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     status: z.enum(['success', 'already_running', 'error']),
     name: z.string(),
     process_public_id: z.string().nullable().optional(),
@@ -334,11 +334,11 @@ export const ProcessStartResponseSchema = z
 
 export const ProcessStatusSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_status'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     status: z.enum(['not_running', 'running', 'stopped', 'completed', 'error']),
     pid: z.number().int().nullable().optional(),
     started_at: z.string().nullable().optional(),
@@ -350,11 +350,11 @@ export const ProcessStatusSchema = z
 
 export const ProcessStopResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_stop_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     status: z.enum(['success', 'not_running', 'error']),
     name: z.string(),
     message: z.string().nullable().optional(),
@@ -363,11 +363,11 @@ export const ProcessStopResponseSchema = z
 
 export const SettingCategoriesResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('setting_categories'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(z.string()),
     count: z.number().int(),
   })
@@ -375,11 +375,11 @@ export const SettingCategoriesResponseSchema = z
 
 export const SettingReadSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('setting_read'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     key: z.string(),
     value: z.string(),
     category: z.string(),
@@ -391,11 +391,11 @@ export const SettingReadSchema = z
 
 export const SettingUpdateSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('setting_update'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     value: z.string(),
     category: z.string(),
     description: z.string().nullable().optional(),
@@ -404,11 +404,11 @@ export const SettingUpdateSchema = z
 
 export const SignalDataSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('signal'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     side: z.enum(['buy', 'sell']),
@@ -422,11 +422,11 @@ export const SignalDataSchema = z
 
 export const StrategyProcessSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('strategy_process'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     name: z.string(),
     running: z.boolean(),
     enabled: z.boolean(),
@@ -436,11 +436,11 @@ export const StrategyProcessSchema = z
 
 export const StrategyStatusPayloadSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('strategy_status'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     strategy_name: z.string(),
     status: z.string(),
     details: z.record(z.string(), z.unknown()).optional(),
@@ -456,11 +456,11 @@ export const StrategyStatusPayloadSchema = z
 
 export const SubscriptionsStatsSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('subscriptions_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     per_topic: z.record(z.string(), z.number().int()),
     per_client: z.record(z.string(), z.array(z.string())),
   })
@@ -468,11 +468,11 @@ export const SubscriptionsStatsSchema = z
 
 export const TopicMetricSnapshotSchemaSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('topic_metric_snapshot'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     active_subscribers: z.number().int(),
     received: z.number().int(),
     forwarded: z.number().int(),
@@ -501,11 +501,11 @@ export const ValidationErrorSchema = z
 
 export const WebSocketStatsSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('websocket_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     active_connections: z.number().int(),
     topic_subscribers: z.record(z.string(), z.number().int()),
     client_count: z.number().int(),
@@ -514,11 +514,11 @@ export const WebSocketStatsSchema = z
 
 export const WsStatsConfigSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('ws_stats_config'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     broker_xpub: z.string(),
     heartbeat_interval_ms: z.number().int(),
   })
@@ -526,11 +526,11 @@ export const WsStatsConfigSchema = z
 
 export const ZmqBridgeStatsSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('zmq_bridge_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     active_topics: z.number().int(),
     subscriber_tasks: z.number().int(),
     available_topics: z.array(z.string()),
@@ -539,11 +539,11 @@ export const ZmqBridgeStatsSchema = z
 
 export const ZmqComponentsSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('zmq_components'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     zmq_context: z.enum(['ok', 'error']),
     websocket_manager: z.enum(['ok', 'error']),
     active_connections: z.number().int(),
@@ -552,22 +552,22 @@ export const ZmqComponentsSchema = z
 
 export const ZmqConfigSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('zmq_config'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     available_topics: z.array(z.string()),
   })
   .strict()
 
 export const AvailableProcessesResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('available_processes'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(AvailableProcessSchema),
     count: z.number().int(),
   })
@@ -575,11 +575,11 @@ export const AvailableProcessesResponseSchema = z
 
 export const ConfiguredProcessesResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('configured_processes'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(ConfiguredProcessSchema),
     count: z.number().int(),
   })
@@ -587,11 +587,11 @@ export const ConfiguredProcessesResponseSchema = z
 
 export const ExecutionListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('execution_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(ExecutionDataSchema),
     count: z.number().int(),
   })
@@ -599,11 +599,11 @@ export const ExecutionListResponseSchema = z
 
 export const GapDetectionStatsSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('gap_detection_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     bridge: GapStatsSchemaSchema,
     rest_clients: z.record(z.string(), GapStatsSchemaSchema).optional(),
   })
@@ -611,11 +611,11 @@ export const GapDetectionStatsSchema = z
 
 export const OrderListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('order_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(OrderDataSchema),
     count: z.number().int(),
   })
@@ -623,11 +623,11 @@ export const OrderListResponseSchema = z
 
 export const PositionListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('position_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(PositionDataSchema),
     count: z.number().int(),
   })
@@ -635,11 +635,11 @@ export const PositionListResponseSchema = z
 
 export const ProcessSummaryResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_summary'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     feeds: ProcessCategoryCountSchema,
     strategies: ProcessCategoryCountSchema,
     executors: ProcessCategoryCountSchema,
@@ -649,11 +649,11 @@ export const ProcessSummaryResponseSchema = z
 
 export const ProcessCreateResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_create_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     status: z.literal('created'),
     process: ProcessCreatedInfoSchema,
   })
@@ -661,11 +661,11 @@ export const ProcessCreateResponseSchema = z
 
 export const ProcessRunsResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('process_runs'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(ProcessRunSchema),
     count: z.number().int(),
   })
@@ -673,11 +673,11 @@ export const ProcessRunsResponseSchema = z
 
 export const SettingListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('setting_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(SettingReadSchema),
     count: z.number().int(),
   })
@@ -685,22 +685,22 @@ export const SettingListResponseSchema = z
 
 export const SettingResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('setting_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: SettingReadSchema,
   })
   .strict()
 
 export const SignalListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('signal_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(SignalDataSchema),
     count: z.number().int(),
   })
@@ -708,11 +708,11 @@ export const SignalListResponseSchema = z
 
 export const StrategyListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('strategy_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(StrategyProcessSchema),
     count: z.number().int(),
   })
@@ -720,11 +720,11 @@ export const StrategyListResponseSchema = z
 
 export const SystemStatusSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('system_status'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     trader: ProcessStatusSchema,
     backtests: z.record(z.string(), ProcessStatusSchema),
     strategies: z.array(StrategyStatusPayloadSchema).optional(),
@@ -733,11 +733,11 @@ export const SystemStatusSchema = z
 
 export const CreateUserRequestSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('create_user_request'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     username: z.string().min(3).max(64),
     email: z.string().max(255).nullable().optional(),
     password: z.string().min(8),
@@ -748,11 +748,11 @@ export const CreateUserRequestSchema = z
 
 export const UpdateUserRequestSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('update_user_request'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     email: z.string().max(255).nullable().optional(),
     role: UserRoleSchema.nullable().optional(),
     is_active: z.boolean().nullable().optional(),
@@ -761,11 +761,11 @@ export const UpdateUserRequestSchema = z
 
 export const UserProfileSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('user_profile'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     username: z.string(),
     email: z.string().nullable().optional(),
     role: UserRoleSchema,
@@ -782,11 +782,11 @@ export const HTTPValidationErrorSchema = z
 
 export const WsStatsResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('ws_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     websocket: WebSocketStatsSchema,
     zmq_bridge: ZmqBridgeStatsSchema,
     connections: ConnectionStatsSchemaSchema,
@@ -798,11 +798,11 @@ export const WsStatsResponseSchema = z
 
 export const ZmqHealthResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('zmq_health'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     status: z.enum(['healthy', 'warning', 'error']),
     components: ZmqComponentsSchema,
     config: ZmqConfigSchema,
@@ -814,11 +814,11 @@ export const ZmqHealthResponseSchema = z
 
 export const HealthCheckResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('health_check'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     status: z.enum(['healthy', 'warning', 'error']),
     version: z.string(),
     connections: ConnectionStatsSchemaSchema,
@@ -829,11 +829,11 @@ export const HealthCheckResponseSchema = z
 
 export const LoginResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('login_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     message: z.string(),
     expires_in: z.number().int(),
     user: UserProfileSchema,
@@ -842,11 +842,11 @@ export const LoginResponseSchema = z
 
 export const RefreshResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('refresh_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     message: z.string(),
     ws_token: z.string(),
     ws_token_exp: z.iso.datetime(),
@@ -857,11 +857,11 @@ export const RefreshResponseSchema = z
 
 export const UserListResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('user_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: z.array(UserProfileSchema),
     count: z.number().int(),
   })
@@ -869,11 +869,11 @@ export const UserListResponseSchema = z
 
 export const UserResponseSchema = z
   .object({
-    public_id: z.string().optional(),
     type: z.literal('user_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string().optional(),
     timestamp: z.iso.datetime().optional(),
     session_id: z.string(),
-    sequence_id: z.number().int(),
     payload: UserProfileSchema,
   })
   .strict()

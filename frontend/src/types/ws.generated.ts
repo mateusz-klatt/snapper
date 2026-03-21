@@ -248,18 +248,18 @@ export type Topics2 = string[];
  * event. This ensures every event is complete and identifiable from birth.
  *
  * Attributes:
- *     public_id: Unique identifier (UUID7), generated at creation time.
  *     type: Payload item type discriminator for routing and deserialization.
+ *     sequence_id: Per-table monotonic counter for gap detection.
+ *     public_id: Unique identifier (UUID7), generated at creation time.
  *     timestamp: Bus arrival timestamp (UTC), generated once at creation.
  *     session_id: Producer session identifier for provenance tracking.
- *     sequence_id: Per-table monotonic counter for gap detection.
  */
 export interface StrictDataSchema {
-  public_id?: string;
   type: string;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
 }
 /**
  * OHLCV candlestick data for technical analysis.
@@ -281,11 +281,11 @@ export interface StrictDataSchema {
  *     trades: Number of trades in the candle (optional).
  */
 export interface CandleData {
-  public_id?: string;
   type: Type;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   instrument: string;
   exchange: Exchange;
   timeframe: string;
@@ -321,11 +321,11 @@ export interface CandleData {
  *     executed_at: Timestamp of the fill.
  */
 export interface ExecutionData {
-  public_id?: string;
   type: Type1;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   trade_id?: TradeId;
   exchange_order_id?: ExchangeOrderId;
   client_order_id: string;
@@ -353,11 +353,11 @@ export interface ExecutionData {
  *     meta: Optional metadata dictionary for extensions.
  */
 export interface HeartbeatData {
-  public_id?: string;
   type: Type2;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   component: string;
   sequence: number;
   status: Status1;
@@ -380,11 +380,11 @@ export interface Meta {
  *     client_order_id: Our generated order ID.
  */
 export interface OrderCancelData {
-  public_id?: string;
   type: Type3;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   exchange: Exchange2;
   instrument: string;
   exchange_order_id: string;
@@ -418,11 +418,11 @@ export interface OrderCancelData {
  *     updated_at: Last status update timestamp.
  */
 export interface OrderData {
-  public_id?: string;
   type: Type4;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   exchange_order_id?: ExchangeOrderId1;
   client_order_id: string;
   instrument: string;
@@ -460,11 +460,11 @@ export interface OrderData {
  *     reason: Optional rejection/cancellation reason.
  */
 export interface OrderEventData {
-  public_id?: string;
   type: Type5;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   exchange_order_id: string;
   client_order_id: string;
   exchange: Exchange4;
@@ -487,11 +487,11 @@ export interface OrderEventData {
  *     new_price: New limit price (optional).
  */
 export interface OrderReplaceData {
-  public_id?: string;
   type: Type6;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   exchange: Exchange5;
   instrument: string;
   exchange_order_id: string;
@@ -519,11 +519,11 @@ export interface OrderReplaceData {
  *     signaled_at: Original signal timestamp (optional).
  */
 export interface OrderRequestData {
-  public_id?: string;
   type: Type7;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   strategy_id: string;
   exchange: Exchange6;
   instrument: string;
@@ -551,11 +551,11 @@ export interface OrderRequestData {
  *     realized_pnl: Realized profit/loss.
  */
 export interface PositionData {
-  public_id?: string;
   type: Type8;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   instrument: string;
   exchange: Exchange7;
   quantity: number;
@@ -570,11 +570,11 @@ export interface PositionData {
  * Strategies use this to finalize analysis and generate reports.
  */
 export interface ReplayEndData {
-  public_id?: string;
   type: Type9;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
 }
 /**
  * Historical data replay start marker.
@@ -586,11 +586,11 @@ export interface ReplayEndData {
  *     started_at: Replay start timestamp (optional).
  */
 export interface ReplayStartData {
-  public_id?: string;
   type: Type10;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   started_at?: StartedAt;
 }
 /**
@@ -606,11 +606,11 @@ export interface ReplayStartData {
  *     updated_by: User who made the change (optional).
  */
 export interface SettingChangedData {
-  public_id?: string;
   type: Type11;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   key: string;
   value: string;
   category: string;
@@ -633,11 +633,11 @@ export interface SettingChangedData {
  *     fired_at: Domain timestamp when the signal was generated.
  */
 export interface SignalData {
-  public_id?: string;
   type: Type12;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   instrument: string;
   exchange: Exchange8;
   side: Side3;
@@ -658,11 +658,11 @@ export interface SignalData {
  *     action: Required action (always 'clear_cache').
  */
 export interface SymbolAliasUpdateData {
-  public_id?: string;
   type: Type13;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   event: Event1;
   action: Action;
 }
@@ -681,11 +681,11 @@ export interface SymbolAliasUpdateData {
  *     last: Last traded price.
  */
 export interface TickData {
-  public_id?: string;
   type: Type14;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   instrument: string;
   exchange: Exchange9;
   volume: number;
@@ -708,11 +708,11 @@ export interface TickData {
  *     side: Trade direction ('buy'/'sell') if available.
  */
 export interface TradeData {
-  public_id?: string;
   type: Type15;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   instrument: string;
   exchange: Exchange10;
   executed_at?: ExecutedAt;
@@ -733,11 +733,11 @@ export interface TradeData {
  *     ws_token_exp: WebSocket token expiration (ISO 8601).
  */
 export interface WSAuthCompleteResponse {
-  public_id?: string;
   type: Type16;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   available_topics: AvailableTopics;
   user_role: UserRole;
   session_expires_at?: SessionExpiresAt;
@@ -755,11 +755,11 @@ export interface WSAuthCompleteResponse {
  *     type: Message type discriminator ('auth_expired').
  */
 export interface WSAuthExpiredResponse {
-  public_id?: string;
   type: Type17;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
 }
 /**
  * Authentication failure message.
@@ -771,11 +771,11 @@ export interface WSAuthExpiredResponse {
  *     reason: Optional failure reason code.
  */
 export interface WSAuthFailedResponse {
-  public_id?: string;
   type: Type18;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   reason?: Reason2;
 }
 /**
@@ -788,11 +788,11 @@ export interface WSAuthFailedResponse {
  *     exp: Token expiration timestamp (ISO 8601).
  */
 export interface WSAuthOkResponse {
-  public_id?: string;
   type: Type19;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   /**
    * Token expiration (ISO 8601)
    */
@@ -808,11 +808,11 @@ export interface WSAuthOkResponse {
  *     timeout: Seconds until authentication timeout.
  */
 export interface WSAuthRequiredResponse {
-  public_id?: string;
   type: Type20;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   /**
    * Authentication timeout in seconds
    */
@@ -828,11 +828,11 @@ export interface WSAuthRequiredResponse {
  *     ws_token: WebSocket authentication token.
  */
 export interface WSAuthenticateRequest {
-  public_id?: string;
   type: Type21;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   /**
    * WebSocket authentication token
    */
@@ -848,11 +848,11 @@ export interface WSAuthenticateRequest {
  *     message: Human-readable error description.
  */
 export interface WSErrorResponse {
-  public_id?: string;
   type: Type22;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   /**
    * Error description
    */
@@ -865,11 +865,11 @@ export interface WSErrorResponse {
  *     type: Message type discriminator ('get_subscriptions').
  */
 export interface WSGetSubscriptionsRequest {
-  public_id?: string;
   type: Type23;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
 }
 /**
  * Ping request from client.
@@ -880,11 +880,11 @@ export interface WSGetSubscriptionsRequest {
  *     type: Message type discriminator ('ping').
  */
 export interface WSPingRequest {
-  public_id?: string;
   type: Type24;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
 }
 /**
  * Pong response to ping request.
@@ -897,14 +897,14 @@ export interface WSPingRequest {
  *     active_connections: Number of active WebSocket connections.
  */
 export interface WSPongResponse {
-  public_id?: string;
   type: Type25;
+  sequence_id: number;
+  public_id?: string;
   /**
    * Server timestamp (ISO 8601)
    */
   timestamp: string;
   session_id: string;
-  sequence_id: number;
   /**
    * Number of active WebSocket connections
    */
@@ -920,11 +920,11 @@ export interface WSPongResponse {
  *     exp: New token expiration timestamp (ISO 8601).
  */
 export interface WSReauthOkResponse {
-  public_id?: string;
   type: Type26;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   /**
    * New token expiration (ISO 8601)
    */
@@ -940,11 +940,11 @@ export interface WSReauthOkResponse {
  *     ws_token: New WebSocket authentication token.
  */
 export interface WSReauthRequest {
-  public_id?: string;
   type: Type27;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   /**
    * New WebSocket authentication token
    */
@@ -960,11 +960,11 @@ export interface WSReauthRequest {
  *     deadline: Deadline for reauthentication (ISO 8601).
  */
 export interface WSReauthRequiredResponse {
-  public_id?: string;
   type: Type28;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   /**
    * Deadline for reauthentication (ISO 8601)
    */
@@ -978,11 +978,11 @@ export interface WSReauthRequiredResponse {
  *     topics: List of topics to subscribe to.
  */
 export interface WSSubscribeRequest {
-  public_id?: string;
   type: Type29;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   topics: Topics;
 }
 /**
@@ -1000,11 +1000,11 @@ export interface WSSubscribeRequest {
  *     message: Optional additional details.
  */
 export interface WSSubscriptionSuccessResponse {
-  public_id?: string;
   type: Type30;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   action: Action1;
   status: Status2;
   topics: Topics1;
@@ -1024,11 +1024,11 @@ export interface WSSubscriptionSuccessResponse {
  *     total_available: Total number of available topics.
  */
 export interface WSSubscriptionsListResponse {
-  public_id?: string;
   type: Type31;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   subscriptions: Subscriptions;
   available_topics: AvailableTopics1;
   /**
@@ -1044,10 +1044,10 @@ export interface WSSubscriptionsListResponse {
  *     topics: List of topics to unsubscribe from.
  */
 export interface WSUnsubscribeRequest {
-  public_id?: string;
   type: Type32;
+  sequence_id: number;
+  public_id?: string;
   timestamp?: string;
   session_id: string;
-  sequence_id: number;
   topics: Topics2;
 }

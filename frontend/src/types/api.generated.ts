@@ -906,14 +906,16 @@ export type Components = {
          *         new_password: New password to set (min 8 chars).
          */
         AdminResetPasswordRequest: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default admin_reset_password_request
              * @constant
              */
             type: "admin_reset_password_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -921,8 +923,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** New Password */
             new_password: string;
         };
@@ -944,14 +944,16 @@ export type Components = {
          *         parameters_schema: JSON Schema for parameters.
          */
         AvailableProcess: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default available_process
              * @constant
              */
             type: "available_process";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -959,8 +961,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Name
              * @description Process identifier
@@ -1016,14 +1016,16 @@ export type Components = {
          *         count: Total number of available processes.
          */
         AvailableProcessesResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default available_processes
              * @constant
              */
             type: "available_processes";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1031,8 +1033,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["AvailableProcess"][];
             /**
@@ -1053,14 +1053,16 @@ export type Components = {
          *         new_password: New password (min 8 chars).
          */
         ChangePasswordRequest: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default change_password_request
              * @constant
              */
             type: "change_password_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1068,8 +1070,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Current Password */
             current_password: string;
             /** New Password */
@@ -1100,14 +1100,16 @@ export type Components = {
          *         active_public_id: Active public ID if running.
          */
         ConfiguredProcess: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default configured_process
              * @constant
              */
             type: "configured_process";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1115,8 +1117,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -1210,14 +1210,16 @@ export type Components = {
          *         count: Total number of configured processes.
          */
         ConfiguredProcessesResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default configured_processes
              * @constant
              */
             type: "configured_processes";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1225,8 +1227,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["ConfiguredProcess"][];
             /**
@@ -1247,14 +1247,16 @@ export type Components = {
          *         active_clients: Number of unique connected clients.
          */
         ConnectionStatsSchema: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default connection_stats
              * @constant
              */
             type: "connection_stats";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1262,8 +1264,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Active Connections
              * @description Active WebSocket connections
@@ -1308,14 +1308,16 @@ export type Components = {
          *         is_active: Whether account is active.
          */
         CreateUserRequest: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default create_user_request
              * @constant
              */
             type: "create_user_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1323,8 +1325,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Username */
             username: string;
             /** Email */
@@ -1350,14 +1350,16 @@ export type Components = {
          *         count: Total number of exchanges in the response.
          */
         ExchangeListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default exchange_list
              * @constant
              */
             type: "exchange_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1365,8 +1367,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: string[];
             /**
@@ -1399,14 +1399,16 @@ export type Components = {
          *         executed_at: Timestamp of the fill.
          */
         ExecutionData: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default execution
              * @constant
              */
             type: "execution";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1414,8 +1416,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Trade Id */
             trade_id?: string | null;
             /** Exchange Order Id */
@@ -1465,14 +1465,16 @@ export type Components = {
          *         count: Total number of executions in the response.
          */
         ExecutionListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default execution_list
              * @constant
              */
             type: "execution_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1480,8 +1482,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["ExecutionData"][];
             /**
@@ -1499,14 +1499,16 @@ export type Components = {
          *         rest_clients: Per-session gap stats from REST client detectors.
          */
         GapDetectionStats: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default gap_detection_stats
              * @constant
              */
             type: "gap_detection_stats";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1514,8 +1516,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** @description ZMQ bridge gap detection stats */
             bridge: Components["schemas"]["GapStatsSchema"];
             /**
@@ -1538,14 +1538,16 @@ export type Components = {
          *         rejected_unstamped: Messages rejected due to missing provenance.
          */
         GapStatsSchema: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default gap_stats
              * @constant
              */
             type: "gap_stats";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1553,8 +1555,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Gaps Detected
              * @description Total missing messages detected
@@ -1607,14 +1607,16 @@ export type Components = {
          *         gap_detection: Gap detection statistics from all detectors.
          */
         HealthCheckResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default health_check
              * @constant
              */
             type: "health_check";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1623,8 +1625,6 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Status
              * @description Overall service health status
@@ -1651,14 +1651,16 @@ export type Components = {
          *         active: Number of currently active topics with subscribers.
          */
         HealthTopics: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default health_topics
              * @constant
              */
             type: "health_topics";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1666,8 +1668,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Active
              * @description Number of currently active topics
@@ -1686,14 +1686,16 @@ export type Components = {
          *         count: Total number of instruments in the response.
          */
         InstrumentListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default instrument_list
              * @constant
              */
             type: "instrument_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1701,8 +1703,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: string[];
             /**
@@ -1722,14 +1722,16 @@ export type Components = {
          *         remember_me: If True, extends refresh token lifetime.
          */
         LoginRequest: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default login_request
              * @constant
              */
             type: "login_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1737,8 +1739,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Username */
             username: string;
             /** Password */
@@ -1762,14 +1762,16 @@ export type Components = {
          *         user: Authenticated user profile.
          */
         LoginResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default login_response
              * @constant
              */
             type: "login_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1777,8 +1779,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Message */
             message: string;
             /** Expires In */
@@ -1796,14 +1796,16 @@ export type Components = {
          *         payload: Human-readable response message.
          */
         MessageResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default message
              * @constant
              */
             type: "message";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1811,8 +1813,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: string;
         };
@@ -1845,14 +1845,16 @@ export type Components = {
          *         updated_at: Last status update timestamp.
          */
         OrderData: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default order
              * @constant
              */
             type: "order";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1860,8 +1862,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Exchange Order Id */
             exchange_order_id?: string | null;
             /** Client Order Id */
@@ -1919,14 +1919,16 @@ export type Components = {
          *         count: Total number of orders in the response.
          */
         OrderListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default order_list
              * @constant
              */
             type: "order_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1934,8 +1936,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["OrderData"][];
             /**
@@ -1961,14 +1961,16 @@ export type Components = {
          *         realized_pnl: Realized profit/loss.
          */
         PositionData: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default position
              * @constant
              */
             type: "position";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -1976,8 +1978,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Instrument */
             instrument: string;
             /**
@@ -2006,14 +2006,16 @@ export type Components = {
          *         count: Total number of positions in the response.
          */
         PositionListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default position_list
              * @constant
              */
             type: "position_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2021,8 +2023,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["PositionData"][];
             /**
@@ -2041,14 +2041,16 @@ export type Components = {
          *         total: Total number of configured processes.
          */
         ProcessCategoryCount: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_category_count
              * @constant
              */
             type: "process_category_count";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2056,8 +2058,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Running
              * @description Number of currently running processes
@@ -2086,14 +2086,16 @@ export type Components = {
          *         note: Optional note stored alongside configuration.
          */
         ProcessCreateRequest: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_create_request
              * @constant
              */
             type: "process_create_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2101,8 +2103,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -2151,14 +2151,16 @@ export type Components = {
          *         process: Created process info.
          */
         ProcessCreateResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_create_response
              * @constant
              */
             type: "process_create_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2166,8 +2168,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Status
              * @description Operation status
@@ -2187,14 +2187,16 @@ export type Components = {
          *         template: Template used for creation.
          */
         ProcessCreatedInfo: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_created_info
              * @constant
              */
             type: "process_created_info";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2202,8 +2204,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -2237,16 +2237,18 @@ export type Components = {
          */
         ProcessRun: {
             /**
-             * Public Id
-             * @description Unique run identifier
-             */
-            public_id: string;
-            /**
              * Type
              * @default process_run
              * @constant
              */
             type: "process_run";
+            /** Sequence Id */
+            sequence_id: number;
+            /**
+             * Public Id
+             * @description Unique run identifier
+             */
+            public_id: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2254,8 +2256,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Process Name
              * @description Process name
@@ -2324,14 +2324,16 @@ export type Components = {
          *         count: Total number of runs.
          */
         ProcessRunsResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_runs
              * @constant
              */
             type: "process_runs";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2339,8 +2341,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["ProcessRun"][];
             /**
@@ -2368,14 +2368,16 @@ export type Components = {
          *         lifecycle: Process lifecycle type.
          */
         ProcessSchemaResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_schema
              * @constant
              */
             type: "process_schema";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2383,8 +2385,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Name
              * @description Process identifier
@@ -2449,14 +2449,16 @@ export type Components = {
          *         autostart: Toggle autostart flag (None keeps stored value).
          */
         ProcessStartRequest: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_start_request
              * @constant
              */
             type: "process_start_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2464,8 +2466,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Mode
              * @description Execution mode (thread/process) - for ProcessLauncherService, not constructor
@@ -2511,14 +2511,16 @@ export type Components = {
          *         message: Additional message.
          */
         ProcessStartResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_start_response
              * @constant
              */
             type: "process_start_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2526,8 +2528,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Status
              * @description Operation status (success, already_running, error)
@@ -2566,14 +2566,16 @@ export type Components = {
          *         error: Error message if failed.
          */
         ProcessStatus: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_status
              * @constant
              */
             type: "process_status";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2581,8 +2583,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Status
              * @description Process status: not_running, running, stopped, completed, error
@@ -2626,14 +2626,16 @@ export type Components = {
          *         message: Additional message.
          */
         ProcessStopResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_stop_response
              * @constant
              */
             type: "process_stop_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2641,8 +2643,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Status
              * @description Operation status (success, not_running, error)
@@ -2672,14 +2672,16 @@ export type Components = {
          *         brokers: Count of broker processes.
          */
         ProcessSummaryResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default process_summary
              * @constant
              */
             type: "process_summary";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2687,8 +2689,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** @description Feed publisher process counts */
             feeds: Components["schemas"]["ProcessCategoryCount"];
             /** @description Strategy process counts */
@@ -2713,14 +2713,16 @@ export type Components = {
          *         user: User profile.
          */
         RefreshResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default refresh_response
              * @constant
              */
             type: "refresh_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2728,8 +2730,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Message */
             message: string;
             /** Ws Token */
@@ -2752,14 +2752,16 @@ export type Components = {
          *         count: Number of categories.
          */
         SettingCategoriesResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default setting_categories
              * @constant
              */
             type: "setting_categories";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2767,8 +2769,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: string[];
             /**
@@ -2789,14 +2789,16 @@ export type Components = {
          *         count: Total number of settings in the response.
          */
         SettingListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default setting_list
              * @constant
              */
             type: "setting_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2804,8 +2806,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["SettingRead"][];
             /**
@@ -2830,14 +2830,16 @@ export type Components = {
          *         updated_by: User who last modified the setting.
          */
         SettingRead: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default setting_read
              * @constant
              */
             type: "setting_read";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2845,8 +2847,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Key */
             key: string;
             /** Value */
@@ -2874,14 +2874,16 @@ export type Components = {
          *         payload: The setting data.
          */
         SettingResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default setting_response
              * @constant
              */
             type: "setting_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2889,8 +2891,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             payload: Components["schemas"]["SettingRead"];
         };
         /**
@@ -2906,14 +2906,16 @@ export type Components = {
          *         description: Optional description.
          */
         SettingUpdate: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default setting_update
              * @constant
              */
             type: "setting_update";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2921,8 +2923,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Value
              * @description Setting value as string
@@ -2958,14 +2958,16 @@ export type Components = {
          *         fired_at: Domain timestamp when the signal was generated.
          */
         SignalData: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default signal
              * @constant
              */
             type: "signal";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -2973,8 +2975,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Instrument */
             instrument: string;
             /**
@@ -3013,14 +3013,16 @@ export type Components = {
          *         count: Total number of signals in the response.
          */
         SignalListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default signal_list
              * @constant
              */
             type: "signal_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3028,8 +3030,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["SignalData"][];
             /**
@@ -3048,14 +3048,16 @@ export type Components = {
          *         count: Total number of strategies.
          */
         StrategyListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default strategy_list
              * @constant
              */
             type: "strategy_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3063,8 +3065,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["StrategyProcess"][];
             /**
@@ -3085,14 +3085,16 @@ export type Components = {
          *         mode: Execution mode (thread/process).
          */
         StrategyProcess: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default strategy_process
              * @constant
              */
             type: "strategy_process";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3100,8 +3102,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Name
              * @description Unique process name
@@ -3142,14 +3142,16 @@ export type Components = {
          *         uptime: Process uptime string.
          */
         StrategyStatusPayload: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default strategy_status
              * @constant
              */
             type: "strategy_status";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3157,8 +3159,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Strategy Name
              * @description Strategy name
@@ -3221,14 +3221,16 @@ export type Components = {
          *         per_client: Topics subscribed per client.
          */
         SubscriptionsStats: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default subscriptions_stats
              * @constant
              */
             type: "subscriptions_stats";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3236,8 +3238,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Per Topic
              * @description Subscriber count per topic
@@ -3266,14 +3266,16 @@ export type Components = {
          *         strategies: List of active strategies from strategy_runner.
          */
         SystemStatus: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default system_status
              * @constant
              */
             type: "system_status";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3281,8 +3283,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             trader: Components["schemas"]["ProcessStatus"];
             /** Backtests */
             backtests: {
@@ -3312,14 +3312,16 @@ export type Components = {
          *         pattern: ZMQ subscription pattern (None if unconfigured).
          */
         TopicMetricSnapshotSchema: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default topic_metric_snapshot
              * @constant
              */
             type: "topic_metric_snapshot";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3327,8 +3329,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Active Subscribers
              * @description Current subscriber count
@@ -3407,14 +3407,16 @@ export type Components = {
          *         is_active: New active status.
          */
         UpdateUserRequest: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default update_user_request
              * @constant
              */
             type: "update_user_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3422,8 +3424,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Email */
             email?: string | null;
             role?: Components["schemas"]["UserRole"] | null;
@@ -3442,14 +3442,16 @@ export type Components = {
          *         count: Total number of users.
          */
         UserListResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default user_list
              * @constant
              */
             type: "user_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3457,8 +3459,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Payload */
             payload: Components["schemas"]["UserProfile"][];
             /**
@@ -3483,14 +3483,16 @@ export type Components = {
          *         created_at: Account creation timestamp.
          */
         UserProfile: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default user_profile
              * @constant
              */
             type: "user_profile";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3498,8 +3500,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** Username */
             username: string;
             /** Email */
@@ -3527,14 +3527,16 @@ export type Components = {
          *         payload: The user profile data.
          */
         UserResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default user_response
              * @constant
              */
             type: "user_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3542,8 +3544,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             payload: Components["schemas"]["UserProfile"];
         };
         /**
@@ -3581,14 +3581,16 @@ export type Components = {
          *         client_count: Total client count.
          */
         WebSocketStats: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default websocket_stats
              * @constant
              */
             type: "websocket_stats";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3596,8 +3598,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Active Connections
              * @description Number of active WebSocket connections
@@ -3625,14 +3625,16 @@ export type Components = {
          *         heartbeat_interval_ms: Heartbeat interval in milliseconds.
          */
         WsStatsConfig: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default ws_stats_config
              * @constant
              */
             type: "ws_stats_config";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3640,8 +3642,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Broker Xpub
              * @description ZMQ broker XPUB endpoint
@@ -3669,14 +3669,16 @@ export type Components = {
          *         config: Configuration details.
          */
         WsStatsResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default ws_stats
              * @constant
              */
             type: "ws_stats";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3684,8 +3686,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /** @description WebSocket statistics */
             websocket: Components["schemas"]["WebSocketStats"];
             /** @description ZMQ bridge statistics */
@@ -3714,14 +3714,16 @@ export type Components = {
          *         available_topics: List of available topics.
          */
         ZmqBridgeStats: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default zmq_bridge_stats
              * @constant
              */
             type: "zmq_bridge_stats";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3729,8 +3731,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Active Topics
              * @description Number of active ZMQ topics
@@ -3757,14 +3757,16 @@ export type Components = {
          *         active_connections: Number of active WebSocket connections.
          */
         ZmqComponents: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default zmq_components
              * @constant
              */
             type: "zmq_components";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3772,8 +3774,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Zmq Context
              * @description ZMQ context status
@@ -3800,14 +3800,16 @@ export type Components = {
          *         available_topics: List of available ZMQ topics for subscription.
          */
         ZmqConfig: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default zmq_config
              * @constant
              */
             type: "zmq_config";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3815,8 +3817,6 @@ export type Components = {
             timestamp?: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Available Topics
              * @description List of available ZMQ topics
@@ -3840,14 +3840,16 @@ export type Components = {
          *         errors: Error messages if not healthy.
          */
         ZmqHealthResponse: {
-            /** Public Id */
-            public_id?: string;
             /**
              * Type
              * @default zmq_health
              * @constant
              */
             type: "zmq_health";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id?: string;
             /**
              * Timestamp
              * Format: date-time
@@ -3856,8 +3858,6 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /** Sequence Id */
-            sequence_id: number;
             /**
              * Status
              * @description Overall ZMQ bridge health status

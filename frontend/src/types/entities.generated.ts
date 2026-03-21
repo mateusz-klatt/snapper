@@ -23,10 +23,10 @@ type TradeSide = 'buy' | 'sell'
  * From WebSocket CandleData.
  */
 export interface Candle {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   instrument: string
   exchange: MarketDataExchange
   timeframe: string
@@ -45,10 +45,10 @@ export interface Candle {
  * From WebSocket ExecutionData.
  */
 export interface Execution {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   tradeId?: string | null
   exchangeOrderId?: string | null
   clientOrderId: string
@@ -68,10 +68,10 @@ export interface Execution {
  * From WebSocket HeartbeatData.
  */
 export interface Heartbeat {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   component: string
   sequence: number
   status: 'healthy' | 'warning' | 'error'
@@ -84,10 +84,10 @@ export interface Heartbeat {
  * From WebSocket OrderCancelData.
  */
 export interface OrderCancel {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
@@ -99,10 +99,10 @@ export interface OrderCancel {
  * From WebSocket OrderData.
  */
 export interface Order {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
@@ -126,10 +126,10 @@ export interface Order {
  * From WebSocket OrderEventData.
  */
 export interface OrderEvent {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   exchangeOrderId: string
   clientOrderId: string
   exchange: OrderExchange
@@ -143,10 +143,10 @@ export interface OrderEvent {
  * From WebSocket OrderReplaceData.
  */
 export interface OrderReplace {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   exchange: OrderExchange
   instrument: string
   exchangeOrderId: string
@@ -160,10 +160,10 @@ export interface OrderReplace {
  * From WebSocket OrderRequestData.
  */
 export interface OrderRequest {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   strategyId: string
   exchange: OrderExchange
   instrument: string
@@ -181,10 +181,10 @@ export interface OrderRequest {
  * From WebSocket PositionData.
  */
 export interface Position {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   instrument: string
   exchange: OrderExchange
   quantity: number
@@ -198,10 +198,10 @@ export interface Position {
  * From WebSocket ReplayEndData.
  */
 export interface ReplayEnd {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
 }
 
 /**
@@ -209,10 +209,10 @@ export interface ReplayEnd {
  * From WebSocket ReplayStartData.
  */
 export interface ReplayStart {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   startedAt?: Date | null
 }
 
@@ -221,10 +221,10 @@ export interface ReplayStart {
  * From WebSocket SettingChangedData.
  */
 export interface SettingChanged {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   key: string
   value: string
   category: string
@@ -236,10 +236,10 @@ export interface SettingChanged {
  * From WebSocket SignalData.
  */
 export interface Signal {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   instrument: string
   exchange: OrderExchange
   side: TradeSide
@@ -255,10 +255,10 @@ export interface Signal {
  * From WebSocket SymbolAliasUpdateData.
  */
 export interface SymbolAliasUpdate {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   event: string
   action: string
 }
@@ -268,10 +268,10 @@ export interface SymbolAliasUpdate {
  * From WebSocket TickData.
  */
 export interface Tick {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   instrument: string
   exchange: MarketDataExchange
   volume: number
@@ -285,10 +285,10 @@ export interface Tick {
  * From WebSocket TradeData.
  */
 export interface Trade {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   instrument: string
   exchange: MarketDataExchange
   executedAt?: Date | null
@@ -303,10 +303,10 @@ export interface Trade {
  * Use with adminResetPasswordToAPI() transform.
  */
 export interface AdminResetPassword {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   newPassword: string
 }
 
@@ -315,10 +315,10 @@ export interface AdminResetPassword {
  * Use with changePasswordToAPI() transform.
  */
 export interface ChangePassword {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   currentPassword: string
   newPassword: string
 }
@@ -328,10 +328,10 @@ export interface ChangePassword {
  * Use with createUserToAPI() transform.
  */
 export interface CreateUser {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   username: string
   email?: string | null
   password: string
@@ -344,10 +344,10 @@ export interface CreateUser {
  * Use with loginToAPI() transform.
  */
 export interface Login {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   username: string
   password: string
   rememberMe?: boolean
@@ -358,10 +358,10 @@ export interface Login {
  * Use with processCreateToAPI() transform.
  */
 export interface ProcessCreate {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   name: string
   template: string
   enabled?: boolean | null
@@ -376,10 +376,10 @@ export interface ProcessCreate {
  * Use with processStartToAPI() transform.
  */
 export interface ProcessStart {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   mode?: 'thread' | 'process' | null
   args?: unknown[] | null
   kwargs?: Record<string, unknown> | null
@@ -391,10 +391,10 @@ export interface ProcessStart {
  * Use with updateUserToAPI() transform.
  */
 export interface UpdateUser {
+  sequenceId: number
   publicId?: string
   timestamp?: Date
   sessionId: string
-  sequenceId: number
   email?: string | null
   role?: 'viewer' | 'operator' | 'admin' | null
   isActive?: boolean | null

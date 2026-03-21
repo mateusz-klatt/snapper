@@ -48,20 +48,20 @@ class StrictDataSchema(BaseModel):
     event. This ensures every event is complete and identifiable from birth.
 
     Attributes:
-        public_id: Unique identifier (UUID7), generated at creation time.
         type: Payload item type discriminator for routing and deserialization.
+        sequence_id: Per-table monotonic counter for gap detection.
+        public_id: Unique identifier (UUID7), generated at creation time.
         timestamp: Bus arrival timestamp (UTC), generated once at creation.
         session_id: Producer session identifier for provenance tracking.
-        sequence_id: Per-table monotonic counter for gap detection.
     """
 
     model_config = STRICT_CONFIG
 
-    public_id: str = Field(default_factory=lambda: str(uuid7()))
     type: str
+    sequence_id: int
+    public_id: str = Field(default_factory=lambda: str(uuid7()))
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     session_id: str
-    sequence_id: int
 
     def to_json(self) -> str:
         """Serialize to JSON string for ZMQ transport.

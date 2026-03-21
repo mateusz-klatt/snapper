@@ -98,27 +98,27 @@ enum WSSubscriptionSuccessResponseStatus: String, Codable, Sendable {
 }
 
 struct WsMessageBase: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
     }
 }
 
 struct CandleData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let instrument: String
     let exchange: String
     let timeframe: String
@@ -132,11 +132,11 @@ struct CandleData: Codable, Sendable {
     let trades: Int?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case instrument
         case exchange
         case timeframe
@@ -152,11 +152,11 @@ struct CandleData: Codable, Sendable {
 }
 
 struct HeartbeatData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let component: String
     let sequence: Int
     let status: String
@@ -164,11 +164,11 @@ struct HeartbeatData: Codable, Sendable {
     let meta: [String: AnyCodable]?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case component
         case sequence
         case status
@@ -178,22 +178,22 @@ struct HeartbeatData: Codable, Sendable {
 }
 
 struct OrderCancelData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
     let clientOrderId: String
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case exchange
         case instrument
         case exchangeOrderId = "exchange_order_id"
@@ -202,11 +202,11 @@ struct OrderCancelData: Codable, Sendable {
 }
 
 struct OrderEventData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let exchangeOrderId: String
     let clientOrderId: String
     let exchange: String
@@ -215,11 +215,11 @@ struct OrderEventData: Codable, Sendable {
     let reason: String?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
         case exchange
@@ -230,11 +230,11 @@ struct OrderEventData: Codable, Sendable {
 }
 
 struct OrderReplaceData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let exchange: String
     let instrument: String
     let exchangeOrderId: String
@@ -243,11 +243,11 @@ struct OrderReplaceData: Codable, Sendable {
     let newPrice: Double?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case exchange
         case instrument
         case exchangeOrderId = "exchange_order_id"
@@ -258,11 +258,11 @@ struct OrderReplaceData: Codable, Sendable {
 }
 
 struct OrderRequestData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let strategyId: String
     let exchange: String
     let instrument: String
@@ -275,11 +275,11 @@ struct OrderRequestData: Codable, Sendable {
     let signaledAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case strategyId = "strategy_id"
         case exchange
         case instrument
@@ -294,56 +294,56 @@ struct OrderRequestData: Codable, Sendable {
 }
 
 struct ReplayEndData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
     }
 }
 
 struct ReplayStartData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let startedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case startedAt = "started_at"
     }
 }
 
 struct SettingChangedData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let key: String
     let value: String
     let category: String
     let updatedBy: String?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case key
         case value
         case category
@@ -352,31 +352,31 @@ struct SettingChangedData: Codable, Sendable {
 }
 
 struct SymbolAliasUpdateData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let event: String
     let action: String
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case event
         case action
     }
 }
 
 struct TickData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let instrument: String
     let exchange: String
     let volume: Double
@@ -385,11 +385,11 @@ struct TickData: Codable, Sendable {
     let last: Double?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case instrument
         case exchange
         case volume
@@ -400,11 +400,11 @@ struct TickData: Codable, Sendable {
 }
 
 struct TradeData: Codable, Sendable {
-    let publicId: String?
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     let instrument: String
     let exchange: String
     let executedAt: Date?
@@ -413,11 +413,11 @@ struct TradeData: Codable, Sendable {
     let side: String?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case instrument
         case exchange
         case executedAt = "executed_at"
@@ -428,12 +428,12 @@ struct TradeData: Codable, Sendable {
 }
 
 struct WSAuthCompleteResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Topics available for subscription
     let availableTopics: [String]
     /// Authenticated user role
@@ -444,11 +444,11 @@ struct WSAuthCompleteResponse: Codable, Sendable {
     let wsTokenExp: Date
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case availableTopics = "available_topics"
         case userRole = "user_role"
         case sessionExpiresAt = "session_expires_at"
@@ -457,264 +457,264 @@ struct WSAuthCompleteResponse: Codable, Sendable {
 }
 
 struct WSAuthExpiredResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
     }
 }
 
 struct WSAuthFailedResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Failure reason
     let reason: String?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case reason
     }
 }
 
 struct WSAuthOkResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Token expiration (ISO 8601)
     let exp: Date
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case exp
     }
 }
 
 struct WSAuthRequiredResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Authentication timeout in seconds
     let timeout: Int?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case timeout
     }
 }
 
 struct WSAuthenticateRequest: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// WebSocket authentication token
     let wsToken: String
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case wsToken = "ws_token"
     }
 }
 
 struct WSErrorResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Error description
     let message: String
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case message
     }
 }
 
 struct WSGetSubscriptionsRequest: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
     }
 }
 
 struct WSPingRequest: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
     }
 }
 
 struct WSPongResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     /// Server timestamp (ISO 8601)
     let timestamp: Date
     let sessionId: String
-    let sequenceId: Int
     /// Number of active WebSocket connections
     let activeConnections: Int
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case activeConnections = "active_connections"
     }
 }
 
 struct WSReauthOkResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// New token expiration (ISO 8601)
     let exp: Date
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case exp
     }
 }
 
 struct WSReauthRequest: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// New WebSocket authentication token
     let wsToken: String
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case wsToken = "ws_token"
     }
 }
 
 struct WSReauthRequiredResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Deadline for reauthentication (ISO 8601)
     let deadline: Date
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case deadline
     }
 }
 
 struct WSSubscribeRequest: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Topics to subscribe to
     let topics: [String]
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case topics
     }
 }
 
 struct WSSubscriptionSuccessResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// The subscription action performed
     let action: String
     /// Result status of the subscription operation
@@ -729,11 +729,11 @@ struct WSSubscriptionSuccessResponse: Codable, Sendable {
     let message: String?
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case action
         case status
         case topics
@@ -744,12 +744,12 @@ struct WSSubscriptionSuccessResponse: Codable, Sendable {
 }
 
 struct WSSubscriptionsListResponse: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Current active subscriptions
     let subscriptions: [String]
     /// Topics available for subscription
@@ -758,11 +758,11 @@ struct WSSubscriptionsListResponse: Codable, Sendable {
     let totalAvailable: Int
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case subscriptions
         case availableTopics = "available_topics"
         case totalAvailable = "total_available"
@@ -770,21 +770,21 @@ struct WSSubscriptionsListResponse: Codable, Sendable {
 }
 
 struct WSUnsubscribeRequest: Codable, Sendable {
-    let publicId: String?
     /// Message type discriminator
     let type: String
+    let sequenceId: Int
+    let publicId: String?
     let timestamp: Date?
     let sessionId: String
-    let sequenceId: Int
     /// Topics to unsubscribe from
     let topics: [String]
 
     enum CodingKeys: String, CodingKey {
-        case publicId = "public_id"
         case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case sequenceId = "sequence_id"
         case topics
     }
 }
