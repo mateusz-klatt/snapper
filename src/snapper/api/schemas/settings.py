@@ -14,7 +14,7 @@ from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
 
 
-class SettingRead(StrictDataSchema):
+class SettingRead(StrictDataSchema[Literal["setting_read"]]):
     """Setting read response schema.
 
     Returned when fetching a setting from the database.
@@ -38,7 +38,7 @@ class SettingRead(StrictDataSchema):
     updated_by: str | None = None
 
 
-class SettingUpdate(StrictDataSchema):
+class SettingUpdate(StrictDataSchema[Literal["setting_update"]]):
     """Setting update request schema.
 
     Used when updating an existing setting.
@@ -56,7 +56,7 @@ class SettingUpdate(StrictDataSchema):
     description: str | None = Field(None, description="Setting description")
 
 
-class SettingCreate(StrictDataSchema):
+class SettingCreate(StrictDataSchema[Literal["setting_create"]]):
     """Setting creation request schema.
 
     Used when creating a new setting.
@@ -76,7 +76,7 @@ class SettingCreate(StrictDataSchema):
     description: str | None = Field(None, description="Setting description")
 
 
-class SettingResponse(PayloadResponse[SettingRead]):
+class SettingResponse(PayloadResponse[Literal["setting_response"], SettingRead]):
     """Single setting response wrapper.
 
     Wraps a SettingRead in a typed envelope for REST API consistency.
@@ -89,7 +89,7 @@ class SettingResponse(PayloadResponse[SettingRead]):
     type: Literal["setting_response"] = "setting_response"
 
 
-class SettingListResponse(PayloadListResponse[SettingRead]):
+class SettingListResponse(PayloadListResponse[Literal["setting_list"], SettingRead]):
     """Setting list response wrapper.
 
     Wraps a list of SettingRead items with a count for REST API consistency.

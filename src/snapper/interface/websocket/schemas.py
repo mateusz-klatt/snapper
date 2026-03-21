@@ -39,7 +39,7 @@ __all__ = [
 ]
 
 
-class WSErrorResponse(StrictDataSchema):
+class WSErrorResponse(StrictDataSchema[Literal["error"]]):
     """WebSocket error response message.
 
     Sent when an error occurs during message processing.
@@ -53,7 +53,7 @@ class WSErrorResponse(StrictDataSchema):
     message: str = Field(..., description="Error description")
 
 
-class WSAuthOkResponse(StrictDataSchema):
+class WSAuthOkResponse(StrictDataSchema[Literal["auth_ok"]]):
     """Authentication success acknowledgment.
 
     Sent after successful ws_token verification.
@@ -67,7 +67,7 @@ class WSAuthOkResponse(StrictDataSchema):
     exp: datetime = Field(..., description="Token expiration (ISO 8601)")
 
 
-class WSAuthRequiredResponse(StrictDataSchema):
+class WSAuthRequiredResponse(StrictDataSchema[Literal["auth_required"]]):
     """Authentication request message.
 
     Sent immediately after WebSocket connection to request authentication.
@@ -81,7 +81,7 @@ class WSAuthRequiredResponse(StrictDataSchema):
     timeout: int = Field(default=30, description="Authentication timeout in seconds")
 
 
-class WSAuthFailedResponse(StrictDataSchema):
+class WSAuthFailedResponse(StrictDataSchema[Literal["auth_failed"]]):
     """Authentication failure message.
 
     Sent when authentication fails for any reason.
@@ -95,7 +95,7 @@ class WSAuthFailedResponse(StrictDataSchema):
     reason: str | None = Field(default=None, description="Failure reason")
 
 
-class WSReauthRequiredResponse(StrictDataSchema):
+class WSReauthRequiredResponse(StrictDataSchema[Literal["reauth_required"]]):
     """Reauthentication warning message.
 
     Sent before token expiration to prompt client to refresh.
@@ -109,7 +109,7 @@ class WSReauthRequiredResponse(StrictDataSchema):
     deadline: datetime = Field(..., description="Deadline for reauthentication (ISO 8601)")
 
 
-class WSReauthOkResponse(StrictDataSchema):
+class WSReauthOkResponse(StrictDataSchema[Literal["reauth_ok"]]):
     """Reauthentication success acknowledgment.
 
     Sent after successful token refresh.
@@ -123,7 +123,7 @@ class WSReauthOkResponse(StrictDataSchema):
     exp: datetime = Field(..., description="New token expiration (ISO 8601)")
 
 
-class WSAuthExpiredResponse(StrictDataSchema):
+class WSAuthExpiredResponse(StrictDataSchema[Literal["auth_expired"]]):
     """Authentication expiration notification.
 
     Sent when token expires and grace period ends.
@@ -135,7 +135,7 @@ class WSAuthExpiredResponse(StrictDataSchema):
     type: Literal["auth_expired"] = Field("auth_expired", description=_TYPE_DESC)
 
 
-class WSAuthCompleteResponse(StrictDataSchema):
+class WSAuthCompleteResponse(StrictDataSchema[Literal["auth_complete"]]):
     """Authentication complete message with session info.
 
     Sent after successful authentication with available topics.
@@ -157,7 +157,7 @@ class WSAuthCompleteResponse(StrictDataSchema):
     ws_token_exp: datetime = Field(..., description="WS token expiration (ISO 8601)")
 
 
-class WSSubscribeRequest(StrictDataSchema):
+class WSSubscribeRequest(StrictDataSchema[Literal["subscribe"]]):
     """Topic subscription request from client.
 
     Attributes:
@@ -169,7 +169,7 @@ class WSSubscribeRequest(StrictDataSchema):
     topics: list[str] = Field(..., description="Topics to subscribe to")
 
 
-class WSUnsubscribeRequest(StrictDataSchema):
+class WSUnsubscribeRequest(StrictDataSchema[Literal["unsubscribe"]]):
     """Topic unsubscription request from client.
 
     Attributes:
@@ -181,7 +181,7 @@ class WSUnsubscribeRequest(StrictDataSchema):
     topics: list[str] = Field(..., description="Topics to unsubscribe from")
 
 
-class WSSubscriptionSuccessResponse(StrictDataSchema):
+class WSSubscriptionSuccessResponse(StrictDataSchema[Literal["subscription_success"]]):
     """Subscription operation result message.
 
     Sent after subscribe/unsubscribe operations with detailed status.
@@ -211,7 +211,7 @@ class WSSubscriptionSuccessResponse(StrictDataSchema):
     )
 
 
-class WSSubscriptionsListResponse(StrictDataSchema):
+class WSSubscriptionsListResponse(StrictDataSchema[Literal["subscriptions_list"]]):
     """Active subscriptions list response.
 
     Sent in response to get_subscriptions request.
@@ -229,7 +229,7 @@ class WSSubscriptionsListResponse(StrictDataSchema):
     total_available: int = Field(..., description="Total number of available topics")
 
 
-class WSPongResponse(StrictDataSchema):
+class WSPongResponse(StrictDataSchema[Literal["pong"]]):
     """Pong response to ping request.
 
     Includes server timestamp and connection count.
@@ -245,7 +245,7 @@ class WSPongResponse(StrictDataSchema):
     active_connections: int = Field(..., description="Number of active WebSocket connections")
 
 
-class WSAuthenticateRequest(StrictDataSchema):
+class WSAuthenticateRequest(StrictDataSchema[Literal["authenticate"]]):
     """Initial authentication request from client.
 
     Sent in response to auth_required message.
@@ -259,7 +259,7 @@ class WSAuthenticateRequest(StrictDataSchema):
     ws_token: str = Field(..., description="WebSocket authentication token")
 
 
-class WSReauthRequest(StrictDataSchema):
+class WSReauthRequest(StrictDataSchema[Literal["reauth"]]):
     """Reauthentication request from client.
 
     Sent to refresh token before expiration.
@@ -273,7 +273,7 @@ class WSReauthRequest(StrictDataSchema):
     ws_token: str = Field(..., description="New WebSocket authentication token")
 
 
-class WSPingRequest(StrictDataSchema):
+class WSPingRequest(StrictDataSchema[Literal["ping"]]):
     """Ping request from client.
 
     Used for connection health checks.
@@ -285,7 +285,7 @@ class WSPingRequest(StrictDataSchema):
     type: Literal["ping"] = Field(default="ping", description=_TYPE_DESC)
 
 
-class WSGetSubscriptionsRequest(StrictDataSchema):
+class WSGetSubscriptionsRequest(StrictDataSchema[Literal["get_subscriptions"]]):
     """Request current subscriptions list.
 
     Attributes:

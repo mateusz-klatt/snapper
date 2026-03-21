@@ -17,7 +17,7 @@ from snapper.core.types import HealthStatus
 _CONN_STATS_DESC = "Connection statistics"
 
 
-class ConnectionStatsSchema(StrictDataSchema):
+class ConnectionStatsSchema(StrictDataSchema[Literal["connection_stats"]]):
     """Connection-level statistics from the ZMQ-WebSocket bridge.
 
     Attributes:
@@ -36,7 +36,7 @@ class ConnectionStatsSchema(StrictDataSchema):
     active_clients: int = Field(default=0, description="Unique connected clients")
 
 
-class TopicMetricSnapshotSchema(StrictDataSchema):
+class TopicMetricSnapshotSchema(StrictDataSchema[Literal["topic_metric_snapshot"]]):
     """Point-in-time snapshot of metrics for a single topic.
 
     Attributes:
@@ -67,7 +67,7 @@ class TopicMetricSnapshotSchema(StrictDataSchema):
     pattern: str | None = Field(default=None, description="ZMQ subscription pattern")
 
 
-class HealthTopics(StrictDataSchema):
+class HealthTopics(StrictDataSchema[Literal["health_topics"]]):
     """Topic subscription statistics.
 
     Attributes:
@@ -78,7 +78,7 @@ class HealthTopics(StrictDataSchema):
     active: int = Field(description="Number of currently active topics")
 
 
-class GapStatsSchema(StrictDataSchema):
+class GapStatsSchema(StrictDataSchema[Literal["gap_stats"]]):
     """Gap detection telemetry counters for a single detector.
 
     Attributes:
@@ -97,7 +97,7 @@ class GapStatsSchema(StrictDataSchema):
     rejected_unstamped: int = Field(default=0, description="Messages without provenance")
 
 
-class GapDetectionStats(StrictDataSchema):
+class GapDetectionStats(StrictDataSchema[Literal["gap_detection_stats"]]):
     """Aggregated gap detection statistics from all detectors.
 
     Attributes:
@@ -113,7 +113,7 @@ class GapDetectionStats(StrictDataSchema):
     )
 
 
-class HealthCheckResponse(StrictDataSchema):
+class HealthCheckResponse(StrictDataSchema[Literal["health_check"]]):
     """Main health check endpoint response.
 
     Provides overall service health status including version,
@@ -137,7 +137,7 @@ class HealthCheckResponse(StrictDataSchema):
     gap_detection: GapDetectionStats = Field(description="Gap detection statistics")
 
 
-class ZmqComponents(StrictDataSchema):
+class ZmqComponents(StrictDataSchema[Literal["zmq_components"]]):
     """ZMQ infrastructure component status.
 
     Attributes:
@@ -152,7 +152,7 @@ class ZmqComponents(StrictDataSchema):
     active_connections: int = Field(description="Number of active WebSocket connections")
 
 
-class ZmqConfig(StrictDataSchema):
+class ZmqConfig(StrictDataSchema[Literal["zmq_config"]]):
     """ZMQ configuration information.
 
     Attributes:
@@ -163,7 +163,7 @@ class ZmqConfig(StrictDataSchema):
     available_topics: list[str] = Field(description="List of available ZMQ topics")
 
 
-class ZmqHealthResponse(StrictDataSchema):
+class ZmqHealthResponse(StrictDataSchema[Literal["zmq_health"]]):
     """ZMQ bridge health check response.
 
     Provides detailed status of the ZMQ-to-WebSocket bridge including
@@ -191,7 +191,7 @@ class ZmqHealthResponse(StrictDataSchema):
     errors: list[str] = Field(default_factory=list, description="Error messages if not healthy")
 
 
-class WebSocketStats(StrictDataSchema):
+class WebSocketStats(StrictDataSchema[Literal["websocket_stats"]]):
     """WebSocket connection statistics.
 
     Attributes:
@@ -206,7 +206,7 @@ class WebSocketStats(StrictDataSchema):
     client_count: int = Field(description="Total client count")
 
 
-class ZmqBridgeStats(StrictDataSchema):
+class ZmqBridgeStats(StrictDataSchema[Literal["zmq_bridge_stats"]]):
     """ZMQ bridge statistics.
 
     Attributes:
@@ -221,7 +221,7 @@ class ZmqBridgeStats(StrictDataSchema):
     available_topics: list[str] = Field(description="List of available topics")
 
 
-class WsStatsConfig(StrictDataSchema):
+class WsStatsConfig(StrictDataSchema[Literal["ws_stats_config"]]):
     """WebSocket statistics configuration.
 
     Attributes:
@@ -234,7 +234,7 @@ class WsStatsConfig(StrictDataSchema):
     heartbeat_interval_ms: int = Field(description="Heartbeat interval in milliseconds")
 
 
-class SubscriptionsStats(StrictDataSchema):
+class SubscriptionsStats(StrictDataSchema[Literal["subscriptions_stats"]]):
     """Subscription statistics.
 
     Attributes:
@@ -247,7 +247,7 @@ class SubscriptionsStats(StrictDataSchema):
     per_client: dict[str, list[str]] = Field(description="Topics subscribed per client")
 
 
-class WsStatsResponse(StrictDataSchema):
+class WsStatsResponse(StrictDataSchema[Literal["ws_stats"]]):
     """WebSocket statistics endpoint response.
 
     Comprehensive statistics about WebSocket connections, ZMQ bridge,
@@ -271,7 +271,7 @@ class WsStatsResponse(StrictDataSchema):
     config: WsStatsConfig = Field(description="Configuration details")
 
 
-class SettingCategoriesResponse(PayloadListResponse[str]):
+class SettingCategoriesResponse(PayloadListResponse[Literal["setting_categories"], str]):
     """Setting categories list response.
 
     Attributes:

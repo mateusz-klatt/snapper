@@ -10,7 +10,7 @@ from typing import Literal
 from snapper.api.schemas.base import StrictDataSchema
 
 
-class CsrfToken(StrictDataSchema):
+class CsrfToken(StrictDataSchema[Literal["csrf_token"]]):
     """CSRF token schema.
 
     Attributes:

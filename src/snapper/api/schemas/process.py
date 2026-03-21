@@ -56,7 +56,7 @@ __all__ = [
 ]
 
 
-class ProcessStartRequest(StrictDataSchema):
+class ProcessStartRequest(StrictDataSchema[Literal["process_start_request"]]):
     """Process start request schema.
 
     Used to start a configured process with optional parameter overrides.
@@ -91,7 +91,7 @@ class ProcessStartRequest(StrictDataSchema):
     )
 
 
-class ProcessCreateRequest(StrictDataSchema):
+class ProcessCreateRequest(StrictDataSchema[Literal["process_create_request"]]):
     """Process creation request schema.
 
     Used to create a new process configuration from a template.
@@ -142,7 +142,7 @@ class ProcessCreateRequest(StrictDataSchema):
     )
 
 
-class TradeStartRequest(StrictDataSchema):
+class TradeStartRequest(StrictDataSchema[Literal["trade_start_request"]]):
     """Trade execution start request schema.
 
     Used to start live trading with a specific strategy.
@@ -158,7 +158,7 @@ class TradeStartRequest(StrictDataSchema):
     paper: bool = Field(default=False, description="Enable paper trading mode")
 
 
-class BacktestRequest(StrictDataSchema):
+class BacktestRequest(StrictDataSchema[Literal["backtest_request"]]):
     """Backtest request schema.
 
     Used to start a backtest run.
@@ -176,7 +176,7 @@ class BacktestRequest(StrictDataSchema):
     end: str = Field(description="End date in YYYY-MM-DD format")
 
 
-class ProcessStatus(StrictDataSchema):
+class ProcessStatus(StrictDataSchema[Literal["process_status"]]):
     """Process status response schema.
 
     Represents the current status of a single process.
@@ -202,7 +202,7 @@ class ProcessStatus(StrictDataSchema):
     error: str | None = Field(default=None, description="Error message if failed")
 
 
-class StrategyStatusPayload(StrictDataSchema):
+class StrategyStatusPayload(StrictDataSchema[Literal["strategy_status"]]):
     """Strategy process status payload for the system status endpoint.
 
     Attributes:
@@ -232,7 +232,7 @@ class StrategyStatusPayload(StrictDataSchema):
     uptime: str | None = Field(None, description="Process uptime")
 
 
-class SystemStatus(StrictDataSchema):
+class SystemStatus(StrictDataSchema[Literal["system_status"]]):
     """System-wide status response schema.
 
     Provides status of the trader process, backtests, and active strategies.
@@ -252,7 +252,7 @@ class SystemStatus(StrictDataSchema):
     )
 
 
-class BacktestStatus(StrictDataSchema):
+class BacktestStatus(StrictDataSchema[Literal["backtest_status"]]):
     """Backtest status response schema.
 
     Represents the current status of a backtest run.
@@ -278,7 +278,7 @@ class BacktestStatus(StrictDataSchema):
     error: str | None = None
 
 
-class BacktestOutput(StrictDataSchema):
+class BacktestOutput(StrictDataSchema[Literal["backtest_output"]]):
     """Backtest output response schema.
 
     Contains output lines from a backtest run.
@@ -296,7 +296,7 @@ class BacktestOutput(StrictDataSchema):
     status: SpawnerProcessStatus
 
 
-class AvailableProcess(StrictDataSchema):
+class AvailableProcess(StrictDataSchema[Literal["available_process"]]):
     """Available process template response schema.
 
     Describes a registered process that can be instantiated.
@@ -324,7 +324,9 @@ class AvailableProcess(StrictDataSchema):
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
 
 
-class AvailableProcessesResponse(PayloadListResponse[AvailableProcess]):
+class AvailableProcessesResponse(
+    PayloadListResponse[Literal["available_processes"], AvailableProcess]
+):
     """Available processes list response schema.
 
     Attributes:
@@ -336,7 +338,7 @@ class AvailableProcessesResponse(PayloadListResponse[AvailableProcess]):
     type: Literal["available_processes"] = "available_processes"
 
 
-class ConfiguredProcess(StrictDataSchema):
+class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     """Configured process response schema.
 
     Describes a process configuration with its current runtime state.
@@ -378,7 +380,9 @@ class ConfiguredProcess(StrictDataSchema):
     active_public_id: str | None = Field(None, description="Active public ID if running")
 
 
-class ConfiguredProcessesResponse(PayloadListResponse[ConfiguredProcess]):
+class ConfiguredProcessesResponse(
+    PayloadListResponse[Literal["configured_processes"], ConfiguredProcess]
+):
     """Configured processes list response schema.
 
     Attributes:
@@ -390,7 +394,7 @@ class ConfiguredProcessesResponse(PayloadListResponse[ConfiguredProcess]):
     type: Literal["configured_processes"] = "configured_processes"
 
 
-class ProcessCategoryCount(StrictDataSchema):
+class ProcessCategoryCount(StrictDataSchema[Literal["process_category_count"]]):
     """Running/total count for a process category.
 
     Attributes:
@@ -404,7 +408,7 @@ class ProcessCategoryCount(StrictDataSchema):
     total: int = Field(description="Total number of configured processes")
 
 
-class ProcessSummaryResponse(StrictDataSchema):
+class ProcessSummaryResponse(StrictDataSchema[Literal["process_summary"]]):
     """Lightweight process summary for the overview dashboard.
 
     Attributes:
@@ -422,7 +426,7 @@ class ProcessSummaryResponse(StrictDataSchema):
     brokers: ProcessCategoryCount = Field(description="Broker process counts")
 
 
-class StrategyProcess(StrictDataSchema):
+class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
     """Lightweight strategy process info for read-only views.
 
     Attributes:
@@ -440,7 +444,7 @@ class StrategyProcess(StrictDataSchema):
     mode: ProcessMode = Field(description="Execution mode (thread/process)")
 
 
-class StrategyListResponse(PayloadListResponse[StrategyProcess]):
+class StrategyListResponse(PayloadListResponse[Literal["strategy_list"], StrategyProcess]):
     """Strategy processes list response.
 
     Attributes:
@@ -452,7 +456,7 @@ class StrategyListResponse(PayloadListResponse[StrategyProcess]):
     type: Literal["strategy_list"] = "strategy_list"
 
 
-class ProcessCreatedInfo(StrictDataSchema):
+class ProcessCreatedInfo(StrictDataSchema[Literal["process_created_info"]]):
     """Process creation info schema.
 
     Attributes:
@@ -466,7 +470,7 @@ class ProcessCreatedInfo(StrictDataSchema):
     template: str = Field(description="Template used for creation")
 
 
-class ProcessCreateResponse(StrictDataSchema):
+class ProcessCreateResponse(StrictDataSchema[Literal["process_create_response"]]):
     """Process creation response schema.
 
     Attributes:
@@ -480,7 +484,7 @@ class ProcessCreateResponse(StrictDataSchema):
     process: ProcessCreatedInfo = Field(description="Created process info")
 
 
-class ProcessSchemaResponse(StrictDataSchema):
+class ProcessSchemaResponse(StrictDataSchema[Literal["process_schema"]]):
     """Process schema response.
 
     Describes a process template schema with default values.
@@ -510,7 +514,7 @@ class ProcessSchemaResponse(StrictDataSchema):
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 
 
-class ProcessRun(StrictDataSchema):
+class ProcessRun(StrictDataSchema[Literal["process_run"]]):
     """Process run record response schema.
 
     Represents a single execution run of a process.
@@ -544,7 +548,7 @@ class ProcessRun(StrictDataSchema):
     completed_at: str | None = Field(None, description="Completion time if finished")
 
 
-class ProcessRunsResponse(PayloadListResponse[ProcessRun]):
+class ProcessRunsResponse(PayloadListResponse[Literal["process_runs"], ProcessRun]):
     """Process runs list response schema.
 
     Attributes:
@@ -556,7 +560,7 @@ class ProcessRunsResponse(PayloadListResponse[ProcessRun]):
     type: Literal["process_runs"] = "process_runs"
 
 
-class ProcessRuntimeStatus(StrictDataSchema):
+class ProcessRuntimeStatus(StrictDataSchema[Literal["process_runtime_status"]]):
     """Process runtime status response schema.
 
     Represents the current runtime state of a process.
@@ -580,7 +584,7 @@ class ProcessRuntimeStatus(StrictDataSchema):
     details: dict[str, Any] | None = Field(None, description="Additional process details")
 
 
-class ProcessStartResponse(StrictDataSchema):
+class ProcessStartResponse(StrictDataSchema[Literal["process_start_response"]]):
     """Process start response schema.
 
     Attributes:
@@ -600,7 +604,7 @@ class ProcessStartResponse(StrictDataSchema):
     message: str | None = Field(None, description="Additional message")
 
 
-class ProcessStopResponse(StrictDataSchema):
+class ProcessStopResponse(StrictDataSchema[Literal["process_stop_response"]]):
     """Process stop response schema.
 
     Attributes:

@@ -13,7 +13,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
-class LoginRequest(StrictDataSchema):
+class LoginRequest(StrictDataSchema[Literal["login_request"]]):
     """Login request schema.
 
     Attributes:
@@ -29,7 +29,7 @@ class LoginRequest(StrictDataSchema):
     remember_me: bool = False
 
 
-class CreateUserRequest(StrictDataSchema):
+class CreateUserRequest(StrictDataSchema[Literal["create_user_request"]]):
     """Create user request schema.
 
     Attributes:
@@ -49,7 +49,7 @@ class CreateUserRequest(StrictDataSchema):
     is_active: bool = True
 
 
-class UpdateUserRequest(StrictDataSchema):
+class UpdateUserRequest(StrictDataSchema[Literal["update_user_request"]]):
     """Update user request schema.
 
     All fields are optional - only provided fields are updated.
@@ -67,7 +67,7 @@ class UpdateUserRequest(StrictDataSchema):
     is_active: bool | None = None
 
 
-class ChangePasswordRequest(StrictDataSchema):
+class ChangePasswordRequest(StrictDataSchema[Literal["change_password_request"]]):
     """Change password request schema.
 
     Used by authenticated users to change their own password.
@@ -83,7 +83,7 @@ class ChangePasswordRequest(StrictDataSchema):
     new_password: str = Field(min_length=8)
 
 
-class AdminResetPasswordRequest(StrictDataSchema):
+class AdminResetPasswordRequest(StrictDataSchema[Literal["admin_reset_password_request"]]):
     """Admin password reset request schema.
 
     Used by admins to reset another user's password

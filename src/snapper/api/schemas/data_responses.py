@@ -16,7 +16,7 @@ from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
 
 
-class CandleListResponse(PayloadListResponse[CandleData]):
+class CandleListResponse(PayloadListResponse[Literal["candle_list"], CandleData]):
     """Candle list response wrapper.
 
     Wraps a list of CandleData items with a count.
@@ -30,7 +30,7 @@ class CandleListResponse(PayloadListResponse[CandleData]):
     type: Literal["candle_list"] = "candle_list"
 
 
-class SignalListResponse(PayloadListResponse[SignalData]):
+class SignalListResponse(PayloadListResponse[Literal["signal_list"], SignalData]):
     """Signal list response wrapper.
 
     Wraps a list of SignalData items with a count.
@@ -44,7 +44,7 @@ class SignalListResponse(PayloadListResponse[SignalData]):
     type: Literal["signal_list"] = "signal_list"
 
 
-class OrderListResponse(PayloadListResponse[OrderData]):
+class OrderListResponse(PayloadListResponse[Literal["order_list"], OrderData]):
     """Order list response wrapper.
 
     Wraps a list of OrderData items with a count.
@@ -58,7 +58,7 @@ class OrderListResponse(PayloadListResponse[OrderData]):
     type: Literal["order_list"] = "order_list"
 
 
-class ExecutionListResponse(PayloadListResponse[ExecutionData]):
+class ExecutionListResponse(PayloadListResponse[Literal["execution_list"], ExecutionData]):
     """Execution list response wrapper.
 
     Wraps a list of ExecutionData items with a count.
@@ -72,7 +72,7 @@ class ExecutionListResponse(PayloadListResponse[ExecutionData]):
     type: Literal["execution_list"] = "execution_list"
 
 
-class PositionListResponse(PayloadListResponse[PositionData]):
+class PositionListResponse(PayloadListResponse[Literal["position_list"], PositionData]):
     """Position list response wrapper.
 
     Wraps a list of PositionData items with a count.
@@ -86,7 +86,7 @@ class PositionListResponse(PayloadListResponse[PositionData]):
     type: Literal["position_list"] = "position_list"
 
 
-class ExchangeListResponse(PayloadListResponse[str]):
+class ExchangeListResponse(PayloadListResponse[Literal["exchange_list"], str]):
     """Exchange list response wrapper.
 
     Wraps a list of exchange name strings with a count.
@@ -100,7 +100,7 @@ class ExchangeListResponse(PayloadListResponse[str]):
     type: Literal["exchange_list"] = "exchange_list"
 
 
-class InstrumentListResponse(PayloadListResponse[str]):
+class InstrumentListResponse(PayloadListResponse[Literal["instrument_list"], str]):
     """Instrument list response wrapper.
 
     Wraps a list of instrument symbol strings with a count.

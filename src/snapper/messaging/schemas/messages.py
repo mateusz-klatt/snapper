@@ -9,6 +9,7 @@ Functions:
 """
 
 import json
+from typing import Any
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -64,7 +65,7 @@ class MessageParseError(Exception):
     pass
 
 
-MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema]] = {
+MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "tick": TickData,
     "candle": CandleData,
     "trade": TradeData,
@@ -84,7 +85,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema]] = {
 """Mapping from message type string to Data class for deserialization."""
 
 
-def parse_message(data: str) -> StrictDataSchema:
+def parse_message(data: str) -> StrictDataSchema[Any]:
     """Parse JSON string into typed Data instance.
 
     Deserializes a JSON message string and returns the appropriate

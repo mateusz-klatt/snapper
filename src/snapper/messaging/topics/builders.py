@@ -31,6 +31,7 @@ Parser Functions:
 """
 
 from dataclasses import dataclass
+from typing import Any
 from typing import cast
 from typing import get_args
 
@@ -489,7 +490,7 @@ def heartbeat_topic_from_component(component: str) -> str:
     return f"system.heartbeats.{component}"
 
 
-def topic_for_message(data: StrictDataSchema) -> str:
+def topic_for_message(data: StrictDataSchema[Any]) -> str:
     """Derive ZMQ topic from a Data schema instance.
 
     Uses isinstance dispatch to call the appropriate builder function

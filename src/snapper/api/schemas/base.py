@@ -31,7 +31,7 @@ STRICT_CONFIG = ConfigDict(
 )
 
 
-class StrictDataSchema(BaseModel):
+class StrictDataSchema[TypeT: str](BaseModel):
     """Base schema for all event payload items across ZMQ, WebSocket, and REST.
 
     Every event payload item inherits from this base, gaining a unique UUID7
@@ -57,7 +57,7 @@ class StrictDataSchema(BaseModel):
 
     model_config = STRICT_CONFIG
 
-    type: str
+    type: TypeT
     sequence_id: int
     public_id: str = Field(default_factory=lambda: str(uuid7()))
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -84,7 +84,7 @@ class StrictDataSchema(BaseModel):
         return cls.model_validate_json(data)
 
 
-class PayloadResponse[PayloadT](StrictDataSchema):
+class PayloadResponse[TypeT: str, PayloadT](StrictDataSchema[TypeT]):
     """Generic REST response carrying a single payload.
 
     All singleton REST responses inherit from this base. The ``payload``
@@ -98,7 +98,7 @@ class PayloadResponse[PayloadT](StrictDataSchema):
     payload: PayloadT
 
 
-class PayloadListResponse[PayloadT](StrictDataSchema):
+class PayloadListResponse[TypeT: str, PayloadT](StrictDataSchema[TypeT]):
     """Generic REST response carrying a list of payloads.
 
     All list REST responses inherit from this base. The ``payload``
@@ -113,7 +113,7 @@ class PayloadListResponse[PayloadT](StrictDataSchema):
     count: int = Field(description="Number of items in payload")
 
 
-class MessageResponse(PayloadResponse[str]):
+class MessageResponse(PayloadResponse[Literal["message"], str]):
     """Generic API response containing a single message.
 
     Used for simple acknowledgment responses (logout, delete, password change).

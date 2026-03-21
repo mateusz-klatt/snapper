@@ -13,7 +13,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.schemas.user import UserProfile
 
 
-class LoginResponse(StrictDataSchema):
+class LoginResponse(StrictDataSchema[Literal["login_response"]]):
     """Login response schema.
 
     Returned after successful authentication.
@@ -31,7 +31,7 @@ class LoginResponse(StrictDataSchema):
     user: UserProfile
 
 
-class RefreshResponse(StrictDataSchema):
+class RefreshResponse(StrictDataSchema[Literal["refresh_response"]]):
     """Token refresh response schema.
 
     Returned after successful token refresh.
@@ -53,7 +53,7 @@ class RefreshResponse(StrictDataSchema):
     user: UserProfile
 
 
-class UserResponse(PayloadResponse[UserProfile]):
+class UserResponse(PayloadResponse[Literal["user_response"], UserProfile]):
     """Single user response wrapper.
 
     Wraps a UserProfile in a typed envelope for REST API consistency.
@@ -66,7 +66,7 @@ class UserResponse(PayloadResponse[UserProfile]):
     type: Literal["user_response"] = "user_response"
 
 
-class UserListResponse(PayloadListResponse[UserProfile]):
+class UserListResponse(PayloadListResponse[Literal["user_list"], UserProfile]):
     """User list response schema.
 
     Returned by user listing endpoints.

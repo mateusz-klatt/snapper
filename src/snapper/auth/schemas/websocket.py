@@ -10,7 +10,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
-class WebSocketAuthMessage(StrictDataSchema):
+class WebSocketAuthMessage(StrictDataSchema[Literal["auth"]]):
     """WebSocket authentication message schema.
 
     Sent by client to authenticate WebSocket connection.
@@ -24,7 +24,7 @@ class WebSocketAuthMessage(StrictDataSchema):
     token: str
 
 
-class WebSocketAuthResponse(StrictDataSchema):
+class WebSocketAuthResponse(StrictDataSchema[Literal["auth_response"]]):
     """WebSocket authentication response schema.
 
     Sent by server after authentication attempt.

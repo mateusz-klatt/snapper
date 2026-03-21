@@ -14,7 +14,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 
 
-class UserProfile(StrictDataSchema):
+class UserProfile(StrictDataSchema[Literal["user_profile"]]):
     """User profile schema.
 
     Represents authenticated user information returned by API

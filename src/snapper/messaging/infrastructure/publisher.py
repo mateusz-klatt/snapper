@@ -9,6 +9,7 @@ one component lifetime. MessagePublisher wraps ValidatedPublisher and
 delegates routing to the caller via explicit stream_key.
 """
 
+from typing import Any
 from uuid import uuid7
 
 from snapper.api.schemas.base import StrictDataSchema
@@ -88,7 +89,7 @@ class MessagePublisher:
     async def send(
         self,
         stream_key: str,
-        data: StrictDataSchema,
+        data: StrictDataSchema[Any],
         *,
         flags: int = 0,
     ) -> None:
