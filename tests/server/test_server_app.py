@@ -280,7 +280,7 @@ class TestCreateApiRouter:
         response = self.client.get("/api/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "healthy"
+        assert data["payload"]["status"] == "healthy"
         assert "timestamp" in data
 
     @patch("snapper.server.app.get_settings")
@@ -397,14 +397,14 @@ class TestCreateApiRouter:
 
     @patch("snapper.server.app.get_settings")
     @patch("snapper.server.app.get_repository")
-    def test_get_candles_instrument_not_found_returns_204(
+    def test_get_candles_instrument_not_found_returns_empty_payload(
         self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
     ) -> None:
-        """Test candles endpoint returns 204 for unknown instrument.
+        """Test candles endpoint returns empty payload for unknown instrument.
 
         Given: An instrument that does not exist in the database,
         When: GET /api/candles is called,
-        Then: Response status is 204 No Content.
+        Then: Response status is 200 with empty payload list.
         """
         mock_settings = MagicMock()
         mock_settings.db_url = TEST_DB_URL
@@ -424,8 +424,10 @@ class TestCreateApiRouter:
 
         mock_session.execute = mock_execute
         response = self.client.get("/api/candles?instrument=INVALID&exchange=kraken&timeframe=1h")
-        assert response.status_code == 204
-        assert response.content == b""
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"] == []
+        assert data["count"] == 0
 
     def test_get_system_status_success(self) -> None:
         """Test system status returns running processes info.
@@ -463,15 +465,16 @@ class TestCreateApiRouter:
             response = self.client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
-        assert "trader" in data
-        assert data["trader"]["status"] == "not_running"
-        assert "backtests" in data
-        assert data["backtests"] == {}
-        assert "strategies" in data
-        assert len(data["strategies"]) == 1
-        assert data["strategies"][0]["strategy_name"] == "macd_btc_1h"
-        assert data["strategies"][0]["status"] == "running"
-        assert data["strategies"][0]["signals_generated"] == 42
+        payload = data["payload"]
+        assert "trader" in payload
+        assert payload["trader"]["status"] == "not_running"
+        assert "backtests" in payload
+        assert payload["backtests"] == {}
+        assert "strategies" in payload
+        assert len(payload["strategies"]) == 1
+        assert payload["strategies"][0]["strategy_name"] == "macd_btc_1h"
+        assert payload["strategies"][0]["status"] == "running"
+        assert payload["strategies"][0]["signals_generated"] == 42
 
 
 class TestWebSocketEndpoints:
@@ -501,9 +504,9 @@ class TestWebSocketEndpoints:
         response = self.client.get("/api/zmq/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "healthy"
+        assert data["payload"]["status"] == "healthy"
         assert "timestamp" in data
-        assert data["components"]["websocket_manager"] == "ok"
+        assert data["payload"]["components"]["websocket_manager"] == "ok"
 
 
 class TestStaticFileServing:
@@ -1006,7 +1009,7 @@ class TestZmqHealthCheckErrors:
             response = client.get("/api/zmq/health")
             assert response.status_code == 200
             data = response.json()
-            assert "status" in data
+            assert "status" in data["payload"]
         finally:
             app.state.manager.zmq_bridge.context = original_context
 
@@ -1060,9 +1063,10 @@ class TestSystemStatusEdgeCases:
                 response = client.get("/api/status")
                 assert response.status_code == 200
                 data = response.json()
-                assert "trader" in data
-                assert data["trader"]["status"] == "not_running"
-                assert "strategies" in data
+                payload = data["payload"]
+                assert "trader" in payload
+                assert payload["trader"]["status"] == "not_running"
+                assert "strategies" in payload
 
     def test_system_status_handles_process_error(self) -> None:
         """Verify status handles process status error gracefully.
@@ -1091,8 +1095,8 @@ class TestSystemStatusEdgeCases:
                 response = client.get("/api/status")
                 assert response.status_code == 200
                 data = response.json()
-                assert "trader" in data
-                assert "strategies" in data
+                assert "trader" in data["payload"]
+                assert "strategies" in data["payload"]
 
     def test_system_status_trader_running_when_coordinator_started(self) -> None:
         """Verify trader status reflects trader_coordinator process state.
@@ -1118,7 +1122,7 @@ class TestSystemStatusEdgeCases:
                 response = client.get("/api/status")
                 assert response.status_code == 200
                 data = response.json()
-                assert data["trader"]["status"] == "running"
+                assert data["payload"]["trader"]["status"] == "running"
 
     def test_system_status_trader_not_running_when_coordinator_absent(self) -> None:
         """Verify trader status is not_running when coordinator is absent.
@@ -1144,7 +1148,7 @@ class TestSystemStatusEdgeCases:
                 response = client.get("/api/status")
                 assert response.status_code == 200
                 data = response.json()
-                assert data["trader"]["status"] == "not_running"
+                assert data["payload"]["trader"]["status"] == "not_running"
 
 
 class TestAppCoverageImprovement:
@@ -1179,9 +1183,9 @@ class TestAppCoverageImprovement:
         response = self.client.get("/api/ws/stats")
         assert response.status_code == 200
         data = response.json()
-        assert "websocket" in data
-        assert "zmq_bridge" in data
-        assert "config" in data
+        assert "websocket" in data["payload"]
+        assert "zmq_bridge" in data["payload"]
+        assert "config" in data["payload"]
 
     def test_zmq_health_check_success(self) -> None:
         """Verify ZMQ health check returns healthy status.
@@ -1193,8 +1197,8 @@ class TestAppCoverageImprovement:
         response = self.client.get("/api/zmq/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "healthy"
-        assert data["components"]["zmq_context"] == "ok"
+        assert data["payload"]["status"] == "healthy"
+        assert data["payload"]["components"]["zmq_context"] == "ok"
 
     def test_zmq_health_check_error(self) -> None:
         """Verify ZMQ health check includes error information.
@@ -1206,9 +1210,9 @@ class TestAppCoverageImprovement:
         response = self.client.get("/api/zmq/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "healthy"
-        assert "components" in data
-        assert "errors" in data
+        assert data["payload"]["status"] == "healthy"
+        assert "components" in data["payload"]
+        assert "errors" in data["payload"]
 
     def test_health_endpoint(self) -> None:
         """Verify health endpoint returns healthy status.
@@ -1220,7 +1224,7 @@ class TestAppCoverageImprovement:
         response = self.client.get("/api/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "healthy"
+        assert data["payload"]["status"] == "healthy"
         assert "timestamp" in data
 
     def test_root_dashboard_endpoint(self) -> None:
@@ -1678,10 +1682,10 @@ class TestZmqHealthCheckContextError:
             response = client.get("/api/zmq/health")
             assert response.status_code == 200
             data = response.json()
-            assert data["status"] == "error"
-            assert data["components"]["zmq_context"] == "error"
-            assert len(data["errors"]) > 0
-            assert "ZMQ context error" in data["errors"][0]
+            assert data["payload"]["status"] == "error"
+            assert data["payload"]["components"]["zmq_context"] == "error"
+            assert len(data["payload"]["errors"]) > 0
+            assert "ZMQ context error" in data["payload"]["errors"][0]
         finally:
             app.state.manager.zmq_bridge.context = original_context
 
@@ -1719,8 +1723,8 @@ class TestSystemStatusProcessError:
                 response = client.get("/api/status")
                 assert response.status_code == 200
                 data = response.json()
-                assert "strategies" in data
-                assert "trader" in data
+                assert "strategies" in data["payload"]
+                assert "trader" in data["payload"]
                 mock_logger.warning.assert_called()
 
     def test_system_status_with_valid_process_status(self) -> None:
@@ -1758,9 +1762,10 @@ class TestSystemStatusProcessError:
                 response = client.get("/api/status")
                 assert response.status_code == 200
                 data = response.json()
-                assert len(data["strategies"]) == 1
-                assert data["strategies"][0]["strategy_name"] == "test_strategy"
-                assert data["strategies"][0]["status"] == "running"
+                payload = data["payload"]
+                assert len(payload["strategies"]) == 1
+                assert payload["strategies"][0]["strategy_name"] == "test_strategy"
+                assert payload["strategies"][0]["status"] == "running"
 
 
 class TestSignalsExchangeFilter:
@@ -2097,4 +2102,4 @@ def test_build_strategy_payload_returns_none_for_non_dict() -> None:
     When _build_strategy_payload is called,
     Then it returns None without raising.
     """
-    assert _build_strategy_payload("not_a_dict", "sid", 1, datetime.now()) is None
+    assert _build_strategy_payload("not_a_dict") is None

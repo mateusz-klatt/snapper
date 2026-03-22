@@ -5,6 +5,9 @@ and message broadcasting with ZMQ bridge integration.
 """
 
 import logging
+from datetime import UTC
+from datetime import datetime
+from uuid import uuid7
 
 from fastapi import WebSocket
 from pydantic import BaseModel
@@ -234,6 +237,8 @@ class WebSocketConnectionManager:
             message=error_message,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await self.send_response(websocket, error)
 

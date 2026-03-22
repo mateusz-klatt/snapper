@@ -2,6 +2,8 @@
 
 import asyncio
 import time
+from datetime import UTC
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -347,6 +349,8 @@ class TestZMQPubSub:
             test_msg = TickData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="BTCUSD",
                 exchange="kraken",
                 volume=0.1,
@@ -395,6 +399,8 @@ class TestZMQPubSub:
             btc_msg = TickData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="BTCUSD",
                 exchange="kraken",
                 volume=0.1,
@@ -403,6 +409,8 @@ class TestZMQPubSub:
             eth_msg = TickData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="ETHUSD",
                 exchange="kraken",
                 volume=1.0,
@@ -411,6 +419,8 @@ class TestZMQPubSub:
             other_msg = TickData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="ADAUSD",
                 exchange="kraken",
                 volume=100.0,
@@ -458,6 +468,8 @@ class TestZMQPubSub:
             test_msg = TickData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="BTCUSD",
                 exchange="kraken",
                 volume=0.1,
@@ -489,6 +501,8 @@ class TestZMQPubSub:
             early_msg = TickData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="BTCUSD",
                 exchange="kraken",
                 volume=0.1,
@@ -503,6 +517,8 @@ class TestZMQPubSub:
             late_msg = TickData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="BTCUSD",
                 exchange="kraken",
                 volume=0.1,

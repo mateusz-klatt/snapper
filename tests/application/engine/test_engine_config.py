@@ -2,6 +2,8 @@
 
 import math
 from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -404,6 +406,8 @@ class TestTraderSignalHandling:
         signal = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             side="buy",
             strength=0.8,
@@ -469,6 +473,8 @@ class TestTraderSignalHandling:
         signal = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             side="sell",
             strength=1.0,
@@ -527,6 +533,8 @@ class TestTraderSignalHandling:
         invalid_signal = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             side="buy",
             strength=0.5,
@@ -593,6 +601,8 @@ class TestTraderSignalHandling:
         signal = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="ETH-USD",
             side="buy",
             strength=0.5,

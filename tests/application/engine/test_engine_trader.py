@@ -291,6 +291,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -336,6 +338,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="sell",
@@ -380,6 +384,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -419,6 +425,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test_strategy",
             instrument="UNKNOWN-USD",
             side="buy",
@@ -462,6 +470,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -504,6 +514,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test",
             instrument="BTC-USD",
             side="buy",
@@ -537,6 +549,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test_strategy",
             instrument="NONTRADEABLE-USD",
             side="buy",
@@ -578,6 +592,8 @@ class TestTraderCoverage:
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="test",
             instrument="BTC-USD",
             side="buy",
@@ -993,6 +1009,8 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     signal_invalid_topic = SignalData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         side="buy",
         strength=0.5,
@@ -1006,6 +1024,8 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     signal_no_price = SignalData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         side="buy",
         strength=0.5,
@@ -1017,6 +1037,8 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     signal_zero_price = SignalData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         side="buy",
         strength=0.5,
@@ -1029,6 +1051,8 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     signal_valid = SignalData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         side="buy",
         price=10.0,
@@ -1046,6 +1070,8 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     signal_sell = SignalData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         side="sell",
         strength=1.0,
@@ -1087,6 +1113,8 @@ async def test_listen_signals_processes_single_message(monkeypatch: pytest.Monke
     subscriber = _SubscriberStub(subscriber_socket)
     message: dict[str, Any] = {
         "type": "signal",
+        "public_id": "test-pid",
+        "timestamp": "2024-01-01T00:00:00Z",
         "session_id": "",
         "sequence_id": 0,
         "instrument": "BTC-USD",
@@ -1164,6 +1192,8 @@ async def test_listen_signals_handles_settings_update(
             json.dumps(
                 {
                     "type": "setting_changed",
+                    "public_id": "test-pid",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "session_id": "",
                     "sequence_id": 0,
                     "key": "foo",
@@ -1229,6 +1259,8 @@ async def test_handle_settings_update_skips_when_no_instance(
     payload = json.dumps(
         {
             "type": "setting_changed",
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "session_id": "",
             "sequence_id": 0,
             "key": "test_key",
@@ -1252,6 +1284,8 @@ async def test_handle_execution_fill_success(monkeypatch: pytest.MonkeyPatch) ->
     fill = ExecutionData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1282,6 +1316,8 @@ async def test_handle_execution_fill_invariant_exchange_mismatch(
     fill = ExecutionData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1312,6 +1348,8 @@ async def test_handle_execution_fill_invariant_instrument_mismatch(
     fill = ExecutionData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1340,6 +1378,8 @@ async def test_handle_execution_fill_malformed_topic(monkeypatch: pytest.MonkeyP
     fill = ExecutionData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         trade_id="trade-456",
         exchange_order_id="exec-456",
         client_order_id="order-123",
@@ -1386,6 +1426,8 @@ async def test_listen_signals_routes_execution_fill(monkeypatch: pytest.MonkeyPa
             json.dumps(
                 {
                     "type": "execution",
+                    "public_id": "test-pid",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "session_id": "",
                     "sequence_id": 0,
                     "trade_id": "exec-1",
@@ -1426,6 +1468,8 @@ async def test_listen_signals_routes_order_status(monkeypatch: pytest.MonkeyPatc
             json.dumps(
                 {
                     "type": "order",
+                    "public_id": "test-pid",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "session_id": "",
                     "sequence_id": 0,
                     "exchange_order_id": "exch-123",
@@ -1467,6 +1511,8 @@ async def test_listen_signals_handles_invalid_order_event_payload(
             json.dumps(
                 {
                     "type": "order",
+                    "public_id": "test-pid",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "session_id": "",
                     "sequence_id": 0,
                     "client_order_id": "order-123",
@@ -1492,6 +1538,8 @@ async def test_handle_order_status_success(monkeypatch: pytest.MonkeyPatch) -> N
     order_status = OrderData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -1522,6 +1570,8 @@ async def test_handle_order_status_invariant_exchange_mismatch(
     order_status = OrderData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -1552,6 +1602,8 @@ async def test_handle_order_status_invariant_instrument_mismatch(
     order_status = OrderData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="ETH-USD",
@@ -1582,6 +1634,8 @@ async def test_handle_order_status_rejected_logs_envelope_type(
     order_status = OrderData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id=None,
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -1612,6 +1666,8 @@ async def test_dispatch_order_event_routes_order_event_envelope(
     payload = json.dumps(
         {
             "type": "order_event",
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "session_id": "",
             "sequence_id": 0,
             "exchange_order_id": "exch-123",
@@ -1637,6 +1693,8 @@ async def test_dispatch_order_event_unknown_type(monkeypatch: pytest.MonkeyPatch
     payload = json.dumps(
         {
             "type": "heartbeat",
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "session_id": "",
             "sequence_id": 0,
             "component": "test",
@@ -1661,6 +1719,8 @@ async def test_handle_order_event_success(monkeypatch: pytest.MonkeyPatch) -> No
     order_event = OrderEventData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1685,6 +1745,8 @@ async def test_handle_order_event_invariant_exchange_mismatch(
     order_event = OrderEventData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="paper",
@@ -1709,6 +1771,8 @@ async def test_handle_order_event_invariant_instrument_mismatch(
     order_event = OrderEventData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1731,6 +1795,8 @@ async def test_handle_order_event_malformed_topic(monkeypatch: pytest.MonkeyPatc
     order_event = OrderEventData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1755,6 +1821,8 @@ async def test_handle_order_event_topic_payload_mismatch(
     order_event = OrderEventData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1779,6 +1847,8 @@ async def test_handle_order_event_rejected_logs_envelope_type(
     order_event = OrderEventData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         exchange="kraken",
@@ -1801,6 +1871,8 @@ async def test_handle_order_status_malformed_topic(monkeypatch: pytest.MonkeyPat
     order_status = OrderData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         client_order_id="order-123",
         instrument="BTC-USD",
         exchange="kraken",
@@ -1829,6 +1901,8 @@ async def test_handle_order_status_topic_payload_mismatch(
     order_status = OrderData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange_order_id="exch-123",
         client_order_id="order-123",
         instrument="BTC-USD",
@@ -2097,6 +2171,8 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     signal = SignalData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         side="buy",
         strength=0.5,

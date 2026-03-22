@@ -25,39 +25,134 @@ import {
 import { useAuth } from '../stores/auth'
 import { apiClient } from '../lib/apiClient'
 
+const ENV = {
+  seq: 0,
+  pid: 'test-pid',
+  ts: '2024-01-01T00:00:00Z',
+  sid: 'test-sid',
+}
+
+function envelope<T extends string>(type: T, extra: Record<string, unknown> = {}) {
+  return {
+    type,
+    sequence_id: ENV.seq,
+    public_id: ENV.pid,
+    timestamp: ENV.ts,
+    session_id: ENV.sid,
+    ...extra,
+  }
+}
+
 vi.mock('../lib/apiClient', () => ({
   apiClient: {
-    getSystemStatus: vi.fn(() => Promise.resolve({ trader: { status: 'running' } })),
-    getCandles: vi.fn(() => Promise.resolve([])),
-    getExchanges: vi.fn(() => Promise.resolve({ payload: ['kraken', 'binance'], count: 2 })),
-    getExchangeInstruments: vi.fn(() =>
-      Promise.resolve({ payload: ['BTC/USD', 'ETH/USD'], count: 2 })
+    getSystemStatus: vi.fn(() =>
+      Promise.resolve(
+        envelope('system_status_response', {
+          payload: envelope('system_status', {
+            trader: { status: 'running' },
+            backtests: {},
+          }),
+        })
+      )
     ),
-    getOrders: vi.fn(() => Promise.resolve({ payload: [], count: 0 })),
-    getExecutions: vi.fn(() => Promise.resolve({ payload: [], count: 0 })),
-    getPositions: vi.fn(() => Promise.resolve({ payload: [], count: 0 })),
-    getSignals: vi.fn(() => Promise.resolve({ payload: [], count: 0 })),
-    getAvailableProcesses: vi.fn(() => Promise.resolve({ available: [] })),
-    getConfiguredProcesses: vi.fn(() => Promise.resolve({ payload: [] })),
+    getCandles: vi.fn(() => Promise.resolve([])),
+    getExchanges: vi.fn(() =>
+      Promise.resolve(envelope('exchange_list', { payload: ['kraken', 'binance'], count: 2 }))
+    ),
+    getExchangeInstruments: vi.fn(() =>
+      Promise.resolve(envelope('instrument_list', { payload: ['BTC/USD', 'ETH/USD'], count: 2 }))
+    ),
+    getOrders: vi.fn(() => Promise.resolve(envelope('order_list', { payload: [], count: 0 }))),
+    getExecutions: vi.fn(() =>
+      Promise.resolve(envelope('execution_list', { payload: [], count: 0 }))
+    ),
+    getPositions: vi.fn(() =>
+      Promise.resolve(envelope('position_list', { payload: [], count: 0 }))
+    ),
+    getSignals: vi.fn(() => Promise.resolve(envelope('signal_list', { payload: [], count: 0 }))),
+    getAvailableProcesses: vi.fn(() =>
+      Promise.resolve(envelope('available_processes', { payload: [], count: 0 }))
+    ),
+    getConfiguredProcesses: vi.fn(() =>
+      Promise.resolve(envelope('configured_processes', { payload: [], count: 0 }))
+    ),
     getProcessSummary: vi.fn(() =>
-      Promise.resolve({
-        feeds: { running: 0, total: 0 },
-        strategies: { running: 0, total: 0 },
-        executors: { running: 0, total: 0 },
-        brokers: { running: 0, total: 0 },
-      })
+      Promise.resolve(
+        envelope('process_summary_response', {
+          payload: envelope('process_summary', {
+            feeds: { running: 0, total: 0 },
+            strategies: { running: 0, total: 0 },
+            executors: { running: 0, total: 0 },
+            brokers: { running: 0, total: 0 },
+          }),
+        })
+      )
     ),
     getStrategies: vi.fn(() =>
-      Promise.resolve({
-        payload: [{ name: 'strategy_test', running: false, enabled: true, mode: 'thread' }],
-        count: 1,
-      })
+      Promise.resolve(
+        envelope('strategy_list', {
+          payload: [
+            envelope('strategy_process', {
+              name: 'strategy_test',
+              running: false,
+              enabled: true,
+              mode: 'thread',
+            }),
+          ],
+          count: 1,
+        })
+      )
     ),
-    getProcessSchema: vi.fn(() => Promise.resolve({ schema: {} })),
-    getProcessRuns: vi.fn(() => Promise.resolve({ payload: [] })),
-    startProcessByName: vi.fn(() => Promise.resolve({ status: 'success', message: 'started' })),
-    stopProcessByName: vi.fn(() => Promise.resolve({ status: 'success', message: 'stopped' })),
-    createProcessConfig: vi.fn(() => Promise.resolve({ name: 'test', id: '123' })),
+    getProcessSchema: vi.fn(() =>
+      Promise.resolve(
+        envelope('process_schema_response', {
+          payload: envelope('process_schema', {
+            name: 'collector',
+            description: '',
+            class_path: '',
+            method: '',
+            default_enabled: true,
+            default_mode: 'thread',
+            lifecycle: 'long_running',
+          }),
+        })
+      )
+    ),
+    getProcessRuns: vi.fn(() =>
+      Promise.resolve(envelope('process_runs', { payload: [], count: 0 }))
+    ),
+    startProcessByName: vi.fn(() =>
+      Promise.resolve(
+        envelope('process_start_response', {
+          payload: envelope('process_start', {
+            status: 'success',
+            name: 'collector',
+            message: 'started',
+          }),
+        })
+      )
+    ),
+    stopProcessByName: vi.fn(() =>
+      Promise.resolve(
+        envelope('process_stop_response', {
+          payload: envelope('process_stop', {
+            status: 'success',
+            name: 'collector',
+            message: 'stopped',
+          }),
+        })
+      )
+    ),
+    createProcessConfig: vi.fn(() =>
+      Promise.resolve(
+        envelope('process_create_response', {
+          payload: envelope('process_create', {
+            status: 'created',
+            process: { name: 'test', template: 'test-template' },
+          }),
+        })
+      )
+    ),
   },
 }))
 vi.mock('../stores/auth', () => ({
@@ -92,6 +187,7 @@ const mockedApiClient = apiClient as unknown as {
   getAvailableProcesses: Mock
   getConfiguredProcesses: Mock
   getProcessSummary: Mock
+  getStrategies: Mock
   getProcessSchema: Mock
   getProcessRuns: Mock
   startProcessByName: Mock
@@ -202,10 +298,12 @@ describe('queries', () => {
   })
   describe('useExecutions', () => {
     it('returns data when authenticated', async () => {
-      mockedApiClient.getExecutions.mockResolvedValueOnce({
-        payload: [null, { public_id: 'exec-1' }],
-        count: 2,
-      })
+      mockedApiClient.getExecutions.mockResolvedValueOnce(
+        envelope('execution_list', {
+          payload: [null, { public_id: 'exec-1' }],
+          count: 2,
+        })
+      )
       const { result } = renderHook(() => useExecutions(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -232,41 +330,43 @@ describe('queries', () => {
       expect(result.current.data).toBeDefined()
     })
     it('sorts signals by timestamp and applies limit', async () => {
-      mockedApiClient.getSignals.mockResolvedValueOnce({
-        payload: [
-          {
-            exchange: 'kraken',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            strength: 0.5,
-            reason: 'oldest',
-            strategyName: 'test',
-            price: 50000,
-            firedAt: new Date('2026-01-15T10:00:00Z'),
-          },
-          {
-            exchange: 'kraken',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            strength: 0.6,
-            reason: 'newest',
-            strategyName: 'test',
-            price: 50100,
-            firedAt: new Date('2026-01-15T12:00:00Z'),
-          },
-          {
-            exchange: 'kraken',
-            instrument: 'BTC/USD',
-            side: 'sell',
-            strength: 0.4,
-            reason: 'middle',
-            strategyName: 'test',
-            price: 49900,
-            firedAt: new Date('2026-01-15T11:00:00Z'),
-          },
-        ],
-        count: 3,
-      } as never)
+      mockedApiClient.getSignals.mockResolvedValueOnce(
+        envelope('signal_list', {
+          payload: [
+            {
+              exchange: 'kraken',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              strength: 0.5,
+              reason: 'oldest',
+              strategyName: 'test',
+              price: 50000,
+              firedAt: new Date('2026-01-15T10:00:00Z'),
+            },
+            {
+              exchange: 'kraken',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              strength: 0.6,
+              reason: 'newest',
+              strategyName: 'test',
+              price: 50100,
+              firedAt: new Date('2026-01-15T12:00:00Z'),
+            },
+            {
+              exchange: 'kraken',
+              instrument: 'BTC/USD',
+              side: 'sell',
+              strength: 0.4,
+              reason: 'middle',
+              strategyName: 'test',
+              price: 49900,
+              firedAt: new Date('2026-01-15T11:00:00Z'),
+            },
+          ],
+          count: 3,
+        }) as never
+      )
       const { result } = renderHook(() => useLatestSignals(2), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -277,41 +377,43 @@ describe('queries', () => {
       expect(result.current.data?.[1].reason).toBe('middle')
     })
     it('handles signals with undefined timestamp in sorting', async () => {
-      mockedApiClient.getSignals.mockResolvedValueOnce({
-        payload: [
-          {
-            exchange: 'kraken',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            strength: 0.5,
-            reason: 'with-timestamp',
-            strategyName: 'test',
-            price: 50000,
-            firedAt: new Date('2026-01-15T10:00:00Z'),
-          },
-          {
-            exchange: 'kraken',
-            instrument: 'ETH/USD',
-            side: 'sell',
-            strength: 0.6,
-            reason: 'no-timestamp',
-            strategyName: 'test',
-            price: 3000,
-            firedAt: undefined,
-          },
-          {
-            exchange: 'kraken',
-            instrument: 'SOL/USD',
-            side: 'buy',
-            strength: 0.4,
-            reason: 'newer-timestamp',
-            strategyName: 'test',
-            price: 100,
-            firedAt: new Date('2026-01-15T12:00:00Z'),
-          },
-        ],
-        count: 3,
-      } as never)
+      mockedApiClient.getSignals.mockResolvedValueOnce(
+        envelope('signal_list', {
+          payload: [
+            {
+              exchange: 'kraken',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              strength: 0.5,
+              reason: 'with-timestamp',
+              strategyName: 'test',
+              price: 50000,
+              firedAt: new Date('2026-01-15T10:00:00Z'),
+            },
+            {
+              exchange: 'kraken',
+              instrument: 'ETH/USD',
+              side: 'sell',
+              strength: 0.6,
+              reason: 'no-timestamp',
+              strategyName: 'test',
+              price: 3000,
+              firedAt: undefined,
+            },
+            {
+              exchange: 'kraken',
+              instrument: 'SOL/USD',
+              side: 'buy',
+              strength: 0.4,
+              reason: 'newer-timestamp',
+              strategyName: 'test',
+              price: 100,
+              firedAt: new Date('2026-01-15T12:00:00Z'),
+            },
+          ],
+          count: 3,
+        }) as never
+      )
       const { result } = renderHook(() => useLatestSignals(3), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -351,7 +453,7 @@ describe('queries', () => {
         expect(result.current.isLoading).toBe(false)
       })
       expect(result.current.data).toBeDefined()
-      expect(result.current.data?.feeds).toEqual({ running: 0, total: 0 })
+      expect(result.current.data?.payload?.feeds).toEqual({ running: 0, total: 0 })
     })
   })
   describe('useStrategies', () => {
@@ -408,59 +510,61 @@ describe('queries', () => {
   })
   describe('useOrdersGrouped', () => {
     it('groups orders by status', async () => {
-      mockedApiClient.getOrders.mockResolvedValueOnce({
-        payload: [
-          {
-            public_id: '1',
-            status: 'NEW',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            price: 100,
-            quantity: 1,
-          },
-          {
-            public_id: '2',
-            status: 'OPEN',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            price: 100,
-            quantity: 1,
-          },
-          {
-            public_id: '3',
-            status: 'FILLED',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            price: 100,
-            quantity: 1,
-          },
-          {
-            public_id: '4',
-            status: 'PARTIALLY_FILLED',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            price: 100,
-            quantity: 1,
-          },
-          {
-            public_id: '5',
-            status: 'CANCELLED',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            price: 100,
-            quantity: 1,
-          },
-          {
-            public_id: '6',
-            status: 'REJECTED',
-            instrument: 'BTC/USD',
-            side: 'buy',
-            price: 100,
-            quantity: 1,
-          },
-        ],
-        count: 6,
-      })
+      mockedApiClient.getOrders.mockResolvedValueOnce(
+        envelope('order_list', {
+          payload: [
+            {
+              public_id: '1',
+              status: 'NEW',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              price: 100,
+              quantity: 1,
+            },
+            {
+              public_id: '2',
+              status: 'OPEN',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              price: 100,
+              quantity: 1,
+            },
+            {
+              public_id: '3',
+              status: 'FILLED',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              price: 100,
+              quantity: 1,
+            },
+            {
+              public_id: '4',
+              status: 'PARTIALLY_FILLED',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              price: 100,
+              quantity: 1,
+            },
+            {
+              public_id: '5',
+              status: 'CANCELLED',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              price: 100,
+              quantity: 1,
+            },
+            {
+              public_id: '6',
+              status: 'REJECTED',
+              instrument: 'BTC/USD',
+              side: 'buy',
+              price: 100,
+              quantity: 1,
+            },
+          ],
+          count: 6,
+        })
+      )
       const { result } = renderHook(() => useOrdersGrouped(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -486,33 +590,35 @@ describe('queries', () => {
   })
   describe('usePositionsSummary', () => {
     it('calculates position summary', async () => {
-      mockedApiClient.getPositions.mockResolvedValueOnce({
-        payload: [
-          {
-            type: 'position' as const,
-            public_id: '1',
-            timestamp: new Date().toISOString(),
-            instrument: 'BTC/USD',
-            exchange: 'kraken' as const,
-            quantity: 10,
-            average_price: 100,
-            unrealized_pnl: 50,
-            realized_pnl: 20,
-          },
-          {
-            type: 'position' as const,
-            public_id: '2',
-            timestamp: new Date().toISOString(),
-            instrument: 'ETH/USD',
-            exchange: 'kraken' as const,
-            quantity: 5,
-            average_price: 200,
-            unrealized_pnl: -10,
-            realized_pnl: 30,
-          },
-        ],
-        count: 2,
-      })
+      mockedApiClient.getPositions.mockResolvedValueOnce(
+        envelope('position_list', {
+          payload: [
+            {
+              type: 'position' as const,
+              public_id: '1',
+              timestamp: new Date().toISOString(),
+              instrument: 'BTC/USD',
+              exchange: 'kraken' as const,
+              quantity: 10,
+              average_price: 100,
+              unrealized_pnl: 50,
+              realized_pnl: 20,
+            },
+            {
+              type: 'position' as const,
+              public_id: '2',
+              timestamp: new Date().toISOString(),
+              instrument: 'ETH/USD',
+              exchange: 'kraken' as const,
+              quantity: 5,
+              average_price: 200,
+              unrealized_pnl: -10,
+              realized_pnl: 30,
+            },
+          ],
+          count: 2,
+        })
+      )
       const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
 
       await waitFor(() => {
@@ -534,19 +640,21 @@ describe('queries', () => {
       expect(result.current.data).toBeNull()
     })
     it('handles zero totalCost', async () => {
-      mockedApiClient.getPositions.mockResolvedValueOnce({
-        payload: [
-          {
-            public_id: '1',
-            instrument: 'BTC/USD',
-            quantity: 0,
-            average_price: 0,
-            unrealized_pnl: 0,
-            realized_pnl: 0,
-          },
-        ],
-        count: 1,
-      })
+      mockedApiClient.getPositions.mockResolvedValueOnce(
+        envelope('position_list', {
+          payload: [
+            {
+              public_id: '1',
+              instrument: 'BTC/USD',
+              quantity: 0,
+              average_price: 0,
+              unrealized_pnl: 0,
+              realized_pnl: 0,
+            },
+          ],
+          count: 1,
+        })
+      )
       const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
 
       await waitFor(() => {

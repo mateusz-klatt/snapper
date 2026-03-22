@@ -9,8 +9,8 @@ export const WsMessageBaseSchema = z
   .object({
     type: z.string(),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
   })
   .strict()
@@ -19,8 +19,8 @@ export const CandleDataSchema = z
   .object({
     type: z.literal('candle'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
@@ -40,8 +40,8 @@ export const ExecutionDataSchema = z
   .object({
     type: z.literal('execution'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     trade_id: z.string().nullable(),
     exchange_order_id: z.string().nullable(),
@@ -62,8 +62,8 @@ export const HeartbeatDataSchema = z
   .object({
     type: z.literal('heartbeat'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     component: z.string(),
     sequence: z.number().int(),
@@ -77,8 +77,8 @@ export const OrderCancelDataSchema = z
   .object({
     type: z.literal('order_cancel'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     instrument: z.string(),
@@ -91,8 +91,8 @@ export const OrderDataSchema = z
   .object({
     type: z.literal('order'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     exchange_order_id: z.string().nullable(),
     client_order_id: z.string(),
@@ -117,8 +117,8 @@ export const OrderEventDataSchema = z
   .object({
     type: z.literal('order_event'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     exchange_order_id: z.string(),
     client_order_id: z.string(),
@@ -133,8 +133,8 @@ export const OrderReplaceDataSchema = z
   .object({
     type: z.literal('order_replace'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
     instrument: z.string(),
@@ -149,8 +149,8 @@ export const OrderRequestDataSchema = z
   .object({
     type: z.literal('order_request'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     strategy_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
@@ -169,8 +169,8 @@ export const PositionDataSchema = z
   .object({
     type: z.literal('position'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
@@ -185,8 +185,8 @@ export const ReplayEndDataSchema = z
   .object({
     type: z.literal('replay_end'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
   })
   .strict()
@@ -195,8 +195,8 @@ export const ReplayStartDataSchema = z
   .object({
     type: z.literal('replay_start'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     started_at: z.iso.datetime().nullable(),
   })
@@ -206,8 +206,8 @@ export const SettingChangedDataSchema = z
   .object({
     type: z.literal('setting_changed'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     key: z.string(),
     value: z.string(),
@@ -220,8 +220,8 @@ export const SignalDataSchema = z
   .object({
     type: z.literal('signal'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'zonda', 'walutomat']),
@@ -238,8 +238,8 @@ export const SymbolAliasUpdateDataSchema = z
   .object({
     type: z.literal('symbol_alias_update'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     event: z.literal('symbol_aliases_updated'),
     action: z.literal('clear_cache'),
@@ -250,8 +250,8 @@ export const TickDataSchema = z
   .object({
     type: z.literal('tick'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
@@ -266,8 +266,8 @@ export const TradeDataSchema = z
   .object({
     type: z.literal('trade'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['kraken', 'zonda', 'walutomat', 'polygon']),
@@ -284,8 +284,8 @@ export const WSAuthExpiredResponseSchema = z
   .object({
     type: z.literal('auth_expired'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
   })
   .strict()
@@ -294,8 +294,8 @@ export const WSAuthFailedResponseSchema = z
   .object({
     type: z.literal('auth_failed'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     reason: z.string().nullable(),
   })
@@ -305,8 +305,8 @@ export const WSAuthOkResponseSchema = z
   .object({
     type: z.literal('auth_ok'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     exp: z.iso.datetime(),
   })
@@ -316,8 +316,8 @@ export const WSAuthRequiredResponseSchema = z
   .object({
     type: z.literal('auth_required'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     timeout: z.number().int(),
   })
@@ -327,8 +327,8 @@ export const WSAuthenticateRequestSchema = z
   .object({
     type: z.literal('authenticate'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     ws_token: z.string(),
   })
@@ -338,8 +338,8 @@ export const WSErrorResponseSchema = z
   .object({
     type: z.literal('error'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     message: z.string(),
   })
@@ -349,8 +349,8 @@ export const WSGetSubscriptionsRequestSchema = z
   .object({
     type: z.literal('get_subscriptions'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
   })
   .strict()
@@ -359,8 +359,8 @@ export const WSPingRequestSchema = z
   .object({
     type: z.literal('ping'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
   })
   .strict()
@@ -369,7 +369,7 @@ export const WSPongResponseSchema = z
   .object({
     type: z.literal('pong'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
+    public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     active_connections: z.number().int(),
@@ -380,8 +380,8 @@ export const WSReauthOkResponseSchema = z
   .object({
     type: z.literal('reauth_ok'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     exp: z.iso.datetime(),
   })
@@ -391,8 +391,8 @@ export const WSReauthRequestSchema = z
   .object({
     type: z.literal('reauth'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     ws_token: z.string(),
   })
@@ -402,8 +402,8 @@ export const WSReauthRequiredResponseSchema = z
   .object({
     type: z.literal('reauth_required'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     deadline: z.iso.datetime(),
   })
@@ -413,8 +413,8 @@ export const WSSubscribeRequestSchema = z
   .object({
     type: z.literal('subscribe'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     topics: z.array(z.string()),
   })
@@ -424,8 +424,8 @@ export const WSSubscriptionSuccessResponseSchema = z
   .object({
     type: z.literal('subscription_success'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     action: z.enum(['subscribe', 'unsubscribe']),
     status: z.enum(['subscribed', 'unsubscribed', 'partial', 'denied', 'no_topics']),
@@ -440,8 +440,8 @@ export const WSSubscriptionsListResponseSchema = z
   .object({
     type: z.literal('subscriptions_list'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     subscriptions: z.array(z.string()),
     available_topics: z.array(z.string()),
@@ -453,8 +453,8 @@ export const WSUnsubscribeRequestSchema = z
   .object({
     type: z.literal('unsubscribe'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     topics: z.array(z.string()),
   })
@@ -464,8 +464,8 @@ export const WSAuthCompleteResponseSchema = z
   .object({
     type: z.literal('auth_complete'),
     sequence_id: z.number().int(),
-    public_id: z.string().optional(),
-    timestamp: z.iso.datetime().optional(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
     session_id: z.string(),
     available_topics: z.array(z.string()),
     user_role: UserRoleSchema,

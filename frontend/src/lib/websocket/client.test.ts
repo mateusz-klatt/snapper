@@ -1588,7 +1588,13 @@ describe('WebSocketClient secure mode', () => {
     const mockWs = (client as any).ws
 
     mockWs.onmessage?.({
-      data: JSON.stringify({ type: 'auth_ok' }),
+      data: JSON.stringify({
+        type: 'auth_ok',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+      }),
     })
     expect((client as any).reauthTimer).toBe(null)
   })
@@ -1601,8 +1607,10 @@ describe('WebSocketClient secure mode', () => {
     mockWs.onmessage?.({
       data: JSON.stringify({
         type: 'auth_ok',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         exp: pastExpiration,
       }),
     })

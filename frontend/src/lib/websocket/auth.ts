@@ -10,15 +10,21 @@ let wsTokenPromise: Promise<RefreshWsTokenResponse> | null = null
 
 async function fetchWsToken(): Promise<RefreshWsTokenResponse> {
   wsTokenPromise ??= (async () => {
-    const data = await apiClient.postJSON<RefreshWsTokenResponse>('/api/auth/refresh', undefined, {
-      skipRetry: true,
-    })
+    const envelope = await apiClient.postJSON<RefreshWsTokenResponse>(
+      '/api/auth/refresh',
+      undefined,
+      {
+        skipRetry: true,
+      }
+    )
+
+    const data = envelope?.payload
 
     if (!data || typeof data.ws_token !== 'string' || typeof data.ws_token_exp !== 'string') {
       throw new Error('Invalid ws_token response from refresh endpoint')
     }
 
-    return data
+    return envelope
   })()
 
   try {
@@ -35,7 +41,8 @@ export async function getWsToken(): Promise<{ token: string; exp: number }> {
     return { token: cachedTicket.token, exp: cachedTicket.exp }
   }
 
-  const { ws_token, ws_token_exp } = await fetchWsToken()
+  const refreshResponse = await fetchWsToken()
+  const { ws_token, ws_token_exp } = refreshResponse.payload
   const expSeconds = Math.floor(new Date(ws_token_exp).getTime() / 1000)
 
   return { token: ws_token, exp: expSeconds }

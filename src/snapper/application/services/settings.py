@@ -14,6 +14,7 @@ import json
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -296,6 +297,8 @@ class SettingsService:
             return
         topic = system_topic("settings")
         envelope = SettingChangedData(
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
             session_id=self._msg_publisher.tracker.session_id,
             sequence_id=self._msg_publisher.tracker.next_sequence(topic),
             key=key,

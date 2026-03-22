@@ -2,14 +2,27 @@
 
 This module defines request/response schemas for the process management
 endpoints, supporting process lifecycle operations (start, stop, create).
+
+Schema hierarchy follows these rules:
+
+- Nested structural schemas (fields inside other schemas) are plain BaseModel
+  with ``extra="forbid"`` and no provenance fields.
+- Top-level response schemas use ``PayloadResponse[..., XxxData]`` wrapping
+  a new ``XxxData(StrictDataSchema)`` that carries the domain fields.
+- Schemas that are payloads in ``PayloadListResponse`` stay as
+  ``StrictDataSchema`` (first-class objects with their own provenance).
+- Request schemas stay as ``StrictDataSchema``.
 """
 
 from typing import Any
 from typing import Literal
 
+from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
@@ -34,22 +47,35 @@ __all__ = [
     "TradeStartRequest",
     "BacktestRequest",
     "ProcessStatus",
-    "SystemStatus",
-    "BacktestStatus",
-    "BacktestOutput",
+    "StrategyStatusPayload",
+    "SystemStatusData",
+    "SystemStatusResponse",
+    "BacktestStatusData",
+    "BacktestStatusResponse",
+    "BacktestOutputData",
+    "BacktestOutputResponse",
     "AvailableProcess",
     "AvailableProcessesResponse",
     "ConfiguredProcess",
     "ConfiguredProcessesResponse",
     "ProcessCreatedInfo",
+    "ProcessCreateData",
     "ProcessCreateResponse",
+    "ProcessSchemaData",
     "ProcessSchemaResponse",
+    "ProcessCategoryCount",
+    "ProcessSummaryData",
+    "ProcessSummaryResponse",
     "ProcessRun",
     "ProcessRunsResponse",
-    "ProcessRuntimeStatus",
+    "ProcessRuntimeStatusData",
+    "ProcessRuntimeStatusResponse",
+    "ProcessStartData",
     "ProcessStartResponse",
+    "ProcessStopData",
     "ProcessStopResponse",
-    "StrategyStatusPayload",
+    "StrategyProcess",
+    "StrategyListResponse",
     "ProcessLifecycleType",
     "ProcessRoleType",
     "ProcessRunStatusType",
@@ -176,13 +202,13 @@ class BacktestRequest(StrictDataSchema[Literal["backtest_request"]]):
     end: str = Field(description="End date in YYYY-MM-DD format")
 
 
-class ProcessStatus(StrictDataSchema[Literal["process_status"]]):
-    """Process status response schema.
+class ProcessStatus(BaseModel):
+    """Process status nested structural schema.
 
-    Represents the current status of a single process.
+    Represents the current status of a single process. Used as a nested
+    field inside other schemas (e.g. SystemStatusData).
 
     Attributes:
-        type: Payload item type discriminator.
         status: Process status (not_running, running, stopped, completed, error).
         pid: Process ID if running.
         started_at: Start time in ISO format.
@@ -191,7 +217,8 @@ class ProcessStatus(StrictDataSchema[Literal["process_status"]]):
         error: Error message if failed.
     """
 
-    type: Literal["process_status"] = "process_status"
+    model_config = ConfigDict(extra="forbid")
+
     status: SpawnerProcessStatus = Field(
         description="Process status: not_running, running, stopped, completed, error"
     )
@@ -202,11 +229,12 @@ class ProcessStatus(StrictDataSchema[Literal["process_status"]]):
     error: str | None = Field(default=None, description="Error message if failed")
 
 
-class StrategyStatusPayload(StrictDataSchema[Literal["strategy_status"]]):
+class StrategyStatusPayload(BaseModel):
     """Strategy process status payload for the system status endpoint.
 
+    Nested structural schema used inside SystemStatusData.
+
     Attributes:
-        type: Payload item type discriminator.
         strategy_name: Name of the strategy.
         status: Current strategy status string.
         details: Full raw status dictionary from the process.
@@ -219,7 +247,8 @@ class StrategyStatusPayload(StrictDataSchema[Literal["strategy_status"]]):
         uptime: Process uptime string.
     """
 
-    type: Literal["strategy_status"] = "strategy_status"
+    model_config = ConfigDict(extra="forbid")
+
     strategy_name: str = Field(description="Strategy name")
     status: str = Field(description="Current strategy status")
     details: dict[str, Any] = Field(default_factory=dict, description="Full raw status")
@@ -232,8 +261,40 @@ class StrategyStatusPayload(StrictDataSchema[Literal["strategy_status"]]):
     uptime: str | None = Field(None, description="Process uptime")
 
 
-class SystemStatus(StrictDataSchema[Literal["system_status"]]):
-    """System-wide status response schema.
+class ProcessCategoryCount(BaseModel):
+    """Running/total count for a process category.
+
+    Nested structural schema used inside ProcessSummaryData.
+
+    Attributes:
+        running: Number of currently running processes.
+        total: Total number of configured processes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    running: int = Field(description="Number of currently running processes")
+    total: int = Field(description="Total number of configured processes")
+
+
+class ProcessCreatedInfo(BaseModel):
+    """Process creation info nested structural schema.
+
+    Used inside ProcessCreateData to describe the created process.
+
+    Attributes:
+        name: Unique process name.
+        template: Template used for creation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
+    template: str = Field(description="Template used for creation")
+
+
+class SystemStatusData(StrictDataSchema[Literal["system_status"]]):
+    """System-wide status data schema.
 
     Provides status of the trader process, backtests, and active strategies.
 
@@ -252,8 +313,18 @@ class SystemStatus(StrictDataSchema[Literal["system_status"]]):
     )
 
 
-class BacktestStatus(StrictDataSchema[Literal["backtest_status"]]):
-    """Backtest status response schema.
+class SystemStatusResponse(PayloadResponse[Literal["system_status_response"], SystemStatusData]):
+    """System-wide status REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["system_status_response"] = "system_status_response"
+
+
+class BacktestStatusData(StrictDataSchema[Literal["backtest_status"]]):
+    """Backtest status data schema.
 
     Represents the current status of a backtest run.
 
@@ -278,8 +349,20 @@ class BacktestStatus(StrictDataSchema[Literal["backtest_status"]]):
     error: str | None = None
 
 
-class BacktestOutput(StrictDataSchema[Literal["backtest_output"]]):
-    """Backtest output response schema.
+class BacktestStatusResponse(
+    PayloadResponse[Literal["backtest_status_response"], BacktestStatusData]
+):
+    """Backtest status REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["backtest_status_response"] = "backtest_status_response"
+
+
+class BacktestOutputData(StrictDataSchema[Literal["backtest_output"]]):
+    """Backtest output data schema.
 
     Contains output lines from a backtest run.
 
@@ -296,10 +379,23 @@ class BacktestOutput(StrictDataSchema[Literal["backtest_output"]]):
     status: SpawnerProcessStatus
 
 
+class BacktestOutputResponse(
+    PayloadResponse[Literal["backtest_output_response"], BacktestOutputData]
+):
+    """Backtest output REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["backtest_output_response"] = "backtest_output_response"
+
+
 class AvailableProcess(StrictDataSchema[Literal["available_process"]]):
     """Available process template response schema.
 
     Describes a registered process that can be instantiated.
+    First-class payload in AvailableProcessesResponse.
 
     Attributes:
         type: Payload item type discriminator.
@@ -342,6 +438,7 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     """Configured process response schema.
 
     Describes a process configuration with its current runtime state.
+    First-class payload in ConfiguredProcessesResponse.
 
     Attributes:
         type: Payload item type discriminator.
@@ -394,22 +491,8 @@ class ConfiguredProcessesResponse(
     type: Literal["configured_processes"] = "configured_processes"
 
 
-class ProcessCategoryCount(StrictDataSchema[Literal["process_category_count"]]):
-    """Running/total count for a process category.
-
-    Attributes:
-        type: Payload item type discriminator.
-        running: Number of currently running processes.
-        total: Total number of configured processes.
-    """
-
-    type: Literal["process_category_count"] = "process_category_count"
-    running: int = Field(description="Number of currently running processes")
-    total: int = Field(description="Total number of configured processes")
-
-
-class ProcessSummaryResponse(StrictDataSchema[Literal["process_summary"]]):
-    """Lightweight process summary for the overview dashboard.
+class ProcessSummaryData(StrictDataSchema[Literal["process_summary"]]):
+    """Lightweight process summary data for the overview dashboard.
 
     Attributes:
         type: Payload item type discriminator.
@@ -426,8 +509,22 @@ class ProcessSummaryResponse(StrictDataSchema[Literal["process_summary"]]):
     brokers: ProcessCategoryCount = Field(description="Broker process counts")
 
 
+class ProcessSummaryResponse(
+    PayloadResponse[Literal["process_summary_response"], ProcessSummaryData]
+):
+    """Process summary REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_summary_response"] = "process_summary_response"
+
+
 class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
     """Lightweight strategy process info for read-only views.
+
+    First-class payload in StrategyListResponse.
 
     Attributes:
         type: Payload item type discriminator.
@@ -456,22 +553,8 @@ class StrategyListResponse(PayloadListResponse[Literal["strategy_list"], Strateg
     type: Literal["strategy_list"] = "strategy_list"
 
 
-class ProcessCreatedInfo(StrictDataSchema[Literal["process_created_info"]]):
-    """Process creation info schema.
-
-    Attributes:
-        type: Payload item type discriminator.
-        name: Unique process name.
-        template: Template used for creation.
-    """
-
-    type: Literal["process_created_info"] = "process_created_info"
-    name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
-    template: str = Field(description="Template used for creation")
-
-
-class ProcessCreateResponse(StrictDataSchema[Literal["process_create_response"]]):
-    """Process creation response schema.
+class ProcessCreateData(StrictDataSchema[Literal["process_create"]]):
+    """Process creation data schema.
 
     Attributes:
         type: Payload item type discriminator.
@@ -479,13 +562,23 @@ class ProcessCreateResponse(StrictDataSchema[Literal["process_create_response"]]
         process: Created process info.
     """
 
-    type: Literal["process_create_response"] = "process_create_response"
+    type: Literal["process_create"] = "process_create"
     status: Literal["created"] = Field(description="Operation status")
     process: ProcessCreatedInfo = Field(description="Created process info")
 
 
-class ProcessSchemaResponse(StrictDataSchema[Literal["process_schema"]]):
-    """Process schema response.
+class ProcessCreateResponse(PayloadResponse[Literal["process_create_response"], ProcessCreateData]):
+    """Process creation REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_create_response"] = "process_create_response"
+
+
+class ProcessSchemaData(StrictDataSchema[Literal["process_schema"]]):
+    """Process schema data.
 
     Describes a process template schema with default values.
 
@@ -514,10 +607,21 @@ class ProcessSchemaResponse(StrictDataSchema[Literal["process_schema"]]):
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 
 
+class ProcessSchemaResponse(PayloadResponse[Literal["process_schema_response"], ProcessSchemaData]):
+    """Process schema REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_schema_response"] = "process_schema_response"
+
+
 class ProcessRun(StrictDataSchema[Literal["process_run"]]):
     """Process run record response schema.
 
     Represents a single execution run of a process.
+    First-class payload in ProcessRunsResponse.
 
     Attributes:
         type: Payload item type discriminator.
@@ -560,8 +664,8 @@ class ProcessRunsResponse(PayloadListResponse[Literal["process_runs"], ProcessRu
     type: Literal["process_runs"] = "process_runs"
 
 
-class ProcessRuntimeStatus(StrictDataSchema[Literal["process_runtime_status"]]):
-    """Process runtime status response schema.
+class ProcessRuntimeStatusData(StrictDataSchema[Literal["process_runtime_status"]]):
+    """Process runtime status data schema.
 
     Represents the current runtime state of a process.
 
@@ -584,8 +688,20 @@ class ProcessRuntimeStatus(StrictDataSchema[Literal["process_runtime_status"]]):
     details: dict[str, Any] | None = Field(None, description="Additional process details")
 
 
-class ProcessStartResponse(StrictDataSchema[Literal["process_start_response"]]):
-    """Process start response schema.
+class ProcessRuntimeStatusResponse(
+    PayloadResponse[Literal["process_runtime_status_response"], ProcessRuntimeStatusData]
+):
+    """Process runtime status REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_runtime_status_response"] = "process_runtime_status_response"
+
+
+class ProcessStartData(StrictDataSchema[Literal["process_start"]]):
+    """Process start data schema.
 
     Attributes:
         type: Payload item type discriminator.
@@ -595,7 +711,7 @@ class ProcessStartResponse(StrictDataSchema[Literal["process_start_response"]]):
         message: Additional message.
     """
 
-    type: Literal["process_start_response"] = "process_start_response"
+    type: Literal["process_start"] = "process_start"
     status: StartProcessStatus = Field(
         description="Operation status (success, already_running, error)"
     )
@@ -604,8 +720,18 @@ class ProcessStartResponse(StrictDataSchema[Literal["process_start_response"]]):
     message: str | None = Field(None, description="Additional message")
 
 
-class ProcessStopResponse(StrictDataSchema[Literal["process_stop_response"]]):
-    """Process stop response schema.
+class ProcessStartResponse(PayloadResponse[Literal["process_start_response"], ProcessStartData]):
+    """Process start REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_start_response"] = "process_start_response"
+
+
+class ProcessStopData(StrictDataSchema[Literal["process_stop"]]):
+    """Process stop data schema.
 
     Attributes:
         type: Payload item type discriminator.
@@ -614,7 +740,17 @@ class ProcessStopResponse(StrictDataSchema[Literal["process_stop_response"]]):
         message: Additional message.
     """
 
-    type: Literal["process_stop_response"] = "process_stop_response"
+    type: Literal["process_stop"] = "process_stop"
     status: StopProcessStatus = Field(description="Operation status (success, not_running, error)")
     name: str = Field(description=_PROCESS_NAME_DESC)
     message: str | None = Field(None, description="Additional message")
+
+
+class ProcessStopResponse(PayloadResponse[Literal["process_stop_response"], ProcessStopData]):
+    """Process stop REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_stop_response"] = "process_stop_response"

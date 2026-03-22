@@ -10,10 +10,12 @@ vi.mock('../../hooks/queries', () => ({
   useProcessSummary: vi.fn(() => ({
     isLoading: false,
     data: {
-      feeds: { running: 0, total: 0 },
-      strategies: { running: 0, total: 0 },
-      executors: { running: 0, total: 0 },
-      brokers: { running: 0, total: 0 },
+      payload: {
+        feeds: { running: 0, total: 0 },
+        strategies: { running: 0, total: 0 },
+        executors: { running: 0, total: 0 },
+        brokers: { running: 0, total: 0 },
+      },
     },
   })),
   useExecutions: vi.fn(() => ({ data: [], isLoading: false })),
@@ -130,10 +132,12 @@ describe('Overview', () => {
     vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        feeds: { running: 1, total: 2 },
-        strategies: { running: 0, total: 0 },
-        executors: { running: 0, total: 0 },
-        brokers: { running: 0, total: 0 },
+        payload: {
+          feeds: { running: 1, total: 2 },
+          strategies: { running: 0, total: 0 },
+          executors: { running: 0, total: 0 },
+          brokers: { running: 0, total: 0 },
+        },
       },
     } as never)
     renderWithMocks(<Overview />)
@@ -145,10 +149,12 @@ describe('Overview', () => {
     vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        feeds: { running: 0, total: 0 },
-        strategies: { running: 1, total: 1 },
-        executors: { running: 0, total: 0 },
-        brokers: { running: 0, total: 0 },
+        payload: {
+          feeds: { running: 0, total: 0 },
+          strategies: { running: 1, total: 1 },
+          executors: { running: 0, total: 0 },
+          brokers: { running: 0, total: 0 },
+        },
       },
     } as never)
     renderWithMocks(<Overview />)
@@ -160,10 +166,12 @@ describe('Overview', () => {
     vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        feeds: { running: 0, total: 0 },
-        strategies: { running: 0, total: 0 },
-        executors: { running: 1, total: 1 },
-        brokers: { running: 0, total: 0 },
+        payload: {
+          feeds: { running: 0, total: 0 },
+          strategies: { running: 0, total: 0 },
+          executors: { running: 1, total: 1 },
+          brokers: { running: 0, total: 0 },
+        },
       },
     } as never)
     renderWithMocks(<Overview />)
@@ -175,10 +183,12 @@ describe('Overview', () => {
     vi.mocked(useProcessSummary).mockReturnValue({
       isLoading: false,
       data: {
-        feeds: { running: 0, total: 0 },
-        strategies: { running: 0, total: 0 },
-        executors: { running: 0, total: 0 },
-        brokers: { running: 1, total: 1 },
+        payload: {
+          feeds: { running: 0, total: 0 },
+          strategies: { running: 0, total: 0 },
+          executors: { running: 0, total: 0 },
+          brokers: { running: 1, total: 1 },
+        },
       },
     } as never)
     renderWithMocks(<Overview />)

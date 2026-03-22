@@ -13,10 +13,8 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.schemas.user import UserProfile
 
 
-class LoginResponse(StrictDataSchema[Literal["login_response"]]):
-    """Login response schema.
-
-    Returned after successful authentication.
+class LoginData(StrictDataSchema[Literal["login"]]):
+    """Login payload data.
 
     Attributes:
         type: Payload item type discriminator.
@@ -25,16 +23,24 @@ class LoginResponse(StrictDataSchema[Literal["login_response"]]):
         user: Authenticated user profile.
     """
 
-    type: Literal["login_response"] = "login_response"
+    type: Literal["login"] = "login"
     message: str
     expires_in: int
     user: UserProfile
 
 
-class RefreshResponse(StrictDataSchema[Literal["refresh_response"]]):
-    """Token refresh response schema.
+class LoginResponse(PayloadResponse[Literal["login_response"], LoginData]):
+    """Login REST response envelope.
 
-    Returned after successful token refresh.
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["login_response"] = "login_response"
+
+
+class RefreshData(StrictDataSchema[Literal["refresh"]]):
+    """Token refresh payload data.
 
     Attributes:
         type: Payload item type discriminator.
@@ -45,12 +51,22 @@ class RefreshResponse(StrictDataSchema[Literal["refresh_response"]]):
         user: User profile.
     """
 
-    type: Literal["refresh_response"] = "refresh_response"
+    type: Literal["refresh"] = "refresh"
     message: str
     ws_token: str
     ws_token_exp: datetime
     csrf_token: str
     user: UserProfile
+
+
+class RefreshResponse(PayloadResponse[Literal["refresh_response"], RefreshData]):
+    """Token refresh REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["refresh_response"] = "refresh_response"
 
 
 class UserResponse(PayloadResponse[Literal["user_response"], UserProfile]):

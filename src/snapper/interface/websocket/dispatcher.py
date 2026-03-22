@@ -15,6 +15,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Annotated
 from typing import Any
+from uuid import uuid7
 
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
@@ -208,6 +209,8 @@ async def send_auth_complete(
         exp=datetime.fromtimestamp(ws_payload.exp, UTC),
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.control"),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )
     await websocket.send_text(auth_ok.model_dump_json())
     allowed_topics = get_allowed_topics_for_role(user.role)
@@ -219,6 +222,8 @@ async def send_auth_complete(
         ws_token_exp=datetime.fromtimestamp(ws_payload.exp, UTC),
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.control"),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )
     await websocket.send_text(auth_complete.model_dump_json())
     await _record_ws_control(db_url, manager.tracker, "auth", "ok")
@@ -243,6 +248,8 @@ def _try_parse_message(
             message=f"Invalid message format: {e.error_count()} errors",
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
 
 
@@ -361,6 +368,8 @@ async def dispatch_messages(
             message="Internal server error",
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(error_msg.model_dump_json())
         await _record_ws_control(

@@ -2955,6 +2955,8 @@ class TestZmqWsBridgeE2ESmoke:
         fill = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-1",
             exchange_order_id="exec-1",
             client_order_id="order-123",
@@ -2999,6 +3001,8 @@ class TestZmqWsBridgeE2ESmoke:
         order = OrderData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange_order_id=None,
             client_order_id="order-789",
             instrument="BTC-USD",
@@ -3140,6 +3144,8 @@ class TestDataSerialization:
         fill = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-123",
             exchange_order_id="exchange-fill-123",
             client_order_id="order-123",
@@ -3172,6 +3178,8 @@ class TestDataSerialization:
         order = OrderData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange_order_id="exchange-789",
             client_order_id="order-789",
             instrument="BTC-USD",

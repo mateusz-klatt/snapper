@@ -55,16 +55,18 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        uptime: 3600,
-        components: {
-          database: { status: 'healthy', latency_ms: 10 },
-          redis: { status: 'healthy', latency_ms: 5 },
+        payload: {
+          status: 'healthy',
+          uptime: 3600,
+          components: {
+            database: { status: 'healthy', latency_ms: 10 },
+            redis: { status: 'healthy', latency_ms: 5 },
+          },
+          backtests: {},
+          strategies: {},
+          trader: { status: 'running', pid: 123 },
+          websocket: { connected_clients: 2 },
         },
-        backtests: {},
-        strategies: {},
-        trader: { status: 'running', pid: 123 },
-        websocket: { connected_clients: 2 },
       },
       isLoading: false,
       error: null,
@@ -82,9 +84,11 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running', pid: 123 },
-        backtests: {},
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running', pid: 123 },
+          backtests: {},
+        },
       },
       isLoading: false,
       error: null,
@@ -102,10 +106,12 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running' },
-        backtests: {
-          'bt-12345678': { status: 'running', started_at: '2024-01-01T00:00:00Z' },
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running' },
+          backtests: {
+            'bt-12345678': { status: 'running', started_at: '2024-01-01T00:00:00Z' },
+          },
         },
       },
       isLoading: false,
@@ -131,9 +137,11 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'stopped' },
-        backtests: {},
+        payload: {
+          status: 'healthy',
+          trader: { status: 'stopped' },
+          backtests: {},
+        },
       },
       isLoading: false,
       error: null,
@@ -149,9 +157,11 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'error',
-        trader: { status: 'error' },
-        backtests: {},
+        payload: {
+          status: 'error',
+          trader: { status: 'error' },
+          backtests: {},
+        },
       },
       isLoading: false,
       error: null,
@@ -167,10 +177,12 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running' },
-        backtests: {
-          'bt-1': { status: 'completed', started_at: '2024-01-01T00:00:00Z' },
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running' },
+          backtests: {
+            'bt-1': { status: 'completed', started_at: '2024-01-01T00:00:00Z' },
+          },
         },
       },
       isLoading: false,
@@ -187,9 +199,11 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'error',
-        trader: { status: 'stopped', exit_code: 1, error: 'Process crashed' },
-        backtests: {},
+        payload: {
+          status: 'error',
+          trader: { status: 'stopped', exit_code: 1, error: 'Process crashed' },
+          backtests: {},
+        },
       },
       isLoading: false,
       error: null,
@@ -220,14 +234,16 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'error',
-        trader: { status: 'running' },
-        backtests: {
-          'bt-error': {
-            status: 'error',
-            started_at: '2024-01-01T00:00:00Z',
-            error: 'Backtest failed',
-            exit_code: 2,
+        payload: {
+          status: 'error',
+          trader: { status: 'running' },
+          backtests: {
+            'bt-error': {
+              status: 'error',
+              started_at: '2024-01-01T00:00:00Z',
+              error: 'Backtest failed',
+              exit_code: 2,
+            },
           },
         },
       },
@@ -246,11 +262,13 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running' },
-        backtests: {
-          'bt-1': { status: 'running', started_at: '2024-01-01T00:00:00Z' },
-          'bt-2': { status: 'completed', started_at: '2024-01-01T01:00:00Z' },
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running' },
+          backtests: {
+            'bt-1': { status: 'running', started_at: '2024-01-01T00:00:00Z' },
+            'bt-2': { status: 'completed', started_at: '2024-01-01T01:00:00Z' },
+          },
         },
       },
       isLoading: false,
@@ -269,12 +287,14 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running' },
-        strategies: {
-          unknown_process: { status: 'running' },
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running' },
+          strategies: {
+            unknown_process: { status: 'running' },
+          },
+          backtests: {},
         },
-        backtests: {},
       },
       isLoading: false,
       error: null,
@@ -292,15 +312,17 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running' },
-        backtests: {},
-        metrics: [
-          { name: 'CPU Usage', value: '45%', status: 'healthy' },
-          { name: 'Memory', value: '2GB', status: 'warning' },
-          { name: 'Disk', value: '90%', status: 'error' },
-          { name: 'Network', value: '100Mbps', status: 'unknown' },
-        ],
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running' },
+          backtests: {},
+          metrics: [
+            { name: 'CPU Usage', value: '45%', status: 'healthy' },
+            { name: 'Memory', value: '2GB', status: 'warning' },
+            { name: 'Disk', value: '90%', status: 'error' },
+            { name: 'Network', value: '100Mbps', status: 'unknown' },
+          ],
+        },
       },
       isLoading: false,
       error: null,
@@ -318,12 +340,14 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running' },
-        strategies: {
-          market_analyzer: { status: 'running' },
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running' },
+          strategies: {
+            market_analyzer: { status: 'running' },
+          },
+          backtests: {},
         },
-        backtests: {},
       },
       isLoading: false,
       error: null,
@@ -341,9 +365,11 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'error',
-        trader: { status: 'error' },
-        backtests: {},
+        payload: {
+          status: 'error',
+          trader: { status: 'error' },
+          backtests: {},
+        },
       },
       isLoading: false,
       error: null,
@@ -361,8 +387,10 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running', started_at: thirtyMinsAgo.toISOString() },
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running', started_at: thirtyMinsAgo.toISOString() },
+        },
       },
       isLoading: false,
       error: null,
@@ -380,8 +408,10 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'healthy',
-        trader: { status: 'running', started_at: twoHoursAgo.toISOString() },
+        payload: {
+          status: 'healthy',
+          trader: { status: 'running', started_at: twoHoursAgo.toISOString() },
+        },
       },
       isLoading: false,
       error: null,
@@ -397,9 +427,11 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'warning',
-        trader: { status: 'stopped', pid: null },
-        backtests: {},
+        payload: {
+          status: 'warning',
+          trader: { status: 'stopped', pid: null },
+          backtests: {},
+        },
       },
       isLoading: false,
       error: null,
@@ -415,12 +447,14 @@ describe('Health', () => {
 
     vi.mocked(useSystemStatus).mockReturnValue({
       data: {
-        status: 'error',
-        components: {
-          database: { status: 'error', error: 'Connection failed' },
+        payload: {
+          status: 'error',
+          components: {
+            database: { status: 'error', error: 'Connection failed' },
+          },
+          trader: { status: 'error', pid: null },
+          backtests: {},
         },
-        trader: { status: 'error', pid: null },
-        backtests: {},
       },
       isLoading: false,
       error: null,
@@ -429,6 +463,26 @@ describe('Health', () => {
     renderWithProviders(<Health />)
     await waitFor(() => {
       expect(screen.getByText('Inactive')).toBeInTheDocument()
+    })
+  })
+  it('displays Unknown label for unrecognized trader status', async () => {
+    const { useSystemStatus } = await import('../../hooks/queries')
+
+    vi.mocked(useSystemStatus).mockReturnValue({
+      data: {
+        payload: {
+          status: 'healthy',
+          trader: { status: 'unexpected_value' },
+          backtests: {},
+        },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Health />)
+    await waitFor(() => {
+      expect(screen.getByText('Unknown')).toBeInTheDocument()
     })
   })
 })

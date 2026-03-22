@@ -7,7 +7,10 @@ and periodic heartbeat publishing for trading strategies.
 import asyncio
 import logging
 import time
+from datetime import UTC
+from datetime import datetime
 from typing import Any
+from uuid import uuid7
 
 from snapper.interface.websocket.schemas import HealthStatus
 from snapper.messaging.schemas.data import HeartbeatData
@@ -82,6 +85,8 @@ class StrategyHealthMonitor:
         """
         tracker = self.strategy.msg_publisher.tracker if self.strategy.msg_publisher else None
         return HeartbeatData(
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
             session_id=tracker.session_id if tracker else "",
             sequence_id=tracker.next_sequence(topic) if tracker else 0,
             component=f"strategy.{self.strategy.name}",

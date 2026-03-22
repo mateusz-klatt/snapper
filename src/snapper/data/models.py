@@ -121,8 +121,8 @@ class TemporalMixin:
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
-    session_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    sequence_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    session_id: Mapped[str] = mapped_column(String(36))
+    sequence_id: Mapped[int] = mapped_column(Integer)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
 
@@ -195,8 +195,8 @@ class Candle(TemporalMixin, Base):
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float)
-    vwap: Mapped[float | None] = mapped_column(Float, nullable=True)
-    trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    vwap: Mapped[float | None] = mapped_column(Float)
+    trades: Mapped[int | None] = mapped_column(Integer)
     instrument: Mapped[Instrument] = relationship(back_populates="candles")
 
 
@@ -215,9 +215,9 @@ class Tick(TemporalMixin, Base):
         ),
     )
     instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
-    bid: Mapped[float | None] = mapped_column(Float, nullable=True)
-    ask: Mapped[float | None] = mapped_column(Float, nullable=True)
-    last: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid: Mapped[float | None] = mapped_column(Float)
+    ask: Mapped[float | None] = mapped_column(Float)
+    last: Mapped[float | None] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float)
 
 
@@ -293,7 +293,7 @@ class Order(TemporalMixin, Base):
     status: Mapped[str] = mapped_column(String(16))
     time_in_force: Mapped[str | None] = mapped_column(String(16))
     filled_size: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
-    average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_price: Mapped[float | None] = mapped_column(Float)
     error: Mapped[str | None] = mapped_column(String(512))
 
 
@@ -326,15 +326,15 @@ class Execution(TemporalMixin, Base):
     )
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    exec_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exec_id: Mapped[str | None] = mapped_column(String(64))
+    trade_id: Mapped[str | None] = mapped_column(String(64))
     side: Mapped[str] = mapped_column(String(4))
     status: Mapped[str] = mapped_column(String(16))
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
-    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     order: Mapped[Order] = relationship()
 
 
@@ -383,8 +383,8 @@ class Signal(TemporalMixin, Base):
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(256))
-    strategy_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    strategy_name: Mapped[str | None] = mapped_column(String(64))
+    price: Mapped[float | None] = mapped_column(Float)
     instrument: Mapped[Instrument] = relationship()
 
 
@@ -409,7 +409,7 @@ class User(TemporalMixin, Base):
         ),
     )
     username: Mapped[str] = mapped_column(String(64))
-    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255))
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -461,9 +461,9 @@ class Setting(TemporalMixin, Base):
     key: Mapped[str] = mapped_column(String(64))
     value: Mapped[str] = mapped_column(String(1024))
     category: Mapped[str] = mapped_column(String(32))
-    description: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(256))
     is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
-    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(64))
 
 
 class Symbol(TemporalMixin, Base):
@@ -505,7 +505,7 @@ class Symbol(TemporalMixin, Base):
     )
     native_symbol: Mapped[str] = mapped_column(String(32))
     base: Mapped[str] = mapped_column(String(16))
-    quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    quote: Mapped[str | None] = mapped_column(String(16))
     asset_type: Mapped[str] = mapped_column(String(16), server_default="crypto")
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
@@ -555,9 +555,9 @@ class SymbolAlias(TemporalMixin, Base):
         ),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    exchange: Mapped[str] = mapped_column(String(20), nullable=False)
-    channel: Mapped[str] = mapped_column(String(10), nullable=False)
-    exchange_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(20))
+    channel: Mapped[str] = mapped_column(String(10))
+    exchange_symbol: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
@@ -615,11 +615,11 @@ class SymbolExchangeCapability(TemporalMixin, Base):
         ),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    exchange: Mapped[str] = mapped_column(String(20), nullable=False)
-    can_market_data: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    can_trade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    exchange: Mapped[str] = mapped_column(String(20))
+    can_market_data: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_trade: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str | None] = mapped_column(String(50))
+    reason: Mapped[str | None] = mapped_column(String(1024))
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
@@ -640,10 +640,10 @@ class ProcessRun(TemporalMixin, Base):
     role: Mapped[str] = mapped_column(String(16))
     lifecycle: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), index=True)
-    parameters: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    parameters: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(String(1024))
+    tags: Mapped[list[str] | None] = mapped_column(JSON)
     started_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
 
@@ -668,38 +668,22 @@ class InstrumentSpec(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(
-        ForeignKey(_INSTRUMENT_FK), nullable=False, index=True
-    )
-    tick_size: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Minimum price increment"
-    )
-    lot_size: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Minimum order size increment"
-    )
-    min_order_size: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Minimum order size"
-    )
-    max_order_size: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Maximum order size"
-    )
-    cost_decimals: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="Decimal precision for cost"
-    )
+    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    tick_size: Mapped[float | None] = mapped_column(Float, comment="Minimum price increment")
+    lot_size: Mapped[float | None] = mapped_column(Float, comment="Minimum order size increment")
+    min_order_size: Mapped[float | None] = mapped_column(Float, comment="Minimum order size")
+    max_order_size: Mapped[float | None] = mapped_column(Float, comment="Maximum order size")
+    cost_decimals: Mapped[int | None] = mapped_column(Integer, comment="Decimal precision for cost")
     qty_decimals: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="Decimal precision for quantity"
+        Integer, comment="Decimal precision for quantity"
     )
-    margin_initial: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Initial margin percentage"
-    )
-    position_limit_long: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="Long position limit"
-    )
+    margin_initial: Mapped[float | None] = mapped_column(Float, comment="Initial margin percentage")
+    position_limit_long: Mapped[int | None] = mapped_column(Integer, comment="Long position limit")
     position_limit_short: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="Short position limit"
+        Integer, comment="Short position limit"
     )
     status: Mapped[str | None] = mapped_column(
-        String(20), nullable=True, comment="Trading status (e.g., online, offline)"
+        String(20), comment="Trading status (e.g., online, offline)"
     )
 
 
@@ -720,42 +704,29 @@ class MarketSnapshot(TemporalMixin, Base):
     )
     exchange: Mapped[str] = mapped_column(
         String(20),
-        nullable=False,
         server_default="kraken",
         comment="Exchange name (kraken, zonda, walutomat)",
     )
     symbol: Mapped[str] = mapped_column(
         String(20), index=True, comment="Trading pair symbol (e.g., BTC-USD)"
     )
-    bid: Mapped[float | None] = mapped_column(Float, nullable=True, comment="Best bid price")
-    bid_volume: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Volume at best bid"
-    )
-    ask: Mapped[float | None] = mapped_column(Float, nullable=True, comment="Best ask price")
-    ask_volume: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Volume at best ask"
-    )
-    last_price: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Last trade price"
-    )
-    volume_24h: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="24-hour trading volume"
-    )
+    bid: Mapped[float | None] = mapped_column(Float, comment="Best bid price")
+    bid_volume: Mapped[float | None] = mapped_column(Float, comment="Volume at best bid")
+    ask: Mapped[float | None] = mapped_column(Float, comment="Best ask price")
+    ask_volume: Mapped[float | None] = mapped_column(Float, comment="Volume at best ask")
+    last_price: Mapped[float | None] = mapped_column(Float, comment="Last trade price")
+    volume_24h: Mapped[float | None] = mapped_column(Float, comment="24-hour trading volume")
     vwap_24h: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="24-hour volume-weighted average price"
+        Float, comment="24-hour volume-weighted average price"
     )
-    low_24h: Mapped[float | None] = mapped_column(Float, nullable=True, comment="24-hour low price")
-    high_24h: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="24-hour high price"
-    )
+    low_24h: Mapped[float | None] = mapped_column(Float, comment="24-hour low price")
+    high_24h: Mapped[float | None] = mapped_column(Float, comment="24-hour high price")
     change_24h: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="24-hour price change percentage"
+        Float, comment="24-hour price change percentage"
     )
-    spread: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Current spread (ask - bid)"
-    )
+    spread: Mapped[float | None] = mapped_column(Float, comment="Current spread (ask - bid)")
     spread_pct: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="Spread as percentage of mid price"
+        Float, comment="Spread as percentage of mid price"
     )
 
 
@@ -780,10 +751,10 @@ class Control(TemporalMixin, Base):
     direction: Mapped[str] = mapped_column(String(10))
     message_type: Mapped[str] = mapped_column(String(128))
     outcome: Mapped[str] = mapped_column(String(16))
-    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
-    client_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    client_public_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[str | None] = mapped_column(Text)
+    client_session_id: Mapped[str | None] = mapped_column(String(36))
+    client_public_id: Mapped[str | None] = mapped_column(String(36))
 
 
 class Telemetry(TemporalMixin, Base):
@@ -806,4 +777,4 @@ class Telemetry(TemporalMixin, Base):
     transport: Mapped[str] = mapped_column(String(10))
     direction: Mapped[str] = mapped_column(String(10))
     message_type: Mapped[str] = mapped_column(String(128))
-    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[str | None] = mapped_column(Text)

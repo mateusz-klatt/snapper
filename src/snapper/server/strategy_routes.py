@@ -12,6 +12,7 @@ The endpoint requires only READ_STRATEGIES permission (viewer+).
 
 import datetime as dt
 from typing import Annotated
+from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -61,6 +62,7 @@ async def list_strategies(
             mode=config.mode,
             session_id=sid,
             sequence_id=tracker.next_sequence(_REST_STREAM),
+            public_id=str(uuid7()),
             timestamp=ts,
         )
         for config in configs
@@ -71,5 +73,6 @@ async def list_strategies(
         count=len(strategies),
         session_id=sid,
         sequence_id=tracker.next_sequence(_REST_STREAM),
+        public_id=str(uuid7()),
         timestamp=ts,
     )

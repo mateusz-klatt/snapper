@@ -28,6 +28,7 @@ Example:
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
+from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -80,6 +81,7 @@ async def get_all_settings(
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = datetime.now(UTC)
+    pid = str(uuid7())
     async with repository.session() as session:
         query = select(Setting).where(*where_active(Setting))
         if category:
@@ -104,6 +106,7 @@ async def get_all_settings(
         return SettingListResponse(
             session_id=sid,
             sequence_id=seq,
+            public_id=pid,
             timestamp=ts,
             payload=items,
             count=len(items),
@@ -135,9 +138,11 @@ async def get_setting_categories(
         sid = tracker.session_id
         seq = tracker.next_sequence(_REST_STREAM)
         ts = datetime.now(UTC)
+        pid = str(uuid7())
         return SettingCategoriesResponse(
             session_id=sid,
             sequence_id=seq,
+            public_id=pid,
             timestamp=ts,
             payload=sorted(categories),
             count=len(categories),
@@ -183,6 +188,7 @@ async def update_setting(
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = datetime.now(UTC)
+    pid = str(uuid7())
     async with repository.session() as session:
         result = await session.execute(
             select(Setting).where(Setting.key == key, *where_active(Setting))
@@ -205,6 +211,7 @@ async def update_setting(
         return SettingResponse(
             session_id=sid,
             sequence_id=seq,
+            public_id=pid,
             timestamp=ts,
             payload=setting_read,
         )
@@ -247,4 +254,6 @@ async def delete_setting(
         payload=f"Setting '{key}' deleted successfully",
         session_id=tracker.session_id,
         sequence_id=tracker.next_sequence(_REST_STREAM),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )

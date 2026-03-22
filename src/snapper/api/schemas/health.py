@@ -2,14 +2,20 @@
 
 This module defines response schemas for various health endpoints that provide
 insight into system status, ZMQ bridge health, and WebSocket statistics.
+
+Structural sub-schemas (nested fields) are plain BaseModel with extra="forbid"
+and carry no provenance fields.  Top-level response schemas use the
+PayloadResponse[T, Data] envelope so every REST reply has a consistent shape.
 """
 
-from datetime import datetime
 from typing import Literal
 
+from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ComponentStatus
 from snapper.core.types import HealthStatus
@@ -17,7 +23,7 @@ from snapper.core.types import HealthStatus
 _CONN_STATS_DESC = "Connection statistics"
 
 
-class ConnectionStatsSchema(StrictDataSchema[Literal["connection_stats"]]):
+class ConnectionStats(BaseModel):
     """Connection-level statistics from the ZMQ-WebSocket bridge.
 
     Attributes:
@@ -28,7 +34,8 @@ class ConnectionStatsSchema(StrictDataSchema[Literal["connection_stats"]]):
         active_clients: Number of unique connected clients.
     """
 
-    type: Literal["connection_stats"] = "connection_stats"
+    model_config = ConfigDict(extra="forbid")
+
     active_connections: int = Field(default=0, description="Active WebSocket connections")
     zmq_subscribers: int = Field(default=0, description="Active ZMQ subscriber sockets")
     subscriber_tasks: int = Field(default=0, description="Running subscriber tasks")
@@ -36,7 +43,7 @@ class ConnectionStatsSchema(StrictDataSchema[Literal["connection_stats"]]):
     active_clients: int = Field(default=0, description="Unique connected clients")
 
 
-class TopicMetricSnapshotSchema(StrictDataSchema[Literal["topic_metric_snapshot"]]):
+class TopicMetricSnapshot(BaseModel):
     """Point-in-time snapshot of metrics for a single topic.
 
     Attributes:
@@ -53,7 +60,8 @@ class TopicMetricSnapshotSchema(StrictDataSchema[Literal["topic_metric_snapshot"
         pattern: ZMQ subscription pattern (None if unconfigured).
     """
 
-    type: Literal["topic_metric_snapshot"] = "topic_metric_snapshot"
+    model_config = ConfigDict(extra="forbid")
+
     active_subscribers: int = Field(default=0, description="Current subscriber count")
     received: int = Field(default=0, description="Total messages received")
     forwarded: int = Field(default=0, description="Messages forwarded to clients")
@@ -67,18 +75,19 @@ class TopicMetricSnapshotSchema(StrictDataSchema[Literal["topic_metric_snapshot"
     pattern: str | None = Field(default=None, description="ZMQ subscription pattern")
 
 
-class HealthTopics(StrictDataSchema[Literal["health_topics"]]):
+class HealthTopics(BaseModel):
     """Topic subscription statistics.
 
     Attributes:
         active: Number of currently active topics with subscribers.
     """
 
-    type: Literal["health_topics"] = "health_topics"
+    model_config = ConfigDict(extra="forbid")
+
     active: int = Field(description="Number of currently active topics")
 
 
-class GapStatsSchema(StrictDataSchema[Literal["gap_stats"]]):
+class GapStats(BaseModel):
     """Gap detection telemetry counters for a single detector.
 
     Attributes:
@@ -89,7 +98,8 @@ class GapStatsSchema(StrictDataSchema[Literal["gap_stats"]]):
         rejected_unstamped: Messages rejected due to missing provenance.
     """
 
-    type: Literal["gap_stats"] = "gap_stats"
+    model_config = ConfigDict(extra="forbid")
+
     gaps_detected: int = Field(default=0, description="Total missing messages detected")
     session_resets: int = Field(default=0, description="Producer session resets observed")
     duplicates: int = Field(default=0, description="Duplicate or reordered messages")
@@ -97,7 +107,7 @@ class GapStatsSchema(StrictDataSchema[Literal["gap_stats"]]):
     rejected_unstamped: int = Field(default=0, description="Messages without provenance")
 
 
-class GapDetectionStats(StrictDataSchema[Literal["gap_detection_stats"]]):
+class GapDetectionStats(BaseModel):
     """Aggregated gap detection statistics from all detectors.
 
     Attributes:
@@ -105,23 +115,24 @@ class GapDetectionStats(StrictDataSchema[Literal["gap_detection_stats"]]):
         rest_clients: Per-session gap stats from REST client detectors.
     """
 
-    type: Literal["gap_detection_stats"] = "gap_detection_stats"
-    bridge: GapStatsSchema = Field(description="ZMQ bridge gap detection stats")
-    rest_clients: dict[str, GapStatsSchema] = Field(
+    model_config = ConfigDict(extra="forbid")
+
+    bridge: GapStats = Field(description="ZMQ bridge gap detection stats")
+    rest_clients: dict[str, GapStats] = Field(
         default_factory=dict,
         description="Per-session REST client gap stats",
     )
 
 
-class HealthCheckResponse(StrictDataSchema[Literal["health_check"]]):
-    """Main health check endpoint response.
+class HealthCheckData(StrictDataSchema[Literal["health_check"]]):
+    """Domain data for the main health check endpoint.
 
     Provides overall service health status including version,
     connection statistics, topic availability, and gap detection stats.
 
     Attributes:
+        type: Payload item type discriminator.
         status: Overall service health status (healthy/warning/error).
-        timestamp: Timestamp of the health check.
         version: Application version string.
         connections: Connection statistics.
         topics: Topic availability information.
@@ -130,14 +141,23 @@ class HealthCheckResponse(StrictDataSchema[Literal["health_check"]]):
 
     type: Literal["health_check"] = "health_check"
     status: HealthStatus = Field(description="Overall service health status")
-    timestamp: datetime = Field(description="Timestamp of the health check")
     version: str = Field(description="Application version")
-    connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
+    connections: ConnectionStats = Field(description=_CONN_STATS_DESC)
     topics: HealthTopics = Field(description="Topics availability")
     gap_detection: GapDetectionStats = Field(description="Gap detection statistics")
 
 
-class ZmqComponents(StrictDataSchema[Literal["zmq_components"]]):
+class HealthCheckResponse(PayloadResponse[Literal["health_check_response"], HealthCheckData]):
+    """Main health check endpoint response.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["health_check_response"] = "health_check_response"
+
+
+class ZmqComponents(BaseModel):
     """ZMQ infrastructure component status.
 
     Attributes:
@@ -146,32 +166,34 @@ class ZmqComponents(StrictDataSchema[Literal["zmq_components"]]):
         active_connections: Number of active WebSocket connections.
     """
 
-    type: Literal["zmq_components"] = "zmq_components"
+    model_config = ConfigDict(extra="forbid")
+
     zmq_context: ComponentStatus = Field(description="ZMQ context status")
     websocket_manager: ComponentStatus = Field(description="WebSocket manager status")
     active_connections: int = Field(description="Number of active WebSocket connections")
 
 
-class ZmqConfig(StrictDataSchema[Literal["zmq_config"]]):
+class ZmqConfig(BaseModel):
     """ZMQ configuration information.
 
     Attributes:
         available_topics: List of available ZMQ topics for subscription.
     """
 
-    type: Literal["zmq_config"] = "zmq_config"
+    model_config = ConfigDict(extra="forbid")
+
     available_topics: list[str] = Field(description="List of available ZMQ topics")
 
 
-class ZmqHealthResponse(StrictDataSchema[Literal["zmq_health"]]):
-    """ZMQ bridge health check response.
+class ZmqHealthData(StrictDataSchema[Literal["zmq_health"]]):
+    """Domain data for the ZMQ bridge health check.
 
     Provides detailed status of the ZMQ-to-WebSocket bridge including
     component health, configuration, and message statistics.
 
     Attributes:
+        type: Payload item type discriminator.
         status: Overall ZMQ bridge health status.
-        timestamp: Timestamp of the health check.
         components: Component status details.
         config: ZMQ configuration.
         connections: Connection statistics.
@@ -181,17 +203,26 @@ class ZmqHealthResponse(StrictDataSchema[Literal["zmq_health"]]):
 
     type: Literal["zmq_health"] = "zmq_health"
     status: HealthStatus = Field(description="Overall ZMQ bridge health status")
-    timestamp: datetime = Field(description="Timestamp of the health check")
     components: ZmqComponents = Field(description="Component status details")
     config: ZmqConfig = Field(description="ZMQ configuration")
-    connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
-    message_stats: dict[str, TopicMetricSnapshotSchema] = Field(
+    connections: ConnectionStats = Field(description=_CONN_STATS_DESC)
+    message_stats: dict[str, TopicMetricSnapshot] = Field(
         description="Message statistics per topic"
     )
     errors: list[str] = Field(default_factory=list, description="Error messages if not healthy")
 
 
-class WebSocketStats(StrictDataSchema[Literal["websocket_stats"]]):
+class ZmqHealthResponse(PayloadResponse[Literal["zmq_health_response"], ZmqHealthData]):
+    """ZMQ bridge health check endpoint response.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["zmq_health_response"] = "zmq_health_response"
+
+
+class WebSocketStats(BaseModel):
     """WebSocket connection statistics.
 
     Attributes:
@@ -200,13 +231,14 @@ class WebSocketStats(StrictDataSchema[Literal["websocket_stats"]]):
         client_count: Total client count.
     """
 
-    type: Literal["websocket_stats"] = "websocket_stats"
+    model_config = ConfigDict(extra="forbid")
+
     active_connections: int = Field(description="Number of active WebSocket connections")
     topic_subscribers: dict[str, int] = Field(description="Subscriber count per topic")
     client_count: int = Field(description="Total client count")
 
 
-class ZmqBridgeStats(StrictDataSchema[Literal["zmq_bridge_stats"]]):
+class ZmqBridgeStats(BaseModel):
     """ZMQ bridge statistics.
 
     Attributes:
@@ -215,13 +247,14 @@ class ZmqBridgeStats(StrictDataSchema[Literal["zmq_bridge_stats"]]):
         available_topics: List of available topics.
     """
 
-    type: Literal["zmq_bridge_stats"] = "zmq_bridge_stats"
+    model_config = ConfigDict(extra="forbid")
+
     active_topics: int = Field(description="Number of active ZMQ topics")
     subscriber_tasks: int = Field(description="Number of subscriber tasks")
     available_topics: list[str] = Field(description="List of available topics")
 
 
-class WsStatsConfig(StrictDataSchema[Literal["ws_stats_config"]]):
+class WsStatsConfig(BaseModel):
     """WebSocket statistics configuration.
 
     Attributes:
@@ -229,12 +262,13 @@ class WsStatsConfig(StrictDataSchema[Literal["ws_stats_config"]]):
         heartbeat_interval_ms: Heartbeat interval in milliseconds.
     """
 
-    type: Literal["ws_stats_config"] = "ws_stats_config"
+    model_config = ConfigDict(extra="forbid")
+
     broker_xpub: str = Field(description="ZMQ broker XPUB endpoint")
     heartbeat_interval_ms: int = Field(description="Heartbeat interval in milliseconds")
 
 
-class SubscriptionsStats(StrictDataSchema[Literal["subscriptions_stats"]]):
+class SubscriptionsStats(BaseModel):
     """Subscription statistics.
 
     Attributes:
@@ -242,18 +276,20 @@ class SubscriptionsStats(StrictDataSchema[Literal["subscriptions_stats"]]):
         per_client: Topics subscribed per client.
     """
 
-    type: Literal["subscriptions_stats"] = "subscriptions_stats"
+    model_config = ConfigDict(extra="forbid")
+
     per_topic: dict[str, int] = Field(description="Subscriber count per topic")
     per_client: dict[str, list[str]] = Field(description="Topics subscribed per client")
 
 
-class WsStatsResponse(StrictDataSchema[Literal["ws_stats"]]):
-    """WebSocket statistics endpoint response.
+class WsStatsData(StrictDataSchema[Literal["ws_stats"]]):
+    """Domain data for the WebSocket statistics endpoint.
 
     Comprehensive statistics about WebSocket connections, ZMQ bridge,
     and subscription state.
 
     Attributes:
+        type: Payload item type discriminator.
         websocket: WebSocket statistics.
         zmq_bridge: ZMQ bridge statistics.
         connections: Connection statistics.
@@ -265,10 +301,20 @@ class WsStatsResponse(StrictDataSchema[Literal["ws_stats"]]):
     type: Literal["ws_stats"] = "ws_stats"
     websocket: WebSocketStats = Field(description="WebSocket statistics")
     zmq_bridge: ZmqBridgeStats = Field(description="ZMQ bridge statistics")
-    connections: ConnectionStatsSchema = Field(description=_CONN_STATS_DESC)
-    topics: dict[str, TopicMetricSnapshotSchema] = Field(description="Topic message statistics")
+    connections: ConnectionStats = Field(description=_CONN_STATS_DESC)
+    topics: dict[str, TopicMetricSnapshot] = Field(description="Topic message statistics")
     subscriptions: SubscriptionsStats = Field(description="Subscription details")
     config: WsStatsConfig = Field(description="Configuration details")
+
+
+class WsStatsResponse(PayloadResponse[Literal["ws_stats_response"], WsStatsData]):
+    """WebSocket statistics endpoint response.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["ws_stats_response"] = "ws_stats_response"
 
 
 class SettingCategoriesResponse(PayloadListResponse[Literal["setting_categories"], str]):
@@ -283,19 +329,22 @@ class SettingCategoriesResponse(PayloadListResponse[Literal["setting_categories"
 
 
 __all__ = [
-    "ConnectionStatsSchema",
+    "ConnectionStats",
     "GapDetectionStats",
-    "GapStatsSchema",
+    "GapStats",
+    "HealthCheckData",
     "HealthCheckResponse",
     "HealthTopics",
     "SettingCategoriesResponse",
     "SubscriptionsStats",
-    "TopicMetricSnapshotSchema",
+    "TopicMetricSnapshot",
     "WebSocketStats",
     "WsStatsConfig",
+    "WsStatsData",
     "WsStatsResponse",
     "ZmqBridgeStats",
     "ZmqComponents",
     "ZmqConfig",
+    "ZmqHealthData",
     "ZmqHealthResponse",
 ]

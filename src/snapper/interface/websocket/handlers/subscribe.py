@@ -4,6 +4,10 @@ This module handles topic subscription and unsubscription requests
 with role-based access control and ZMQ bridge integration.
 """
 
+from datetime import UTC
+from datetime import datetime
+from uuid import uuid7
+
 from fastapi import WebSocket
 
 from snapper.auth.domain.roles import UserRole
@@ -58,6 +62,8 @@ async def handle_subscribe(
             message=f"Invalid topic format: {', '.join(error_details)}",
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(error_msg.model_dump_json())
         return
@@ -74,6 +80,8 @@ async def handle_subscribe(
             active_subscriptions=list(manager.get_client_subscriptions(websocket)),
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(response.model_dump_json())
         return
@@ -86,6 +94,8 @@ async def handle_subscribe(
             active_subscriptions=list(manager.get_client_subscriptions(websocket)),
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(response.model_dump_json())
         return
@@ -97,6 +107,8 @@ async def handle_subscribe(
             message="ZMQ bridge is not available",
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(error_msg.model_dump_json())
         return
@@ -110,6 +122,8 @@ async def handle_subscribe(
         message=f"Access denied to topics: {denied}" if denied else None,
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.control"),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )
     await websocket.send_text(response.model_dump_json())
 
@@ -145,6 +159,8 @@ async def handle_unsubscribe(
             active_subscriptions=list(current_subscriptions),
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(response.model_dump_json())
         return
@@ -154,6 +170,8 @@ async def handle_unsubscribe(
             message="ZMQ bridge is not available",
             session_id=manager.tracker.session_id,
             sequence_id=manager.tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(error_msg.model_dump_json())
         return
@@ -169,6 +187,8 @@ async def handle_unsubscribe(
         message=f"Not subscribed to topics: {denied}" if denied else None,
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.control"),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )
     await websocket.send_text(response.model_dump_json())
 
@@ -192,5 +212,7 @@ async def handle_get_subscriptions(
         total_available=len(allowed_topics),
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.control"),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )
     await websocket.send_text(response.model_dump_json())

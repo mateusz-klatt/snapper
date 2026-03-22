@@ -8,6 +8,7 @@ import asyncio
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from uuid import uuid7
 
 from fastapi import WebSocket
 from loguru import logger
@@ -113,6 +114,8 @@ def create_deadline_tasks(
                 deadline=expiration,
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence("server.control"),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
             )
             await websocket.send_text(reauth_msg.model_dump_json())
         except asyncio.CancelledError:
@@ -128,6 +131,8 @@ def create_deadline_tasks(
             expired_msg = WSAuthExpiredResponse(
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence("server.control"),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
             )
             await websocket.send_text(expired_msg.model_dump_json())
             await asyncio.sleep(0.3)
@@ -169,6 +174,8 @@ async def authenticate_websocket(
             reason="missing_cookie",
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Authentication cookie missing")
@@ -179,6 +186,8 @@ async def authenticate_websocket(
         timeout=AUTH_TIMEOUT_SECONDS,
         session_id=tracker.session_id,
         sequence_id=tracker.next_sequence("server.control"),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )
     await websocket.send_text(auth_required.model_dump_json())
     try:
@@ -189,6 +198,8 @@ async def authenticate_websocket(
             reason="timeout",
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4408, reason="Authentication timeout")
@@ -200,6 +211,8 @@ async def authenticate_websocket(
             reason="invalid_json",
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid auth payload")
@@ -215,6 +228,8 @@ async def authenticate_websocket(
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="ws_token replay")
@@ -223,6 +238,8 @@ async def authenticate_websocket(
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid ws_token")
@@ -276,6 +293,8 @@ async def handle_reauth(
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Missing session state")
@@ -291,6 +310,8 @@ async def handle_reauth(
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="ws_token replay")
@@ -299,6 +320,8 @@ async def handle_reauth(
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid ws_token")
@@ -315,6 +338,8 @@ async def handle_reauth(
         exp=datetime.fromtimestamp(new_payload.exp, UTC),
         session_id=tracker.session_id,
         sequence_id=tracker.next_sequence("server.control"),
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
     )
     await websocket.send_text(reauth_ok.model_dump_json())
     return True

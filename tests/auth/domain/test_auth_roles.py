@@ -46,6 +46,8 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
     expected_profile = UserProfile(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="testuser",
         role=UserRole.VIEWER,
         is_active=True,
@@ -179,6 +181,8 @@ class TestUserManagementBasic:
             UserProfile(
                 session_id="test-sid",
                 sequence_id=1,
+                public_id="test-pid",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 username="testuser",
                 role=UserRole.VIEWER,
                 is_active=True,

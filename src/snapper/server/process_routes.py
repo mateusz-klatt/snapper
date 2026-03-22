@@ -31,6 +31,7 @@ Example:
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
+from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -42,15 +43,20 @@ from snapper.api.schemas.process import AvailableProcessesResponse
 from snapper.api.schemas.process import ConfiguredProcess
 from snapper.api.schemas.process import ConfiguredProcessesResponse
 from snapper.api.schemas.process import ProcessCategoryCount
+from snapper.api.schemas.process import ProcessCreateData
 from snapper.api.schemas.process import ProcessCreatedInfo
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessCreateResponse
 from snapper.api.schemas.process import ProcessRun
 from snapper.api.schemas.process import ProcessRunsResponse
+from snapper.api.schemas.process import ProcessSchemaData
 from snapper.api.schemas.process import ProcessSchemaResponse
+from snapper.api.schemas.process import ProcessStartData
 from snapper.api.schemas.process import ProcessStartRequest
 from snapper.api.schemas.process import ProcessStartResponse
+from snapper.api.schemas.process import ProcessStopData
 from snapper.api.schemas.process import ProcessStopResponse
+from snapper.api.schemas.process import ProcessSummaryData
 from snapper.api.schemas.process import ProcessSummaryResponse
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
@@ -69,20 +75,20 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 _REST_STREAM = "rest.control"
 
 
-def _mint_provenance(request: Request) -> tuple[str, int, datetime]:
-    """Extract one sid/seq/ts triple from the REST tracker.
+def _mint_provenance(request: Request) -> tuple[str, int, str, datetime]:
+    """Extract one sid/seq/pid/ts quad from the REST tracker.
 
     Called once per handler. All nested minted DTOs in the response
-    tree share the same provenance triple.
+    tree share the same provenance quad.
 
     Args:
         request: FastAPI request with app.state.rest_tracker.
 
     Returns:
-        Tuple of (session_id, sequence_id, timestamp).
+        Tuple of (session_id, sequence_id, public_id, timestamp).
     """
     tracker: SequenceTracker = request.app.state.rest_tracker
-    return tracker.session_id, tracker.next_sequence(_REST_STREAM), datetime.now(UTC)
+    return tracker.session_id, tracker.next_sequence(_REST_STREAM), str(uuid7()), datetime.now(UTC)
 
 
 __all__ = [
@@ -113,7 +119,7 @@ async def list_available_processes(
     request: Request,
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> AvailableProcessesResponse:
-    sid, seq, ts = _mint_provenance(request)
+    sid, seq, pid, ts = _mint_provenance(request)
     registry = get_registered_processes()
     processes: list[AvailableProcess] = []
     for name, entry in registry.items():
@@ -121,6 +127,7 @@ async def list_available_processes(
             AvailableProcess(
                 session_id=sid,
                 sequence_id=seq,
+                public_id=str(uuid7()),
                 timestamp=ts,
                 name=name,
                 class_path=entry.class_path,
@@ -135,6 +142,7 @@ async def list_available_processes(
     return AvailableProcessesResponse(
         session_id=sid,
         sequence_id=seq,
+        public_id=pid,
         timestamp=ts,
         payload=processes,
         count=len(processes),
@@ -147,12 +155,13 @@ async def list_configured_processes(
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ConfiguredProcessesResponse:
-    sid, seq, ts = _mint_provenance(request)
+    sid, seq, pid, ts = _mint_provenance(request)
     configs = await factory.get_process_configs()
     processes: list[ConfiguredProcess] = [
         ConfiguredProcess(
             session_id=sid,
             sequence_id=seq,
+            public_id=str(uuid7()),
             timestamp=ts,
             name=config.name,
             enabled=config.enabled,
@@ -175,6 +184,7 @@ async def list_configured_processes(
     return ConfiguredProcessesResponse(
         session_id=sid,
         sequence_id=seq,
+        public_id=pid,
         timestamp=ts,
         payload=processes,
         count=len(processes),
@@ -228,39 +238,35 @@ async def get_process_summary(
             brokers_total += 1
             brokers_running += int(is_running)
 
-    sid, seq, ts = _mint_provenance(request)
-    return ProcessSummaryResponse(
+    sid, seq, pid, ts = _mint_provenance(request)
+    data = ProcessSummaryData(
         session_id=sid,
         sequence_id=seq,
+        public_id=str(uuid7()),
         timestamp=ts,
         feeds=ProcessCategoryCount(
-            session_id=sid,
-            sequence_id=seq,
-            timestamp=ts,
             running=feeds_running,
             total=feeds_total,
         ),
         strategies=ProcessCategoryCount(
-            session_id=sid,
-            sequence_id=seq,
-            timestamp=ts,
             running=strategies_running,
             total=strategies_total,
         ),
         executors=ProcessCategoryCount(
-            session_id=sid,
-            sequence_id=seq,
-            timestamp=ts,
             running=executors_running,
             total=executors_total,
         ),
         brokers=ProcessCategoryCount(
-            session_id=sid,
-            sequence_id=seq,
-            timestamp=ts,
             running=brokers_running,
             total=brokers_total,
         ),
+    )
+    return ProcessSummaryResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=data,
     )
 
 
@@ -327,19 +333,24 @@ async def create_process_configuration(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    sid, seq, ts = _mint_provenance(http_request)
-    return ProcessCreateResponse(
+    sid, seq, pid, ts = _mint_provenance(http_request)
+    data = ProcessCreateData(
         session_id=sid,
         sequence_id=seq,
+        public_id=str(uuid7()),
         timestamp=ts,
         status="created",
         process=ProcessCreatedInfo(
-            session_id=sid,
-            sequence_id=seq,
-            timestamp=ts,
             name=body.name,
             template=body.template,
         ),
+    )
+    return ProcessCreateResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=data,
     )
 
 
@@ -376,10 +387,11 @@ async def get_process_schema(
         default_kwargs = cls.get_default_kwargs(settings)
     except Exception:
         default_kwargs = {}
-    sid, seq, ts = _mint_provenance(request)
-    return ProcessSchemaResponse(
+    sid, seq, pid, ts = _mint_provenance(request)
+    data = ProcessSchemaData(
         session_id=sid,
         sequence_id=seq,
+        public_id=str(uuid7()),
         timestamp=ts,
         name=name,
         description=entry.description,
@@ -390,6 +402,13 @@ async def get_process_schema(
         default_args=entry.args,
         default_kwargs=default_kwargs,
         lifecycle=entry.lifecycle.value,
+    )
+    return ProcessSchemaResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=data,
     )
 
 
@@ -409,15 +428,23 @@ async def start_process(
         kwargs=body.kwargs,
         autostart=body.autostart,
     )
-    sid, seq, ts = _mint_provenance(http_request)
-    return ProcessStartResponse(
+    sid, seq, pid, ts = _mint_provenance(http_request)
+    data = ProcessStartData(
         session_id=sid,
         sequence_id=seq,
+        public_id=str(uuid7()),
         timestamp=ts,
         status=result.status,
         name=name,
         process_public_id=result.public_id,
         message=result.message,
+    )
+    return ProcessStartResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=data,
     )
 
 
@@ -430,14 +457,22 @@ async def stop_process(
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStopResponse:
     result = await factory.stop_process_by_name(name)
-    sid, seq, ts = _mint_provenance(request)
-    return ProcessStopResponse(
+    sid, seq, pid, ts = _mint_provenance(request)
+    data = ProcessStopData(
         session_id=sid,
         sequence_id=seq,
+        public_id=str(uuid7()),
         timestamp=ts,
         status=result.status,
         name=name,
         message=result.message,
+    )
+    return ProcessStopResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=data,
     )
 
 
@@ -451,10 +486,11 @@ async def list_process_runs(
 ) -> ProcessRunsResponse:
     runs_data = await factory.get_recent_runs(limit=limit, name=name)
     runs = [ProcessRun(**run) for run in runs_data]
-    sid, seq, ts = _mint_provenance(request)
+    sid, seq, pid, ts = _mint_provenance(request)
     return ProcessRunsResponse(
         session_id=sid,
         sequence_id=seq,
+        public_id=pid,
         timestamp=ts,
         payload=runs,
         count=len(runs),

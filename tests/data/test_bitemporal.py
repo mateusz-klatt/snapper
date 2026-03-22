@@ -59,17 +59,21 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
 
     Returns:
         Tuple of (repository, instrument_id).
+
+    Uses a fixed historical timestamp so active-row lookups remain stable even
+    if the host wall clock moves backwards during the test run.
     """
     db_path = tmp_path / "bitemporal.db"
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await repo.create_all()
+    seed_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
     symbol = Symbol(
         native_symbol="BTC-USD",
         base="BTC",
         quote="USD",
         asset_type="crypto",
-        created_at=datetime.now(UTC),
-        timestamp=datetime.now(UTC),
+        created_at=seed_time,
+        timestamp=seed_time,
         session_id="test-session",
         sequence_id=1,
     )
@@ -86,6 +90,7 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
         exchange="kraken",
         tick_size=0.01,
         lot_size=0.001,
+        timestamp=seed_time,
         session_id="test-session",
         sequence_id=1,
     )

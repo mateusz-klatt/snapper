@@ -166,10 +166,10 @@ export const Overview: React.FC = () => {
   const { data: latestSignals, isLoading: signalsLoading } = useLatestSignals(5)
   const { data: ordersGrouped } = useOrdersGrouped({ limit: 50 })
   const { data: executions = [] } = useExecutions()
-  const feeds = processSummary?.feeds ?? zeroCounts
-  const strategies = processSummary?.strategies ?? zeroCounts
-  const executors = processSummary?.executors ?? zeroCounts
-  const brokers = processSummary?.brokers ?? zeroCounts
+  const feeds = processSummary?.payload?.feeds ?? zeroCounts
+  const strategies = processSummary?.payload?.strategies ?? zeroCounts
+  const executors = processSummary?.payload?.executors ?? zeroCounts
+  const brokers = processSummary?.payload?.brokers ?? zeroCounts
   const recentExecutions = executions.slice(0, 5)
   const openOrdersCount = ordersGrouped?.open?.length || 0
   const todayStr = new Date().toDateString()

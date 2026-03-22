@@ -191,6 +191,8 @@ async def test_tick_loop_handles_unknown_symbol(monkeypatch: pytest.MonkeyPatch)
         yield TickData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="UNKNOWN",
             volume=1.0,
             last=1.0,
@@ -294,6 +296,8 @@ async def test_publish_message_skips_when_not_running() -> None:
         CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="i",
             volume=1.0,
             timeframe="1m",
@@ -326,6 +330,8 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
         CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="i",
             volume=1.0,
             timeframe="1m",
@@ -352,7 +358,14 @@ async def test_publish_heartbeat_when_running() -> None:
     pub.msg_publisher = AsyncMock()
     pub.running = True
     msg = HeartbeatData(
-        session_id="", sequence_id=0, component="c", sequence=1, status="healthy", lag_ms=0
+        session_id="",
+        sequence_id=0,
+        component="c",
+        sequence=1,
+        status="healthy",
+        lag_ms=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     await pub._publish_heartbeat("heartbeat.c", msg)
     pub.msg_publisher.send.assert_awaited()
@@ -400,7 +413,14 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     msg = TickData(
-        session_id="", sequence_id=0, instrument="i", volume=0.0, last=1.0, exchange="kraken"
+        session_id="",
+        sequence_id=0,
+        instrument="i",
+        volume=0.0,
+        last=1.0,
+        exchange="kraken",
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     await pub._save_to_db("i", msg)
     repo = SimpleNamespace(upsert_instrument=AsyncMock(return_value=1), upsert_candles=AsyncMock())
@@ -410,6 +430,7 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
     candle = CandleData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -684,7 +705,14 @@ async def test_publish_heartbeat_skips_when_not_running() -> None:
     await pub._publish_heartbeat(
         "heartbeat.c",
         HeartbeatData(
-            session_id="", sequence_id=0, component="c", sequence=1, status="healthy", lag_ms=0
+            session_id="",
+            sequence_id=0,
+            component="c",
+            sequence=1,
+            status="healthy",
+            lag_ms=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         ),
     )
     pub.msg_publisher.send.assert_not_awaited()
@@ -706,7 +734,14 @@ async def test_publish_heartbeat_logs_errors() -> None:
     await pub._publish_heartbeat(
         "heartbeat.c",
         HeartbeatData(
-            session_id="", sequence_id=0, component="c", sequence=1, status="healthy", lag_ms=0
+            session_id="",
+            sequence_id=0,
+            component="c",
+            sequence=1,
+            status="healthy",
+            lag_ms=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         ),
     )
     failing.send.assert_awaited_once()
@@ -728,6 +763,7 @@ async def test_save_to_db_logs_errors() -> None:
     candle = CandleData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -923,6 +959,7 @@ async def test_save_to_db_invalid_symbol_logs_warning() -> None:
     candle = CandleData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
         instrument="BAD",
         volume=1.0,
         timeframe="1m",
@@ -951,6 +988,7 @@ async def test_save_to_db_uses_cached_instrument() -> None:
     candle = CandleData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
@@ -1180,7 +1218,13 @@ async def test_handle_settings_update_success(monkeypatch: pytest.MonkeyPatch) -
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     envelope = SettingChangedData(
-        session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+        session_id="",
+        sequence_id=0,
+        key="test_key",
+        value="test_value",
+        category="test",
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     payload = envelope.to_json().encode()
     mock_instance = SimpleNamespace(_cache={}, _parse_value=lambda v: v)
@@ -1214,7 +1258,13 @@ async def test_handle_settings_update_no_instance(monkeypatch: pytest.MonkeyPatc
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     envelope = SettingChangedData(
-        session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+        session_id="",
+        sequence_id=0,
+        key="test_key",
+        value="test_value",
+        category="test",
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     payload = envelope.to_json().encode()
     monkeypatch.setattr(
@@ -1434,6 +1484,8 @@ class TestFeedPublisherCoverage:
         message = TickData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             exchange="kraken",
             volume=1.0,
@@ -1461,6 +1513,8 @@ class TestFeedPublisherCoverage:
         message = TickData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             exchange="kraken",
             volume=1.0,
@@ -1530,6 +1584,8 @@ class TestFeedPublisherCoverage:
         heartbeat = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="feed.kraken.BTC-USD",
             sequence=1,
             status="healthy",
@@ -1728,6 +1784,8 @@ class TestFeedPublisherCoverage:
         bar_message = CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             exchange="kraken",
             volume=5.0,
@@ -1815,6 +1873,8 @@ def _build_bar_message(instrument: str) -> CandleData:
     return CandleData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument=instrument,
         exchange="kraken",
         volume=12.5,
@@ -2133,6 +2193,8 @@ class TestFeedPublisherPublishMessage:
         message = CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2172,6 +2234,8 @@ class TestFeedPublisherPublishMessage:
         message = CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2206,6 +2270,8 @@ class TestFeedPublisherPublishMessage:
         message = CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,
@@ -2240,6 +2306,8 @@ class TestFeedPublisherPublishMessage:
         message = CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             volume=100.5,

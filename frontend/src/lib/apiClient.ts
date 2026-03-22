@@ -7,7 +7,7 @@ import {
   SettingCategoriesResponseSchema,
   SettingListResponseSchema,
   SettingResponseSchema,
-  SystemStatusSchema,
+  SystemStatusResponseSchema,
   ConfiguredProcessesResponseSchema,
   ProcessSummaryResponseSchema,
   AvailableProcessesResponseSchema,
@@ -30,7 +30,7 @@ import {
 } from './schemas/api.generated.zod'
 import type {
   CandleData,
-  SystemStatus,
+  SystemStatusResponse,
   SettingListResponse,
   SettingResponse,
   SettingUpdate,
@@ -57,6 +57,7 @@ import type {
   ExecutionListResponse,
   PositionListResponse,
   SignalListResponse,
+  HealthCheckResponse,
 } from '../types/api'
 
 interface RequestOptions {
@@ -287,15 +288,15 @@ class APIClient {
 
     return false
   }
-  async getHealth(): Promise<{ status: string; timestamp: string }> {
+  async getHealth(): Promise<HealthCheckResponse> {
     const data = await this.getJSON('/api/health')
 
     return validateResponse(data, HealthCheckResponseSchema, '/health')
   }
-  async getSystemStatus(): Promise<SystemStatus> {
+  async getSystemStatus(): Promise<SystemStatusResponse> {
     const data = await this.getJSON('/api/status')
 
-    return validateResponse(data, SystemStatusSchema, '/status')
+    return validateResponse(data, SystemStatusResponseSchema, '/status')
   }
   async getCandles(
     instrument: string,
@@ -305,10 +306,6 @@ class APIClient {
   ): Promise<CandleData[]> {
     const params = new URLSearchParams({ instrument, exchange, timeframe, limit: String(limit) })
     const response = await this.get(`/api/candles?${params}`)
-
-    if (response.status === 204) {
-      return []
-    }
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`)
@@ -526,15 +523,18 @@ function stampProvenance(body: unknown): unknown {
 
 async function cacheWsTicketFromResponse(response: Response): Promise<void> {
   try {
-    const payload = (await response.clone().json()) as {
-      ws_token?: string
-      ws_token_exp?: string
+    const envelope = (await response.clone().json()) as {
+      payload?: {
+        ws_token?: string
+        ws_token_exp?: string
+      }
     }
+    const data = envelope?.payload
 
-    if (typeof payload?.ws_token === 'string' && typeof payload?.ws_token_exp === 'string') {
-      const expSeconds = Math.floor(new Date(payload.ws_token_exp).getTime() / 1000)
+    if (typeof data?.ws_token === 'string' && typeof data?.ws_token_exp === 'string') {
+      const expSeconds = Math.floor(new Date(data.ws_token_exp).getTime() / 1000)
 
-      storeWsTicket({ token: payload.ws_token, exp: expSeconds })
+      storeWsTicket({ token: data.ws_token, exp: expSeconds })
     } else {
       storeWsTicket(null)
     }

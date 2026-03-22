@@ -158,15 +158,16 @@ const MetricCard: React.FC<{ metric: HealthMetric }> = ({ metric }) => {
 
 export const Health: React.FC = () => {
   const { data: systemStatus, isLoading } = useSystemStatus()
-  const backtestsList = Object.values(systemStatus?.backtests || {})
+  const statusPayload = systemStatus?.payload
+  const backtestsList = Object.values(statusPayload?.backtests || {})
   const runningBacktests = backtestsList.filter(b => b.status === 'running').length
   const hasErroredBacktest = backtestsList.some(b => b.status === 'error')
   const backtestStatus: HealthStatus = hasErroredBacktest ? 'error' : 'healthy'
   const healthMetrics: HealthMetric[] = [
     {
       name: 'Trading Engine',
-      value: systemStatus?.trader?.status === 'running' ? 'Active' : 'Inactive',
-      status: systemStatus?.trader?.status === 'running' ? 'healthy' : 'warning',
+      value: statusPayload?.trader?.status === 'running' ? 'Active' : 'Inactive',
+      status: statusPayload?.trader?.status === 'running' ? 'healthy' : 'warning',
       description: 'Strategy execution engine',
       icon: (
         <svg className='w-5 h-5' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
@@ -229,15 +230,15 @@ export const Health: React.FC = () => {
             <div className='grid grid-cols-1 md:grid-cols-2 gap-4'>
               <ProcessCard
                 name='Trading Engine'
-                status={systemStatus?.trader || { status: 'unknown' }}
+                status={statusPayload?.trader || { status: 'not_running' }}
                 type='service'
               />
             </div>
-            {systemStatus?.backtests && Object.keys(systemStatus.backtests).length > 0 && (
+            {statusPayload?.backtests && Object.keys(statusPayload.backtests).length > 0 && (
               <div>
                 <h4 className='mb-3 text-md font-medium text-alpine-900'>Active Backtests</h4>
                 <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'>
-                  {Object.entries(systemStatus.backtests).map(([id, status]) => (
+                  {Object.entries(statusPayload.backtests).map(([id, status]) => (
                     <ProcessCard
                       key={id}
                       name={`Backtest ${id.slice(0, 8)}`}

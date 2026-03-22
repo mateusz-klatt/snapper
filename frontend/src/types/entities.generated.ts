@@ -24,8 +24,8 @@ type TradeSide = 'buy' | 'sell'
  */
 export interface Candle {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   instrument: string
   exchange: MarketDataExchange
@@ -46,8 +46,8 @@ export interface Candle {
  */
 export interface Execution {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   tradeId?: string | null
   exchangeOrderId?: string | null
@@ -69,8 +69,8 @@ export interface Execution {
  */
 export interface Heartbeat {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   component: string
   sequence: number
@@ -85,8 +85,8 @@ export interface Heartbeat {
  */
 export interface OrderCancel {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   exchange: OrderExchange
   instrument: string
@@ -100,8 +100,8 @@ export interface OrderCancel {
  */
 export interface Order {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   exchangeOrderId?: string | null
   clientOrderId: string
@@ -127,8 +127,8 @@ export interface Order {
  */
 export interface OrderEvent {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   exchangeOrderId: string
   clientOrderId: string
@@ -144,8 +144,8 @@ export interface OrderEvent {
  */
 export interface OrderReplace {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   exchange: OrderExchange
   instrument: string
@@ -161,8 +161,8 @@ export interface OrderReplace {
  */
 export interface OrderRequest {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   strategyId: string
   exchange: OrderExchange
@@ -182,8 +182,8 @@ export interface OrderRequest {
  */
 export interface Position {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   instrument: string
   exchange: OrderExchange
@@ -199,8 +199,8 @@ export interface Position {
  */
 export interface ReplayEnd {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
 }
 
@@ -210,8 +210,8 @@ export interface ReplayEnd {
  */
 export interface ReplayStart {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   startedAt?: Date | null
 }
@@ -222,8 +222,8 @@ export interface ReplayStart {
  */
 export interface SettingChanged {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   key: string
   value: string
@@ -237,8 +237,8 @@ export interface SettingChanged {
  */
 export interface Signal {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   instrument: string
   exchange: OrderExchange
@@ -256,8 +256,8 @@ export interface Signal {
  */
 export interface SymbolAliasUpdate {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   event: string
   action: string
@@ -269,8 +269,8 @@ export interface SymbolAliasUpdate {
  */
 export interface Tick {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   instrument: string
   exchange: MarketDataExchange
@@ -286,8 +286,8 @@ export interface Tick {
  */
 export interface Trade {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   instrument: string
   exchange: MarketDataExchange
@@ -297,6 +297,24 @@ export interface Trade {
   side?: string | null
 }
 
+/**
+ * Canonical TopicMetric entity.
+ * From REST API TopicMetricSnapshot.
+ */
+export interface TopicMetric {
+  activeSubscribers?: number
+  received?: number
+  forwarded?: number
+  throttled?: number
+  dropped?: number
+  timeout?: number
+  errors?: number
+  invalidMessages?: number
+  lastMessageTs?: number
+  throttleMs?: number | null
+  pattern?: string | null
+}
+
 
 /**
  * AdminResetPassword request entity.
@@ -304,8 +322,8 @@ export interface Trade {
  */
 export interface AdminResetPassword {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   newPassword: string
 }
@@ -316,8 +334,8 @@ export interface AdminResetPassword {
  */
 export interface ChangePassword {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   currentPassword: string
   newPassword: string
@@ -329,8 +347,8 @@ export interface ChangePassword {
  */
 export interface CreateUser {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   username: string
   email?: string | null
@@ -345,8 +363,8 @@ export interface CreateUser {
  */
 export interface Login {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   username: string
   password: string
@@ -359,8 +377,8 @@ export interface Login {
  */
 export interface ProcessCreate {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   name: string
   template: string
@@ -377,8 +395,8 @@ export interface ProcessCreate {
  */
 export interface ProcessStart {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   mode?: 'thread' | 'process' | null
   args?: unknown[] | null
@@ -392,8 +410,8 @@ export interface ProcessStart {
  */
 export interface UpdateUser {
   sequenceId: number
-  publicId?: string
-  timestamp?: Date
+  publicId: string
+  timestamp: Date
   sessionId: string
   email?: string | null
   role?: 'viewer' | 'operator' | 'admin' | null

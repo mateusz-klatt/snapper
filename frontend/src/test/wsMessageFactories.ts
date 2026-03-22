@@ -1,8 +1,14 @@
+const PROVENANCE = {
+  sequence_id: 0,
+  public_id: 'test-pid',
+  timestamp: '2024-01-01T00:00:00Z',
+  session_id: 'test-sid',
+} as const
+
 export function createAuthRequired(overrides: { timeout?: number } = {}) {
   return {
     type: 'auth_required' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     timeout: overrides.timeout ?? 30,
   }
 }
@@ -10,8 +16,7 @@ export function createAuthRequired(overrides: { timeout?: number } = {}) {
 export function createAuthOk(overrides: { exp?: string } = {}) {
   return {
     type: 'auth_ok' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     exp: overrides.exp ?? new Date(Date.now() + 3600000).toISOString(),
   }
 }
@@ -26,8 +31,7 @@ export function createAuthComplete(
 ) {
   return {
     type: 'auth_complete' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     available_topics: overrides.available_topics ?? [],
     user_role: overrides.user_role ?? 'operator',
     ws_token_exp: overrides.ws_token_exp ?? new Date(Date.now() + 3600000).toISOString(),
@@ -39,8 +43,7 @@ export function createAuthComplete(
 export function createAuthFailed(overrides: { reason?: string | null } = {}) {
   return {
     type: 'auth_failed' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     reason: overrides.reason ?? null,
   }
 }
@@ -48,16 +51,14 @@ export function createAuthFailed(overrides: { reason?: string | null } = {}) {
 export function createAuthExpired() {
   return {
     type: 'auth_expired' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
   }
 }
 
 export function createReauthRequired(overrides: { deadline?: string } = {}) {
   return {
     type: 'reauth_required' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     deadline: overrides.deadline ?? new Date(Date.now() + 60000).toISOString(),
   }
 }
@@ -65,27 +66,34 @@ export function createReauthRequired(overrides: { deadline?: string } = {}) {
 export function createReauthOk(overrides: { exp?: string } = {}) {
   return {
     type: 'reauth_ok' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     exp: overrides.exp ?? new Date(Date.now() + 3600000).toISOString(),
   }
 }
 
 export function createSubscribed(overrides: { topics?: string[] } = {}) {
   return {
-    type: 'subscribed' as const,
-    session_id: '',
-    sequence_id: 0,
+    type: 'subscription_success' as const,
+    ...PROVENANCE,
+    action: 'subscribe' as const,
+    status: 'subscribed' as const,
     topics: overrides.topics ?? ['market.test.BTC-USD'],
+    denied_topics: [] as string[],
+    active_subscriptions: overrides.topics ?? ['market.test.BTC-USD'],
+    message: null,
   }
 }
 
 export function createUnsubscribed(overrides: { topics?: string[] } = {}) {
   return {
-    type: 'unsubscribed' as const,
-    session_id: '',
-    sequence_id: 0,
+    type: 'subscription_success' as const,
+    ...PROVENANCE,
+    action: 'unsubscribe' as const,
+    status: 'unsubscribed' as const,
     topics: overrides.topics ?? ['market.test.BTC-USD'],
+    denied_topics: [] as string[],
+    active_subscriptions: [] as string[],
+    message: null,
   }
 }
 
@@ -98,8 +106,7 @@ export function createSubscriptionsList(
 ) {
   return {
     type: 'subscriptions_list' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     subscriptions: overrides.subscriptions ?? [],
     available_topics: overrides.available_topics ?? [],
     total_available: overrides.total_available ?? 0,
@@ -109,9 +116,8 @@ export function createSubscriptionsList(
 export function createPong(overrides: { timestamp?: string; active_connections?: number } = {}) {
   return {
     type: 'pong' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? new Date().toISOString(),
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
     active_connections: overrides.active_connections ?? 1,
   }
 }
@@ -119,8 +125,7 @@ export function createPong(overrides: { timestamp?: string; active_connections?:
 export function createError(overrides: { message?: string } = {}) {
   return {
     type: 'error' as const,
-    session_id: '',
-    sequence_id: 0,
+    ...PROVENANCE,
     message: overrides.message ?? 'Unknown error',
   }
 }
@@ -141,14 +146,11 @@ export function createCandle(
     trades?: number | null
   } = {}
 ) {
-  const now = new Date().toISOString()
-
   return {
     type: 'candle' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? now,
-    open_at: overrides.open_at ?? now,
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
+    open_at: overrides.open_at ?? PROVENANCE.timestamp,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     volume: overrides.volume ?? 1000,
@@ -173,13 +175,10 @@ export function createTick(
     last?: number | null
   } = {}
 ) {
-  const now = new Date().toISOString()
-
   return {
     type: 'tick' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? now,
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     volume: overrides.volume ?? 1000,
@@ -200,13 +199,10 @@ export function createTrade(
     side?: string | null
   } = {}
 ) {
-  const now = new Date().toISOString()
-
   return {
     type: 'trade' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? now,
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     executed_at: overrides.executed_at ?? null,
@@ -229,13 +225,10 @@ export function createSignal(
     fired_at?: string
   } = {}
 ) {
-  const now = new Date().toISOString()
-
   return {
     type: 'signal' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? now,
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
     exchange: overrides.exchange ?? 'kraken',
     instrument: overrides.instrument ?? 'BTC-USD',
     side: overrides.side ?? ('buy' as const),
@@ -243,7 +236,7 @@ export function createSignal(
     reason: overrides.reason ?? 'Test signal',
     strategy_name: overrides.strategy_name ?? 'test-strategy',
     price: overrides.price ?? 50000,
-    fired_at: overrides.fired_at ?? now,
+    fired_at: overrides.fired_at ?? PROVENANCE.timestamp,
   }
 }
 
@@ -257,13 +250,10 @@ export function createHeartbeat(
     lag_ms?: number
   } = {}
 ) {
-  const now = new Date().toISOString()
-
   return {
     type: 'heartbeat' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? now,
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
     component: overrides.component ?? 'bridge',
     sequence: overrides.sequence ?? 0,
     status: overrides.status ?? ('healthy' as const),
@@ -293,13 +283,10 @@ export function createOrder(
     updated_at?: string | null
   } = {}
 ) {
-  const now = new Date().toISOString()
-
   return {
     type: 'order' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? now,
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
     client_order_id: overrides.client_order_id ?? 'order-1',
     exchange_order_id: overrides.exchange_order_id ?? null,
     instrument: overrides.instrument ?? 'BTC-USD',
@@ -314,7 +301,7 @@ export function createOrder(
     reason: overrides.reason ?? null,
     time_in_force: overrides.time_in_force ?? null,
     error: overrides.error ?? null,
-    created_at: overrides.created_at ?? now,
+    created_at: overrides.created_at ?? PROVENANCE.timestamp,
     updated_at: overrides.updated_at ?? null,
   }
 }
@@ -336,13 +323,10 @@ export function createExecution(
     executed_at?: string
   } = {}
 ) {
-  const now = new Date().toISOString()
-
   return {
     type: 'execution' as const,
-    session_id: '',
-    sequence_id: 0,
-    timestamp: overrides.timestamp ?? now,
+    ...PROVENANCE,
+    timestamp: overrides.timestamp ?? PROVENANCE.timestamp,
     trade_id: overrides.trade_id ?? null,
     exchange_order_id: overrides.exchange_order_id ?? null,
     client_order_id: overrides.client_order_id ?? 'order-1',
@@ -354,6 +338,6 @@ export function createExecution(
     fee: overrides.fee ?? 0.001,
     fee_asset: overrides.fee_asset ?? 'BTC',
     status: overrides.status ?? ('filled' as const),
-    executed_at: overrides.executed_at ?? now,
+    executed_at: overrides.executed_at ?? PROVENANCE.timestamp,
   }
 }

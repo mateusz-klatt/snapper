@@ -62,8 +62,10 @@ describe('auth', () => {
       const expDate = new Date('2026-01-07T12:00:00Z')
 
       vi.mocked(apiClient.postJSON).mockResolvedValue({
-        ws_token: 'fetched-token',
-        ws_token_exp: expDate.toISOString(),
+        payload: {
+          ws_token: 'fetched-token',
+          ws_token_exp: expDate.toISOString(),
+        },
       })
       const result = await getWsToken()
 
@@ -74,7 +76,7 @@ describe('auth', () => {
     })
     it('throws error for invalid API response', async () => {
       vi.mocked(wsTicketCache.consumeWsTicket).mockReturnValue(null)
-      vi.mocked(apiClient.postJSON).mockResolvedValue({ invalid: 'response' })
+      vi.mocked(apiClient.postJSON).mockResolvedValue({ payload: { invalid: 'response' } })
       await expect(getWsToken()).rejects.toThrow('Invalid ws_token response from refresh endpoint')
     })
     it('throws error when API returns null', async () => {
@@ -85,16 +87,20 @@ describe('auth', () => {
     it('throws error when ws_token is not a string', async () => {
       vi.mocked(wsTicketCache.consumeWsTicket).mockReturnValue(null)
       vi.mocked(apiClient.postJSON).mockResolvedValue({
-        ws_token: 12345,
-        ws_token_exp: new Date().toISOString(),
+        payload: {
+          ws_token: 12345,
+          ws_token_exp: new Date().toISOString(),
+        },
       })
       await expect(getWsToken()).rejects.toThrow('Invalid ws_token response from refresh endpoint')
     })
     it('throws error when ws_token_exp is not a string', async () => {
       vi.mocked(wsTicketCache.consumeWsTicket).mockReturnValue(null)
       vi.mocked(apiClient.postJSON).mockResolvedValue({
-        ws_token: 'valid-token',
-        ws_token_exp: 12345,
+        payload: {
+          ws_token: 'valid-token',
+          ws_token_exp: 12345,
+        },
       })
       await expect(getWsToken()).rejects.toThrow('Invalid ws_token response from refresh endpoint')
     })
@@ -108,8 +114,10 @@ describe('auth', () => {
             setTimeout(
               () =>
                 resolve({
-                  ws_token: 'dedup-token',
-                  ws_token_exp: expDate.toISOString(),
+                  payload: {
+                    ws_token: 'dedup-token',
+                    ws_token_exp: expDate.toISOString(),
+                  },
                 }),
               50
             )

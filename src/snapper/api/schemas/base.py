@@ -13,11 +13,9 @@ Schema hierarchy::
         └── PayloadListResponse[T] → list REST response (payload: list[T], count)
 """
 
-from datetime import UTC
 from datetime import datetime
 from typing import Literal
 from typing import Self
-from uuid import uuid7
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -59,8 +57,8 @@ class StrictDataSchema[TypeT: str](BaseModel):
 
     type: TypeT
     sequence_id: int
-    public_id: str = Field(default_factory=lambda: str(uuid7()))
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    public_id: str
+    timestamp: datetime = Field(strict=False)
     session_id: str
 
     def to_json(self) -> str:

@@ -238,6 +238,8 @@ def make_order(**overrides: Any) -> OrderRequestData:
     return OrderRequestData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         type="order_request",
         exchange="paper",
         instrument=overrides.get("instrument", "BTC-USD"),
@@ -1287,7 +1289,13 @@ class TestExecuteLiveOrderErrors:
             "client_order_id": "test_order_123",
         }
         base.update(overrides)
-        return OrderRequestData(session_id="", sequence_id=0, **base)
+        return OrderRequestData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            **base,
+        )
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1354,7 +1362,13 @@ class TestProcessOrder:
             "client_order_id": "test_order_123",
         }
         base.update(overrides)
-        return OrderRequestData(session_id="", sequence_id=0, **base)
+        return OrderRequestData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            **base,
+        )
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1443,6 +1457,8 @@ class TestProcessExecution:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1493,6 +1509,8 @@ class TestProcessExecution:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1541,6 +1559,8 @@ class TestProcessExecution:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -1604,6 +1624,8 @@ class TestHeartbeat:
         hb = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="test",
             sequence=1,
             status="healthy",
@@ -1631,6 +1653,8 @@ class TestHeartbeat:
         hb = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="test",
             sequence=1,
             status="healthy",
@@ -1681,6 +1705,8 @@ class TestSymbolAliasUpdate:
             {
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "event": "symbol_aliases_updated",
                 "action": "clear_cache",
             }
@@ -1735,6 +1761,8 @@ class TestSettingsUpdate:
         envelope = SettingChangedData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             key="test_key",
             value="test_value",
             category="test",
@@ -1765,6 +1793,8 @@ class TestSettingsUpdate:
         envelope = SettingChangedData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             key="test_key",
             value="test_value",
             category="test",
@@ -1803,6 +1833,8 @@ class TestPublishOrderStatus:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -2326,6 +2358,8 @@ async def test_order_handler_processes_order_and_stops(monkeypatch: pytest.Monke
     order = OrderRequestData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         strategy_id="s1",
         exchange="paper",
         instrument="BTC-USD",
@@ -2530,7 +2564,13 @@ class TestExecutorCoverage:
             "client_order_id": "test_order_123",
         }
         base_payload.update(overrides)
-        return OrderRequestData(session_id="", sequence_id=0, **base_payload)
+        return OrderRequestData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            **base_payload,
+        )
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2585,6 +2625,8 @@ class TestExecutorCoverage:
         fill_msg = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-1",
             exchange_order_id="exchange_123",
             client_order_id="test_order_123",
@@ -2617,6 +2659,8 @@ class TestExecutorCoverage:
         fill_msg = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-1",
             exchange_order_id="test_order_123",
             client_order_id="test_order_123",
@@ -2947,6 +2991,8 @@ class TestExecutorCoverage:
         hb = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="executor.kraken",
             sequence=1,
             status="healthy",
@@ -2979,6 +3025,8 @@ class TestExecutorCoverage:
             {
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "event": "symbol_aliases_updated",
                 "action": "clear_cache",
             }
@@ -3258,6 +3306,8 @@ class TestExecutorCoverage:
         fill_msg = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-1",
             exchange_order_id="one",
             client_order_id="one",
@@ -3585,6 +3635,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3623,6 +3675,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3659,6 +3713,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3691,6 +3747,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3748,6 +3806,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3798,6 +3858,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3879,6 +3941,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -3927,6 +3991,8 @@ class TestExecutorWebSocketExecutions:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test_strategy",
             instrument="BTC-USD",
             mode="live",
@@ -4019,6 +4085,7 @@ class TestCancelReplaceHandlers:
         service_any._process_cancel = AsyncMock()
         payload = (
             '{"type":"order_cancel","session_id":"","sequence_id":0,'
+            '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
             '"exchange":"kraken","instrument":"BTC-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456"}'
         )
@@ -4047,6 +4114,7 @@ class TestCancelReplaceHandlers:
         service_any._process_cancel = AsyncMock()
         payload = (
             '{"type":"order_cancel","session_id":"","sequence_id":0,'
+            '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
             '"exchange":"paper","instrument":"BTC-USD",'
             '"exchange_order_id":"PAPER-123","client_order_id":"client_456"}'
         )
@@ -4097,6 +4165,7 @@ class TestCancelReplaceHandlers:
         service_any._process_replace = AsyncMock()
         payload = (
             '{"type":"order_replace","session_id":"","sequence_id":0,'
+            '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
             '"exchange":"kraken","instrument":"BTC-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456",'
             '"new_quantity":0.5,"new_price":48000.0}'
@@ -4126,6 +4195,7 @@ class TestCancelReplaceHandlers:
         service_any._process_replace = AsyncMock()
         payload = (
             '{"type":"order_replace","session_id":"","sequence_id":0,'
+            '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
             '"exchange":"zonda","instrument":"BTC-PLN",'
             '"exchange_order_id":"ZONDA-123","client_order_id":"client_456","new_price":200000.0}'
         )
@@ -4245,6 +4315,7 @@ class TestCancelReplaceHandlers:
         service_any._process_order = AsyncMock()
         payload = (
             '{"type":"order_request","session_id":"","sequence_id":0,'
+            '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
             '"strategy_id":"test","exchange":"kraken",'
             '"instrument":"ETH-USD","mode":"paper","side":"buy","order_type":"market",'
             '"quantity":1.0,"client_order_id":"test-123"}'
@@ -4271,6 +4342,7 @@ class TestCancelReplaceHandlers:
         service_any._process_cancel = AsyncMock()
         payload = (
             '{"type":"order_cancel","session_id":"","sequence_id":0,'
+            '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
             '"exchange":"kraken","instrument":"ETH-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456"}'
         )
@@ -4296,6 +4368,7 @@ class TestCancelReplaceHandlers:
         service_any._process_replace = AsyncMock()
         payload = (
             '{"type":"order_replace","session_id":"","sequence_id":0,'
+            '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
             '"exchange":"kraken","instrument":"ETH-USD",'
             '"exchange_order_id":"KRAKEN-123","client_order_id":"client_456","new_price":48000.0}'
         )
@@ -4327,6 +4400,8 @@ class TestCancelReplaceHandlers:
         cancel_envelope = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4355,6 +4430,8 @@ class TestCancelReplaceHandlers:
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test",
             exchange="kraken",
             instrument="BTC-USD",
@@ -4375,6 +4452,8 @@ class TestCancelReplaceHandlers:
         cancel_envelope = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4410,6 +4489,8 @@ class TestCancelReplaceHandlers:
         cancel_envelope = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4441,6 +4522,8 @@ class TestCancelReplaceHandlers:
         cancel_envelope = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4469,6 +4552,8 @@ class TestCancelReplaceHandlers:
         replace_envelope = OrderReplaceData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4500,6 +4585,8 @@ class TestCancelReplaceHandlers:
         cancel_envelope = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4533,6 +4620,8 @@ class TestCancelReplaceHandlers:
         cancel_envelope = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4563,6 +4652,8 @@ class TestCancelReplaceHandlers:
         cancel_envelope = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4592,6 +4683,8 @@ class TestCancelReplaceHandlers:
         replace_envelope = OrderReplaceData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4627,6 +4720,8 @@ class TestCancelReplaceHandlers:
         replace_envelope = OrderReplaceData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",
@@ -4657,6 +4752,8 @@ class TestCancelReplaceHandlers:
         replace_envelope = OrderReplaceData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-123",

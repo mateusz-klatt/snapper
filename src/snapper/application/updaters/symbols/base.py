@@ -11,6 +11,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -120,6 +121,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.msg_publisher:
             topic = system_topic("symbol_aliases")
             envelope = SymbolAliasUpdateData(
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
                 session_id=self.msg_publisher.tracker.session_id,
                 sequence_id=self.msg_publisher.tracker.next_sequence(topic),
             )

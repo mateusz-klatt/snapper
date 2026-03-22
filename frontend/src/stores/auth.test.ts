@@ -219,7 +219,7 @@ describe('auth store', () => {
 
       vi.mocked(apiClient.post).mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ user: mockUser, csrf_token: 'test-csrf' }),
+        json: () => Promise.resolve({ payload: { user: mockUser, csrf_token: 'test-csrf' } }),
       } as Response)
       const state = useAuthStore.getState()
 
@@ -282,7 +282,7 @@ describe('auth store', () => {
               ok: true,
               json: () =>
                 Promise.resolve({
-                  user: { username: 'test', role: 'admin', is_active: true },
+                  payload: { user: { username: 'test', role: 'admin', is_active: true } },
                 }),
             } as Response)
           })
@@ -348,10 +348,12 @@ describe('auth store', () => {
       const mockUser = { username: 'admin', role: 'admin' as const, is_active: true }
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
-        ws_token: 'new-ws-token',
-        ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
-        csrf_token: 'new-csrf',
-        user: mockUser,
+        payload: {
+          ws_token: 'new-ws-token',
+          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          csrf_token: 'new-csrf',
+          user: mockUser,
+        },
       })
       const state = useAuthStore.getState()
 
@@ -362,13 +364,16 @@ describe('auth store', () => {
     it('fetches user info if not in response', async () => {
       useAuthStore.setState({ user: null, isAuthenticated: true })
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
-        ws_token: 'token',
-        ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
-        csrf_token: 'csrf',
+        payload: {
+          ws_token: 'token',
+          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          csrf_token: 'csrf',
+        },
       })
       vi.mocked(apiClient.get).mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ username: 'admin', role: 'admin', is_active: true }),
+        json: () =>
+          Promise.resolve({ payload: { username: 'admin', role: 'admin', is_active: true } }),
       } as Response)
       const state = useAuthStore.getState()
 
@@ -388,8 +393,10 @@ describe('auth store', () => {
       const { storeWsTicket } = await import('../lib/wsTicketCache')
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
-        csrf_token: 'csrf',
-        user: { username: 'admin', role: 'admin', is_active: true },
+        payload: {
+          csrf_token: 'csrf',
+          user: { username: 'admin', role: 'admin', is_active: true },
+        },
       })
       const state = useAuthStore.getState()
 
@@ -400,9 +407,11 @@ describe('auth store', () => {
       const { storeWsTicket } = await import('../lib/wsTicketCache')
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
-        csrf_token: 'csrf',
-        ws_token: 'token',
-        user: { username: 'admin', role: 'admin', is_active: true },
+        payload: {
+          csrf_token: 'csrf',
+          ws_token: 'token',
+          user: { username: 'admin', role: 'admin', is_active: true },
+        },
       })
       const state = useAuthStore.getState()
 
@@ -413,9 +422,11 @@ describe('auth store', () => {
       const mockUser = { username: 'admin', role: 'admin' as const, is_active: true }
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
-        ws_token: 'token',
-        ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
-        user: mockUser,
+        payload: {
+          ws_token: 'token',
+          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          user: mockUser,
+        },
       })
       const state = useAuthStore.getState()
 
@@ -426,9 +437,11 @@ describe('auth store', () => {
     it('throws error when fetching user info fails', async () => {
       useAuthStore.setState({ user: null, isAuthenticated: true })
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
-        ws_token: 'token',
-        ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
-        csrf_token: 'csrf',
+        payload: {
+          ws_token: 'token',
+          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          csrf_token: 'csrf',
+        },
       })
       vi.mocked(apiClient.get).mockResolvedValueOnce({
         ok: false,
@@ -443,13 +456,15 @@ describe('auth store', () => {
     it('does not update localStorage when userData is null', async () => {
       useAuthStore.setState({ user: null, isAuthenticated: true })
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
-        ws_token: 'token',
-        ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
-        csrf_token: 'csrf',
+        payload: {
+          ws_token: 'token',
+          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          csrf_token: 'csrf',
+        },
       })
       vi.mocked(apiClient.get).mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve(null),
+        json: () => Promise.resolve({ payload: null }),
       } as unknown as Response)
       const localStorageSpy = vi.spyOn(Storage.prototype, 'setItem')
       const state = useAuthStore.getState()

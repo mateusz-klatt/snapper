@@ -1,6 +1,8 @@
 """Tests for SequenceTracker and MessagePublisher."""
 
 import json
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -22,6 +24,8 @@ def _make_tick(
     return TickData(
         session_id=tracker.session_id,
         sequence_id=tracker.next_sequence(topic),
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange=exchange,
         instrument=instrument,
         volume=1.0,
@@ -117,6 +121,8 @@ class TestMessagePublisher:
         tick = TickData(
             session_id="custom-session",
             sequence_id=42,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             volume=1.0,

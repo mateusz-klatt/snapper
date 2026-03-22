@@ -74,6 +74,7 @@ def make_candle_envelope(
     return CandleData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
         instrument=instrument,
         timeframe="1h",
         open=close - 100,
@@ -608,6 +609,8 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
     heartbeat = HeartbeatData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         component="feed.kraken",
         sequence=1,
         status="healthy",
@@ -623,11 +626,27 @@ async def test_listen_loop_handles_system_messages_and_emits_signal(
         ),
         (
             "system.replay.start",
-            json.dumps({"type": "replay_start", "session_id": "", "sequence_id": 0}).encode(),
+            json.dumps(
+                {
+                    "type": "replay_start",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "public_id": "test-pid",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                }
+            ).encode(),
         ),
         (
             "system.replay.end",
-            json.dumps({"type": "replay_end", "session_id": "", "sequence_id": 0}).encode(),
+            json.dumps(
+                {
+                    "type": "replay_end",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "public_id": "test-pid",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                }
+            ).encode(),
         ),
         (
             "market.kraken.BTC-USD.candles.1h",
@@ -690,6 +709,8 @@ async def test_default_handlers_return_none() -> None:
     tick = TickData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         volume=100.0,
         bid=50000.0,
@@ -700,6 +721,8 @@ async def test_default_handlers_return_none() -> None:
     trade = TradeData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         price=50000.0,
         volume=1.0,
@@ -755,6 +778,8 @@ async def test_emit_signal_persists_with_stamped_provenance(
         reason="test",
         session_id="test-session-123",
         sequence_id=7,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     mock_publisher = MagicMock()
     mock_publisher.send = AsyncMock(return_value=stamped)
@@ -858,6 +883,8 @@ async def test_listen_loop_handles_tick_data() -> None:
     tick = TickData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         volume=100.0,
         bid=50000.0,
@@ -901,6 +928,8 @@ async def test_listen_loop_handles_trade_data() -> None:
     trade = TradeData(
         session_id="",
         sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         price=50000.0,
         volume=1.0,
@@ -1852,6 +1881,8 @@ class TestListenLoop:
                 "type": "replay_start",
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "started_at": "2024-01-01T00:02:03.450000+00:00",
             }
         ).encode()
@@ -1878,7 +1909,13 @@ class TestListenLoop:
         strategy._running = True
         strategy._last_data_ts = 55.5
         replay_end_payload = json.dumps(
-            {"type": "replay_end", "session_id": "", "sequence_id": 0}
+            {
+                "type": "replay_end",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
+            }
         ).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
@@ -2006,6 +2043,8 @@ class TestListenLoop:
         heartbeat = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="feed.kraken",
             sequence=1,
             status="healthy",
@@ -2594,6 +2633,8 @@ class TestReplayHandling:
                 "type": "replay_start",
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "started_at": "2024-01-01T00:02:03.456000+00:00",
             }
         ).encode()
@@ -2631,10 +2672,20 @@ class TestReplayHandling:
                 "type": "replay_start",
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "started_at": "2024-01-01T00:00:50.000000+00:00",
             }
         ).encode()
-        replay_end = json.dumps({"type": "replay_end", "session_id": "", "sequence_id": 0}).encode()
+        replay_end = json.dumps(
+            {
+                "type": "replay_end",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
+            }
+        ).encode()
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = AsyncMock(
             side_effect=[
@@ -2666,7 +2717,15 @@ class TestReplayHandling:
         strategy = ReplayAwareStrategy(config)
         strategy._running = True
         strategy._last_data_ts = 777.0
-        replay_end = json.dumps({"type": "replay_end", "session_id": "", "sequence_id": 0}).encode()
+        replay_end = json.dumps(
+            {
+                "type": "replay_end",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
+            }
+        ).encode()
 
         class StubSubscriber:
             def __init__(self) -> None:
@@ -2706,7 +2765,13 @@ class TestReplayHandling:
         strategy._running = True
         strategy._last_data_ts = 99.0
         replay_end_payload = json.dumps(
-            {"type": "replay_end", "session_id": "", "sequence_id": 0}
+            {
+                "type": "replay_end",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
+            }
         ).encode()
 
         class SingleMessageSubscriber:
@@ -3242,6 +3307,8 @@ class TestListenLoopSystemMessages:
                             "type": "setting_changed",
                             "session_id": "",
                             "sequence_id": 0,
+                            "public_id": "test-pid",
+                            "timestamp": "2024-01-01T00:00:00Z",
                             "key": "foo",
                             "value": "bar",
                             "category": "test",
@@ -3273,7 +3340,13 @@ class TestListenLoopSystemMessages:
         )
         strategy = SimpleTestStrategy(config)
         envelope = SettingChangedData(
-            session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+            session_id="",
+            sequence_id=0,
+            key="test_key",
+            value="test_value",
+            category="test",
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
@@ -3299,7 +3372,13 @@ class TestListenLoopSystemMessages:
         )
         strategy = SimpleTestStrategy(config)
         envelope = SettingChangedData(
-            session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+            session_id="",
+            sequence_id=0,
+            key="test_key",
+            value="test_value",
+            category="test",
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_service.return_value = None
@@ -3320,7 +3399,13 @@ class TestListenLoopSystemMessages:
         )
         strategy = SimpleTestStrategy(config)
         envelope = SettingChangedData(
-            session_id="", sequence_id=0, key="test_key", value="test_value", category="test"
+            session_id="",
+            sequence_id=0,
+            key="test_key",
+            value="test_value",
+            category="test",
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
             mock_instance = MagicMock()
@@ -3350,6 +3435,8 @@ class TestListenLoopSystemMessages:
         heartbeat = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="feed_kraken",
             sequence=1,
             status="healthy",
@@ -3735,6 +3822,7 @@ class TestExecutorBasePhase4:
             heartbeat = HeartbeatData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
                 timestamp=datetime.now(UTC),
                 component="test.executor",
                 sequence=1,
@@ -5957,7 +6045,13 @@ def test_check_gap_parsed_handles_valid_message() -> None:
     """
     strategy = FakeStrategy(_strategy_config())
     tick = TickData(
-        instrument="BTC-USD", exchange="kraken", volume=1.0, session_id="abc", sequence_id=1
+        instrument="BTC-USD",
+        exchange="kraken",
+        volume=1.0,
+        session_id="abc",
+        sequence_id=1,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     strategy._check_gap_parsed("market.kraken.BTC-USD.ticks", tick.to_json())
     assert strategy._gap_detector.stats.mid_stream_joins == 0

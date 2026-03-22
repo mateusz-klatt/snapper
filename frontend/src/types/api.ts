@@ -45,6 +45,6 @@ export type ProcessSummaryResponse = Components['schemas']['ProcessSummaryRespon
 export type StrategyProcess = Components['schemas']['StrategyProcess']
 export type StrategyListResponse = Components['schemas']['StrategyListResponse']
 export type ProcessStatus = Components['schemas']['ProcessStatus']
-export type SystemStatus = Components['schemas']['SystemStatus']
+export type SystemStatusResponse = Components['schemas']['SystemStatusResponse']
 export type HealthCheckResponse = Components['schemas']['HealthCheckResponse']
 export type MessageResponse = Components['schemas']['MessageResponse']

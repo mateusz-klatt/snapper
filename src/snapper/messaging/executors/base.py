@@ -8,8 +8,11 @@ import asyncio
 import time
 from abc import ABC
 from abc import abstractmethod
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 from typing import cast
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -486,6 +489,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             topic = order_event_topic(exchange_name, cancel.instrument, event)
             order_event = OrderEventData(
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=cancel.exchange_order_id,
@@ -519,6 +524,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             topic = order_event_topic(exchange_name, replace.instrument, event)
             order_event = OrderEventData(
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=replace.exchange_order_id,
@@ -737,6 +744,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         total_fee = execution.fee_usd_equiv or 0.0
         topic = order_event_topic(exchange_name, original_order.instrument, "executed")
         return topic, ExecutionData(
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(topic),
             trade_id=execution.exec_id,
@@ -811,6 +820,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             topic = order_event_topic(exchange_name, order.instrument, status)
             order_status = OrderData(
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=exchange_order_id,
@@ -845,6 +856,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 component = f"executor.{exchange_name}"
                 hb_topic = heartbeat_topic_from_component(component)
                 hb_msg = HeartbeatData(
+                    public_id=str(uuid7()),
+                    timestamp=datetime.now(UTC),
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(hb_topic),
                     component=component,

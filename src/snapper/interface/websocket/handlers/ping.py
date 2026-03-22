@@ -6,6 +6,7 @@ keep-alive and health monitoring.
 
 from datetime import UTC
 from datetime import datetime
+from uuid import uuid7
 
 from fastapi import WebSocket
 
@@ -31,5 +32,6 @@ async def handle_ping(websocket: WebSocket, manager: WebSocketConnectionManager)
         active_connections=len(manager.active_connections),
         session_id=manager.tracker.session_id,
         sequence_id=manager.tracker.next_sequence("server.telemetry"),
+        public_id=str(uuid7()),
     )
     await websocket.send_text(pong.model_dump_json())

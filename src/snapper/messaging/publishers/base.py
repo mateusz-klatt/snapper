@@ -350,6 +350,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
                 candle_msg = CandleData(
                     public_id=public_id,
+                    timestamp=datetime.now(UTC),
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
@@ -389,6 +390,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 native_symbol = message.symbol
                 topic = self._build_data_topic(native_symbol, "ticks")
                 tick_msg = TickData(
+                    public_id=str(uuid7()),
+                    timestamp=datetime.now(UTC),
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
@@ -420,6 +423,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 native_symbol = trade.symbol
                 topic = self._build_data_topic(native_symbol, "trades")
                 trade_msg = TradeData(
+                    public_id=str(uuid7()),
+                    timestamp=datetime.now(UTC),
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
@@ -473,6 +478,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     max_lag_ms = max(max_lag_ms, lag_ms)
                 hb_topic = heartbeat_topic_from_component(component_name)
                 hb_msg = HeartbeatData(
+                    public_id=str(uuid7()),
+                    timestamp=datetime.now(UTC),
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(hb_topic),
                     component=component_name,

@@ -17,6 +17,7 @@ from abc import abstractmethod
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -505,6 +506,8 @@ class BaseStrategy(ABC):
             await self._setup_publisher()
         tracker = self.msg_publisher.tracker if self.msg_publisher else self._tracker
         signal_envelope = SignalData(
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence(topic),
             instrument=signal.instrument,

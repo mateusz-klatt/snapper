@@ -1,5 +1,7 @@
 """Tests for process management REST API routes."""
 
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -207,14 +209,14 @@ class TestGetProcessSummary:
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
-        assert result.feeds.running == 0
-        assert result.feeds.total == 0
-        assert result.strategies.running == 0
-        assert result.strategies.total == 0
-        assert result.executors.running == 0
-        assert result.executors.total == 0
-        assert result.brokers.running == 0
-        assert result.brokers.total == 0
+        assert result.payload.feeds.running == 0
+        assert result.payload.feeds.total == 0
+        assert result.payload.strategies.running == 0
+        assert result.payload.strategies.total == 0
+        assert result.payload.executors.running == 0
+        assert result.payload.executors.total == 0
+        assert result.payload.brokers.running == 0
+        assert result.payload.brokers.total == 0
 
     @pytest.mark.asyncio
     async def test_mixed_processes_categorization(self) -> None:
@@ -278,14 +280,14 @@ class TestGetProcessSummary:
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
-        assert result.feeds.running == 1
-        assert result.feeds.total == 2
-        assert result.strategies.running == 1
-        assert result.strategies.total == 1
-        assert result.executors.running == 0
-        assert result.executors.total == 1
-        assert result.brokers.running == 1
-        assert result.brokers.total == 1
+        assert result.payload.feeds.running == 1
+        assert result.payload.feeds.total == 2
+        assert result.payload.strategies.running == 1
+        assert result.payload.strategies.total == 1
+        assert result.payload.executors.running == 0
+        assert result.payload.executors.total == 1
+        assert result.payload.brokers.running == 1
+        assert result.payload.brokers.total == 1
 
     @pytest.mark.asyncio
     async def test_uncategorized_process_not_counted(self) -> None:
@@ -309,10 +311,10 @@ class TestGetProcessSummary:
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
-        assert result.feeds.total == 0
-        assert result.strategies.total == 0
-        assert result.executors.total == 0
-        assert result.brokers.total == 0
+        assert result.payload.feeds.total == 0
+        assert result.payload.strategies.total == 0
+        assert result.payload.executors.total == 0
+        assert result.payload.brokers.total == 0
 
 
 class TestGetProcessSchema:
@@ -349,14 +351,14 @@ class TestGetProcessSchema:
         result = await get_process_schema(
             request=_make_rest_request(), name="zmq_broker", settings=settings, _user=MagicMock()
         )
-        assert result.name == "zmq_broker"
-        assert result.description == "ZMQ message broker"
-        assert result.class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
-        assert result.method == "run"
-        assert result.default_enabled is True
-        assert result.default_mode == "thread"
-        assert result.default_args == []
-        assert result.default_kwargs == {"endpoint": "tcp://0.0.0.0:5555"}
+        assert result.payload.name == "zmq_broker"
+        assert result.payload.description == "ZMQ message broker"
+        assert result.payload.class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
+        assert result.payload.method == "run"
+        assert result.payload.default_enabled is True
+        assert result.payload.default_mode == "thread"
+        assert result.payload.default_args == []
+        assert result.payload.default_kwargs == {"endpoint": "tcp://0.0.0.0:5555"}
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -392,11 +394,11 @@ class TestGetProcessSchema:
             settings=settings,
             _user=MagicMock(),
         )
-        assert result.name == "custom_process"
-        assert result.default_enabled is False
-        assert result.default_mode == "thread"
-        assert result.default_args == []
-        assert result.default_kwargs == {}
+        assert result.payload.name == "custom_process"
+        assert result.payload.default_enabled is False
+        assert result.payload.default_mode == "thread"
+        assert result.payload.default_args == []
+        assert result.payload.default_kwargs == {}
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -434,10 +436,10 @@ class TestGetProcessSchema:
             settings=settings,
             _user=MagicMock(),
         )
-        assert result.default_kwargs == {}
-        assert result.default_enabled is True
-        assert result.default_mode == "process"
-        assert result.default_args == ["arg1"]
+        assert result.payload.default_kwargs == {}
+        assert result.payload.default_enabled is True
+        assert result.payload.default_mode == "process"
+        assert result.payload.default_args == ["arg1"]
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -485,6 +487,8 @@ class TestStartProcess:
             autostart=True,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         result = await start_process(
             http_request=_make_rest_request(),
@@ -494,9 +498,9 @@ class TestStartProcess:
             _user=MagicMock(),
             _csrf=None,
         )
-        assert result.status == "success"
-        assert result.name == "zmq_broker"
-        assert result.process_public_id == "run-001"
+        assert result.payload.status == "success"
+        assert result.payload.name == "zmq_broker"
+        assert result.payload.process_public_id == "run-001"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker",
             mode="process",
@@ -524,6 +528,8 @@ class TestStartProcess:
             autostart=None,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         result = await start_process(
             http_request=_make_rest_request(),
@@ -533,7 +539,7 @@ class TestStartProcess:
             _user=MagicMock(),
             _csrf=None,
         )
-        assert result.status == "success"
+        assert result.payload.status == "success"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker", mode=None, args=None, kwargs=None, autostart=None
         )
@@ -561,8 +567,8 @@ class TestStopProcess:
             _user=MagicMock(),
             _csrf=None,
         )
-        assert result.status == "success"
-        assert result.name == "zmq_broker"
+        assert result.payload.status == "success"
+        assert result.payload.name == "zmq_broker"
         mock_factory.stop_process_by_name.assert_awaited_once_with("zmq_broker")
 
 
@@ -583,6 +589,8 @@ class TestProcessStartRequest:
             autostart=False,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         assert request.mode == "process"
         assert request.args == ["arg1", 2]
@@ -603,6 +611,8 @@ class TestProcessStartRequest:
             autostart=None,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         assert request.mode is None
         assert request.args is None
@@ -670,6 +680,8 @@ class TestCreateProcessConfiguration:
             note="UI created",
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         settings = MagicMock()
         result = await create_process_configuration(
@@ -698,8 +710,8 @@ class TestCreateProcessConfiguration:
             parameters_schema={"type": "object"},
             note="UI created",
         )
-        assert result.status == "created"
-        assert result.process.name == "strategy_macd_custom"
+        assert result.payload.status == "created"
+        assert result.payload.process.name == "strategy_macd_custom"
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -723,6 +735,8 @@ class TestCreateProcessConfiguration:
             note=None,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         factory = MagicMock()
         settings = MagicMock()
@@ -787,6 +801,8 @@ class TestCreateProcessConfiguration:
             note=None,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         with pytest.raises(HTTPException) as exc_info:
             await create_process_configuration(
@@ -882,6 +898,8 @@ class TestProcessRoutesEdgeCases:
             note=None,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -934,6 +952,8 @@ class TestProcessRoutesEdgeCases:
             note=None,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -987,6 +1007,8 @@ class TestProcessRoutesEdgeCases:
             note=None,
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -1025,6 +1047,7 @@ class TestProcessRoutesEdgeCases:
                     "completed_at": "2026-01-04T11:00:00Z",
                     "session_id": "test-sid",
                     "sequence_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 },
                 {
                     "public_id": "run-002",
@@ -1040,6 +1063,7 @@ class TestProcessRoutesEdgeCases:
                     "completed_at": None,
                     "session_id": "test-sid",
                     "sequence_id": 2,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 },
             ]
         )
@@ -1079,6 +1103,7 @@ class TestProcessRoutesEdgeCases:
                     "completed_at": "2026-01-04T11:00:00Z",
                     "session_id": "test-sid",
                     "sequence_id": 1,
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 },
             ]
         )

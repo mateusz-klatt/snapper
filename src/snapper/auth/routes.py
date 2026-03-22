@@ -8,6 +8,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Annotated
 from typing import Literal
+from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -31,7 +32,9 @@ from snapper.auth.schemas.requests import ChangePasswordRequest
 from snapper.auth.schemas.requests import CreateUserRequest
 from snapper.auth.schemas.requests import LoginRequest
 from snapper.auth.schemas.requests import UpdateUserRequest
+from snapper.auth.schemas.responses import LoginData
 from snapper.auth.schemas.responses import LoginResponse
+from snapper.auth.schemas.responses import RefreshData
 from snapper.auth.schemas.responses import RefreshResponse
 from snapper.auth.schemas.responses import UserListResponse
 from snapper.auth.schemas.responses import UserResponse
@@ -50,20 +53,20 @@ _REST_STREAM = "rest.control"
 _USER_NOT_FOUND = "User not found"
 
 
-def _mint_provenance(request: Request) -> tuple[str, int, datetime]:
-    """Extract one sid/seq/ts triple from the REST tracker.
+def _mint_provenance(request: Request) -> tuple[str, int, str, datetime]:
+    """Extract one sid/seq/pid/ts quad from the REST tracker.
 
     Called once per handler. All nested minted DTOs in the response
-    tree share the same provenance triple.
+    tree share the same provenance quad.
 
     Args:
         request: FastAPI request with app.state.rest_tracker.
 
     Returns:
-        Tuple of (session_id, sequence_id, timestamp).
+        Tuple of (session_id, sequence_id, public_id, timestamp).
     """
     tracker: SequenceTracker = request.app.state.rest_tracker
-    return tracker.session_id, tracker.next_sequence(_REST_STREAM), datetime.now(UTC)
+    return tracker.session_id, tracker.next_sequence(_REST_STREAM), str(uuid7()), datetime.now(UTC)
 
 
 def _message_response(request: Request, message: str) -> MessageResponse:
@@ -76,11 +79,12 @@ def _message_response(request: Request, message: str) -> MessageResponse:
     Returns:
         MessageResponse with session_id and sequence_id from the REST tracker.
     """
-    sid, seq, ts = _mint_provenance(request)
+    sid, seq, pid, ts = _mint_provenance(request)
     return MessageResponse(
         payload=message,
         session_id=sid,
         sequence_id=seq,
+        public_id=pid,
         timestamp=ts,
     )
 
@@ -152,14 +156,22 @@ async def login(
         samesite=cookie_samesite,
         path="/",
     )
-    sid, seq, ts = _mint_provenance(request)
-    return LoginResponse(
+    sid, seq, _pid, ts = _mint_provenance(request)
+    login_payload = LoginData(
         session_id=sid,
         sequence_id=seq,
+        public_id=str(uuid7()),
         timestamp=ts,
         message="Login successful",
         expires_in=15 * 60,
         user=user,
+    )
+    return LoginResponse(
+        payload=login_payload,
+        session_id=sid,
+        sequence_id=seq,
+        public_id=str(uuid7()),
+        timestamp=ts,
     )
 
 
@@ -241,16 +253,24 @@ async def refresh_token(
     ws_token_service = get_ws_token_service()
     session_id = token_data.sid
     ws_token_result = ws_token_service.generate(user_id=user.username, session_id=session_id)
-    sid, seq, ts = _mint_provenance(request)
-    return RefreshResponse(
+    sid, seq, _pid, ts = _mint_provenance(request)
+    refresh_data = RefreshData(
         session_id=sid,
         sequence_id=seq,
+        public_id=str(uuid7()),
         timestamp=ts,
         message="session refreshed",
         ws_token=ws_token_result.token,
         ws_token_exp=ws_token_result.expires_at,
         csrf_token=csrf_token,
         user=user,
+    )
+    return RefreshResponse(
+        payload=refresh_data,
+        session_id=sid,
+        sequence_id=seq,
+        public_id=str(uuid7()),
+        timestamp=ts,
     )
 
 
@@ -278,10 +298,11 @@ async def get_current_user_profile(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=_USER_NOT_FOUND,
         )
-    sid, seq, ts = _mint_provenance(request)
+    sid, seq, pid, ts = _mint_provenance(request)
     return UserResponse(
         session_id=sid,
         sequence_id=seq,
+        public_id=pid,
         timestamp=ts,
         payload=user,
     )
@@ -384,10 +405,11 @@ async def get_users(
     """
     user_service = get_user_service()
     users = await user_service.get_all_users(include_inactive=include_inactive)
-    sid, seq, ts = _mint_provenance(request)
+    sid, seq, pid, ts = _mint_provenance(request)
     return UserListResponse(
         session_id=sid,
         sequence_id=seq,
+        public_id=pid,
         timestamp=ts,
         payload=users,
         count=len(users),
@@ -423,10 +445,11 @@ async def create_user(
             role=user_data.role,
             is_active=user_data.is_active,
         )
-        sid, seq, ts = _mint_provenance(request)
+        sid, seq, pid, ts = _mint_provenance(request)
         return UserResponse(
             session_id=sid,
             sequence_id=seq,
+            public_id=pid,
             timestamp=ts,
             payload=new_user,
         )
@@ -467,10 +490,11 @@ async def update_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"
         )
-    sid, seq, ts = _mint_provenance(request)
+    sid, seq, pid, ts = _mint_provenance(request)
     return UserResponse(
         session_id=sid,
         sequence_id=seq,
+        public_id=pid,
         timestamp=ts,
         payload=updated_user,
     )

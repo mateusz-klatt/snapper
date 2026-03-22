@@ -1,6 +1,8 @@
 """Tests for WebSocket subscription handlers."""
 
 import json
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
@@ -52,7 +54,11 @@ class TestHandleSubscribeEdgeCases:
         Then: Returns error response with invalid topic names.
         """
         message = WSSubscribeRequest(
-            session_id="", sequence_id=0, topics=["invalid..topic", "another..bad"]
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["invalid..topic", "another..bad"],
         )
         await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
         mock_websocket.send_text.assert_called_once()
@@ -71,7 +77,13 @@ class TestHandleSubscribeEdgeCases:
         When: Handling subscribe request,
         Then: Returns success with no_topics status.
         """
-        message = WSSubscribeRequest(session_id="", sequence_id=0, topics=["  ", ""])
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["  ", ""],
+        )
         await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
@@ -89,7 +101,11 @@ class TestHandleSubscribeEdgeCases:
         Then: Returns success with denied status and all denied topics.
         """
         message = WSSubscribeRequest(
-            session_id="", sequence_id=0, topics=["admin.users", "admin.settings"]
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["admin.users", "admin.settings"],
         )
         await handle_subscribe(mock_websocket, message, mock_manager, UserRole.VIEWER)
         mock_websocket.send_text.assert_called_once()
@@ -111,7 +127,13 @@ class TestHandleSubscribeEdgeCases:
         mock_manager.zmq_bridge = None
         valid_topic = "market.kraken.BTC-USD.candles.1m"
         mock_manager.topic_manager.get_all_topics = MagicMock(return_value=[valid_topic])
-        message = WSSubscribeRequest(session_id="", sequence_id=0, topics=[valid_topic])
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=[valid_topic],
+        )
         with patch(
             "snapper.interface.websocket.handlers.subscribe.get_allowed_topics_for_role",
             return_value=[valid_topic],
@@ -164,7 +186,11 @@ class TestHandleUnsubscribeEdgeCases:
         Then: Returns success with no_topics status and denied topic.
         """
         message = WSUnsubscribeRequest(
-            session_id="", sequence_id=0, topics=["market.zonda.ETH-PLN.candles.1m"]
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["market.zonda.ETH-PLN.candles.1m"],
         )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()
@@ -185,7 +211,11 @@ class TestHandleUnsubscribeEdgeCases:
         """
         mock_manager.zmq_bridge = None
         message = WSUnsubscribeRequest(
-            session_id="", sequence_id=0, topics=["market.kraken.BTC-USD.candles.1m"]
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["market.kraken.BTC-USD.candles.1m"],
         )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()
@@ -207,7 +237,11 @@ class TestHandleUnsubscribeEdgeCases:
             return_value={"market.kraken.BTC-USD.ticks"}
         )
         message = WSUnsubscribeRequest(
-            session_id="", sequence_id=0, topics=["   ", "\t", "", "market.kraken.BTC-USD.ticks"]
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["   ", "\t", "", "market.kraken.BTC-USD.ticks"],
         )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()

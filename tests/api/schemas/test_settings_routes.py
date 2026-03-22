@@ -132,6 +132,8 @@ class TestSettingsRoutes:
             updated_by="test_user",
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-public-id",
+            timestamp=timestamp,
         )
         assert response.key == "test_key"
         assert response.value == "test_value"
@@ -153,6 +155,8 @@ class TestSettingsRoutes:
             description="New description",
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         assert request.value == "new_value"
         assert request.category == "new_category"
@@ -289,6 +293,8 @@ class TestSettingsRoutes:
             description="Updated description",
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
@@ -333,7 +339,12 @@ class TestSettingsRoutes:
         mock_session.execute.return_value = MockResult([])
         mock_repository.session.return_value = mock_session
         request = SettingUpdate(
-            value="updated_value", description=None, session_id="test-sid", sequence_id=1
+            value="updated_value",
+            description=None,
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),

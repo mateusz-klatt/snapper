@@ -36,7 +36,13 @@ class TestTopicForMessage:
         Then: Returns market.kraken.BTC-USD.ticks.
         """
         data = TickData(
-            session_id="", sequence_id=0, exchange="kraken", instrument="BTC-USD", volume=1.0
+            session_id="",
+            sequence_id=0,
+            exchange="kraken",
+            instrument="BTC-USD",
+            volume=1.0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         assert topic_for_message(data) == "market.kraken.BTC-USD.ticks"
 
@@ -50,6 +56,8 @@ class TestTopicForMessage:
         data = CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             timeframe="1m",
@@ -72,6 +80,8 @@ class TestTopicForMessage:
         data = TradeData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="zonda",
             instrument="BTC-PLN",
             price=200000.0,
@@ -89,6 +99,8 @@ class TestTopicForMessage:
         data = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="strat-1",
             exchange="kraken",
             instrument="BTC-USD",
@@ -111,6 +123,8 @@ class TestTopicForMessage:
         data = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="ETH-USD",
             exchange_order_id="exch-123",
@@ -128,6 +142,8 @@ class TestTopicForMessage:
         data = OrderReplaceData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="exch-456",
@@ -146,6 +162,8 @@ class TestTopicForMessage:
         data = OrderData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             client_order_id="ord-001",
             instrument="BTC-USD",
             exchange="kraken",
@@ -168,6 +186,8 @@ class TestTopicForMessage:
         data = OrderEventData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange_order_id="exch-789",
             client_order_id="ord-003",
             exchange="kraken",
@@ -186,6 +206,8 @@ class TestTopicForMessage:
         data = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             client_order_id="ord-001",
             instrument="BTC-USD",
             exchange="kraken",
@@ -208,6 +230,8 @@ class TestTopicForMessage:
         data = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -226,6 +250,8 @@ class TestTopicForMessage:
         data = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
             exchange="paper",
             side="sell",
@@ -246,6 +272,8 @@ class TestTopicForMessage:
             SignalData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="BTC-USD",
                 exchange="paper",
                 side="buy",
@@ -271,6 +299,7 @@ class TestTopicForMessage:
             reason="test",
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
         )
         with pytest.raises(ValueError, match="strategy_name"):
             topic_for_message(data)
@@ -285,6 +314,8 @@ class TestTopicForMessage:
         data = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="executor.kraken",
             sequence=1,
             status="healthy",
@@ -300,7 +331,13 @@ class TestTopicForMessage:
         Then: Returns system.settings.
         """
         data = SettingChangedData(
-            session_id="", sequence_id=0, key="max_position", value="100", category="trading"
+            session_id="",
+            sequence_id=0,
+            key="max_position",
+            value="100",
+            category="trading",
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         assert topic_for_message(data) == "system.settings"
 
@@ -311,7 +348,12 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns system.symbol_aliases.
         """
-        data = SymbolAliasUpdateData(session_id="", sequence_id=0)
+        data = SymbolAliasUpdateData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        )
         assert topic_for_message(data) == "system.symbol_aliases"
 
     def test_replay_start_data(self) -> None:
@@ -321,7 +363,12 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns system.replay.start.
         """
-        data = ReplayStartData(session_id="", sequence_id=0)
+        data = ReplayStartData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        )
         assert topic_for_message(data) == "system.replay.start"
 
     def test_replay_end_data(self) -> None:
@@ -331,7 +378,12 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: Returns system.replay.end.
         """
-        data = ReplayEndData(session_id="", sequence_id=0)
+        data = ReplayEndData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        )
         assert topic_for_message(data) == "system.replay.end"
 
     def test_unknown_type_raises(self) -> None:
@@ -341,7 +393,13 @@ class TestTopicForMessage:
         When: Deriving topic,
         Then: ValueError is raised.
         """
-        data = StrictDataSchema(session_id="", sequence_id=0, type="unknown_thing")
+        data = StrictDataSchema(
+            session_id="",
+            sequence_id=0,
+            type="unknown_thing",
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        )
         with pytest.raises(ValueError, match="No topic derivation"):
             topic_for_message(data)
 

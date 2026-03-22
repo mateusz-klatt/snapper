@@ -32,6 +32,8 @@ class TestMessages:
         msg = TickData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTCUSD",
             volume=0.1,
             last=50000.0,
@@ -55,6 +57,8 @@ class TestMessages:
         msg = CandleData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="ETHUSD",
             exchange="kraken",
             volume=5.0,
@@ -89,6 +93,8 @@ class TestMessages:
         msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_name="rsi_reversion#1",
             instrument="BTCUSD",
             exchange="kraken",
@@ -113,6 +119,8 @@ class TestMessages:
         msg = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="strategy_1",
             instrument="BTCUSD",
             mode="paper",
@@ -140,6 +148,8 @@ class TestMessages:
         msg = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="TRADE-XYZ",
             exchange_order_id="KRAKEN-ABC123",
             client_order_id="test_order_123",
@@ -170,6 +180,8 @@ class TestMessages:
         msg = HeartbeatData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             component="feed.kraken.BTCUSD",
             sequence=12345,
             status="healthy",
@@ -193,6 +205,8 @@ class TestMessages:
         tick_msg = TickData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTCUSD",
             exchange="kraken",
             volume=0.1,
@@ -238,22 +252,24 @@ class TestMessages:
             parse_message(json_str)
 
     def test_message_timestamps(self) -> None:
-        """Test data timestamp defaults to now.
+        """Test explicit timestamp is preserved.
 
-        Given: A TickData created without explicit timestamp,
+        Given: A TickData created with an explicit timestamp,
         When: Timestamp is accessed,
-        Then: It is within 1 second of current time.
+        Then: It equals the exact value provided.
         """
+        explicit_ts = datetime(2024, 1, 1, tzinfo=UTC)
         msg = TickData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=explicit_ts,
             instrument="BTCUSD",
             exchange="kraken",
             volume=0.1,
             last=50000.0,
         )
-        now = datetime.now(UTC)
-        assert abs((msg.timestamp - now).total_seconds()) < 1.0
+        assert msg.timestamp == explicit_ts
 
     def test_signal_strength_validation(self) -> None:
         """Test SignalData strength validation.
@@ -265,6 +281,8 @@ class TestMessages:
         msg = SignalData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTCUSD",
             exchange="kraken",
             side="buy",
@@ -276,6 +294,8 @@ class TestMessages:
             SignalData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 instrument="BTCUSD",
                 exchange="kraken",
                 side="buy",
@@ -293,6 +313,8 @@ class TestMessages:
         msg = OrderRequestData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             strategy_id="test",
             instrument="BTCUSD",
             mode="paper",
@@ -307,6 +329,8 @@ class TestMessages:
             OrderRequestData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 strategy_id="test",
                 instrument="BTCUSD",
                 mode="paper",
@@ -327,6 +351,8 @@ class TestMessages:
         msg = OrderCancelData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-ABC123",
@@ -352,6 +378,8 @@ class TestMessages:
             "type": "order_cancel",
             "session_id": "",
             "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "exchange": "paper",
             "instrument": "ETH-USD",
             "exchange_order_id": "PAPER-XYZ789",
@@ -371,6 +399,8 @@ class TestMessages:
         msg = OrderReplaceData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-ABC123",
@@ -398,6 +428,8 @@ class TestMessages:
         msg = OrderReplaceData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange="kraken",
             instrument="BTC-USD",
             exchange_order_id="KRAKEN-ABC123",
@@ -418,6 +450,8 @@ class TestMessages:
             "type": "order_replace",
             "session_id": "",
             "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "exchange": "zonda",
             "instrument": "BTC-PLN",
             "exchange_order_id": "ZONDA-111",
@@ -439,6 +473,8 @@ class TestMessages:
         msg = OrderEventData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange_order_id="KRAKEN-ABC123",
             client_order_id="client_order_456",
             exchange="kraken",
@@ -466,6 +502,8 @@ class TestMessages:
         msg = OrderEventData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             exchange_order_id="KRAKEN-ABC123",
             client_order_id="client_456",
             exchange="kraken",
@@ -487,6 +525,8 @@ class TestMessages:
             "type": "order_event",
             "session_id": "",
             "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "exchange_order_id": "PAPER-XYZ789",
             "client_order_id": "client_789",
             "exchange": "paper",

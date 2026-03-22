@@ -47,6 +47,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Annotated
 from typing import Any
+from uuid import uuid7
 
 import zmq
 from fastapi import APIRouter
@@ -75,23 +76,27 @@ from snapper.api.schemas.data_responses import InstrumentListResponse
 from snapper.api.schemas.data_responses import OrderListResponse
 from snapper.api.schemas.data_responses import PositionListResponse
 from snapper.api.schemas.data_responses import SignalListResponse
-from snapper.api.schemas.health import ConnectionStatsSchema
+from snapper.api.schemas.health import ConnectionStats
 from snapper.api.schemas.health import GapDetectionStats
-from snapper.api.schemas.health import GapStatsSchema
+from snapper.api.schemas.health import GapStats
+from snapper.api.schemas.health import HealthCheckData
 from snapper.api.schemas.health import HealthCheckResponse
 from snapper.api.schemas.health import HealthTopics
 from snapper.api.schemas.health import SubscriptionsStats
-from snapper.api.schemas.health import TopicMetricSnapshotSchema
+from snapper.api.schemas.health import TopicMetricSnapshot
 from snapper.api.schemas.health import WebSocketStats
 from snapper.api.schemas.health import WsStatsConfig
+from snapper.api.schemas.health import WsStatsData
 from snapper.api.schemas.health import WsStatsResponse
 from snapper.api.schemas.health import ZmqBridgeStats
 from snapper.api.schemas.health import ZmqComponents
 from snapper.api.schemas.health import ZmqConfig
+from snapper.api.schemas.health import ZmqHealthData
 from snapper.api.schemas.health import ZmqHealthResponse
 from snapper.api.schemas.process import ProcessStatus
 from snapper.api.schemas.process import StrategyStatusPayload
-from snapper.api.schemas.process import SystemStatus
+from snapper.api.schemas.process import SystemStatusData
+from snapper.api.schemas.process import SystemStatusResponse
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.settings import SettingsService
@@ -369,9 +374,6 @@ def _normalize_strategy_status(status: dict[str, Any]) -> dict[str, Any]:
 
 def _build_strategy_payload(
     raw_status: dict[str, Any],
-    sid: str,
-    seq: int,
-    ts: dt.datetime,
 ) -> StrategyStatusPayload | None:
     """Build a strategy payload from a raw process status.
 
@@ -379,9 +381,6 @@ def _build_strategy_payload(
 
     Args:
         raw_status: Raw process status dictionary.
-        sid: Shared session_id for the response tree.
-        seq: Shared sequence_id for the response tree.
-        ts: Shared timestamp for the response tree.
 
     Returns:
         StrategyStatusPayload or None if not a strategy status.
@@ -396,9 +395,6 @@ def _build_strategy_payload(
         if key in normalized:
             extra[key] = normalized[key]
     return StrategyStatusPayload(
-        session_id=sid,
-        sequence_id=seq,
-        timestamp=ts,
         strategy_name=str(normalized.get("strategy_name", "unknown")),
         status=normalized.get("status", "unknown"),
         details=normalized,
@@ -413,9 +409,6 @@ _REST_DATA_STREAM = "rest.data"
 
 def _resolve_trader_status(
     process_factory: ProcessLauncherService,
-    sid: str,
-    seq: int,
-    ts: dt.datetime,
 ) -> ProcessStatus:
     """Derive trader coordinator status from the process launcher.
 
@@ -424,9 +417,6 @@ def _resolve_trader_status(
 
     Args:
         process_factory: Process launcher service with started processes.
-        sid: Shared session_id for the response tree.
-        seq: Shared sequence_id for the response tree.
-        ts: Shared timestamp for the response tree.
 
     Returns:
         ProcessStatus reflecting actual trader coordinator state.
@@ -437,26 +427,17 @@ def _resolve_trader_status(
         else "not_running"
     )
     return ProcessStatus(
-        session_id=sid,
-        sequence_id=seq,
-        timestamp=ts,
         status=ps_status,
     )
 
 
 def _collect_strategy_statuses(
     process_factory: ProcessLauncherService,
-    sid: str,
-    seq: int,
-    ts: dt.datetime,
 ) -> list[StrategyStatusPayload]:
     """Collect strategy statuses from all running processes.
 
     Args:
         process_factory: Process launcher service with started processes.
-        sid: Shared session_id for the response tree.
-        seq: Shared sequence_id for the response tree.
-        ts: Shared timestamp for the response tree.
 
     Returns:
         List of StrategyStatusPayload instances.
@@ -465,7 +446,7 @@ def _collect_strategy_statuses(
     for process_name, process_instance in process_factory.started_processes.items():
         try:
             raw = process_instance.get_status()
-            payload = _build_strategy_payload(raw, sid, seq, ts)
+            payload = _build_strategy_payload(raw)
             if payload is not None:
                 strategies.append(payload)
         except Exception as exc:
@@ -521,7 +502,7 @@ def _create_candles_signals_router() -> APIRouter:
         timeframe: Annotated[str, Query(description="Timeframe")],
         limit: Annotated[int, Query(le=1000, description="Number of candles to return")] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> CandleListResponse | Response:
+    ) -> CandleListResponse:
         """Fetch historical candle data for an instrument.
 
         Args:
@@ -535,7 +516,7 @@ def _create_candles_signals_router() -> APIRouter:
             as_of: Optional point-in-time query timestamp.
 
         Returns:
-            CandleListResponse wrapping the candle data, or 204 if no instrument found.
+            CandleListResponse wrapping the candle data (empty payload if no instrument found).
         """
         settings = get_settings()
         repo = get_repository(settings.db_url)
@@ -552,7 +533,15 @@ def _create_candles_signals_router() -> APIRouter:
                 )
                 inst = inst_query.scalars().first()
                 if not inst:
-                    return Response(status_code=204)
+                    tracker: SequenceTracker = request.app.state.rest_tracker
+                    return CandleListResponse(
+                        payload=[],
+                        count=0,
+                        session_id=tracker.session_id,
+                        sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+                        public_id=str(uuid7()),
+                        timestamp=dt.datetime.now(dt.UTC),
+                    )
                 candles_query = await session.execute(
                     select(Candle)
                     .where(
@@ -585,13 +574,15 @@ def _create_candles_signals_router() -> APIRouter:
                     )
                     for candle in reversed(candles)
                 ]
-                tracker: SequenceTracker = request.app.state.rest_tracker
+                tracker = request.app.state.rest_tracker
                 sid = tracker.session_id
                 seq = tracker.next_sequence(_REST_DATA_STREAM)
                 ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
                 return CandleListResponse(
                     session_id=sid,
                     sequence_id=seq,
+                    public_id=pid,
                     timestamp=ts,
                     payload=items,
                     count=len(items),
@@ -666,9 +657,11 @@ def _create_candles_signals_router() -> APIRouter:
                 sid = tracker.session_id
                 seq = tracker.next_sequence(_REST_DATA_STREAM)
                 ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
                 return SignalListResponse(
                     session_id=sid,
                     sequence_id=seq,
+                    public_id=pid,
                     timestamp=ts,
                     payload=items,
                     count=len(items),
@@ -722,9 +715,11 @@ def _create_exchange_router() -> APIRouter:
                 sid = tracker.session_id
                 seq = tracker.next_sequence(_REST_DATA_STREAM)
                 ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
                 return ExchangeListResponse(
                     session_id=sid,
                     sequence_id=seq,
+                    public_id=pid,
                     timestamp=ts,
                     payload=items,
                     count=len(items),
@@ -777,9 +772,11 @@ def _create_exchange_router() -> APIRouter:
                 sid = tracker.session_id
                 seq = tracker.next_sequence(_REST_DATA_STREAM)
                 ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
                 return InstrumentListResponse(
                     session_id=sid,
                     sequence_id=seq,
+                    public_id=pid,
                     timestamp=ts,
                     payload=items,
                     count=len(items),
@@ -888,9 +885,11 @@ def _create_orders_executions_router() -> APIRouter:
                 sid = tracker.session_id
                 seq = tracker.next_sequence(_REST_DATA_STREAM)
                 ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
                 return OrderListResponse(
                     session_id=sid,
                     sequence_id=seq,
+                    public_id=pid,
                     timestamp=ts,
                     payload=items,
                     count=len(items),
@@ -967,9 +966,11 @@ def _create_orders_executions_router() -> APIRouter:
                 sid = tracker.session_id
                 seq = tracker.next_sequence(_REST_DATA_STREAM)
                 ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
                 return ExecutionListResponse(
                     session_id=sid,
                     sequence_id=seq,
+                    public_id=pid,
                     timestamp=ts,
                     payload=items,
                     count=len(items),
@@ -1027,9 +1028,11 @@ def _create_orders_executions_router() -> APIRouter:
                 sid = tracker.session_id
                 seq = tracker.next_sequence(_REST_DATA_STREAM)
                 ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
                 return PositionListResponse(
                     session_id=sid,
                     sequence_id=seq,
+                    public_id=pid,
                     timestamp=ts,
                     payload=items,
                     count=len(items),
@@ -1043,25 +1046,16 @@ def _create_orders_executions_router() -> APIRouter:
 
 def _gap_detector_stats_to_schema(
     stats: GapDetectorStats,
-    sid: str,
-    seq: int,
-    ts: dt.datetime,
-) -> GapStatsSchema:
-    """Convert a GapDetectorStats dataclass to a GapStatsSchema.
+) -> GapStats:
+    """Convert a GapDetectorStats dataclass to a GapStats model.
 
     Args:
         stats: Gap detector statistics dataclass.
-        sid: Shared session_id for the response tree.
-        seq: Shared sequence_id for the response tree.
-        ts: Shared timestamp for the response tree.
 
     Returns:
-        Pydantic schema with the same counter values.
+        Pydantic model with the same counter values.
     """
-    return GapStatsSchema(
-        session_id=sid,
-        sequence_id=seq,
-        timestamp=ts,
+    return GapStats(
         gaps_detected=stats.gaps_detected,
         session_resets=stats.session_resets,
         duplicates=stats.duplicates,
@@ -1073,9 +1067,6 @@ def _gap_detector_stats_to_schema(
 def _collect_gap_detection_stats(
     manager: WebSocketConnectionManager,
     middleware_gap_detectors: dict[str, Any] | None,
-    sid: str,
-    seq: int,
-    ts: dt.datetime,
 ) -> GapDetectionStats:
     """Aggregate gap detection stats from bridge and REST middleware.
 
@@ -1083,32 +1074,20 @@ def _collect_gap_detection_stats(
         manager: WebSocket connection manager with ZMQ bridge.
         middleware_gap_detectors: Per-session gap detectors from the
             provenance middleware (may be None).
-        sid: Shared session_id for the response tree.
-        seq: Shared sequence_id for the response tree.
-        ts: Shared timestamp for the response tree.
 
     Returns:
         Aggregated gap detection statistics.
     """
     bridge_stats = _gap_detector_stats_to_schema(
         manager.zmq_bridge._gap_detector.stats,
-        sid,
-        seq,
-        ts,
     )
-    rest_clients: dict[str, GapStatsSchema] = {}
+    rest_clients: dict[str, GapStats] = {}
     if middleware_gap_detectors:
         for det_session_id, detector in middleware_gap_detectors.items():
             rest_clients[det_session_id] = _gap_detector_stats_to_schema(
                 detector.stats,
-                sid,
-                seq,
-                ts,
             )
     return GapDetectionStats(
-        session_id=sid,
-        sequence_id=seq,
-        timestamp=ts,
         bridge=bridge_stats,
         rest_clients=rest_clients,
     )
@@ -1134,34 +1113,33 @@ def _create_monitoring_endpoints_router(
         sid = tracker.session_id
         seq = tracker.next_sequence(_REST_HEALTH_STREAM)
         ts = dt.datetime.now(dt.UTC)
+        pid = str(uuid7())
         stats = manager.get_stats()
         middleware_detectors = getattr(request.app.state, "provenance_gap_detectors", None)
         gap_stats = _collect_gap_detection_stats(
             manager,
             middleware_detectors,
-            sid,
-            seq,
-            ts,
         )
         return HealthCheckResponse(
             session_id=sid,
             sequence_id=seq,
+            public_id=pid,
             timestamp=ts,
-            status="healthy",
-            version="0.1.0",
-            connections=ConnectionStatsSchema(
+            payload=HealthCheckData(
                 session_id=sid,
                 sequence_id=seq,
+                public_id=str(uuid7()),
                 timestamp=ts,
-                **asdict(stats.connections),
+                status="healthy",
+                version="0.1.0",
+                connections=ConnectionStats(
+                    **asdict(stats.connections),
+                ),
+                topics=HealthTopics(
+                    active=stats.connections.active_topics,
+                ),
+                gap_detection=gap_stats,
             ),
-            topics=HealthTopics(
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                active=stats.connections.active_topics,
-            ),
-            gap_detection=gap_stats,
         )
 
     @router.get("/ws/stats")
@@ -1174,59 +1152,51 @@ def _create_monitoring_endpoints_router(
         sid = tracker.session_id
         seq = tracker.next_sequence(_REST_HEALTH_STREAM)
         ts = dt.datetime.now(dt.UTC)
+        pid = str(uuid7())
         stats = manager.get_stats()
         return WsStatsResponse(
             session_id=sid,
             sequence_id=seq,
+            public_id=pid,
             timestamp=ts,
-            websocket=WebSocketStats(
+            payload=WsStatsData(
                 session_id=sid,
                 sequence_id=seq,
+                public_id=str(uuid7()),
                 timestamp=ts,
-                active_connections=len(manager.active_connections),
-                topic_subscribers={
-                    topic: len(subs) for topic, subs in manager.topic_subscribers.items()
+                websocket=WebSocketStats(
+                    active_connections=len(manager.active_connections),
+                    topic_subscribers={
+                        topic: len(subs) for topic, subs in manager.topic_subscribers.items()
+                    },
+                    client_count=len(manager.active_connections),
+                ),
+                zmq_bridge=ZmqBridgeStats(
+                    active_topics=len(zmq_bridge.topic_subscriptions),
+                    subscriber_tasks=len(zmq_bridge.subscriber_tasks),
+                    available_topics=list(zmq_bridge.available_topics),
+                ),
+                connections=ConnectionStats(
+                    **asdict(stats.connections),
+                ),
+                topics={
+                    k: TopicMetricSnapshot(
+                        **asdict(v),
+                    )
+                    for k, v in stats.topics.items()
                 },
-                client_count=len(manager.active_connections),
-            ),
-            zmq_bridge=ZmqBridgeStats(
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                active_topics=len(zmq_bridge.topic_subscriptions),
-                subscriber_tasks=len(zmq_bridge.subscriber_tasks),
-                available_topics=list(zmq_bridge.available_topics),
-            ),
-            connections=ConnectionStatsSchema(
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                **asdict(stats.connections),
-            ),
-            topics={
-                k: TopicMetricSnapshotSchema(
-                    session_id=sid,
-                    sequence_id=seq,
-                    timestamp=ts,
-                    **asdict(v),
-                )
-                for k, v in stats.topics.items()
-            },
-            subscriptions=SubscriptionsStats(
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                per_topic={topic: len(subs) for topic, subs in manager.topic_subscribers.items()},
-                per_client={
-                    str(id(ws)): list(subs) for ws, subs in manager.client_subscriptions.items()
-                },
-            ),
-            config=WsStatsConfig(
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                broker_xpub=zmq_bridge.settings.zmq_broker_xpub,
-                heartbeat_interval_ms=zmq_bridge.settings.zmq_heartbeat_interval_ms,
+                subscriptions=SubscriptionsStats(
+                    per_topic={
+                        topic: len(subs) for topic, subs in manager.topic_subscribers.items()
+                    },
+                    per_client={
+                        str(id(ws)): list(subs) for ws, subs in manager.client_subscriptions.items()
+                    },
+                ),
+                config=WsStatsConfig(
+                    broker_xpub=zmq_bridge.settings.zmq_broker_xpub,
+                    heartbeat_interval_ms=zmq_bridge.settings.zmq_heartbeat_interval_ms,
+                ),
             ),
         )
 
@@ -1252,41 +1222,37 @@ def _create_monitoring_endpoints_router(
         sid = tracker.session_id
         seq = tracker.next_sequence(_REST_HEALTH_STREAM)
         ts = dt.datetime.now(dt.UTC)
+        pid = str(uuid7())
         return ZmqHealthResponse(
             session_id=sid,
             sequence_id=seq,
+            public_id=pid,
             timestamp=ts,
-            status=status,
-            components=ZmqComponents(
+            payload=ZmqHealthData(
                 session_id=sid,
                 sequence_id=seq,
+                public_id=str(uuid7()),
                 timestamp=ts,
-                zmq_context="ok" if not error_messages else "error",
-                websocket_manager="ok",
-                active_connections=stats.connections.active_connections,
+                status=status,
+                components=ZmqComponents(
+                    zmq_context="ok" if not error_messages else "error",
+                    websocket_manager="ok",
+                    active_connections=stats.connections.active_connections,
+                ),
+                config=ZmqConfig(
+                    available_topics=available_topics,
+                ),
+                connections=ConnectionStats(
+                    **asdict(stats.connections),
+                ),
+                message_stats={
+                    k: TopicMetricSnapshot(
+                        **asdict(v),
+                    )
+                    for k, v in stats.topics.items()
+                },
+                errors=error_messages,
             ),
-            config=ZmqConfig(
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                available_topics=available_topics,
-            ),
-            connections=ConnectionStatsSchema(
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                **asdict(stats.connections),
-            ),
-            message_stats={
-                k: TopicMetricSnapshotSchema(
-                    session_id=sid,
-                    sequence_id=seq,
-                    timestamp=ts,
-                    **asdict(v),
-                )
-                for k, v in stats.topics.items()
-            },
-            errors=error_messages,
         )
 
     @router.get("/status")
@@ -1294,20 +1260,29 @@ def _create_monitoring_endpoints_router(
         request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
-    ) -> SystemStatus:
+    ) -> SystemStatusResponse:
         process_factory: ProcessLauncherService = request.app.state.process_factory
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
         seq = tracker.next_sequence(_REST_HEALTH_STREAM)
         ts = dt.datetime.now(dt.UTC)
-        trader_status = _resolve_trader_status(process_factory, sid, seq, ts)
-        return SystemStatus(
+        pid = str(uuid7())
+        trader_status = _resolve_trader_status(process_factory)
+        data = SystemStatusData(
             session_id=sid,
             sequence_id=seq,
+            public_id=str(uuid7()),
             timestamp=ts,
             trader=trader_status,
             backtests={},
-            strategies=_collect_strategy_statuses(process_factory, sid, seq, ts),
+            strategies=_collect_strategy_statuses(process_factory),
+        )
+        return SystemStatusResponse(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pid,
+            timestamp=ts,
+            payload=data,
         )
 
     return router

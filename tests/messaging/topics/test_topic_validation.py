@@ -230,6 +230,8 @@ class TestPayloadContract:
         fill = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-456",
             exchange_order_id="exch-456",
             client_order_id="test-order-123",
@@ -277,6 +279,8 @@ class TestPayloadContract:
         buy_fill = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-1",
             exchange_order_id="exch-1",
             client_order_id="test-1",
@@ -294,6 +298,8 @@ class TestPayloadContract:
         sell_fill = ExecutionData(
             session_id="",
             sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             trade_id="trade-2",
             exchange_order_id="exch-2",
             client_order_id="test-2",
@@ -324,6 +330,8 @@ class TestPayloadContract:
             fill = ExecutionData(
                 session_id="",
                 sequence_id=0,
+                public_id="test-public-id",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 trade_id="trade",
                 exchange_order_id="exch",
                 client_order_id="test",

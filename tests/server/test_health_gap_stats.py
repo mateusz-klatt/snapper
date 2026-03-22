@@ -1,14 +1,13 @@
 """Tests for health endpoint gap detection statistics."""
 
 import contextlib
-import datetime as dt
 from typing import Any
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
 from snapper.api.schemas.health import GapDetectionStats
-from snapper.api.schemas.health import GapStatsSchema
+from snapper.api.schemas.health import GapStats
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -19,16 +18,12 @@ from snapper.server.app import _collect_gap_detection_stats
 from snapper.server.app import _gap_detector_stats_to_schema
 from snapper.server.app import create_app
 
-_SID = "test-session"
-_SEQ = 1
-_TS = dt.datetime.now(dt.UTC)
-
 
 class TestGapDetectorStatsToSchema:
     """Tests for _gap_detector_stats_to_schema helper."""
 
     def test_converts_all_fields(self) -> None:
-        """All GapDetectorStats fields are mapped to GapStatsSchema."""
+        """All GapDetectorStats fields are mapped to GapStats."""
         stats = GapDetectorStats(
             gaps_detected=3,
             session_resets=1,
@@ -36,7 +31,7 @@ class TestGapDetectorStatsToSchema:
             mid_stream_joins=4,
             rejected_unstamped=5,
         )
-        schema = _gap_detector_stats_to_schema(stats, _SID, _SEQ, _TS)
+        schema = _gap_detector_stats_to_schema(stats)
         assert schema.gaps_detected == 3
         assert schema.session_resets == 1
         assert schema.duplicates == 2
@@ -45,7 +40,7 @@ class TestGapDetectorStatsToSchema:
 
     def test_zero_defaults(self) -> None:
         """Default GapDetectorStats converts to all-zero schema."""
-        schema = _gap_detector_stats_to_schema(GapDetectorStats(), _SID, _SEQ, _TS)
+        schema = _gap_detector_stats_to_schema(GapDetectorStats())
         assert schema.gaps_detected == 0
         assert schema.session_resets == 0
         assert schema.duplicates == 0
@@ -66,7 +61,7 @@ class TestCollectGapDetectionStats:
         mock_manager = MagicMock()
         mock_manager.zmq_bridge = mock_bridge
 
-        result = _collect_gap_detection_stats(mock_manager, None, _SID, _SEQ, _TS)
+        result = _collect_gap_detection_stats(mock_manager, None)
         assert result.bridge.gaps_detected == 7
         assert result.rest_clients == {}
 
@@ -83,7 +78,7 @@ class TestCollectGapDetectionStats:
         client_detector.stats.session_resets = 1
         middleware_detectors: dict[str, Any] = {"abc-session": client_detector}
 
-        result = _collect_gap_detection_stats(mock_manager, middleware_detectors, _SID, _SEQ, _TS)
+        result = _collect_gap_detection_stats(mock_manager, middleware_detectors)
         assert "abc-session" in result.rest_clients
         assert result.rest_clients["abc-session"].gaps_detected == 2
         assert result.rest_clients["abc-session"].session_resets == 1
@@ -96,7 +91,7 @@ class TestCollectGapDetectionStats:
         mock_manager = MagicMock()
         mock_manager.zmq_bridge = mock_bridge
 
-        result = _collect_gap_detection_stats(mock_manager, {}, _SID, _SEQ, _TS)
+        result = _collect_gap_detection_stats(mock_manager, {})
         assert result.rest_clients == {}
 
 
@@ -123,12 +118,13 @@ class TestHealthEndpointGapStats:
             self.client.close()
 
     def test_health_response_contains_gap_detection(self) -> None:
-        """Health endpoint includes gap_detection field."""
+        """Health endpoint includes gap_detection field in payload."""
         response = self.client.get("/api/health")
         assert response.status_code == 200
         data = response.json()
-        assert "gap_detection" in data
-        gap = data["gap_detection"]
+        payload = data["payload"]
+        assert "gap_detection" in payload
+        gap = payload["gap_detection"]
         assert "bridge" in gap
         assert "rest_clients" in gap
 
@@ -136,7 +132,7 @@ class TestHealthEndpointGapStats:
         """Bridge gap stats are zero when no messages have been processed."""
         response = self.client.get("/api/health")
         data = response.json()
-        bridge = data["gap_detection"]["bridge"]
+        bridge = data["payload"]["gap_detection"]["bridge"]
         assert bridge["gaps_detected"] == 0
         assert bridge["session_resets"] == 0
         assert bridge["duplicates"] == 0
@@ -145,11 +141,11 @@ class TestHealthEndpointGapStats:
 
 
 class TestGapStatsSchemaValidation:
-    """Tests for GapStatsSchema and GapDetectionStats Pydantic models."""
+    """Tests for GapStats and GapDetectionStats Pydantic models."""
 
-    def test_gap_stats_schema_defaults(self) -> None:
-        """GapStatsSchema fields default to zero."""
-        schema = GapStatsSchema(session_id="test-sid", sequence_id=1)
+    def test_gap_stats_defaults(self) -> None:
+        """GapStats fields default to zero."""
+        schema = GapStats()
         assert schema.gaps_detected == 0
         assert schema.session_resets == 0
         assert schema.duplicates == 0
@@ -158,17 +154,15 @@ class TestGapStatsSchemaValidation:
 
     def test_gap_detection_stats_defaults(self) -> None:
         """GapDetectionStats has default bridge and empty rest_clients."""
-        bridge = GapStatsSchema(session_id="test-sid", sequence_id=1)
-        stats = GapDetectionStats(bridge=bridge, session_id="test-sid", sequence_id=1)
+        bridge = GapStats()
+        stats = GapDetectionStats(bridge=bridge)
         assert stats.bridge.gaps_detected == 0
         assert stats.rest_clients == {}
 
     def test_gap_detection_stats_with_data(self) -> None:
         """GapDetectionStats accepts populated bridge and rest_clients."""
-        bridge = GapStatsSchema(gaps_detected=5, session_id="test-sid", sequence_id=1)
-        clients = {"sess-1": GapStatsSchema(duplicates=3, session_id="test-sid", sequence_id=1)}
-        stats = GapDetectionStats(
-            bridge=bridge, rest_clients=clients, session_id="test-sid", sequence_id=1
-        )
+        bridge = GapStats(gaps_detected=5)
+        clients = {"sess-1": GapStats(duplicates=3)}
+        stats = GapDetectionStats(bridge=bridge, rest_clients=clients)
         assert stats.bridge.gaps_detected == 5
         assert stats.rest_clients["sess-1"].duplicates == 3

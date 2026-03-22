@@ -5,6 +5,9 @@ including topic filtering, role-based access control, and origin validation.
 """
 
 from collections.abc import Iterable
+from datetime import UTC
+from datetime import datetime
+from uuid import uuid7
 
 from fastapi import WebSocket
 
@@ -91,6 +94,8 @@ async def validate_origin(
             reason="origin_forbidden",
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("server.control"),
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
         )
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4403, reason="Origin not allowed")

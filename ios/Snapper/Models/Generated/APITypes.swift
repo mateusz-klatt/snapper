@@ -55,7 +55,7 @@ enum ExecutionDataStatus: String, Codable, Sendable {
     case partial
 }
 
-enum HealthCheckResponseStatus: String, Codable, Sendable {
+enum HealthCheckDataStatus: String, Codable, Sendable {
     case healthy
     case warning
     case error
@@ -106,17 +106,17 @@ enum ProcessRunLifecycle: String, Codable, Sendable {
     case oneShot = "one_shot"
 }
 
-enum ProcessSchemaResponseDefaultMode: String, Codable, Sendable {
+enum ProcessSchemaDataDefaultMode: String, Codable, Sendable {
     case thread
     case process
 }
 
-enum ProcessSchemaResponseLifecycle: String, Codable, Sendable {
+enum ProcessSchemaDataLifecycle: String, Codable, Sendable {
     case longRunning = "long_running"
     case oneShot = "one_shot"
 }
 
-enum ProcessStartResponseStatus: String, Codable, Sendable {
+enum ProcessStartDataStatus: String, Codable, Sendable {
     case success
     case alreadyRunning = "already_running"
     case error
@@ -130,7 +130,7 @@ enum ProcessStatusStatus: String, Codable, Sendable {
     case error
 }
 
-enum ProcessStopResponseStatus: String, Codable, Sendable {
+enum ProcessStopDataStatus: String, Codable, Sendable {
     case success
     case notRunning = "not_running"
     case error
@@ -163,7 +163,7 @@ enum ZmqComponentsWebsocketManager: String, Codable, Sendable {
     case error
 }
 
-enum ZmqHealthResponseStatus: String, Codable, Sendable {
+enum ZmqHealthDataStatus: String, Codable, Sendable {
     case healthy
     case warning
     case error
@@ -172,8 +172,8 @@ enum ZmqHealthResponseStatus: String, Codable, Sendable {
 struct AdminResetPasswordRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let newPassword: String
 
@@ -190,8 +190,8 @@ struct AdminResetPasswordRequest: Codable, Sendable {
 struct AvailableProcess: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Process identifier
     let name: String
@@ -230,8 +230,8 @@ struct AvailableProcess: Codable, Sendable {
 struct AvailableProcessesResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [AvailableProcess]
     /// Number of items in payload
@@ -251,8 +251,8 @@ struct AvailableProcessesResponse: Codable, Sendable {
 struct ChangePasswordRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let currentPassword: String
     let newPassword: String
@@ -271,8 +271,8 @@ struct ChangePasswordRequest: Codable, Sendable {
 struct ConfiguredProcess: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Unique process name
     let name: String
@@ -332,8 +332,8 @@ struct ConfiguredProcess: Codable, Sendable {
 struct ConfiguredProcessesResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [ConfiguredProcess]
     /// Number of items in payload
@@ -350,12 +350,7 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
     }
 }
 
-struct ConnectionStatsSchema: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
+struct ConnectionStats: Codable, Sendable {
     /// Active WebSocket connections
     let activeConnections: Int?
     /// Active ZMQ subscriber sockets
@@ -368,11 +363,6 @@ struct ConnectionStatsSchema: Codable, Sendable {
     let activeClients: Int?
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case activeConnections = "active_connections"
         case zmqSubscribers = "zmq_subscribers"
         case subscriberTasks = "subscriber_tasks"
@@ -384,8 +374,8 @@ struct ConnectionStatsSchema: Codable, Sendable {
 struct CreateUserRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let username: String
     let email: String?
@@ -410,8 +400,8 @@ struct CreateUserRequest: Codable, Sendable {
 struct ExchangeListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [String]
     /// Number of items in payload
@@ -431,8 +421,8 @@ struct ExchangeListResponse: Codable, Sendable {
 struct ExecutionData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let tradeId: String?
     let exchangeOrderId: String?
@@ -471,8 +461,8 @@ struct ExecutionData: Codable, Sendable {
 struct ExecutionListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [ExecutionData]
     /// Number of items in payload
@@ -490,33 +480,18 @@ struct ExecutionListResponse: Codable, Sendable {
 }
 
 struct GapDetectionStats: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// ZMQ bridge gap detection stats
-    let bridge: GapStatsSchema
+    let bridge: GapStats
     /// Per-session REST client gap stats
-    let restClients: [String: GapStatsSchema]?
+    let restClients: [String: GapStats]?
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case bridge
         case restClients = "rest_clients"
     }
 }
 
-struct GapStatsSchema: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
+struct GapStats: Codable, Sendable {
     /// Total missing messages detected
     let gapsDetected: Int?
     /// Producer session resets observed
@@ -529,11 +504,6 @@ struct GapStatsSchema: Codable, Sendable {
     let rejectedUnstamped: Int?
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case gapsDetected = "gaps_detected"
         case sessionResets = "session_resets"
         case duplicates
@@ -546,11 +516,10 @@ struct HTTPValidationError: Codable, Sendable {
     let detail: [ValidationError]?
 }
 
-struct HealthCheckResponse: Codable, Sendable {
+struct HealthCheckData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    /// Timestamp of the health check
+    let publicId: String
     let timestamp: Date
     let sessionId: String
     /// Overall service health status
@@ -558,7 +527,7 @@ struct HealthCheckResponse: Codable, Sendable {
     /// Application version
     let version: String
     /// Connection statistics
-    let connections: ConnectionStatsSchema
+    let connections: ConnectionStats
     /// Topics availability
     let topics: HealthTopics
     /// Gap detection statistics
@@ -578,14 +547,13 @@ struct HealthCheckResponse: Codable, Sendable {
     }
 }
 
-struct HealthTopics: Codable, Sendable {
+struct HealthCheckResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
-    /// Number of currently active topics
-    let active: Int
+    let payload: HealthCheckData
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -593,15 +561,20 @@ struct HealthTopics: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case active
+        case payload
     }
+}
+
+struct HealthTopics: Codable, Sendable {
+    /// Number of currently active topics
+    let active: Int
 }
 
 struct InstrumentListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [String]
     /// Number of items in payload
@@ -618,11 +591,33 @@ struct InstrumentListResponse: Codable, Sendable {
     }
 }
 
+struct LoginData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let message: String
+    let expiresIn: Int
+    let user: UserProfile
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case message
+        case expiresIn = "expires_in"
+        case user
+    }
+}
+
 struct LoginRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let username: String
     let password: String
@@ -643,12 +638,10 @@ struct LoginRequest: Codable, Sendable {
 struct LoginResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
-    let message: String
-    let expiresIn: Int
-    let user: UserProfile
+    let payload: LoginData
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -656,17 +649,15 @@ struct LoginResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case message
-        case expiresIn = "expires_in"
-        case user
+        case payload
     }
 }
 
 struct MessageResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: String
 
@@ -683,8 +674,8 @@ struct MessageResponse: Codable, Sendable {
 struct OrderData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let exchangeOrderId: String?
     let clientOrderId: String
@@ -731,8 +722,8 @@ struct OrderData: Codable, Sendable {
 struct OrderListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [OrderData]
     /// Number of items in payload
@@ -752,8 +743,8 @@ struct OrderListResponse: Codable, Sendable {
 struct PositionData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let instrument: String
     let exchange: String
@@ -780,8 +771,8 @@ struct PositionData: Codable, Sendable {
 struct PositionListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [PositionData]
     /// Number of items in payload
@@ -799,15 +790,22 @@ struct PositionListResponse: Codable, Sendable {
 }
 
 struct ProcessCategoryCount: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// Number of currently running processes
     let running: Int
     /// Total number of configured processes
     let total: Int
+}
+
+struct ProcessCreateData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    /// Operation status
+    let status: String
+    /// Created process info
+    let process: ProcessCreatedInfo
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -815,16 +813,16 @@ struct ProcessCategoryCount: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case running
-        case total
+        case status
+        case process
     }
 }
 
 struct ProcessCreateRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Unique process name
     let name: String
@@ -860,13 +858,10 @@ struct ProcessCreateRequest: Codable, Sendable {
 struct ProcessCreateResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
-    /// Operation status
-    let status: String
-    /// Created process info
-    let process: ProcessCreatedInfo
+    let payload: ProcessCreateData
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -874,31 +869,15 @@ struct ProcessCreateResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case status
-        case process
+        case payload
     }
 }
 
 struct ProcessCreatedInfo: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// Unique process name
     let name: String
     /// Template used for creation
     let template: String
-
-    enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
-        case name
-        case template
-    }
 }
 
 struct ProcessRun: Codable, Sendable {
@@ -906,7 +885,7 @@ struct ProcessRun: Codable, Sendable {
     let sequenceId: Int
     /// Unique run identifier
     let publicId: String
-    let timestamp: Date?
+    let timestamp: Date
     let sessionId: String
     /// Process name
     let processName: String
@@ -951,8 +930,8 @@ struct ProcessRun: Codable, Sendable {
 struct ProcessRunsResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [ProcessRun]
     /// Number of items in payload
@@ -969,11 +948,11 @@ struct ProcessRunsResponse: Codable, Sendable {
     }
 }
 
-struct ProcessSchemaResponse: Codable, Sendable {
+struct ProcessSchemaData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Process identifier
     let name: String
@@ -1012,11 +991,57 @@ struct ProcessSchemaResponse: Codable, Sendable {
     }
 }
 
+struct ProcessSchemaResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: ProcessSchemaData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct ProcessStartData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    /// Operation status (success, already_running, error)
+    let status: String
+    /// Process name
+    let name: String
+    /// Public ID if started
+    let processPublicId: String?
+    /// Additional message
+    let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case status
+        case name
+        case processPublicId = "process_public_id"
+        case message
+    }
+}
+
 struct ProcessStartRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Execution mode (thread/process) - for ProcessLauncherService, not constructor
     let mode: String?
@@ -1043,17 +1068,10 @@ struct ProcessStartRequest: Codable, Sendable {
 struct ProcessStartResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
-    /// Operation status (success, already_running, error)
-    let status: String
-    /// Process name
-    let name: String
-    /// Public ID if started
-    let processPublicId: String?
-    /// Additional message
-    let message: String?
+    let payload: ProcessStartData
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1061,19 +1079,11 @@ struct ProcessStartResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case status
-        case name
-        case processPublicId = "process_public_id"
-        case message
+        case payload
     }
 }
 
 struct ProcessStatus: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// Process status: not_running, running, stopped, completed, error
     let status: String
     /// Process ID if running
@@ -1088,11 +1098,6 @@ struct ProcessStatus: Codable, Sendable {
     let error: String?
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case status
         case pid
         case startedAt = "started_at"
@@ -1102,11 +1107,11 @@ struct ProcessStatus: Codable, Sendable {
     }
 }
 
-struct ProcessStopResponse: Codable, Sendable {
+struct ProcessStopData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Operation status (success, not_running, error)
     let status: String
@@ -1127,11 +1132,29 @@ struct ProcessStopResponse: Codable, Sendable {
     }
 }
 
-struct ProcessSummaryResponse: Codable, Sendable {
+struct ProcessStopResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: ProcessStopData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct ProcessSummaryData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Feed publisher process counts
     let feeds: ProcessCategoryCount
@@ -1155,11 +1178,29 @@ struct ProcessSummaryResponse: Codable, Sendable {
     }
 }
 
-struct RefreshResponse: Codable, Sendable {
+struct ProcessSummaryResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: ProcessSummaryData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct RefreshData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let message: String
     let wsToken: String
@@ -1181,11 +1222,29 @@ struct RefreshResponse: Codable, Sendable {
     }
 }
 
+struct RefreshResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: RefreshData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct SettingCategoriesResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [String]
     /// Number of items in payload
@@ -1205,8 +1264,8 @@ struct SettingCategoriesResponse: Codable, Sendable {
 struct SettingListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [SettingRead]
     /// Number of items in payload
@@ -1226,8 +1285,8 @@ struct SettingListResponse: Codable, Sendable {
 struct SettingRead: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let key: String
     let value: String
@@ -1254,8 +1313,8 @@ struct SettingRead: Codable, Sendable {
 struct SettingResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: SettingRead
 
@@ -1272,8 +1331,8 @@ struct SettingResponse: Codable, Sendable {
 struct SettingUpdate: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Setting value as string
     let value: String
@@ -1297,8 +1356,8 @@ struct SettingUpdate: Codable, Sendable {
 struct SignalData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let instrument: String
     let exchange: String
@@ -1329,8 +1388,8 @@ struct SignalData: Codable, Sendable {
 struct SignalListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [SignalData]
     /// Number of items in payload
@@ -1350,8 +1409,8 @@ struct SignalListResponse: Codable, Sendable {
 struct StrategyListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [StrategyProcess]
     /// Number of items in payload
@@ -1371,8 +1430,8 @@ struct StrategyListResponse: Codable, Sendable {
 struct StrategyProcess: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// Unique process name
     let name: String
@@ -1397,11 +1456,6 @@ struct StrategyProcess: Codable, Sendable {
 }
 
 struct StrategyStatusPayload: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// Strategy name
     let strategyName: String
     /// Current strategy status
@@ -1424,11 +1478,6 @@ struct StrategyStatusPayload: Codable, Sendable {
     let uptime: String?
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case strategyName = "strategy_name"
         case status
         case details
@@ -1443,32 +1492,22 @@ struct StrategyStatusPayload: Codable, Sendable {
 }
 
 struct SubscriptionsStats: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// Subscriber count per topic
     let perTopic: [String: Int]
     /// Topics subscribed per client
     let perClient: [String: [String]]
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case perTopic = "per_topic"
         case perClient = "per_client"
     }
 }
 
-struct SystemStatus: Codable, Sendable {
+struct SystemStatusData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let trader: ProcessStatus
     let backtests: [String: ProcessStatus]
@@ -1487,12 +1526,25 @@ struct SystemStatus: Codable, Sendable {
     }
 }
 
-struct TopicMetricSnapshotSchema: Codable, Sendable {
+struct SystemStatusResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
+    let payload: SystemStatusData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct TopicMetricSnapshot: Codable, Sendable {
     /// Current subscriber count
     let activeSubscribers: Int?
     /// Total messages received
@@ -1517,11 +1569,6 @@ struct TopicMetricSnapshotSchema: Codable, Sendable {
     let pattern: String?
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case activeSubscribers = "active_subscribers"
         case received
         case forwarded
@@ -1539,8 +1586,8 @@ struct TopicMetricSnapshotSchema: Codable, Sendable {
 struct UpdateUserRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let email: String?
     let role: UserRole?
@@ -1561,8 +1608,8 @@ struct UpdateUserRequest: Codable, Sendable {
 struct UserListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: [UserProfile]
     /// Number of items in payload
@@ -1582,8 +1629,8 @@ struct UserListResponse: Codable, Sendable {
 struct UserProfile: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let username: String
     let email: String?
@@ -1608,8 +1655,8 @@ struct UserProfile: Codable, Sendable {
 struct UserResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     let payload: UserProfile
 
@@ -1632,11 +1679,6 @@ struct ValidationError: Codable, Sendable {
 }
 
 struct WebSocketStats: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// Number of active WebSocket connections
     let activeConnections: Int
     /// Subscriber count per topic
@@ -1645,11 +1687,6 @@ struct WebSocketStats: Codable, Sendable {
     let clientCount: Int
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case activeConnections = "active_connections"
         case topicSubscribers = "topic_subscribers"
         case clientCount = "client_count"
@@ -1657,41 +1694,31 @@ struct WebSocketStats: Codable, Sendable {
 }
 
 struct WsStatsConfig: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// ZMQ broker XPUB endpoint
     let brokerXpub: String
     /// Heartbeat interval in milliseconds
     let heartbeatIntervalMs: Int
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case brokerXpub = "broker_xpub"
         case heartbeatIntervalMs = "heartbeat_interval_ms"
     }
 }
 
-struct WsStatsResponse: Codable, Sendable {
+struct WsStatsData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
     /// WebSocket statistics
     let websocket: WebSocketStats
     /// ZMQ bridge statistics
     let zmqBridge: ZmqBridgeStats
     /// Connection statistics
-    let connections: ConnectionStatsSchema
+    let connections: ConnectionStats
     /// Topic message statistics
-    let topics: [String: TopicMetricSnapshotSchema]
+    let topics: [String: TopicMetricSnapshot]
     /// Subscription details
     let subscriptions: SubscriptionsStats
     /// Configuration details
@@ -1712,12 +1739,25 @@ struct WsStatsResponse: Codable, Sendable {
     }
 }
 
-struct ZmqBridgeStats: Codable, Sendable {
+struct WsStatsResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
+    let publicId: String
+    let timestamp: Date
     let sessionId: String
+    let payload: WsStatsData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct ZmqBridgeStats: Codable, Sendable {
     /// Number of active ZMQ topics
     let activeTopics: Int
     /// Number of subscriber tasks
@@ -1726,11 +1766,6 @@ struct ZmqBridgeStats: Codable, Sendable {
     let availableTopics: [String]
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case activeTopics = "active_topics"
         case subscriberTasks = "subscriber_tasks"
         case availableTopics = "available_topics"
@@ -1738,11 +1773,6 @@ struct ZmqBridgeStats: Codable, Sendable {
 }
 
 struct ZmqComponents: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// ZMQ context status
     let zmqContext: String
     /// WebSocket manager status
@@ -1751,11 +1781,6 @@ struct ZmqComponents: Codable, Sendable {
     let activeConnections: Int
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case zmqContext = "zmq_context"
         case websocketManager = "websocket_manager"
         case activeConnections = "active_connections"
@@ -1763,29 +1788,18 @@ struct ZmqComponents: Codable, Sendable {
 }
 
 struct ZmqConfig: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String?
-    let timestamp: Date?
-    let sessionId: String
     /// List of available ZMQ topics
     let availableTopics: [String]
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case availableTopics = "available_topics"
     }
 }
 
-struct ZmqHealthResponse: Codable, Sendable {
+struct ZmqHealthData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    let publicId: String?
-    /// Timestamp of the health check
+    let publicId: String
     let timestamp: Date
     let sessionId: String
     /// Overall ZMQ bridge health status
@@ -1795,9 +1809,9 @@ struct ZmqHealthResponse: Codable, Sendable {
     /// ZMQ configuration
     let config: ZmqConfig
     /// Connection statistics
-    let connections: ConnectionStatsSchema
+    let connections: ConnectionStats
     /// Message statistics per topic
-    let messageStats: [String: TopicMetricSnapshotSchema]
+    let messageStats: [String: TopicMetricSnapshot]
     /// Error messages if not healthy
     let errors: [String]?
 
@@ -1813,5 +1827,23 @@ struct ZmqHealthResponse: Codable, Sendable {
         case connections
         case messageStats = "message_stats"
         case errors
+    }
+}
+
+struct ZmqHealthResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: ZmqHealthData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }

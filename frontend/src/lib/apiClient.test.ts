@@ -155,14 +155,18 @@ describe('APIClient', () => {
         ok: true,
         status: 200,
         json: async () => ({
-          ws_token: 'new-token',
-          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          payload: {
+            ws_token: 'new-token',
+            ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          },
         }),
         clone: function () {
           return {
             json: async () => ({
-              ws_token: 'new-token',
-              ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+              payload: {
+                ws_token: 'new-token',
+                ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+              },
             }),
           }
         },
@@ -486,49 +490,45 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        type: 'health_check',
-        session_id: '',
+        type: 'health_check_response',
         sequence_id: 0,
-        status: 'healthy',
+        public_id: 'test-pid',
         timestamp: '2024-01-01T00:00:00Z',
-        version: '1.0.0',
-        connections: {
-          type: 'connection_stats',
-          session_id: '',
+        session_id: 'test-sid',
+        payload: {
+          type: 'health_check',
           sequence_id: 0,
-          active_connections: 5,
-          zmq_subscribers: 2,
-          subscriber_tasks: 1,
-          active_topics: 3,
-          active_clients: 4,
-        },
-        topics: {
-          type: 'health_topics',
-          session_id: '',
-          sequence_id: 0,
-          active: 3,
-        },
-        gap_detection: {
-          type: 'gap_detection_stats',
-          session_id: '',
-          sequence_id: 0,
-          bridge: {
-            type: 'gap_stats',
-            session_id: '',
-            sequence_id: 0,
-            gaps_detected: 0,
-            session_resets: 0,
-            duplicates: 0,
-            mid_stream_joins: 0,
-            rejected_unstamped: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          status: 'healthy',
+          version: '1.0.0',
+          connections: {
+            active_connections: 5,
+            zmq_subscribers: 2,
+            subscriber_tasks: 1,
+            active_topics: 3,
+            active_clients: 4,
           },
-          rest_clients: {},
+          topics: {
+            active: 3,
+          },
+          gap_detection: {
+            bridge: {
+              gaps_detected: 0,
+              session_resets: 0,
+              duplicates: 0,
+              mid_stream_joins: 0,
+              rejected_unstamped: 0,
+            },
+            rest_clients: {},
+          },
         },
       }),
     })
     const result = await apiClient.getHealth()
 
-    expect(result.status).toBe('healthy')
+    expect(result.payload.status).toBe('healthy')
     expect(result.timestamp).toBe('2024-01-01T00:00:00Z')
   })
   it('getSystemStatus returns system status', async () => {
@@ -536,23 +536,29 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        type: 'system_status',
-        session_id: '',
+        type: 'system_status_response',
         sequence_id: 0,
-        trader: {
-          type: 'process_status',
-          session_id: '',
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        payload: {
+          type: 'system_status',
           sequence_id: 0,
-          status: 'running',
-          pid: 1234,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          trader: {
+            status: 'running',
+            pid: 1234,
+          },
+          backtests: {},
         },
-        backtests: {},
       }),
     })
     const result = await apiClient.getSystemStatus()
 
-    expect(result.trader.status).toBe('running')
-    expect(result.backtests).toEqual({})
+    expect(result.payload.trader.status).toBe('running')
+    expect(result.payload.backtests).toEqual({})
   })
   it('getCandles returns candle data', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -593,10 +599,17 @@ describe('domain API methods', () => {
       expect.any(Object)
     )
   })
-  it('getCandles returns empty array on 204', async () => {
+  it('getCandles returns empty array when payload is empty', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      status: 204,
+      status: 200,
+      json: async () => ({
+        type: 'candle_list',
+        session_id: '',
+        sequence_id: 0,
+        payload: [],
+        count: 0,
+      }),
     })
     const result = await apiClient.getCandles('BTC/USD', 'kraken')
 
@@ -628,13 +641,17 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'order_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [
           {
             type: 'order',
-            session_id: '',
             sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
             instrument: 'BTC/USD',
             exchange: 'kraken',
             client_order_id: 'client-1',
@@ -666,8 +683,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'order_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -684,13 +703,17 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'execution_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [
           {
             type: 'execution',
-            session_id: '',
             sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
             client_order_id: 'client-1',
             executed_at: '2024-01-01T00:00:00Z',
             price: 100,
@@ -717,13 +740,17 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'execution_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [
           {
             type: 'execution',
-            session_id: '',
             sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
             client_order_id: 'client-1',
             executed_at: '2024-01-01T00:00:00Z',
             price: 100,
@@ -750,20 +777,23 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'position_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [
           {
             type: 'position',
-            session_id: '',
             sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
             instrument: 'BTC/USD',
             exchange: 'kraken',
             quantity: 1,
             average_price: 50000,
             unrealized_pnl: 100,
             realized_pnl: 50,
-            timestamp: '2024-01-01T00:00:00Z',
           },
         ],
         count: 1,
@@ -779,13 +809,17 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'signal_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [
           {
             type: 'signal',
-            session_id: '',
             sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
             instrument: 'BTC/USD',
             exchange: 'kraken',
             fired_at: '2024-01-01T00:00:00Z',
@@ -813,8 +847,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'signal_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -833,8 +869,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'signal_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -850,8 +888,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'order_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -867,8 +907,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'exchange_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: ['kraken', 'binance'],
         count: 2,
       }),
@@ -887,8 +929,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'instrument_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: ['BTC/USD', 'ETH/USD'],
         count: 2,
       }),
@@ -907,13 +951,17 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'setting_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [
           {
             type: 'setting_read',
-            session_id: '',
             sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
             key: 'setting1',
             value: 'value1',
             category: 'trading',
@@ -937,8 +985,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'setting_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -955,8 +1005,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'setting_categories',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: ['trading', 'system'],
         count: 2,
       }),
@@ -971,12 +1023,16 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'setting_response',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: {
           type: 'setting_read',
-          session_id: '',
           sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
           key: 'setting1',
           value: 'new-value',
           category: 'general',
@@ -998,8 +1054,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'message',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: 'Setting deleted successfully',
       }),
     })
@@ -1007,8 +1065,10 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({
       type: 'message',
-      session_id: '',
       sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
       payload: 'Setting deleted successfully',
     })
     expect(mockFetch).toHaveBeenCalledWith(
@@ -1021,22 +1081,31 @@ describe('domain API methods', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        type: 'process_schema',
-        session_id: '',
+        type: 'process_schema_response',
         sequence_id: 0,
-        name: 'test',
-        description: 'Test process',
-        class_path: 'snapper.processes.test',
-        method: 'run',
-        default_enabled: true,
-        default_mode: 'thread',
-        lifecycle: 'long_running',
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        payload: {
+          type: 'process_schema',
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          name: 'test',
+          description: 'Test process',
+          class_path: 'snapper.processes.test',
+          method: 'run',
+          default_enabled: true,
+          default_mode: 'thread',
+          lifecycle: 'long_running',
+        },
       }),
     })
     const result = await apiClient.getProcessSchema('test-process')
 
-    expect(result.name).toBe('test')
-    expect(result.lifecycle).toBe('long_running')
+    expect(result.payload.name).toBe('test')
+    expect(result.payload.lifecycle).toBe('long_running')
   })
   it('createProcessConfig creates process config', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -1044,15 +1113,21 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'process_create_response',
-        session_id: '',
         sequence_id: 0,
-        status: 'created',
-        process: {
-          type: 'process_created_info',
-          session_id: '',
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        payload: {
+          type: 'process_create',
           sequence_id: 0,
-          name: 'new-process',
-          template: 'test-template',
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          status: 'created',
+          process: {
+            name: 'new-process',
+            template: 'test-template',
+          },
         },
       }),
     })
@@ -1061,8 +1136,8 @@ describe('domain API methods', () => {
       template: 'test-template',
     })
 
-    expect(result.status).toBe('created')
-    expect(result.process.name).toBe('new-process')
+    expect(result.payload.status).toBe('created')
+    expect(result.payload.process.name).toBe('new-process')
   })
   it('getConfiguredProcesses returns configured processes', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -1070,8 +1145,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'configured_processes',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -1080,66 +1157,69 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({
       type: 'configured_processes',
-      session_id: '',
       sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
       payload: [],
       count: 0,
     })
   })
   it('getProcessSummary returns process category counts', async () => {
-    const summary = {
-      type: 'process_summary' as const,
-      session_id: '',
+    const responseData = {
+      type: 'process_summary_response' as const,
       sequence_id: 0,
-      feeds: {
-        type: 'process_category_count' as const,
-        session_id: '',
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
+      payload: {
+        type: 'process_summary' as const,
         sequence_id: 0,
-        running: 1,
-        total: 2,
-      },
-      strategies: {
-        type: 'process_category_count' as const,
-        session_id: '',
-        sequence_id: 0,
-        running: 0,
-        total: 1,
-      },
-      executors: {
-        type: 'process_category_count' as const,
-        session_id: '',
-        sequence_id: 0,
-        running: 0,
-        total: 0,
-      },
-      brokers: {
-        type: 'process_category_count' as const,
-        session_id: '',
-        sequence_id: 0,
-        running: 1,
-        total: 1,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        feeds: {
+          running: 1,
+          total: 2,
+        },
+        strategies: {
+          running: 0,
+          total: 1,
+        },
+        executors: {
+          running: 0,
+          total: 0,
+        },
+        brokers: {
+          running: 1,
+          total: 1,
+        },
       },
     }
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => summary,
+      json: async () => responseData,
     })
     const result = await apiClient.getProcessSummary()
 
-    expect(result).toEqual(summary)
+    expect(result).toEqual(responseData)
   })
   it('getStrategies returns strategy list', async () => {
     const strategiesResponse = {
       type: 'strategy_list' as const,
-      session_id: '',
       sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
       payload: [
         {
           type: 'strategy_process' as const,
-          session_id: '',
           sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
           name: 'strategy_test',
           running: true,
           enabled: true,
@@ -1164,8 +1244,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'available_processes',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -1174,8 +1256,10 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({
       type: 'available_processes',
-      session_id: '',
       sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
       payload: [],
       count: 0,
     })
@@ -1186,8 +1270,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'process_runs',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -1196,8 +1282,10 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({
       type: 'process_runs',
-      session_id: '',
       sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
       payload: [],
       count: 0,
     })
@@ -1210,8 +1298,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'process_runs',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [],
         count: 0,
       }),
@@ -1223,17 +1313,28 @@ describe('domain API methods', () => {
     )
   })
   it('startProcessByName starts a process', async () => {
+    const responseData = {
+      type: 'process_start_response' as const,
+      sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
+      payload: {
+        type: 'process_start' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        status: 'success' as const,
+        name: 'test-process',
+        message: 'Process started',
+      },
+    }
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({
-        type: 'process_start_response',
-        session_id: '',
-        sequence_id: 0,
-        status: 'success',
-        name: 'test-process',
-        message: 'Process started',
-      }),
+      json: async () => responseData,
     })
     const result = await apiClient.startProcessByName('test-process', {
       mode: 'live',
@@ -1242,14 +1343,7 @@ describe('domain API methods', () => {
       autostart: true,
     })
 
-    expect(result).toEqual({
-      type: 'process_start_response',
-      session_id: '',
-      sequence_id: 0,
-      status: 'success',
-      name: 'test-process',
-      message: 'Process started',
-    })
+    expect(result).toEqual(responseData)
   })
   it('startProcessByName works without options', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -1257,39 +1351,52 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'process_start_response',
-        session_id: '',
         sequence_id: 0,
-        status: 'success',
-        name: 'test-process',
-        message: 'Started',
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        payload: {
+          type: 'process_start',
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          status: 'success',
+          name: 'test-process',
+          message: 'Started',
+        },
       }),
     })
     await apiClient.startProcessByName('test-process')
     expect(mockFetch).toHaveBeenCalled()
   })
   it('stopProcessByName stops a process', async () => {
+    const responseData = {
+      type: 'process_stop_response' as const,
+      sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
+      payload: {
+        type: 'process_stop' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        status: 'success' as const,
+        name: 'test-process',
+        message: 'Process stopped',
+      },
+    }
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({
-        type: 'process_stop_response',
-        session_id: '',
-        sequence_id: 0,
-        status: 'success',
-        name: 'test-process',
-        message: 'Process stopped',
-      }),
+      json: async () => responseData,
     })
     const result = await apiClient.stopProcessByName('test-process')
 
-    expect(result).toEqual({
-      type: 'process_stop_response',
-      session_id: '',
-      sequence_id: 0,
-      status: 'success',
-      name: 'test-process',
-      message: 'Process stopped',
-    })
+    expect(result).toEqual(responseData)
   })
   it('changePassword changes user password', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -1297,8 +1404,10 @@ describe('domain API methods', () => {
       status: 200,
       json: async () => ({
         type: 'message',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: 'Password changed successfully',
       }),
     })
@@ -1306,8 +1415,10 @@ describe('domain API methods', () => {
 
     expect(result).toEqual({
       type: 'message',
-      session_id: '',
       sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
       payload: 'Password changed successfully',
     })
     const call = mockFetch.mock.calls[0]
@@ -1340,13 +1451,17 @@ describe('user management API methods', () => {
       ok: true,
       json: async () => ({
         type: 'user_list',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: [
           {
             type: 'user_profile',
-            session_id: '',
             sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
             username: 'admin',
             email: 'admin@test.com',
             role: 'admin',
@@ -1370,12 +1485,16 @@ describe('user management API methods', () => {
       ok: true,
       json: async () => ({
         type: 'user_response',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: {
           type: 'user_profile',
-          session_id: '',
           sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
           username: 'new',
           email: 'e@e.com',
           role: 'viewer',
@@ -1402,12 +1521,16 @@ describe('user management API methods', () => {
       ok: true,
       json: async () => ({
         type: 'user_response',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: {
           type: 'user_profile',
-          session_id: '',
           sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
           username: 'admin',
           email: 'new@e.com',
           role: 'admin',
@@ -1432,8 +1555,10 @@ describe('user management API methods', () => {
       ok: true,
       json: async () => ({
         type: 'message',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: 'User deactivated',
       }),
     })
@@ -1450,8 +1575,10 @@ describe('user management API methods', () => {
       ok: true,
       json: async () => ({
         type: 'message',
-        session_id: '',
         sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         payload: 'Password reset',
       }),
     })
@@ -1492,8 +1619,10 @@ describe('cacheWsTicketFromResponse', () => {
         clone: function () {
           return {
             json: async () => ({
-              ws_token: 'test-token',
-              ws_token_exp: expDate.toISOString(),
+              payload: {
+                ws_token: 'test-token',
+                ws_token_exp: expDate.toISOString(),
+              },
             }),
           }
         },
@@ -1513,7 +1642,7 @@ describe('cacheWsTicketFromResponse', () => {
         status: 200,
         clone: function () {
           return {
-            json: async () => ({ other: 'data' }),
+            json: async () => ({ payload: { other: 'data' } }),
           }
         },
       })

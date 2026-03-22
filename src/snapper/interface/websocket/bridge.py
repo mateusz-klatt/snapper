@@ -13,6 +13,7 @@ import time
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -653,6 +654,8 @@ class ZmqWebSocketBridgeService:
                     message=f"Invalid topic: {error_msg}",
                     session_id=tracker.session_id,
                     sequence_id=tracker.next_sequence("server.control"),
+                    public_id=str(uuid7()),
+                    timestamp=datetime.now(UTC),
                 )
                 await websocket.send_text(error_response.model_dump_json())
             except Exception as e:

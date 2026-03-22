@@ -63,7 +63,8 @@ export const useAuthStore = create<AuthState>()(
               throw new Error(errorData.detail || 'Login failed')
             }
 
-            const data: { user: User; csrf_token?: string } = await response.json()
+            const envelope: { payload: { user: User; csrf_token?: string } } = await response.json()
+            const data = envelope.payload
 
             apiClient.setCsrfToken(data.csrf_token ?? null)
             set({
@@ -133,13 +134,16 @@ export const useAuthStore = create<AuthState>()(
         },
         refreshToken: async () => {
           try {
-            const data: {
-              message?: string
-              ws_token?: string
-              ws_token_exp?: string
-              csrf_token?: string
-              user?: User
+            const envelope: {
+              payload: {
+                message?: string
+                ws_token?: string
+                ws_token_exp?: string
+                csrf_token?: string
+                user?: User
+              }
             } = await apiClient.postJSON('/api/auth/refresh')
+            const data = envelope.payload
 
             if (typeof data.ws_token === 'string' && typeof data.ws_token_exp === 'string') {
               const expSeconds = Math.floor(new Date(data.ws_token_exp).getTime() / 1000)
@@ -159,7 +163,9 @@ export const useAuthStore = create<AuthState>()(
                 throw new Error('Failed to get user info')
               }
 
-              userData = await userResponse.json()
+              const meEnvelope: { payload: User } = await userResponse.json()
+
+              userData = meEnvelope.payload
             }
 
             set({

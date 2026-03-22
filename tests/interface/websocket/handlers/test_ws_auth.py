@@ -141,6 +141,8 @@ def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
         json={
             "session_id": "",
             "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "username": username,
             "password": password,
         },
@@ -149,7 +151,7 @@ def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
     response = test_client.post("/api/auth/refresh")
     assert response.status_code == 200
     data = cast(dict[str, Any], response.json())
-    return cast(str, data["ws_token"])
+    return cast(str, data["payload"]["ws_token"])
 
 
 def _complete_handshake(websocket: Any, ws_token: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -157,7 +159,14 @@ def _complete_handshake(websocket: Any, ws_token: str) -> tuple[dict[str, Any], 
     assert auth_required["type"] == "auth_required"
     websocket.send_text(
         json.dumps(
-            {"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": ws_token}
+            {
+                "type": "authenticate",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "ws_token": ws_token,
+            }
         )
     )
     auth_ok = _receive_json(websocket)
@@ -237,6 +246,8 @@ class TestSecureWebSocketIntegration:
                         "type": "subscribe",
                         "session_id": "",
                         "sequence_id": 0,
+                        "public_id": "test",
+                        "timestamp": "2024-01-01T00:00:00Z",
                         "topics": [
                             "market.kraken.BTC-USD.candles.1m",
                             "signals.kraken.BTC-USD.live",
@@ -265,7 +276,17 @@ class TestSecureWebSocketIntegration:
         )
         with test_client.websocket_connect(WS_PATH) as websocket:
             _complete_handshake(websocket, ws_token)
-            websocket.send_text(json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}))
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "ping",
+                        "session_id": "",
+                        "sequence_id": 0,
+                        "public_id": "test",
+                        "timestamp": "2024-01-01T00:00:00Z",
+                    }
+                )
+            )
             response = _receive_json(websocket)
             assert response["type"] == "pong"
             assert "timestamp" in response
@@ -360,6 +381,8 @@ class TestSecureWebSocketViewer:
                         "type": "subscribe",
                         "session_id": "",
                         "sequence_id": 0,
+                        "public_id": "test",
+                        "timestamp": "2024-01-01T00:00:00Z",
                         "topics": [
                             "market.kraken.BTC-USD.candles.1m",
                             "signals.kraken.BTC-USD.live",
@@ -419,6 +442,8 @@ def _prepare_ws_token_v2(test_client: Any, *, username: str, password: str) -> t
         json={
             "session_id": "",
             "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
             "username": username,
             "password": password,
         },
@@ -429,7 +454,7 @@ def _prepare_ws_token_v2(test_client: Any, *, username: str, password: str) -> t
     data = cast(dict[str, Any], response.json())
     access_token = cast(str, test_client.cookies.get("access_token"))
     assert access_token
-    return cast(str, data["ws_token"]), access_token
+    return cast(str, data["payload"]["ws_token"]), access_token
 
 
 def test_authentication_failure(test_client: Any) -> None:
@@ -481,7 +506,15 @@ def test_get_subscriptions_initial_state(test_client: Any) -> None:
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
         websocket.send_text(
-            json.dumps({"type": "get_subscriptions", "session_id": "", "sequence_id": 0})
+            json.dumps(
+                {
+                    "type": "get_subscriptions",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                }
+            )
         )
         response = _receive_json(websocket)
         assert response["type"] == "subscriptions_list"
@@ -509,6 +542,8 @@ def test_viewer_subscribe_partial_permissions(test_client: Any) -> None:
                     "type": "subscribe",
                     "session_id": "",
                     "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "topics": ["market.kraken.BTC-USD.candles.1m", "signals.kraken.BTC-USD.live"],
                 }
             )
@@ -570,6 +605,8 @@ def test_unsubscribe_flow(test_client: Any) -> None:
                     "type": "subscribe",
                     "session_id": "",
                     "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "topics": ["market.kraken.BTC-USD.candles.1m"],
                 }
             )
@@ -581,6 +618,8 @@ def test_unsubscribe_flow(test_client: Any) -> None:
                     "type": "unsubscribe",
                     "session_id": "",
                     "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "topics": ["market.kraken.BTC-USD.candles.1m"],
                 }
             )
@@ -605,7 +644,17 @@ def test_ping_returns_pong(test_client: Any) -> None:
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}))
+        websocket.send_text(
+            json.dumps(
+                {
+                    "type": "ping",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                }
+            )
+        )
         response = _receive_json(websocket)
         assert response["type"] == "pong"
         assert "timestamp" in response
@@ -625,11 +674,29 @@ def test_ping_then_get_subscriptions_loop_continuation(test_client: Any) -> None
     )
     with test_client.websocket_connect(WS_PATH) as websocket:
         _complete_handshake(websocket, ws_token)
-        websocket.send_text(json.dumps({"type": "ping", "session_id": "", "sequence_id": 0}))
+        websocket.send_text(
+            json.dumps(
+                {
+                    "type": "ping",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                }
+            )
+        )
         pong_response = _receive_json(websocket)
         assert pong_response["type"] == "pong"
         websocket.send_text(
-            json.dumps({"type": "get_subscriptions", "session_id": "", "sequence_id": 0})
+            json.dumps(
+                {
+                    "type": "get_subscriptions",
+                    "session_id": "",
+                    "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                }
+            )
         )
         subs_response = _receive_json(websocket)
         assert subs_response["type"] == "subscriptions_list"
@@ -1124,7 +1191,17 @@ async def test_handshake_missing_ws_token() -> None:
         websocket = WebSocketStub(
             headers={"origin": "http://localhost:8000"},
             cookies={"access_token": "valid_token"},
-            messages=[json.dumps({"type": "authenticate", "session_id": "", "sequence_id": 0})],
+            messages=[
+                json.dumps(
+                    {
+                        "type": "authenticate",
+                        "session_id": "",
+                        "sequence_id": 0,
+                        "public_id": "test",
+                        "timestamp": "2024-01-01T00:00:00Z",
+                    }
+                )
+            ],
         )
         endpoint = router.routes[0].endpoint
         await endpoint(websocket)
@@ -1168,6 +1245,8 @@ async def test_handshake_invalid_ws_token() -> None:
                         "type": "authenticate",
                         "session_id": "",
                         "sequence_id": 0,
+                        "public_id": "test",
+                        "timestamp": "2024-01-01T00:00:00Z",
                         "ws_token": "invalid_token",
                     }
                 )
@@ -1206,6 +1285,8 @@ async def test_bridge_creation_when_manager_zmq_bridge_is_none() -> None:
                     "type": "authenticate",
                     "session_id": "",
                     "sequence_id": 0,
+                    "public_id": "test",
+                    "timestamp": "2024-01-01T00:00:00Z",
                     "ws_token": "valid_token",
                 }
             ),
@@ -1299,6 +1380,8 @@ async def test_websocket_endpoint_handles_unexpected_exception() -> None:
                             "type": "authenticate",
                             "session_id": "",
                             "sequence_id": 0,
+                            "public_id": "test",
+                            "timestamp": "2024-01-01T00:00:00Z",
                             "ws_token": "valid_token",
                         }
                     ),
@@ -1766,7 +1849,9 @@ async def test_ws_endpoint_requires_ws_token(
     monkeypatch.setattr(auth_handlers_asyncio, "timeout", cast(Any, _PassthroughTimeout))
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
-        messages=['{"type": "authenticate", "session_id": "", "sequence_id": 0}'],
+        messages=[
+            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "public_id": "test", "timestamp": "2024-01-01T00:00:00Z"}'
+        ],
     )
     await endpoint(websocket)
     assert json.loads(websocket.sent[-1])["type"] == "auth_failed"
@@ -1809,7 +1894,7 @@ async def test_ws_endpoint_handles_token_replay(
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=[
-            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "token"}'
+            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "public_id": "test", "timestamp": "2024-01-01T00:00:00Z", "ws_token": "token"}'
         ],
     )
     await endpoint(websocket)
@@ -1853,7 +1938,7 @@ async def test_ws_endpoint_handles_invalid_token(
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=[
-            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "token"}'
+            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "public_id": "test", "timestamp": "2024-01-01T00:00:00Z", "ws_token": "token"}'
         ],
     )
     await endpoint(websocket)
@@ -1906,8 +1991,8 @@ async def test_ws_endpoint_success_and_reauth_flow(
     websocket = EndpointWebSocketStub(
         headers={"origin": "http://localhost:8000"},
         messages=[
-            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "valid-token"}',
-            '{"type": "reauth", "session_id": "", "sequence_id": 0, "ws_token": "reauth-token"}',
+            '{"type": "authenticate", "session_id": "", "sequence_id": 0, "public_id": "test", "timestamp": "2024-01-01T00:00:00Z", "ws_token": "valid-token"}',
+            '{"type": "reauth", "session_id": "", "sequence_id": 0, "public_id": "test", "timestamp": "2024-01-01T00:00:00Z", "ws_token": "reauth-token"}',
             WebSocketDisconnect(),
         ],
         settings=SimpleNamespace(ui_origin="https://ui.example/", session_domain="example.com "),
@@ -2131,7 +2216,11 @@ async def test_handle_subscribe_reports_invalid_topics() -> None:
         await HANDLE_SUBSCRIBE(
             cast(Any, websocket),
             WSSubscribeRequest(
-                session_id="", sequence_id=0, topics=["market.kraken.BTC-USD.candles.1m"]
+                session_id="",
+                sequence_id=0,
+                public_id="test",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                topics=["market.kraken.BTC-USD.candles.1m"],
             ),
             manager,
             UserRole.OPERATOR,
@@ -2172,6 +2261,8 @@ async def test_handle_subscribe_success_partial() -> None:
             WSSubscribeRequest(
                 session_id="",
                 sequence_id=0,
+                public_id="test",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 topics=["market.kraken.BTC-USD.candles.1m", "signals.kraken.BTC-USD.live"],
             ),
             manager,
@@ -2197,7 +2288,13 @@ async def test_handle_unsubscribe_handles_unknown() -> None:
     manager.set_subscriptions(websocket, {"known.topic"})
     await HANDLE_UNSUBSCRIBE(
         cast(Any, websocket),
-        WSUnsubscribeRequest(session_id="", sequence_id=0, topics=["unknown.topic"]),
+        WSUnsubscribeRequest(
+            session_id="",
+            sequence_id=0,
+            public_id="test",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            topics=["unknown.topic"],
+        ),
         manager,
     )
     response = json.loads(websocket.sent[-1])
@@ -2217,7 +2314,13 @@ async def test_handle_unsubscribe_success() -> None:
     manager.set_subscriptions(websocket, {"signals.kraken.BTC-USD.live"})
     await HANDLE_UNSUBSCRIBE(
         cast(Any, websocket),
-        WSUnsubscribeRequest(session_id="", sequence_id=0, topics=["signals.kraken.BTC-USD.live"]),
+        WSUnsubscribeRequest(
+            session_id="",
+            sequence_id=0,
+            public_id="test",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            topics=["signals.kraken.BTC-USD.live"],
+        ),
         manager,
     )
     response = json.loads(websocket.sent[-1])
@@ -2518,7 +2621,13 @@ class TestAuthenticateWebsocket:
             mock_token_data,
         )
         mock_websocket.receive_text.return_value = json.dumps(
-            {"type": "subscribe", "session_id": "", "sequence_id": 0}
+            {
+                "type": "subscribe",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test",
+                "timestamp": "2024-01-01T00:00:00Z",
+            }
         )
         result = await authenticate_websocket(
             mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
@@ -2547,7 +2656,13 @@ class TestAuthenticateWebsocket:
             mock_token_data,
         )
         mock_websocket.receive_text.return_value = json.dumps(
-            {"type": "authenticate", "session_id": "", "sequence_id": 0}
+            {
+                "type": "authenticate",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test",
+                "timestamp": "2024-01-01T00:00:00Z",
+            }
         )
         result = await authenticate_websocket(
             mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
@@ -2580,6 +2695,8 @@ class TestAuthenticateWebsocket:
                 "type": "authenticate",
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "ws_token": "already-used-token",
             }
         )
@@ -2615,6 +2732,8 @@ class TestAuthenticateWebsocket:
                 "type": "authenticate",
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "ws_token": "invalid-token",
             }
         )
@@ -2647,7 +2766,14 @@ class TestAuthenticateWebsocket:
             mock_token_data,
         )
         mock_websocket.receive_text.return_value = json.dumps(
-            {"type": "authenticate", "session_id": "", "sequence_id": 0, "ws_token": "valid-token"}
+            {
+                "type": "authenticate",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "ws_token": "valid-token",
+            }
         )
         mock_ws_token_service.verify.return_value = mock_ws_payload
         result = await authenticate_websocket(
@@ -2686,7 +2812,13 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Closes connection with Missing session state reason.
         """
-        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="some-token")
+        message = WSReauthRequest(
+            session_id="",
+            sequence_id=0,
+            public_id="test",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            ws_token="some-token",
+        )
         mock_ws_auth_manager.get_state.return_value = None
         result = await handle_reauth(
             mock_websocket,
@@ -2714,7 +2846,13 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Closes connection with ws_token replay reason.
         """
-        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="reused-token")
+        message = WSReauthRequest(
+            session_id="",
+            sequence_id=0,
+            public_id="test",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            ws_token="reused-token",
+        )
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
@@ -2745,7 +2883,13 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Closes connection with Invalid ws_token reason.
         """
-        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="invalid-token")
+        message = WSReauthRequest(
+            session_id="",
+            sequence_id=0,
+            public_id="test",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            ws_token="invalid-token",
+        )
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
@@ -2777,7 +2921,13 @@ class TestHandleReauth:
         When: Handling reauth request,
         Then: Updates state and sends reauth_ok message.
         """
-        message = WSReauthRequest(session_id="", sequence_id=0, ws_token="new-valid-token")
+        message = WSReauthRequest(
+            session_id="",
+            sequence_id=0,
+            public_id="test",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            ws_token="new-valid-token",
+        )
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
@@ -2984,6 +3134,8 @@ class StubUserService:
         user = UserProfile(
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             username=username,
             email=email,
             role=role,
@@ -3066,6 +3218,8 @@ def test_login_success_sets_cookies(
     user = UserProfile(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="bob",
         email="bob@example.com",
         role=UserRole.OPERATOR,
@@ -3079,11 +3233,18 @@ def test_login_success_sets_cookies(
     )
     response = client.post(
         "/auth/login",
-        json={"session_id": "", "sequence_id": 0, "username": "bob", "password": "secret"},
+        json={
+            "session_id": "",
+            "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "username": "bob",
+            "password": "secret",
+        },
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["message"] == "Login successful"
+    assert body["payload"]["message"] == "Login successful"
     assert token_manager.last_created_user is not None
     assert token_manager.last_created_user.username == user.username
     assert token_manager.last_created_user.role == user.role
@@ -3105,7 +3266,14 @@ def test_login_failure_returns_401(
     user_service.authenticated_user = None
     response = client.post(
         "/auth/login",
-        json={"session_id": "", "sequence_id": 0, "username": "bob", "password": "wrong"},
+        json={
+            "session_id": "",
+            "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "username": "bob",
+            "password": "wrong",
+        },
     )
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid username or password"
@@ -3131,7 +3299,14 @@ def test_refresh_token_success(
         jti="refresh-jti",
         sid="session-123",
     )
-    user = UserProfile(session_id="test-sid", sequence_id=1, username="bob", role=UserRole.OPERATOR)
+    user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+    )
     user_service.user_by_id = user
     token_manager.create_tokens_response = TokenPair(
         access_token="rotated-access",
@@ -3147,7 +3322,8 @@ def test_refresh_token_success(
     assert response.cookies.get("access_token") == "rotated-access"
     assert response.cookies.get("refresh_token") == "rotated-refresh"
     assert response.cookies.get("csrf_token") == "csrf-rot"
-    payload = response.json()
+    body = response.json()
+    payload = body["payload"]
     assert payload["ws_token"]
     assert isinstance(payload["ws_token_exp"], str)
     assert payload["csrf_token"] == "csrf-rot"
@@ -3166,7 +3342,12 @@ def test_get_current_user_profile_returns_user(
     """
     client, user_service, _token_manager, _csrf_manager = auth_app
     user_service.user_by_id = UserProfile(
-        session_id="test-sid", sequence_id=1, username="alice", role=UserRole.ADMIN
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="alice",
+        role=UserRole.ADMIN,
     )
     response = client.get("/auth/me")
     assert response.status_code == 200
@@ -3289,7 +3470,12 @@ def test_get_current_user_info(
     """
     client, user_service, _, _ = auth_app
     user_service.user_by_id = UserProfile(
-        session_id="test-sid", sequence_id=1, username="alice", role=UserRole.ADMIN
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="alice",
+        role=UserRole.ADMIN,
     )
     response = client.get("/auth/me")
     assert response.status_code == 200
@@ -3310,8 +3496,22 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     stub_service.all_users = [
-        UserProfile(session_id="test-sid", sequence_id=1, username="alice", role=UserRole.ADMIN),
-        UserProfile(session_id="test-sid", sequence_id=1, username="bob", role=UserRole.OPERATOR),
+        UserProfile(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            username="alice",
+            role=UserRole.ADMIN,
+        ),
+        UserProfile(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            username="bob",
+            role=UserRole.OPERATOR,
+        ),
     ]
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.get_users(
@@ -3333,13 +3533,20 @@ async def test_create_user_success(monkeypatch: Any) -> None:
     """
     stub_service = StubUserService()
     created_user = UserProfile(
-        session_id="test-sid", sequence_id=1, username="charlie", role=UserRole.VIEWER
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="charlie",
+        role=UserRole.VIEWER,
     )
     stub_service.create_user_result = created_user
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     request = CreateUserRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="charlie",
         password="pass-pass",
         email="c@example.com",
@@ -3369,6 +3576,8 @@ async def test_create_user_value_error(monkeypatch: Any) -> None:
     request = CreateUserRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="dup",
         password="pass-pass",
         email=None,
@@ -3399,6 +3608,8 @@ async def test_update_user_not_found(monkeypatch: Any) -> None:
     request = UpdateUserRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         email=None,
         role=UserRole.VIEWER,
         is_active=False,
@@ -3426,6 +3637,8 @@ async def test_update_user_success(monkeypatch: Any) -> None:
     updated_user = UserProfile(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="dora",
         role=UserRole.OPERATOR,
         is_active=True,
@@ -3435,6 +3648,8 @@ async def test_update_user_success(monkeypatch: Any) -> None:
     request = UpdateUserRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         email="dora@example.com",
         role=UserRole.OPERATOR,
         is_active=True,
@@ -3531,6 +3746,8 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
     pwd_request = ChangePasswordRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         current_password="old-pass",
         new_password="new-password",
     )
@@ -3558,6 +3775,8 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
     pwd_request = ChangePasswordRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         current_password="old-pass",
         new_password="new-password",
     )
@@ -3586,6 +3805,8 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
     pwd_request = ChangePasswordRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         current_password="old-pass",
         new_password="new-password",
     )
@@ -3613,6 +3834,8 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
     pwd_request = ChangePasswordRequest(
         session_id="test-sid",
         sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         current_password="irrelevant",
         new_password="new-password",
     )
@@ -3664,7 +3887,11 @@ async def test_admin_reset_password_handles_repository_error(
             request=_make_rest_request(),
             user_id="user-1",
             password_data=AdminResetPasswordRequest(
-                session_id="test-sid", sequence_id=1, new_password="super-secret"
+                session_id="test-sid",
+                sequence_id=1,
+                public_id="test-pid",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                new_password="super-secret",
             ),
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
@@ -3695,7 +3922,11 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
         request=_make_rest_request(),
         user_id="user-1",
         password_data=AdminResetPasswordRequest(
-            session_id="test-sid", sequence_id=1, new_password="super-secret"
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            new_password="super-secret",
         ),
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
@@ -3724,7 +3955,11 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
             request=_make_rest_request(),
             user_id="missing",
             password_data=AdminResetPasswordRequest(
-                session_id="test-sid", sequence_id=1, new_password="super-secret"
+                session_id="test-sid",
+                sequence_id=1,
+                public_id="test-pid",
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                new_password="super-secret",
             ),
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
@@ -3777,12 +4012,14 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "admin",
                 "password": "AdminSnapper2026!",
             },
         )
         assert response.status_code == 200
-        data = response.json()
+        data = response.json()["payload"]
         assert data["user"]["username"] == "admin"
         assert data["user"]["role"] == "admin"
         assert data["message"] == "Login successful"
@@ -3802,12 +4039,14 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "operator",
                 "password": "OpSnapper2026!",
             },
         )
         assert response.status_code == 200
-        data = response.json()
+        data = response.json()["payload"]
         assert data["user"]["username"] == "operator"
         assert data["user"]["role"] == "operator"
 
@@ -3823,12 +4062,14 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "viewer",
                 "password": "ViewSnapper2026!",
             },
         )
         assert response.status_code == 200
-        data = response.json()
+        data = response.json()["payload"]
         assert data["user"]["username"] == "viewer"
         assert data["user"]["role"] == "viewer"
 
@@ -3844,6 +4085,8 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "nonexistent",
                 "password": "AdminSnapper2026!",
             },
@@ -3863,6 +4106,8 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "admin",
                 "password": "wrongpassword",
             },
@@ -3918,6 +4163,8 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "admin",
                 "password": "AdminSnapper2026!",
             },
@@ -3933,7 +4180,7 @@ class TestAuthRoutesCoverage:
         try:
             response = client.post("/api/auth/refresh")
             assert response.status_code == 200
-            data = response.json()
+            data = response.json()["payload"]
             assert data["message"] == "session refreshed"
             assert "ws_token" in data
             assert "ws_token_exp" in data
@@ -3967,6 +4214,8 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "admin",
                 "password": "AdminSnapper2026!",
             },
@@ -3982,7 +4231,7 @@ class TestAuthRoutesCoverage:
         try:
             response = client.post("/api/auth/refresh")
             assert response.status_code == 200
-            ws_token_value = response.json()["ws_token"]
+            ws_token_value = response.json()["payload"]["ws_token"]
             ws_token_service = get_ws_token_service()
             ws_payload = ws_token_service.verify(
                 ws_token_value,
@@ -4011,6 +4260,8 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "admin",
                 "password": "AdminSnapper2026!",
             },
@@ -4061,6 +4312,8 @@ class TestAuthRoutesCoverage:
             json={
                 "session_id": "",
                 "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
                 "username": "admin",
                 "password": "AdminSnapper2026!",
             },
@@ -4447,6 +4700,8 @@ class TestUserManagementCoverage:
         create_req = CreateUserRequest(
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             username="testuser",
             password="password123",
             role=UserRole.VIEWER,
@@ -4464,6 +4719,8 @@ class TestUserManagementCoverage:
         user = UserProfile(
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             username="testuser",
             email="test@example.com",
             role=UserRole.ADMIN,
@@ -4558,6 +4815,8 @@ class TestUserManagementCoverage:
         login_req = LoginRequest(
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             username="testuser",
             password="password123",
             remember_me=True,
@@ -4573,12 +4832,20 @@ class TestUserManagementCoverage:
         When: Creating instances,
         Then: Fields populated correctly with correct types.
         """
-        auth_msg = WebSocketAuthMessage(session_id="test-sid", sequence_id=1, token="test_token")
+        auth_msg = WebSocketAuthMessage(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            token="test_token",
+        )
         assert auth_msg.type == "auth"
         assert auth_msg.token == "test_token"
         auth_resp = WebSocketAuthResponse(
             session_id="test-sid",
             sequence_id=1,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             success=True,
             user_id="user123",
             role=UserRole.ADMIN,
