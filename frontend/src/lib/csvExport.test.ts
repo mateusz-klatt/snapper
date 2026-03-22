@@ -15,8 +15,8 @@ describe('csvExport', () => {
     } as unknown as HTMLAnchorElement)
     mockCreateObjectURL = vi.fn().mockReturnValue('blob:mock-url')
     mockRevokeObjectURL = vi.fn()
-    globalThis.URL.createObjectURL = mockCreateObjectURL
-    globalThis.URL.revokeObjectURL = mockRevokeObjectURL
+    globalThis.URL.createObjectURL = mockCreateObjectURL as typeof URL.createObjectURL
+    globalThis.URL.revokeObjectURL = mockRevokeObjectURL as typeof URL.revokeObjectURL
   })
   it('creates CSV with headers and rows', () => {
     exportToCSV('test.csv', ['Name', 'Age'], [['Alice', '30']])

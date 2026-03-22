@@ -14,16 +14,16 @@ import type {
   AvailableProcessesResponse,
   ProcessRunsResponse,
   ProcessSchemaResponse,
-  ProcessCreateRequest,
+  ProcessCreateBody,
   ProcessCreateResponse,
   StrategyListResponse,
   SettingResponse,
-  SettingUpdate,
+  SettingUpdateBody,
   UserListResponse,
   UserResponse,
-  CreateUserRequest,
-  UpdateUserRequest,
-  AdminResetPasswordRequest,
+  CreateUserBody,
+  UpdateUserBody,
+  AdminResetPasswordBody,
 } from '../types/api'
 
 const queryKeys = {
@@ -350,7 +350,7 @@ export const useProcessSchema = (name: string, options?: { enabled?: boolean }) 
 export const useCreateProcessConfig = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<ProcessCreateResponse, Error, ProcessCreateRequest>({
+  return useMutation<ProcessCreateResponse, Error, ProcessCreateBody>({
     mutationFn: body => apiClient.createProcessConfig(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.configuredProcesses })
@@ -388,7 +388,7 @@ export const useSettingCategories = () => {
 export const useUpdateSetting = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<SettingResponse, Error, { key: string; data: SettingUpdate }>({
+  return useMutation<SettingResponse, Error, { key: string; data: SettingUpdateBody }>({
     mutationFn: ({ key, data }) => apiClient.updateSetting(key, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings'] })
@@ -400,7 +400,7 @@ export const useDeleteSetting = () => {
   const queryClient = useQueryClient()
 
   return useMutation<{ payload: string }, Error, string>({
-    mutationFn: key => apiClient.deleteSetting(key),
+    mutationFn: key => apiClient.removeSetting(key),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
@@ -421,7 +421,7 @@ export const useUsers = (includeInactive: boolean) => {
 export const useCreateUser = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<UserResponse, Error, CreateUserRequest>({
+  return useMutation<UserResponse, Error, CreateUserBody>({
     mutationFn: data => apiClient.createUser(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
@@ -432,7 +432,7 @@ export const useCreateUser = () => {
 export const useUpdateUser = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<UserResponse, Error, { userId: string; data: UpdateUserRequest }>({
+  return useMutation<UserResponse, Error, { userId: string; data: UpdateUserBody }>({
     mutationFn: ({ userId, data }) => apiClient.updateUser(userId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
@@ -454,11 +454,7 @@ export const useDeactivateUser = () => {
 export const useAdminResetPassword = () => {
   const queryClient = useQueryClient()
 
-  return useMutation<
-    { payload: string },
-    Error,
-    { userId: string; data: AdminResetPasswordRequest }
-  >({
+  return useMutation<{ payload: string }, Error, { userId: string; data: AdminResetPasswordBody }>({
     mutationFn: ({ userId, data }) => apiClient.adminResetPassword(userId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })

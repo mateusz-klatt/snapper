@@ -171,7 +171,7 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
-    "/api/auth/users/{user_id}": {
+    "/api/auth/users/{user_id}/update": {
         parameters: {
             query?: never;
             header?: never;
@@ -179,6 +179,7 @@ export type Paths = {
             cookie?: never;
         };
         get?: never;
+        put?: never;
         /**
          * Update User
          * @description Update an existing user's profile.
@@ -195,24 +196,40 @@ export type Paths = {
          *     Raises:
          *         HTTPException: If user not found.
          */
-        put: Operations["update_user_api_auth_users__user_id__put"];
-        post?: never;
+        post: Operations["update_user_api_auth_users__user_id__update_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/users/{user_id}/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
         /**
-         * Delete User
+         * Deactivate User
          * @description Deactivate a user account.
          *
          *     Args:
          *         request: FastAPI request (provides REST tracker for provenance).
          *         user_id: Target user ID to deactivate.
+         *         _body: Request envelope with provenance (payload is empty).
          *         current_user: Authenticated user with MANAGE_USERS permission.
          *
          *     Returns:
          *         Success message.
          *
          *     Raises:
-         *         HTTPException: If user not found or trying to delete self.
+         *         HTTPException: If user not found or trying to deactivate self.
          */
-        delete: Operations["delete_user_api_auth_users__user_id__delete"];
+        post: Operations["deactivate_user_api_auth_users__user_id__deactivate_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -340,7 +357,7 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
-    "/api/settings/{key}": {
+    "/api/settings/{key}/set": {
         parameters: {
             query?: never;
             header?: never;
@@ -348,9 +365,10 @@ export type Paths = {
             cookie?: never;
         };
         get?: never;
+        put?: never;
         /**
-         * Update Setting
-         * @description Update or create a setting by key.
+         * Set Setting
+         * @description Set a setting value by key (update or create).
          *
          *     Args:
          *         http_request: FastAPI request (provides REST tracker for provenance).
@@ -364,24 +382,40 @@ export type Paths = {
          *     Raises:
          *         HTTPException: If setting not found after update.
          */
-        put: Operations["update_setting_api_settings__key__put"];
-        post?: never;
+        post: Operations["set_setting_api_settings__key__set_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/{key}/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
         /**
-         * Delete Setting
-         * @description Delete a setting by key.
+         * Remove Setting
+         * @description Remove a setting by key (soft-delete via bitemporal close).
          *
          *     Args:
          *         request: FastAPI request (provides REST tracker for provenance).
-         *         key: The setting key to delete.
+         *         key: The setting key to remove.
+         *         _body: Request envelope with provenance (payload is empty).
          *         user: Authenticated user with CONFIGURE_SYSTEM permission.
          *
          *     Returns:
-         *         Success message confirming deletion.
+         *         Success message confirming removal.
          *
          *     Raises:
          *         HTTPException: If setting not found.
          */
-        delete: Operations["delete_setting_api_settings__key__delete"];
+        post: Operations["remove_setting_api_settings__key__remove_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -895,15 +929,25 @@ export type webhooks = Record<string, never>;
 export type Components = {
     schemas: {
         /**
-         * AdminResetPasswordRequest
-         * @description Admin password reset request schema.
+         * AdminResetPasswordBody
+         * @description Admin password reset request body.
          *
          *     Used by admins to reset another user's password
          *     without knowing the current password.
          *
          *     Attributes:
-         *         type: Payload item type discriminator.
          *         new_password: New password to set (min 8 chars).
+         */
+        AdminResetPasswordBody: {
+            /** New Password */
+            new_password: string;
+        };
+        /**
+         * AdminResetPasswordRequest
+         * @description Admin password reset request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
          */
         AdminResetPasswordRequest: {
             /**
@@ -923,8 +967,7 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /** New Password */
-            new_password: string;
+            payload: Components["schemas"]["AdminResetPasswordBody"];
         };
         /**
          * AvailableProcess
@@ -997,8 +1040,9 @@ export type Components = {
             /**
              * Tags
              * @description Categorization tags
+             * @default []
              */
-            tags?: string[];
+            tags: string[];
             /**
              * Parameters Schema
              * @description JSON Schema for parameters
@@ -1043,15 +1087,27 @@ export type Components = {
             count: number;
         };
         /**
-         * ChangePasswordRequest
-         * @description Change password request schema.
+         * ChangePasswordBody
+         * @description Change password request body.
          *
          *     Used by authenticated users to change their own password.
          *
          *     Attributes:
-         *         type: Payload item type discriminator.
          *         current_password: Current password for verification.
          *         new_password: New password (min 8 chars).
+         */
+        ChangePasswordBody: {
+            /** Current Password */
+            current_password: string;
+            /** New Password */
+            new_password: string;
+        };
+        /**
+         * ChangePasswordRequest
+         * @description Change password request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
          */
         ChangePasswordRequest: {
             /**
@@ -1071,10 +1127,7 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /** Current Password */
-            current_password: string;
-            /** New Password */
-            new_password: string;
+            payload: Components["schemas"]["ChangePasswordBody"];
         };
         /**
          * ConfiguredProcess
@@ -1153,13 +1206,15 @@ export type Components = {
             /**
              * Args
              * @description Constructor arguments
+             * @default []
              */
-            args?: unknown[];
+            args: unknown[];
             /**
              * Kwargs
              * @description Constructor kwargs
+             * @default {}
              */
-            kwargs?: {
+            kwargs: {
                 [key: string]: unknown;
             };
             /**
@@ -1182,8 +1237,9 @@ export type Components = {
             /**
              * Tags
              * @description Categorization tags
+             * @default []
              */
-            tags?: string[];
+            tags: string[];
             /**
              * Parameters Schema
              * @description JSON Schema for parameters
@@ -1281,16 +1337,36 @@ export type Components = {
             active_clients: number;
         };
         /**
-         * CreateUserRequest
-         * @description Create user request schema.
+         * CreateUserBody
+         * @description Create user request body.
          *
          *     Attributes:
-         *         type: Payload item type discriminator.
          *         username: Unique username (3-64 chars).
          *         email: Optional email address.
          *         password: Password (min 8 chars).
          *         role: User role to assign.
          *         is_active: Whether account is active.
+         */
+        CreateUserBody: {
+            /** Username */
+            username: string;
+            /** Email */
+            email?: string | null;
+            /** Password */
+            password: string;
+            role: Components["schemas"]["UserRole"];
+            /**
+             * Is Active
+             * @default true
+             */
+            is_active: boolean;
+        };
+        /**
+         * CreateUserRequest
+         * @description Create user request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
          */
         CreateUserRequest: {
             /**
@@ -1310,18 +1386,45 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /** Username */
-            username: string;
-            /** Email */
-            email?: string | null;
-            /** Password */
-            password: string;
-            role: Components["schemas"]["UserRole"];
+            payload: Components["schemas"]["CreateUserBody"];
+        };
+        /**
+         * DeactivateUserBody
+         * @description Deactivate user command body (empty).
+         *
+         *     Command-style endpoint: no domain fields needed, provenance
+         *     is carried on the PayloadRequest envelope.
+         *
+         *     Attributes:
+         *         (none — empty body signals intent via URL path)
+         */
+        DeactivateUserBody: Record<string, never>;
+        /**
+         * DeactivateUserRequest
+         * @description Deactivate user request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        DeactivateUserRequest: {
             /**
-             * Is Active
-             * @default true
+             * Type
+             * @default deactivate_user_request
+             * @constant
              */
-            is_active: boolean;
+            type: "deactivate_user_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["DeactivateUserBody"];
         };
         /**
          * ExchangeListResponse
@@ -1436,7 +1539,7 @@ export type Components = {
              * Executed At
              * Format: date-time
              */
-            executed_at?: string;
+            executed_at: string;
         };
         /**
          * ExecutionListResponse
@@ -1489,8 +1592,9 @@ export type Components = {
             /**
              * Rest Clients
              * @description Per-session REST client gap stats
+             * @default {}
              */
-            rest_clients?: {
+            rest_clients: {
                 [key: string]: Components["schemas"]["GapStats"];
             };
         };
@@ -1672,6 +1776,26 @@ export type Components = {
             count: number;
         };
         /**
+         * LoginBody
+         * @description Login request body.
+         *
+         *     Attributes:
+         *         username: User's login name.
+         *         password: User's password.
+         *         remember_me: If True, extends refresh token lifetime.
+         */
+        LoginBody: {
+            /** Username */
+            username: string;
+            /** Password */
+            password: string;
+            /**
+             * Remember Me
+             * @default false
+             */
+            remember_me: boolean;
+        };
+        /**
          * LoginData
          * @description Login payload data.
          *
@@ -1707,13 +1831,10 @@ export type Components = {
         };
         /**
          * LoginRequest
-         * @description Login request schema.
+         * @description Login request envelope.
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         username: User's login name.
-         *         password: User's password.
-         *         remember_me: If True, extends refresh token lifetime.
          */
         LoginRequest: {
             /**
@@ -1733,15 +1854,7 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /** Username */
-            username: string;
-            /** Password */
-            password: string;
-            /**
-             * Remember Me
-             * @default false
-             */
-            remember_me: boolean;
+            payload: Components["schemas"]["LoginBody"];
         };
         /**
          * LoginResponse
@@ -1888,7 +2001,7 @@ export type Components = {
              * Created At
              * Format: date-time
              */
-            created_at?: string;
+            created_at: string;
             /** Updated At */
             updated_at?: string | null;
         };
@@ -2039,49 +2152,10 @@ export type Components = {
             total: number;
         };
         /**
-         * ProcessCreateData
-         * @description Process creation data schema.
+         * ProcessCreateBody
+         * @description Process creation request body.
          *
          *     Attributes:
-         *         type: Payload item type discriminator.
-         *         status: Operation status ('created').
-         *         process: Created process info.
-         */
-        ProcessCreateData: {
-            /**
-             * Type
-             * @default process_create
-             * @constant
-             */
-            type: "process_create";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            /**
-             * Status
-             * @description Operation status
-             * @constant
-             */
-            status: "created";
-            /** @description Created process info */
-            process: Components["schemas"]["ProcessCreatedInfo"];
-        };
-        /**
-         * ProcessCreateRequest
-         * @description Process creation request schema.
-         *
-         *     Used to create a new process configuration from a template.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
          *         name: Unique process name (lowercase alphanumeric with underscores).
          *         template: Registered process identifier used as template.
          *         enabled: Whether process should autostart on boot.
@@ -2090,24 +2164,7 @@ export type Components = {
          *         kwargs: Constructor keyword arguments.
          *         note: Optional note stored alongside configuration.
          */
-        ProcessCreateRequest: {
-            /**
-             * Type
-             * @default process_create_request
-             * @constant
-             */
-            type: "process_create_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
+        ProcessCreateBody: {
             /**
              * Name
              * @description Unique process name
@@ -2145,6 +2202,69 @@ export type Components = {
              * @description Optional note stored alongside configuration
              */
             note?: string | null;
+        };
+        /**
+         * ProcessCreateData
+         * @description Process creation data schema.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         status: Operation status ('created').
+         *         process: Created process info.
+         */
+        ProcessCreateData: {
+            /**
+             * Type
+             * @default process_create
+             * @constant
+             */
+            type: "process_create";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /**
+             * Status
+             * @description Operation status
+             * @constant
+             */
+            status: "created";
+            /** @description Created process info */
+            process: Components["schemas"]["ProcessCreatedInfo"];
+        };
+        /**
+         * ProcessCreateRequest
+         * @description Process creation request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        ProcessCreateRequest: {
+            /**
+             * Type
+             * @default process_create_request
+             * @constant
+             */
+            type: "process_create_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["ProcessCreateBody"];
         };
         /**
          * ProcessCreateResponse
@@ -2282,8 +2402,9 @@ export type Components = {
             /**
              * Tags
              * @description Process tags
+             * @default []
              */
-            tags?: string[];
+            tags: string[];
             /**
              * Started At
              * @description Start time in ISO format
@@ -2400,13 +2521,15 @@ export type Components = {
             /**
              * Default Args
              * @description Default arguments
+             * @default []
              */
-            default_args?: unknown[];
+            default_args: unknown[];
             /**
              * Default Kwargs
              * @description Default kwargs
+             * @default {}
              */
-            default_kwargs?: {
+            default_kwargs: {
                 [key: string]: unknown;
             };
             /**
@@ -2442,6 +2565,50 @@ export type Components = {
             /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessSchemaData"];
+        };
+        /**
+         * ProcessStartBody
+         * @description Process start request body.
+         *
+         *     Attributes:
+         *         mode: Execution mode (thread/process) override.
+         *         args: Constructor positional arguments override.
+         *         kwargs: Constructor keyword arguments override.
+         *         autostart: Toggle autostart flag (None keeps stored value).
+         */
+        ProcessStartBody: {
+            /**
+             * Mode
+             * @description Execution mode (thread/process) - for ProcessLauncherService, not constructor
+             * @example thread
+             * @example process
+             */
+            mode?: ("thread" | "process") | null;
+            /**
+             * Args
+             * @description Constructor positional arguments override
+             * @example [
+             *       "arg1",
+             *       2,
+             *       3
+             *     ]
+             */
+            args?: unknown[] | null;
+            /**
+             * Kwargs
+             * @description Constructor keyword arguments override
+             * @example {
+             *       "endpoint": "tcp://0.0.0.0:5555"
+             *     }
+             */
+            kwargs?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Autostart
+             * @description Toggle autostart flag; None keeps stored value
+             */
+            autostart?: boolean | null;
         };
         /**
          * ProcessStartData
@@ -2496,16 +2663,10 @@ export type Components = {
         };
         /**
          * ProcessStartRequest
-         * @description Process start request schema.
-         *
-         *     Used to start a configured process with optional parameter overrides.
+         * @description Process start request envelope.
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         mode: Execution mode (thread/process) override.
-         *         args: Constructor positional arguments override.
-         *         kwargs: Constructor keyword arguments override.
-         *         autostart: Toggle autostart flag (None keeps stored value).
          */
         ProcessStartRequest: {
             /**
@@ -2525,38 +2686,7 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /**
-             * Mode
-             * @description Execution mode (thread/process) - for ProcessLauncherService, not constructor
-             * @example thread
-             * @example process
-             */
-            mode?: ("thread" | "process") | null;
-            /**
-             * Args
-             * @description Constructor positional arguments override
-             * @example [
-             *       "arg1",
-             *       2,
-             *       3
-             *     ]
-             */
-            args?: unknown[] | null;
-            /**
-             * Kwargs
-             * @description Constructor keyword arguments override
-             * @example {
-             *       "endpoint": "tcp://0.0.0.0:5555"
-             *     }
-             */
-            kwargs?: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Autostart
-             * @description Toggle autostart flag; None keeps stored value
-             */
-            autostart?: boolean | null;
+            payload: Components["schemas"]["ProcessStartBody"];
         };
         /**
          * ProcessStartResponse
@@ -2841,6 +2971,44 @@ export type Components = {
             payload: Components["schemas"]["RefreshData"];
         };
         /**
+         * RemoveSettingBody
+         * @description Remove setting command body (empty).
+         *
+         *     Command-style endpoint: no domain fields needed, provenance
+         *     is carried on the PayloadRequest envelope.
+         *
+         *     Attributes:
+         *         (none — empty body signals intent via URL path)
+         */
+        RemoveSettingBody: Record<string, never>;
+        /**
+         * RemoveSettingRequest
+         * @description Remove setting request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        RemoveSettingRequest: {
+            /**
+             * Type
+             * @default remove_setting_request
+             * @constant
+             */
+            type: "remove_setting_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["RemoveSettingBody"];
+        };
+        /**
          * SettingCategoriesResponse
          * @description Setting categories list response.
          *
@@ -2992,15 +3160,10 @@ export type Components = {
         };
         /**
          * SettingUpdate
-         * @description Setting update request schema.
-         *
-         *     Used when updating an existing setting.
+         * @description Setting update request envelope.
          *
          *     Attributes:
          *         type: Payload item type discriminator.
-         *         value: New setting value as string.
-         *         category: Setting category (defaults to 'system').
-         *         description: Optional description.
          */
         SettingUpdate: {
             /**
@@ -3020,6 +3183,18 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
+            payload: Components["schemas"]["SettingUpdateBody"];
+        };
+        /**
+         * SettingUpdateBody
+         * @description Setting update request body.
+         *
+         *     Attributes:
+         *         value: New setting value as string.
+         *         category: Setting category (defaults to 'system').
+         *         description: Optional description.
+         */
+        SettingUpdateBody: {
             /**
              * Value
              * @description Setting value as string
@@ -3096,7 +3271,7 @@ export type Components = {
              * Fired At
              * Format: date-time
              */
-            fired_at?: string;
+            fired_at: string;
         };
         /**
          * SignalListResponse
@@ -3255,8 +3430,9 @@ export type Components = {
             /**
              * Details
              * @description Full raw status
+             * @default {}
              */
-            details?: {
+            details: {
                 [key: string]: unknown;
             };
             /**
@@ -3357,8 +3533,9 @@ export type Components = {
             /**
              * Strategies
              * @description List of active strategies from strategy_runner
+             * @default []
              */
-            strategies?: Components["schemas"]["StrategyStatusPayload"][];
+            strategies: Components["schemas"]["StrategyStatusPayload"][];
         };
         /**
          * SystemStatusResponse
@@ -3471,16 +3648,29 @@ export type Components = {
             pattern?: string | null;
         };
         /**
-         * UpdateUserRequest
-         * @description Update user request schema.
+         * UpdateUserBody
+         * @description Update user request body.
          *
          *     All fields are optional - only provided fields are updated.
          *
          *     Attributes:
-         *         type: Payload item type discriminator.
          *         email: New email address.
          *         role: New role assignment.
          *         is_active: New active status.
+         */
+        UpdateUserBody: {
+            /** Email */
+            email?: string | null;
+            role?: Components["schemas"]["UserRole"] | null;
+            /** Is Active */
+            is_active?: boolean | null;
+        };
+        /**
+         * UpdateUserRequest
+         * @description Update user request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
          */
         UpdateUserRequest: {
             /**
@@ -3500,11 +3690,7 @@ export type Components = {
             timestamp: string;
             /** Session Id */
             session_id: string;
-            /** Email */
-            email?: string | null;
-            role?: Components["schemas"]["UserRole"] | null;
-            /** Is Active */
-            is_active?: boolean | null;
+            payload: Components["schemas"]["UpdateUserBody"];
         };
         /**
          * UserListResponse
@@ -3590,7 +3776,7 @@ export type Components = {
              * Created At
              * Format: date-time
              */
-            created_at?: string;
+            created_at: string;
         };
         /**
          * UserResponse
@@ -3898,8 +4084,9 @@ export type Components = {
             /**
              * Errors
              * @description Error messages if not healthy
+             * @default []
              */
-            errors?: string[];
+            errors: string[];
         };
         /**
          * ZmqHealthResponse
@@ -4094,7 +4281,7 @@ export interface Operations {
             };
         };
     };
-    update_user_api_auth_users__user_id__put: {
+    update_user_api_auth_users__user_id__update_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4129,7 +4316,7 @@ export interface Operations {
             };
         };
     };
-    delete_user_api_auth_users__user_id__delete: {
+    deactivate_user_api_auth_users__user_id__deactivate_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4138,7 +4325,11 @@ export interface Operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["DeactivateUserRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -4281,7 +4472,7 @@ export interface Operations {
             };
         };
     };
-    update_setting_api_settings__key__put: {
+    set_setting_api_settings__key__set_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4323,7 +4514,7 @@ export interface Operations {
             };
         };
     };
-    delete_setting_api_settings__key__delete: {
+    remove_setting_api_settings__key__remove_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4332,7 +4523,11 @@ export interface Operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["RemoveSettingRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

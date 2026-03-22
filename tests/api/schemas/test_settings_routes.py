@@ -9,14 +9,17 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
+from snapper.api.schemas.settings import RemoveSettingBody
+from snapper.api.schemas.settings import RemoveSettingRequest
 from snapper.api.schemas.settings import SettingRead
 from snapper.api.schemas.settings import SettingUpdate
+from snapper.api.schemas.settings import SettingUpdateBody
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.config.settings_routes import delete_setting
 from snapper.config.settings_routes import get_all_settings
 from snapper.config.settings_routes import get_setting_categories
-from snapper.config.settings_routes import update_setting
+from snapper.config.settings_routes import remove_setting
+from snapper.config.settings_routes import set_setting
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
@@ -150,17 +153,19 @@ class TestSettingsRoutes:
         Then: All fields are validated and accessible.
         """
         request = SettingUpdate(
-            value="new_value",
-            category="new_category",
-            description="New description",
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=SettingUpdateBody(
+                value="new_value",
+                category="new_category",
+                description="New description",
+            ),
         )
-        assert request.value == "new_value"
-        assert request.category == "new_category"
-        assert request.description == "New description"
+        assert request.payload.value == "new_value"
+        assert request.payload.category == "new_category"
+        assert request.payload.description == "New description"
 
     @pytest.mark.asyncio
     async def test_get_all_settings_no_filter(self) -> None:
@@ -264,11 +269,11 @@ class TestSettingsRoutes:
         assert result.payload == ["auth", "system"]
 
     @pytest.mark.asyncio
-    async def test_update_setting_found(self) -> None:
-        """Verify update_setting updates existing setting.
+    async def test_set_setting_found(self) -> None:
+        """Verify set_setting updates existing setting.
 
         Given: An existing setting in database,
-        When: update_setting is called with new values,
+        When: set_setting is called with new values,
         Then: Setting is updated and returned with new values.
         """
         mock_user = self._make_user(UserRole.ADMIN)
@@ -288,13 +293,15 @@ class TestSettingsRoutes:
         mock_session.execute.return_value = MockResult([mock_setting])
         mock_repository.session.return_value = mock_session
         request = SettingUpdate(
-            value="updated_value",
-            category="updated_category",
-            description="Updated description",
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=SettingUpdateBody(
+                value="updated_value",
+                category="updated_category",
+                description="Updated description",
+            ),
         )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
@@ -304,7 +311,7 @@ class TestSettingsRoutes:
             ),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
-            result = await update_setting(
+            result = await set_setting(
                 http_request=self._make_rest_request(),
                 key="existing_key",
                 body=request,
@@ -322,11 +329,11 @@ class TestSettingsRoutes:
         assert result.payload.value == "updated_value"
 
     @pytest.mark.asyncio
-    async def test_update_setting_not_found(self) -> None:
-        """Verify update_setting raises 404 for non-existent setting.
+    async def test_set_setting_not_found(self) -> None:
+        """Verify set_setting raises 404 for non-existent setting.
 
         Given: No setting with the specified key exists,
-        When: update_setting is called with that key,
+        When: set_setting is called with that key,
         Then: HTTPException with 404 status is raised.
         """
         mock_user = self._make_user(UserRole.ADMIN)
@@ -339,12 +346,14 @@ class TestSettingsRoutes:
         mock_session.execute.return_value = MockResult([])
         mock_repository.session.return_value = mock_session
         request = SettingUpdate(
-            value="updated_value",
-            description=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=SettingUpdateBody(
+                value="updated_value",
+                description=None,
+            ),
         )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
@@ -355,7 +364,7 @@ class TestSettingsRoutes:
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
             pytest.raises(HTTPException) as exc_info,
         ):
-            await update_setting(
+            await set_setting(
                 http_request=self._make_rest_request(),
                 key="nonexistent_key",
                 body=request,
@@ -365,11 +374,11 @@ class TestSettingsRoutes:
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_setting_found(self) -> None:
-        """Verify delete_setting temporally closes existing setting.
+    async def test_remove_setting_found(self) -> None:
+        """Verify remove_setting temporally closes existing setting.
 
         Given: An existing setting in database,
-        When: delete_setting is called with that key,
+        When: remove_setting is called with that key,
         Then: Setting is closed via update (known_to=now) and success message is returned.
         """
         mock_user = self._make_user(UserRole.ADMIN)
@@ -382,25 +391,32 @@ class TestSettingsRoutes:
         mock_setting.id = 42
         mock_session.execute.return_value = MockResult([mock_setting])
         mock_repository.session.return_value = mock_session
+        body = RemoveSettingRequest(
+            session_id="test-sid",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=RemoveSettingBody(),
+        )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
         ):
             mock_request = MagicMock()
             mock_request.app.state.rest_tracker = SequenceTracker()
-            result = await delete_setting(
-                request=mock_request, key="delete_key", user=mock_user, _csrf=None
+            result = await remove_setting(
+                request=mock_request, key="delete_key", _body=body, user=mock_user, _csrf=None
             )
         assert mock_session.execute.await_count == 2
         mock_session.commit.assert_called_once()
         assert result.payload == "Setting 'delete_key' deleted successfully"
 
     @pytest.mark.asyncio
-    async def test_delete_setting_not_found(self) -> None:
-        """Verify delete_setting raises 404 for non-existent setting.
+    async def test_remove_setting_not_found(self) -> None:
+        """Verify remove_setting raises 404 for non-existent setting.
 
         Given: No setting with the specified key exists,
-        When: delete_setting is called with that key,
+        When: remove_setting is called with that key,
         Then: HTTPException with 404 status is raised.
         """
         mock_user = self._make_user(UserRole.ADMIN)
@@ -410,6 +426,13 @@ class TestSettingsRoutes:
         mock_session = MockSession()
         mock_session.execute.return_value = MockResult([])
         mock_repository.session.return_value = mock_session
+        body = RemoveSettingRequest(
+            session_id="test-sid",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=RemoveSettingBody(),
+        )
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
@@ -417,7 +440,7 @@ class TestSettingsRoutes:
         ):
             mock_request = MagicMock()
             mock_request.app.state.rest_tracker = SequenceTracker()
-            await delete_setting(
-                request=mock_request, key="nonexistent_key", user=mock_user, _csrf=None
+            await remove_setting(
+                request=mock_request, key="nonexistent_key", _body=body, user=mock_user, _csrf=None
             )
         assert exc_info.value.status_code == 404

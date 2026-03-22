@@ -151,25 +151,40 @@ GET /api/settings?category=exchange
 GET /api/settings/categories
 ```
 
-### Update Setting
+### Set Setting
 
 ```http
-PUT /api/settings/{key}
+POST /api/settings/{key}/set
 X-CSRF-Token: <csrf_token>
 Content-Type: application/json
 
 {
-    "value": "new_value",
-    "category": "system",
-    "description": "optional description"
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "value": "new_value",
+        "category": "system",
+        "description": "optional description"
+    }
 }
 ```
 
-### Delete Setting
+### Remove Setting
 
 ```http
-DELETE /api/settings/{key}
+POST /api/settings/{key}/remove
 X-CSRF-Token: <csrf_token>
+Content-Type: application/json
+
+{
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 2,
+    "timestamp": "2026-01-18T12:00:01Z",
+    "payload": {}
+}
 ```
 
 ## Environment Configuration

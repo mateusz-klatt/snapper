@@ -169,13 +169,21 @@ enum ZmqHealthDataStatus: String, Codable, Sendable {
     case error
 }
 
+struct AdminResetPasswordBody: Codable, Sendable {
+    let newPassword: String
+
+    enum CodingKeys: String, CodingKey {
+        case newPassword = "new_password"
+    }
+}
+
 struct AdminResetPasswordRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    let newPassword: String
+    let payload: AdminResetPasswordBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -183,7 +191,7 @@ struct AdminResetPasswordRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case newPassword = "new_password"
+        case payload
     }
 }
 
@@ -248,14 +256,23 @@ struct AvailableProcessesResponse: Codable, Sendable {
     }
 }
 
+struct ChangePasswordBody: Codable, Sendable {
+    let currentPassword: String
+    let newPassword: String
+
+    enum CodingKeys: String, CodingKey {
+        case currentPassword = "current_password"
+        case newPassword = "new_password"
+    }
+}
+
 struct ChangePasswordRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    let currentPassword: String
-    let newPassword: String
+    let payload: ChangePasswordBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -263,8 +280,7 @@ struct ChangePasswordRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case currentPassword = "current_password"
-        case newPassword = "new_password"
+        case payload
     }
 }
 
@@ -371,12 +387,7 @@ struct ConnectionStats: Codable, Sendable {
     }
 }
 
-struct CreateUserRequest: Codable, Sendable {
-    let type: String?
-    let sequenceId: Int
-    let publicId: String
-    let timestamp: Date
-    let sessionId: String
+struct CreateUserBody: Codable, Sendable {
     let username: String
     let email: String?
     let password: String
@@ -384,16 +395,50 @@ struct CreateUserRequest: Codable, Sendable {
     let isActive: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case sequenceId = "sequence_id"
-        case publicId = "public_id"
-        case timestamp
-        case sessionId = "session_id"
         case username
         case email
         case password
         case role
         case isActive = "is_active"
+    }
+}
+
+struct CreateUserRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: CreateUserBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct DeactivateUserBody: Codable, Sendable {
+}
+
+struct DeactivateUserRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DeactivateUserBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
@@ -435,7 +480,7 @@ struct ExecutionData: Codable, Sendable {
     let fee: Double
     let feeAsset: String
     let status: String
-    let executedAt: Date?
+    let executedAt: Date
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -591,6 +636,18 @@ struct InstrumentListResponse: Codable, Sendable {
     }
 }
 
+struct LoginBody: Codable, Sendable {
+    let username: String
+    let password: String
+    let rememberMe: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case username
+        case password
+        case rememberMe = "remember_me"
+    }
+}
+
 struct LoginData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -619,9 +676,7 @@ struct LoginRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    let username: String
-    let password: String
-    let rememberMe: Bool?
+    let payload: LoginBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -629,9 +684,7 @@ struct LoginRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case username
-        case password
-        case rememberMe = "remember_me"
+        case payload
     }
 }
 
@@ -691,7 +744,7 @@ struct OrderData: Codable, Sendable {
     let reason: String?
     let timeInForce: String?
     let error: String?
-    let createdAt: Date?
+    let createdAt: Date
     let updatedAt: Date?
 
     enum CodingKeys: String, CodingKey {
@@ -796,6 +849,23 @@ struct ProcessCategoryCount: Codable, Sendable {
     let total: Int
 }
 
+struct ProcessCreateBody: Codable, Sendable {
+    /// Unique process name
+    let name: String
+    /// Registered process identifier used as template
+    let template: String
+    /// Whether process should autostart on boot
+    let enabled: Bool?
+    /// Execution mode override (thread/process)
+    let mode: String?
+    /// Constructor positional arguments
+    let args: [AnyCodable]?
+    /// Constructor keyword arguments
+    let kwargs: [String: AnyCodable]?
+    /// Optional note stored alongside configuration
+    let note: String?
+}
+
 struct ProcessCreateData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -824,20 +894,7 @@ struct ProcessCreateRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Unique process name
-    let name: String
-    /// Registered process identifier used as template
-    let template: String
-    /// Whether process should autostart on boot
-    let enabled: Bool?
-    /// Execution mode override (thread/process)
-    let mode: String?
-    /// Constructor positional arguments
-    let args: [AnyCodable]?
-    /// Constructor keyword arguments
-    let kwargs: [String: AnyCodable]?
-    /// Optional note stored alongside configuration
-    let note: String?
+    let payload: ProcessCreateBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -845,13 +902,7 @@ struct ProcessCreateRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case name
-        case template
-        case enabled
-        case mode
-        case args
-        case kwargs
-        case note
+        case payload
     }
 }
 
@@ -1009,6 +1060,17 @@ struct ProcessSchemaResponse: Codable, Sendable {
     }
 }
 
+struct ProcessStartBody: Codable, Sendable {
+    /// Execution mode (thread/process) - for ProcessLauncherService, not constructor
+    let mode: String?
+    /// Constructor positional arguments override
+    let args: [AnyCodable]?
+    /// Constructor keyword arguments override
+    let kwargs: [String: AnyCodable]?
+    /// Toggle autostart flag; None keeps stored value
+    let autostart: Bool?
+}
+
 struct ProcessStartData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1043,14 +1105,7 @@ struct ProcessStartRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Execution mode (thread/process) - for ProcessLauncherService, not constructor
-    let mode: String?
-    /// Constructor positional arguments override
-    let args: [AnyCodable]?
-    /// Constructor keyword arguments override
-    let kwargs: [String: AnyCodable]?
-    /// Toggle autostart flag; None keeps stored value
-    let autostart: Bool?
+    let payload: ProcessStartBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1058,10 +1113,7 @@ struct ProcessStartRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case mode
-        case args
-        case kwargs
-        case autostart
+        case payload
     }
 }
 
@@ -1240,6 +1292,27 @@ struct RefreshResponse: Codable, Sendable {
     }
 }
 
+struct RemoveSettingBody: Codable, Sendable {
+}
+
+struct RemoveSettingRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: RemoveSettingBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct SettingCategoriesResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1334,12 +1407,7 @@ struct SettingUpdate: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Setting value as string
-    let value: String
-    /// Setting category
-    let category: String?
-    /// Setting description
-    let description: String?
+    let payload: SettingUpdateBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1347,10 +1415,17 @@ struct SettingUpdate: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case value
-        case category
-        case description
+        case payload
     }
+}
+
+struct SettingUpdateBody: Codable, Sendable {
+    /// Setting value as string
+    let value: String
+    /// Setting category
+    let category: String?
+    /// Setting description
+    let description: String?
 }
 
 struct SignalData: Codable, Sendable {
@@ -1366,7 +1441,7 @@ struct SignalData: Codable, Sendable {
     let reason: String
     let price: Double?
     let strategyName: String?
-    let firedAt: Date?
+    let firedAt: Date
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1583,15 +1658,25 @@ struct TopicMetricSnapshot: Codable, Sendable {
     }
 }
 
+struct UpdateUserBody: Codable, Sendable {
+    let email: String?
+    let role: UserRole?
+    let isActive: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case email
+        case role
+        case isActive = "is_active"
+    }
+}
+
 struct UpdateUserRequest: Codable, Sendable {
     let type: String?
     let sequenceId: Int
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    let email: String?
-    let role: UserRole?
-    let isActive: Bool?
+    let payload: UpdateUserBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1599,9 +1684,7 @@ struct UpdateUserRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
-        case email
-        case role
-        case isActive = "is_active"
+        case payload
     }
 }
 
@@ -1636,7 +1719,7 @@ struct UserProfile: Codable, Sendable {
     let email: String?
     let role: UserRole
     let isActive: Bool?
-    let createdAt: Date?
+    let createdAt: Date
 
     enum CodingKeys: String, CodingKey {
         case type

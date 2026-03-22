@@ -582,7 +582,7 @@ Two destination tables provide always-available observability for non-domain tra
     from inbound messages via `_extract_client_provenance()` and stored as
     `client_session_id` and `client_public_id` on the control row.
   - **REST middleware** — `ClientProvenanceMiddleware._record_control()` records
-    every mutation (POST/PUT/DELETE) with `transport="rest"`, redacted payload,
+    every mutation (POST) with `transport="rest"`, redacted payload,
     outcome (`ok`/`error`/`exception`), and server-side provenance.
   - **ZMQ bridge** — `_record_bridge_control()` records subscribe errors and
     client disconnects with `transport="zmq"`.

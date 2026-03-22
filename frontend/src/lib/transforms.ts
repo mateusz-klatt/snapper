@@ -19,6 +19,14 @@ import type {
   TradeSide,
 } from '../types/entities'
 
+function requireTimestamp(value: unknown, context: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${context} missing required field: timestamp`)
+  }
+
+  return value
+}
+
 function normalizeSide(side: string): TradeSide {
   const normalized = side.toLowerCase()
 
@@ -30,9 +38,13 @@ function normalizeSide(side: string): TradeSide {
 }
 
 export function orderFromAPI(api: OrderData): Order {
+  const ts = requireTimestamp(api.timestamp, 'OrderData')
+
   return {
+    sequenceId: api.sequence_id,
     publicId: api.public_id,
-    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
+    timestamp: new Date(ts),
+    sessionId: api.session_id,
     clientOrderId: api.client_order_id,
     exchangeOrderId: api.exchange_order_id ?? null,
     instrument: api.instrument,
@@ -53,13 +65,17 @@ export function orderFromAPI(api: OrderData): Order {
 }
 
 export function orderFromWS(ws: OrderData): Order {
+  const ts = requireTimestamp(ws.timestamp, 'OrderData')
+
   if (!ws.created_at) {
     throw new Error('OrderData missing required field: created_at')
   }
 
   return {
+    sequenceId: ws.sequence_id,
     publicId: ws.public_id,
-    timestamp: ws.timestamp ? new Date(ws.timestamp) : undefined,
+    timestamp: new Date(ts),
+    sessionId: ws.session_id,
     clientOrderId: ws.client_order_id,
     exchangeOrderId: ws.exchange_order_id ?? null,
     instrument: ws.instrument,
@@ -95,9 +111,13 @@ function normalizeOrderType(type: string): OrderType {
 }
 
 export function executionFromAPI(api: ExecutionData): Execution {
+  const ts = requireTimestamp(api.timestamp, 'ExecutionData')
+
   return {
+    sequenceId: api.sequence_id,
     publicId: api.public_id,
-    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
+    timestamp: new Date(ts),
+    sessionId: api.session_id,
     clientOrderId: api.client_order_id,
     tradeId: api.trade_id ?? null,
     exchangeOrderId: api.exchange_order_id ?? null,
@@ -114,13 +134,17 @@ export function executionFromAPI(api: ExecutionData): Execution {
 }
 
 export function executionFromWS(ws: ExecutionData): Execution {
+  const ts = requireTimestamp(ws.timestamp, 'ExecutionData')
+
   if (!ws.executed_at) {
     throw new Error('ExecutionData missing required field: executed_at')
   }
 
   return {
+    sequenceId: ws.sequence_id,
     publicId: ws.public_id,
-    timestamp: ws.timestamp ? new Date(ws.timestamp) : undefined,
+    timestamp: new Date(ts),
+    sessionId: ws.session_id,
     clientOrderId: ws.client_order_id,
     tradeId: ws.trade_id ?? null,
     exchangeOrderId: ws.exchange_order_id ?? null,
@@ -137,9 +161,13 @@ export function executionFromWS(ws: ExecutionData): Execution {
 }
 
 export function signalFromAPI(api: SignalData): Signal {
+  const ts = requireTimestamp(api.timestamp, 'SignalData')
+
   return {
+    sequenceId: api.sequence_id,
     publicId: api.public_id,
-    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
+    timestamp: new Date(ts),
+    sessionId: api.session_id,
     exchange: api.exchange,
     instrument: api.instrument,
     side: normalizeSide(api.side),
@@ -147,21 +175,19 @@ export function signalFromAPI(api: SignalData): Signal {
     reason: api.reason,
     strategyName: api.strategy_name ?? null,
     price: api.price ?? null,
-    firedAt: api.fired_at ? new Date(api.fired_at) : new Date(),
+    firedAt: new Date(api.fired_at ?? api.timestamp),
   }
 }
 
 export function signalFromWS(ws: SignalData): Signal {
-  if (!ws.fired_at && !ws.timestamp) {
-    throw new Error('SignalData missing required field: timestamp')
-  }
-
-  const firedAtSource = ws.fired_at ?? ws.timestamp
-  const firedAt = new Date(firedAtSource as string)
-  const timestamp = ws.timestamp ? new Date(ws.timestamp) : undefined
+  const ts = requireTimestamp(ws.timestamp, 'SignalData')
+  const firedAtSource = ws.fired_at ?? ts
 
   return {
+    sequenceId: ws.sequence_id,
     publicId: ws.public_id,
+    timestamp: new Date(ts),
+    sessionId: ws.session_id,
     exchange: ws.exchange,
     instrument: ws.instrument,
     side: ws.side,
@@ -169,15 +195,18 @@ export function signalFromWS(ws: SignalData): Signal {
     reason: ws.reason,
     strategyName: ws.strategy_name ?? null,
     price: ws.price ?? null,
-    firedAt,
-    timestamp,
+    firedAt: new Date(firedAtSource),
   }
 }
 
 export function positionFromAPI(api: PositionData): Position {
+  const ts = requireTimestamp(api.timestamp, 'PositionData')
+
   return {
+    sequenceId: api.sequence_id,
     publicId: api.public_id,
-    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
+    timestamp: new Date(ts),
+    sessionId: api.session_id,
     instrument: api.instrument,
     exchange: api.exchange,
     quantity: api.quantity,
@@ -188,9 +217,13 @@ export function positionFromAPI(api: PositionData): Position {
 }
 
 export function candleFromAPI(api: CandleData): Candle {
+  const ts = requireTimestamp(api.timestamp, 'CandleData')
+
   return {
+    sequenceId: api.sequence_id,
     publicId: api.public_id,
-    timestamp: api.timestamp ? new Date(api.timestamp) : undefined,
+    timestamp: new Date(ts),
+    sessionId: api.session_id,
     instrument: api.instrument,
     exchange: api.exchange,
     timeframe: api.timeframe,
@@ -206,6 +239,8 @@ export function candleFromAPI(api: CandleData): Candle {
 }
 
 export function candleFromWS(ws: CandleData): Candle {
+  const ts = requireTimestamp(ws.timestamp, 'CandleData')
+
   if (ws.timeframe === null || ws.timeframe === undefined) {
     throw new Error('CandleData missing required field: timeframe')
   }
@@ -227,7 +262,10 @@ export function candleFromWS(ws: CandleData): Candle {
   }
 
   return {
+    sequenceId: ws.sequence_id,
     publicId: ws.public_id,
+    timestamp: new Date(ts),
+    sessionId: ws.session_id,
     instrument: ws.instrument,
     timeframe: ws.timeframe,
     open: ws.open,
@@ -238,37 +276,38 @@ export function candleFromWS(ws: CandleData): Candle {
     vwap: ws.vwap ?? undefined,
     trades: ws.trades ?? undefined,
     openAt: new Date(ws.open_at),
-    timestamp: ws.timestamp ? new Date(ws.timestamp) : undefined,
     exchange: ws.exchange,
   }
 }
 
 export function tickFromWS(ws: TickData): Tick {
-  if (!ws.timestamp) {
-    throw new Error('TickData missing required field: timestamp')
-  }
+  const ts = requireTimestamp(ws.timestamp, 'TickData')
 
   return {
+    sequenceId: ws.sequence_id,
+    publicId: ws.public_id,
+    timestamp: new Date(ts),
+    sessionId: ws.session_id,
     instrument: ws.instrument,
     bid: ws.bid ?? null,
     ask: ws.ask ?? null,
     last: ws.last ?? undefined,
     volume: ws.volume,
-    timestamp: new Date(ws.timestamp),
     exchange: ws.exchange,
   }
 }
 
 export function heartbeatFromWS(ws: HeartbeatData): Heartbeat {
-  if (!ws.timestamp) {
-    throw new Error('HeartbeatData missing required field: timestamp')
-  }
+  const ts = requireTimestamp(ws.timestamp, 'HeartbeatData')
 
   return {
+    sequenceId: ws.sequence_id,
+    publicId: ws.public_id,
+    timestamp: new Date(ts),
+    sessionId: ws.session_id,
     component: ws.component,
     status: ws.status,
     sequence: ws.sequence,
-    timestamp: new Date(ws.timestamp),
     lagMs: ws.lag_ms,
   }
 }
@@ -276,8 +315,10 @@ export function heartbeatFromWS(ws: HeartbeatData): Heartbeat {
 export function orderDataFromEnvelope(env: OrderData): OrderData {
   return {
     type: env.type,
+    sequence_id: env.sequence_id,
     public_id: env.public_id,
     timestamp: env.timestamp,
+    session_id: env.session_id,
     exchange_order_id: env.exchange_order_id,
     client_order_id: env.client_order_id,
     instrument: env.instrument,
@@ -300,8 +341,10 @@ export function orderDataFromEnvelope(env: OrderData): OrderData {
 export function executionDataFromEnvelope(env: ExecutionData): ExecutionData {
   return {
     type: env.type,
+    sequence_id: env.sequence_id,
     public_id: env.public_id,
     timestamp: env.timestamp,
+    session_id: env.session_id,
     trade_id: env.trade_id,
     exchange_order_id: env.exchange_order_id,
     client_order_id: env.client_order_id,
@@ -320,8 +363,10 @@ export function executionDataFromEnvelope(env: ExecutionData): ExecutionData {
 export function signalDataFromEnvelope(env: SignalData): SignalData {
   return {
     type: env.type,
+    sequence_id: env.sequence_id,
     public_id: env.public_id,
     timestamp: env.timestamp,
+    session_id: env.session_id,
     instrument: env.instrument,
     exchange: env.exchange,
     side: env.side,
@@ -329,7 +374,7 @@ export function signalDataFromEnvelope(env: SignalData): SignalData {
     reason: env.reason,
     price: env.price,
     strategy_name: env.strategy_name,
-    fired_at: env.fired_at ?? env.timestamp,
+    fired_at: env.fired_at,
   }
 }
 

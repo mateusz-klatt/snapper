@@ -302,23 +302,24 @@ async def create_process_configuration(
     Raises:
         HTTPException: If template not found or name already exists.
     """
+    payload = body.payload
     registry = get_registered_processes()
-    entry = registry.get(body.template)
+    entry = registry.get(payload.template)
     if entry is None:
-        raise HTTPException(status_code=404, detail=f"Template '{body.template}' not found")
+        raise HTTPException(status_code=404, detail=f"Template '{payload.template}' not found")
     cls: type[RegisterableProcess] = entry.class_ref
     try:
         base_kwargs = cls.get_default_kwargs(settings)
     except Exception:
         base_kwargs = {}
-    if body.kwargs:
-        base_kwargs.update(body.kwargs)
-    final_args = body.args if body.args is not None else list(entry.args)
-    final_mode = body.mode or resolve_mode(entry.mode, body.name)
-    final_enabled = entry.enabled if body.enabled is None else body.enabled
+    if payload.kwargs:
+        base_kwargs.update(payload.kwargs)
+    final_args = payload.args if payload.args is not None else list(entry.args)
+    final_mode = payload.mode or resolve_mode(entry.mode, payload.name)
+    final_enabled = entry.enabled if payload.enabled is None else payload.enabled
     try:
         await factory.create_process_config(
-            name=body.name,
+            name=payload.name,
             class_path=entry.class_path,
             method=entry.method,
             enabled=bool(final_enabled),
@@ -329,7 +330,7 @@ async def create_process_configuration(
             role=entry.role,
             tags=entry.tags,
             parameters_schema=entry.parameters_schema,
-            note=body.note,
+            note=payload.note,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -341,8 +342,8 @@ async def create_process_configuration(
         timestamp=ts,
         status="created",
         process=ProcessCreatedInfo(
-            name=body.name,
-            template=body.template,
+            name=payload.name,
+            template=payload.template,
         ),
     )
     return ProcessCreateResponse(
@@ -421,12 +422,13 @@ async def start_process(
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStartResponse:
+    payload = body.payload
     result = await factory.start_process_by_name(
         name=name,
-        mode=body.mode,
-        args=body.args,
-        kwargs=body.kwargs,
-        autostart=body.autostart,
+        mode=payload.mode,
+        args=payload.args,
+        kwargs=payload.kwargs,
+        autostart=payload.autostart,
     )
     sid, seq, pid, ts = _mint_provenance(http_request)
     data = ProcessStartData(

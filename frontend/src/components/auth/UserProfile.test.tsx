@@ -265,7 +265,7 @@ describe('UserProfile', () => {
       expect(screen.getByText('Password must be at least 8 characters')).toBeInTheDocument()
     })
     it('calls changePassword API on successful submit', async () => {
-      mockChangePassword.mockResolvedValue({ message: 'Password changed' })
+      mockChangePassword.mockResolvedValue({ payload: 'Password changed' })
       const user = userEvent.setup()
 
       renderWithMocks(<UserProfile />)
@@ -287,7 +287,7 @@ describe('UserProfile', () => {
     })
     it('closes password form after successful change timeout', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
-      mockChangePassword.mockResolvedValue({ message: 'Password changed' })
+      mockChangePassword.mockResolvedValue({ payload: 'Password changed' })
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
 
       renderWithMocks(<UserProfile />)
@@ -356,7 +356,7 @@ describe('UserProfile', () => {
       })
     })
     it('shows loading state while changing password', async () => {
-      let resolvePromise: ((value: { message: string }) => void) | undefined
+      let resolvePromise: ((value: { payload: string }) => void) | undefined
 
       mockChangePassword.mockImplementation(
         () =>
@@ -376,7 +376,7 @@ describe('UserProfile', () => {
       expect(screen.getByText('Changing...')).toBeInTheDocument()
 
       if (resolvePromise) {
-        resolvePromise({ message: 'Done' })
+        resolvePromise({ payload: 'Done' })
       }
 
       await waitFor(() => {

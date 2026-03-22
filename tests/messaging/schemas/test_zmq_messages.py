@@ -95,6 +95,7 @@ class TestMessages:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="rsi_reversion#1",
             instrument="BTCUSD",
             exchange="kraken",
@@ -161,6 +162,7 @@ class TestMessages:
             fee=0.001,
             fee_asset="USD",
             status="filled",
+            executed_at=datetime.now(UTC),
         )
         json_str = msg.to_json()
         parsed = ExecutionData.from_json(json_str)
@@ -283,6 +285,7 @@ class TestMessages:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             instrument="BTCUSD",
             exchange="kraken",
             side="buy",
@@ -296,6 +299,7 @@ class TestMessages:
                 sequence_id=0,
                 public_id="test-public-id",
                 timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                fired_at=datetime.now(UTC),
                 instrument="BTCUSD",
                 exchange="kraken",
                 side="buy",

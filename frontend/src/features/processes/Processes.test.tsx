@@ -3,23 +3,13 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Processes } from './Processes'
-import type { ConfiguredProcess, AvailableProcess, ProcessRun } from '../../types/api'
-import type { HeartbeatData } from '../../types/ws'
-
-function createHeartbeat(
-  component: string,
-  status: 'healthy' | 'warning' | 'error',
-  lagMs: number = 0,
-  sequence: number = 1
-): HeartbeatData {
-  return {
-    type: 'heartbeat',
-    component,
-    status,
-    lag_ms: lagMs,
-    sequence,
-  }
-}
+import {
+  makeConfiguredProcess,
+  makeAvailableProcess,
+  makeProcessRun,
+  makeHeartbeat,
+  makeListEnvelope,
+} from '../../test/factories'
 
 let heartbeatCallback: ((msg: unknown) => void) | null = null
 let connectionCallback: ((connected: boolean) => void) | null = null
@@ -112,12 +102,11 @@ describe('Processes', () => {
     })
   })
   it('displays configured processes section', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -127,12 +116,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -142,12 +131,11 @@ describe('Processes', () => {
     })
   })
   it('subscribes to heartbeat topics', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -157,12 +145,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -175,7 +163,7 @@ describe('Processes', () => {
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: [], count: 0 },
+      data: makeListEnvelope('configured_processes', []),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -188,17 +176,15 @@ describe('Processes', () => {
     const { useAvailableProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: {
-        payload: [
-          {
-            name: 'executor',
-            description: 'Trading Executor',
-            role: 'executor',
-            category: 'trading',
-            parameters: [],
-          },
-        ],
-      },
+      data: makeListEnvelope('available_processes', [
+        makeAvailableProcess({
+          name: 'executor',
+          description: 'Trading Executor',
+          role: 'core',
+          lifecycle: 'long_running',
+          tags: [],
+        }),
+      ]),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -207,12 +193,11 @@ describe('Processes', () => {
     })
   })
   it('opens execution mode modal on start', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -221,12 +206,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -236,12 +221,11 @@ describe('Processes', () => {
     })
   })
   it('stops a running process', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -250,12 +234,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -265,12 +249,11 @@ describe('Processes', () => {
     })
   })
   it('displays process with heartbeat status', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -279,12 +262,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -294,12 +277,11 @@ describe('Processes', () => {
     })
   })
   it('groups processes by role', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -308,12 +290,11 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
-      {
+      }),
+      makeConfiguredProcess({
         name: 'feed_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.feed',
         method: 'main',
         args: [],
@@ -322,12 +303,12 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 2 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -340,19 +321,16 @@ describe('Processes', () => {
     const { useProcessRuns } = await import('../../hooks/queries')
 
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: {
-        payload: [
-          {
-            run_id: '1',
-            process_name: 'executor_kraken',
-            status: 'succeeded',
-            role: 'core',
-            lifecycle: 'daemon',
-            started_at: '2024-01-01T00:00:00Z',
-            completed_at: '2024-01-01T01:00:00Z',
-          },
-        ],
-      },
+      data: makeListEnvelope('process_runs', [
+        makeProcessRun({
+          process_name: 'executor_kraken',
+          status: 'succeeded',
+          role: 'core',
+          lifecycle: 'long_running',
+          started_at: '2024-01-01T00:00:00Z',
+          completed_at: '2024-01-01T01:00:00Z',
+        }),
+      ]),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -364,50 +342,43 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useProcessRuns } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: {
-        payload: [
-          {
-            name: 'task_process',
-            enabled: true,
-            running: false,
-            mode: 'thread',
-            class_path: 'snapper.task',
-            method: 'main',
-            args: [],
-            kwargs: {},
-            lifecycle: 'one_shot',
-            role: 'task',
-            tags: [],
-            is_one_shot: true,
-          },
-        ],
-      },
+      data: makeListEnvelope('configured_processes', [
+        makeConfiguredProcess({
+          name: 'task_process',
+          enabled: true,
+          running: false,
+          class_path: 'snapper.task',
+          method: 'main',
+          args: [],
+          kwargs: {},
+          lifecycle: 'one_shot',
+          role: 'task',
+          tags: [],
+          is_one_shot: true,
+        }),
+      ]),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: {
-        payload: [
-          {
-            run_id: 'latest',
-            process_name: 'task_process',
-            status: 'failed',
-            role: 'task',
-            lifecycle: 'one_shot',
-            started_at: '2024-01-02T00:00:00Z',
-            completed_at: '2024-01-02T01:00:00Z',
-          },
-          {
-            run_id: 'earlier',
-            process_name: 'task_process',
-            status: 'succeeded',
-            role: 'task',
-            lifecycle: 'one_shot',
-            started_at: '2024-01-01T00:00:00Z',
-            completed_at: '2024-01-01T01:00:00Z',
-          },
-        ],
-      },
+      data: makeListEnvelope('process_runs', [
+        makeProcessRun({
+          process_name: 'task_process',
+          status: 'failed',
+          role: 'task',
+          lifecycle: 'one_shot',
+          started_at: '2024-01-02T00:00:00Z',
+          completed_at: '2024-01-02T01:00:00Z',
+        }),
+        makeProcessRun({
+          process_name: 'task_process',
+          status: 'succeeded',
+          role: 'task',
+          lifecycle: 'one_shot',
+          started_at: '2024-01-01T00:00:00Z',
+          completed_at: '2024-01-01T01:00:00Z',
+        }),
+      ]),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -420,41 +391,35 @@ describe('Processes', () => {
     const { useConfiguredProcesses, useProcessRuns } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: {
-        payload: [
-          {
-            name: 'task_process',
-            enabled: true,
-            running: false,
-            mode: 'thread',
-            class_path: 'snapper.task',
-            method: 'main',
-            args: [],
-            kwargs: {},
-            lifecycle: 'one_shot',
-            role: 'task',
-            tags: [],
-            is_one_shot: true,
-          },
-        ],
-      },
+      data: makeListEnvelope('configured_processes', [
+        makeConfiguredProcess({
+          name: 'task_process',
+          enabled: true,
+          running: false,
+          class_path: 'snapper.task',
+          method: 'main',
+          args: [],
+          kwargs: {},
+          lifecycle: 'one_shot',
+          role: 'task',
+          tags: [],
+          is_one_shot: true,
+        }),
+      ]),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: {
-        payload: [
-          {
-            run_id: 'missing-time',
-            process_name: 'task_process',
-            status: 'succeeded',
-            role: 'task',
-            lifecycle: 'one_shot',
-            started_at: null,
-            completed_at: null,
-          },
-        ],
-      },
+      data: makeListEnvelope('process_runs', [
+        makeProcessRun({
+          process_name: 'task_process',
+          status: 'succeeded',
+          role: 'task',
+          lifecycle: 'one_shot',
+          started_at: '',
+          completed_at: null,
+        }),
+      ]),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -464,12 +429,11 @@ describe('Processes', () => {
     })
   })
   it('subscribes to heartbeat topics', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -479,12 +443,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -494,12 +458,11 @@ describe('Processes', () => {
     })
   })
   it('handles heartbeat messages', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -509,12 +472,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -524,16 +487,17 @@ describe('Processes', () => {
     })
 
     if (heartbeatCallback) {
-      heartbeatCallback(createHeartbeat('executor_kraken', 'healthy', 10))
+      heartbeatCallback(
+        makeHeartbeat({ component: 'executor_kraken', status: 'healthy', lag_ms: 10 })
+      )
     }
   })
   it('defaults heartbeat lag and healthy when missing', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -543,12 +507,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -557,23 +521,22 @@ describe('Processes', () => {
       expect(mockWsClient.onMessage).toHaveBeenCalledWith('heartbeat', expect.any(Function))
     })
     act(() => {
-      heartbeatCallback?.(createHeartbeat('executor_kraken', 'healthy'))
+      heartbeatCallback?.(makeHeartbeat({ component: 'executor_kraken', status: 'healthy' }))
     })
     await waitFor(() => {
       expect(screen.getByText('(0ms)')).toBeTruthy()
     })
     act(() => {
-      heartbeatCallback?.(createHeartbeat('executor_kraken', 'error'))
+      heartbeatCallback?.(makeHeartbeat({ component: 'executor_kraken', status: 'error' }))
     })
     expect(screen.getByText('error')).toBeTruthy()
   })
   it('filters long-running processes correctly', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -583,12 +546,11 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
-      {
+      }),
+      makeConfiguredProcess({
         name: 'strategy_test',
         enabled: true,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.strategy',
         method: 'main',
         args: [],
@@ -598,12 +560,12 @@ describe('Processes', () => {
         role: 'strategy',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -614,12 +576,11 @@ describe('Processes', () => {
     expect(screen.queryByText('Test Strategy')).toBeNull()
   })
   it('filters one-shot task processes', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'data_sync_task',
         enabled: true,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.tasks.sync',
         method: 'main',
         args: [],
@@ -629,12 +590,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -644,12 +605,11 @@ describe('Processes', () => {
     })
   })
   it('shows auto-start and manual badges for non-one-shot tasks', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'auto_task',
         enabled: true,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.tasks.auto',
         method: 'main',
         args: [],
@@ -659,12 +619,11 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: false,
-      },
-      {
+      }),
+      makeConfiguredProcess({
         name: 'manual_task',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.tasks.manual',
         method: 'main',
         args: [],
@@ -674,12 +633,12 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 2 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -691,12 +650,11 @@ describe('Processes', () => {
     expect(screen.getByText('manual')).toBeTruthy()
   })
   it('handles connection callback for websocket', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -706,12 +664,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -726,12 +684,11 @@ describe('Processes', () => {
     }
   })
   it('does not resubscribe when connection callback is false', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -741,12 +698,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -762,12 +719,11 @@ describe('Processes', () => {
     expect(mockWsClient.subscribe).toHaveBeenCalledTimes(initialCalls)
   })
   it('displays feed publisher processes with heartbeat', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'kraken_feed_publisher',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.feed_publisher',
         method: 'main',
         args: [],
@@ -777,12 +733,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -792,12 +748,11 @@ describe('Processes', () => {
     })
   })
   it('renders executor process with heartbeat data mapping', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -807,10 +762,10 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
-    const mockAvailableProcesses: AvailableProcess[] = [
-      {
+    const availableItems = [
+      makeAvailableProcess({
         name: 'executor_kraken',
         class_path: 'snapper.executor',
         method: 'main',
@@ -819,17 +774,17 @@ describe('Processes', () => {
         role: 'core',
         tags: ['kraken', 'trading'],
         parameters_schema: null,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { payload: mockAvailableProcesses },
+      data: makeListEnvelope('available_processes', availableItems),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -838,12 +793,11 @@ describe('Processes', () => {
     })
   })
   it('opens execution mode modal and starts long-running process', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -853,12 +807,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -888,12 +842,11 @@ describe('Processes', () => {
     expect(mockStartProcessMutate).toHaveBeenCalled()
   })
   it('starts long-running process from list', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -903,17 +856,17 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { payload: [] },
+      data: makeListEnvelope('available_processes', []),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -940,12 +893,11 @@ describe('Processes', () => {
     )
   })
   it('opens confirm dialog and stops long-running process', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -955,12 +907,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -979,8 +931,8 @@ describe('Processes', () => {
     expect(mockStopProcessMutate).toHaveBeenCalled()
   })
   it('displays task processes with details including tags and parameters_schema', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'data_sync_task',
         enabled: true,
         running: false,
@@ -995,11 +947,11 @@ describe('Processes', () => {
         tags: ['sync', 'data'],
         is_one_shot: true,
         parameters_schema: { type: 'object', properties: { source: { type: 'string' } } },
-        active_run_id: 'run-123',
-      },
+        active_public_id: 'run-123',
+      }),
     ]
-    const mockAvailableProcesses: AvailableProcess[] = [
-      {
+    const availableItems = [
+      makeAvailableProcess({
         name: 'data_sync_task',
         class_path: 'snapper.tasks.sync',
         method: 'main',
@@ -1008,41 +960,39 @@ describe('Processes', () => {
         role: 'task',
         tags: ['sync', 'data'],
         parameters_schema: { type: 'object', properties: { source: { type: 'string' } } },
-      },
+      }),
     ]
-    const mockRuns: ProcessRun[] = [
-      {
-        run_id: 'run-old',
+    const runItems = [
+      makeProcessRun({
         process_name: 'data_sync_task',
         status: 'succeeded',
         role: 'task',
         lifecycle: 'one_shot',
         started_at: '2024-01-01T00:00:00Z',
         completed_at: '2024-01-01T00:05:00Z',
-      },
-      {
-        run_id: 'run-123',
+      }),
+      makeProcessRun({
         process_name: 'data_sync_task',
         status: 'running',
         role: 'task',
         lifecycle: 'one_shot',
         started_at: '2024-01-02T00:00:00Z',
-      },
+      }),
     ]
     const { useConfiguredProcesses, useAvailableProcesses, useProcessRuns } =
       await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { payload: mockAvailableProcesses },
+      data: makeListEnvelope('available_processes', availableItems),
       isLoading: false,
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: { payload: mockRuns },
+      data: makeListEnvelope('process_runs', runItems),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1052,8 +1002,8 @@ describe('Processes', () => {
     expect(screen.getByText('Synchronize data from external sources')).toBeTruthy()
   })
   it('starts task process with execution mode modal and confirm dialog', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'data_sync_task',
         enabled: false,
         running: false,
@@ -1067,7 +1017,7 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
@@ -1077,7 +1027,7 @@ describe('Processes', () => {
     } as never)
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1114,8 +1064,8 @@ describe('Processes', () => {
     expect(mockStartProcessMutate).toHaveBeenCalled()
   })
   it('stops task process with confirm dialog', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'data_sync_task',
         enabled: true,
         running: true,
@@ -1129,7 +1079,7 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
@@ -1139,7 +1089,7 @@ describe('Processes', () => {
     } as never)
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1164,12 +1114,11 @@ describe('Processes', () => {
     expect(mockStopProcessMutate).toHaveBeenCalled()
   })
   it('cancels confirm dialog', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1179,12 +1128,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1202,12 +1151,11 @@ describe('Processes', () => {
     expect(mockStopProcessMutate).not.toHaveBeenCalled()
   })
   it('closes execution mode modal', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1217,12 +1165,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1244,12 +1192,11 @@ describe('Processes', () => {
     })
   })
   it('cleans up stale heartbeats after timeout', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1259,12 +1206,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1275,7 +1222,9 @@ describe('Processes', () => {
     expect(mockWsClient.onMessage).toHaveBeenCalledWith('heartbeat', expect.any(Function))
     expect(heartbeatCallback).toBeDefined()
     act(() => {
-      heartbeatCallback?.(createHeartbeat('executor_kraken', 'healthy', 10))
+      heartbeatCallback?.(
+        makeHeartbeat({ component: 'executor_kraken', status: 'healthy', lag_ms: 10 })
+      )
     })
   })
   it('removes stale heartbeats after threshold', async () => {
@@ -1283,12 +1232,11 @@ describe('Processes', () => {
     vi.setSystemTime(new Date('2024-01-01T00:00:00Z'))
 
     try {
-      const mockProcesses: ConfiguredProcess[] = [
-        {
+      const items = [
+        makeConfiguredProcess({
           name: 'executor_kraken',
           enabled: true,
           running: true,
-          mode: 'thread',
           class_path: 'snapper.executor',
           method: 'main',
           args: [],
@@ -1298,37 +1246,38 @@ describe('Processes', () => {
           role: 'core',
           tags: [],
           is_one_shot: false,
-        },
+        }),
       ]
       const { useConfiguredProcesses } = await import('../../hooks/queries')
 
       vi.mocked(useConfiguredProcesses).mockReturnValue({
-        data: { payload: mockProcesses, count: 1 },
+        data: makeListEnvelope('configured_processes', items),
         isLoading: false,
         refetch: vi.fn(),
       } as never)
       renderWithProviders(<Processes />)
       expect(screen.getByText('Process Control')).toBeTruthy()
-      expect(screen.getByText(/waiting/i)).toBeTruthy()
+      expect(screen.getByText(/unknown/i)).toBeTruthy()
       act(() => {
-        heartbeatCallback?.(createHeartbeat('executor_kraken', 'healthy', 10))
+        heartbeatCallback?.(
+          makeHeartbeat({ component: 'executor_kraken', status: 'healthy', lag_ms: 10 })
+        )
       })
-      expect(screen.queryByText(/waiting/i)).toBeNull()
+      expect(screen.queryByText(/unknown/i)).toBeNull()
       act(() => {
         vi.advanceTimersByTime(15000)
       })
-      expect(screen.getByText(/waiting/i)).toBeTruthy()
+      expect(screen.getByText(/unknown/i)).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
   })
   it('starts ZMQ Broker process', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'zmq_broker',
         enabled: true,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.zmq_broker',
         method: 'main',
         args: [],
@@ -1338,12 +1287,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1383,12 +1332,11 @@ describe('Processes', () => {
     )
   })
   it('stops ZMQ Broker process with warning', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'zmq_broker',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.zmq_broker',
         method: 'main',
         args: [],
@@ -1398,12 +1346,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1428,8 +1376,8 @@ describe('Processes', () => {
     expect(mockStopProcessMutate).toHaveBeenCalledWith({ name: 'zmq_broker' })
   })
   it('formats timestamp correctly', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'data_sync_task',
         enabled: true,
         running: false,
@@ -1443,28 +1391,27 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
-    const mockRuns: ProcessRun[] = [
-      {
-        run_id: 'run-123',
+    const runItems = [
+      makeProcessRun({
         process_name: 'data_sync_task',
         status: 'succeeded',
         role: 'task',
         lifecycle: 'one_shot',
         started_at: '2024-06-15T10:30:00Z',
         completed_at: '2024-06-15T10:35:00Z',
-      },
+      }),
     ]
     const { useConfiguredProcesses, useProcessRuns } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: { payload: mockRuns },
+      data: makeListEnvelope('process_runs', runItems),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1473,8 +1420,8 @@ describe('Processes', () => {
     })
   })
   it('handles null timestamp gracefully', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'data_sync_task',
         enabled: true,
         running: false,
@@ -1488,27 +1435,26 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
-    const mockRuns: ProcessRun[] = [
-      {
-        run_id: 'run-123',
+    const runItems = [
+      makeProcessRun({
         process_name: 'data_sync_task',
         status: 'running',
         role: 'task',
         lifecycle: 'one_shot',
         started_at: 'invalid-date',
-      },
+      }),
     ]
     const { useConfiguredProcesses, useProcessRuns } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useProcessRuns).mockReturnValue({
-      data: { payload: mockRuns },
+      data: makeListEnvelope('process_runs', runItems),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1517,12 +1463,11 @@ describe('Processes', () => {
     })
   })
   it('handles task process without tags from registry', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'simple_task',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.tasks.simple',
         method: 'main',
         args: [],
@@ -1532,17 +1477,17 @@ describe('Processes', () => {
         role: 'task',
         tags: ['local-tag'],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useAvailableProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
     vi.mocked(useAvailableProcesses).mockReturnValue({
-      data: { payload: [] },
+      data: makeListEnvelope('available_processes', []),
       isLoading: false,
     } as never)
     renderWithProviders(<Processes />)
@@ -1557,12 +1502,11 @@ describe('Processes', () => {
     vi.mocked(useWebSocketStore).mockReturnValue({
       wsClient: null,
     } as never)
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1572,12 +1516,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1591,12 +1535,11 @@ describe('Processes', () => {
     } as never)
   })
   it('cleans up stale heartbeats when they exceed threshold', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1606,12 +1549,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1621,17 +1564,18 @@ describe('Processes', () => {
       expect(screen.getByText('Process Control')).toBeTruthy()
     })
     act(() => {
-      heartbeatCallback?.(createHeartbeat('executor_kraken', 'healthy', 10))
+      heartbeatCallback?.(
+        makeHeartbeat({ component: 'executor_kraken', status: 'healthy', lag_ms: 10 })
+      )
     })
     unmount()
   })
   it('shows starting state only for ZMQ Broker when isPending', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'zmq_broker',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.zmq_broker',
         method: 'main',
         args: [],
@@ -1641,12 +1585,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1662,12 +1606,11 @@ describe('Processes', () => {
     expect(screen.getByText(/Starting/i)).toBeTruthy()
   })
   it('shows starting state only for targeted long-running process when isPending', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1677,12 +1620,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1698,12 +1641,11 @@ describe('Processes', () => {
     expect(screen.getByText(/Starting/i)).toBeTruthy()
   })
   it('shows starting state only for targeted task process when isPending', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'sync_task',
         enabled: false,
         running: false,
-        mode: 'thread',
         class_path: 'snapper.sync_task',
         method: 'main',
         args: [],
@@ -1713,12 +1655,12 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useStartProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1734,12 +1676,11 @@ describe('Processes', () => {
     expect(screen.getByText(/Starting/i)).toBeTruthy()
   })
   it('shows stopping state only for targeted long-running process when isPending', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'executor_kraken',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1749,12 +1690,11 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
-      {
+      }),
+      makeConfiguredProcess({
         name: 'executor_zonda',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.executor',
         method: 'main',
         args: [],
@@ -1764,12 +1704,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 2 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1785,12 +1725,11 @@ describe('Processes', () => {
     expect(screen.getByText(/Stopping/i)).toBeTruthy()
   })
   it('shows stopping state only for targeted task process when isPending', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'sync_task',
         enabled: false,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.sync_task',
         method: 'main',
         args: [],
@@ -1800,12 +1739,12 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses, useStopProcessByName } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1821,12 +1760,11 @@ describe('Processes', () => {
     expect(screen.getByText(/Stopping/i)).toBeTruthy()
   })
   it('restarts ZMQ Broker: shows confirm dialog and calls stop with onSuccess', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'zmq_broker',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.zmq_broker',
         method: 'main',
         args: [],
@@ -1836,12 +1774,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1877,12 +1815,11 @@ describe('Processes', () => {
         capturedOnSuccess = options?.onSuccess
       }
     )
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'zmq_broker',
         enabled: true,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.zmq_broker',
         method: 'main',
         args: [],
@@ -1892,12 +1829,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1939,12 +1876,11 @@ describe('Processes', () => {
     )
   })
   it('restarts long-running process: shows confirm dialog and calls stop with onSuccess', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'my_service',
         enabled: false,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.my_service',
         method: 'main',
         args: [],
@@ -1954,12 +1890,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -1988,12 +1924,11 @@ describe('Processes', () => {
         capturedOnSuccess = options?.onSuccess
       }
     )
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'my_service',
         enabled: false,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.my_service',
         method: 'main',
         args: [],
@@ -2003,12 +1938,12 @@ describe('Processes', () => {
         role: 'core',
         tags: [],
         is_one_shot: false,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2044,12 +1979,11 @@ describe('Processes', () => {
     )
   })
   it('restarts task process: shows confirm dialog and calls stop with onSuccess', async () => {
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'sync_task',
         enabled: false,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.sync_task',
         method: 'main',
         args: [],
@@ -2059,12 +1993,12 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)
@@ -2093,12 +2027,11 @@ describe('Processes', () => {
         capturedOnSuccess = options?.onSuccess
       }
     )
-    const mockProcesses: ConfiguredProcess[] = [
-      {
+    const items = [
+      makeConfiguredProcess({
         name: 'sync_task',
         enabled: false,
         running: true,
-        mode: 'thread',
         class_path: 'snapper.sync_task',
         method: 'main',
         args: [],
@@ -2108,12 +2041,12 @@ describe('Processes', () => {
         role: 'task',
         tags: [],
         is_one_shot: true,
-      },
+      }),
     ]
     const { useConfiguredProcesses } = await import('../../hooks/queries')
 
     vi.mocked(useConfiguredProcesses).mockReturnValue({
-      data: { payload: mockProcesses, count: 1 },
+      data: makeListEnvelope('configured_processes', items),
       isLoading: false,
       refetch: vi.fn(),
     } as never)

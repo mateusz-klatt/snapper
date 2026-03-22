@@ -9,7 +9,8 @@ Schema hierarchy::
 
     BaseModel
     └── StrictDataSchema → ALL event payload items (provenance required)
-        ├── PayloadResponse[T] → singleton REST response (payload: T)
+        ├── PayloadRequest[T]     → REST mutation request (payload: T)
+        ├── PayloadResponse[T]    → singleton REST response (payload: T)
         └── PayloadListResponse[T] → list REST response (payload: list[T], count)
 """
 
@@ -82,6 +83,20 @@ class StrictDataSchema[TypeT: str](BaseModel):
         return cls.model_validate_json(data)
 
 
+class PayloadRequest[TypeT: str, PayloadT](StrictDataSchema[TypeT]):
+    """Generic REST request carrying a mutation payload.
+
+    All POST/PUT mutation requests inherit from this base. The ``payload``
+    field carries the domain command — the business intent without provenance.
+    Provenance fields live on the envelope (stamped by the client).
+
+    Attributes:
+        payload: The request command body (plain BaseModel).
+    """
+
+    payload: PayloadT
+
+
 class PayloadResponse[TypeT: str, PayloadT](StrictDataSchema[TypeT]):
     """Generic REST response carrying a single payload.
 
@@ -127,6 +142,7 @@ class MessageResponse(PayloadResponse[Literal["message"], str]):
 __all__ = [
     "STRICT_CONFIG",
     "StrictDataSchema",
+    "PayloadRequest",
     "PayloadResponse",
     "PayloadListResponse",
     "MessageResponse",

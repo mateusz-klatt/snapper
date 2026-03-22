@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
+from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
@@ -1330,12 +1331,14 @@ class TestProcessRoutesTagsFallback:
                 sequence_id=1,
                 public_id="test-pid",
                 timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-                name="my_process",
-                template="test_process",
-                enabled=True,
-                mode="thread",
-                args=[],
-                kwargs={},
+                payload=ProcessCreateBody(
+                    name="my_process",
+                    template="test_process",
+                    enabled=True,
+                    mode="thread",
+                    args=[],
+                    kwargs={},
+                ),
             )
             settings = MagicMock()
             await create_process_configuration(
@@ -1386,12 +1389,14 @@ class TestProcessRoutesTagsFallback:
                 sequence_id=1,
                 public_id="test-pid",
                 timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-                name="my_process",
-                template="test_process",
-                enabled=True,
-                mode="thread",
-                args=[],
-                kwargs={},
+                payload=ProcessCreateBody(
+                    name="my_process",
+                    template="test_process",
+                    enabled=True,
+                    mode="thread",
+                    args=[],
+                    kwargs={},
+                ),
             )
             settings = MagicMock()
             await create_process_configuration(

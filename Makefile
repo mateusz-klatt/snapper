@@ -365,8 +365,8 @@ ui-format:
 ui-format-fix:
 	$(PNPM) format
 
-ui-check: ui-lint ui-format ui-dead-code
-	$(info UI quality checks passed [lint + format + dead code])
+ui-check: ui-lint ui-format ui-dead-code ui-typecheck
+	$(info UI quality checks passed [lint + format + dead code + typecheck])
 
 ui-fix: ui-lint-fix ui-format-fix ui-dead-code-fix
 	$(info UI quality fixes applied [lint + format + dead code])

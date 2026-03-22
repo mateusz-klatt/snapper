@@ -1,9 +1,6 @@
 import type {
   WebSocketMessages,
   PongWithRtt,
-  WSSubscribeRequest,
-  WSUnsubscribeRequest,
-  WSGetSubscriptionsRequest,
   WSAuthRequiredResponse,
   WSAuthOkResponse,
   WSAuthCompleteResponse,
@@ -61,12 +58,12 @@ class WebSocketClient {
   private reconnectAttempts = 0
   private isReconnecting = false
   private intentionalDisconnect = false
-  private heartbeatTimer: number | null = null
-  private throttleTimer: number | null = null
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private throttleTimer: ReturnType<typeof setInterval> | null = null
   private isAuthenticated = false
   private sessionExpiresAt: string | null = null
   private pendingWsTokenExp: number | null = null
-  private reauthTimer: number | null = null
+  private reauthTimer: ReturnType<typeof setTimeout> | null = null
   private reauthScheduledAt: number | null = null
   private lastReauthDeadlineMs: number | null = null
   private reauthInProgress = false
@@ -552,6 +549,7 @@ class WebSocketClient {
       public_id: uuid7(),
       session_id: tracker.sessionId,
       sequence_id: tracker.nextSequence(counterKey),
+      timestamp: new Date().toISOString(),
     }
   }
   subscribe(topics: string[]): void {
@@ -593,18 +591,14 @@ class WebSocketClient {
       const topics = Array.from(this.pendingSubscribes)
 
       this.pendingSubscribes.clear()
-      const message: WSSubscribeRequest = { type: 'subscribe', topics }
-
-      this.send(message)
+      this.send({ type: 'subscribe', topics })
     }
 
     if (this.pendingUnsubscribes.size > 0) {
       const topics = Array.from(this.pendingUnsubscribes)
 
       this.pendingUnsubscribes.clear()
-      const message: WSUnsubscribeRequest = { type: 'unsubscribe', topics }
-
-      this.send(message)
+      this.send({ type: 'unsubscribe', topics })
     }
   }
   onMessage<T extends WebSocketMessageType>(type: T, handler: TypedMessageHandler<T>): () => void
@@ -697,9 +691,8 @@ class WebSocketClient {
 
         resolve(listMessage.available_topics || [])
       })
-      const request: WSGetSubscriptionsRequest = { type: 'get_subscriptions' }
 
-      this.send(request)
+      this.send({ type: 'get_subscriptions' })
     })
   }
   getConnectionStats(): object {

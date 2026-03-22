@@ -203,7 +203,7 @@ class WSSubscriptionSuccessResponse(StrictDataSchema[Literal["subscription_succe
     )
     topics: list[str] = Field(..., description="Topics that were successfully processed")
     denied_topics: list[str] = Field(
-        default_factory=list, description="Topics that were denied due to permissions"
+        default=[], description="Topics that were denied due to permissions"
     )
     active_subscriptions: list[str] = Field(..., description="Current list of active subscriptions")
     message: str | None = Field(

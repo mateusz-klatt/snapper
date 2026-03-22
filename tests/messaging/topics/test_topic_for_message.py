@@ -173,6 +173,7 @@ class TestTopicForMessage:
             size=1.0,
             filled_size=0.0,
             price=50000.0,
+            created_at=datetime.now(UTC),
         )
         assert topic_for_message(data) == "orders.events.kraken.BTC-USD.submitted"
 
@@ -217,6 +218,7 @@ class TestTopicForMessage:
             fee=5.0,
             fee_asset="USD",
             status="filled",
+            executed_at=datetime.now(UTC),
         )
         assert topic_for_message(data) == "orders.events.kraken.BTC-USD.executed"
 
@@ -232,6 +234,7 @@ class TestTopicForMessage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             instrument="BTC-USD",
             exchange="kraken",
             side="buy",
@@ -252,6 +255,7 @@ class TestTopicForMessage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             instrument="BTC-USD",
             exchange="paper",
             side="sell",
@@ -274,6 +278,7 @@ class TestTopicForMessage:
                 sequence_id=0,
                 public_id="test-public-id",
                 timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                fired_at=datetime.now(UTC),
                 instrument="BTC-USD",
                 exchange="paper",
                 side="buy",
@@ -297,6 +302,7 @@ class TestTopicForMessage:
             side="buy",
             strength=0.5,
             reason="test",
+            fired_at=datetime(2024, 1, 1, tzinfo=UTC),
             session_id="",
             sequence_id=0,
             public_id="test-public-id",

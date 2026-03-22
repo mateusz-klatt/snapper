@@ -3,7 +3,7 @@
 Snapper provides a REST API and WebSocket interface for platform interaction.
 The API requires JWT authentication via HTTP-only cookies. Auth bootstrap
 endpoints under `/api/auth` are exempt, but other mutating requests
-(`POST`, `PUT`, `DELETE`) require a valid `X-CSRF-Token` header.
+(`POST`) require a valid `X-CSRF-Token` header.
 
 ## Authentication
 
@@ -165,12 +165,12 @@ delivers for the same data type.
   request in the `telemetry` table for observability but does not stamp
   provenance onto the response items beyond what was stored at write time.
 
-- **Mutations (POST/PUT/DELETE/PATCH)** — Clients carry provenance in the
-  JSON request body (`public_id`, `session_id`, `sequence_id` inherited
-  from `StrictDataSchema`). The server-side `ClientProvenanceMiddleware`
-  extracts these fields, emits a structured info log, and runs a
-  per-session `GapDetector` to warn on sequence gaps. Gaps are logged as
-  warnings but never reject requests.
+- **Mutations (POST)** — All mutations use command-style POST with a
+  `PayloadRequest` envelope carrying provenance (`public_id`, `session_id`,
+  `sequence_id`, `timestamp`) and domain intent in `payload`. The
+  server-side `ClientProvenanceMiddleware` extracts these fields, emits a
+  structured info log, and runs a per-session `GapDetector` to warn on
+  sequence gaps. Gaps are logged as warnings but never reject requests.
 
 ### ClientProvenanceMiddleware
 
@@ -920,25 +920,31 @@ List distinct setting category names.
 }
 ```
 
-### PUT /api/settings/{key}
+### POST /api/settings/{key}/set
 
-Create or update a setting. Performs an upsert operation.
+Set (create or update) a setting value.
 
 **Request:**
 
 ```http
-PUT /api/settings/kraken_api_key
+POST /api/settings/kraken_api_key/set
 Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
 {
-    "value": "new-api-key-value",
-    "category": "exchanges",
-    "description": "Kraken REST API key"
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "value": "new-api-key-value",
+        "category": "exchanges",
+        "description": "Kraken REST API key"
+    }
 }
 ```
 
-**Request body fields:**
+**Payload fields:**
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
@@ -950,31 +956,53 @@ X-CSRF-Token: <csrf_token>
 
 ```json
 {
-    "key": "kraken_api_key",
-    "value": "new-api-key-value",
-    "category": "exchanges",
-    "description": "Kraken REST API key",
-    "updated_at": "2026-01-18T12:00:00Z",
-    "updated_by": "admin"
+    "type": "setting_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "type": "setting_read",
+        "key": "kraken_api_key",
+        "value": "new-api-key-value",
+        "category": "exchanges",
+        "description": "Kraken REST API key",
+        "updated_at": "2026-01-18T12:00:00Z",
+        "updated_by": "admin"
+    }
 }
 ```
 
-### DELETE /api/settings/{key}
+### POST /api/settings/{key}/remove
 
 Soft-delete a setting by key (sets `known_to` to current time).
 
 **Request:**
 
 ```http
-DELETE /api/settings/kraken_api_key
+POST /api/settings/kraken_api_key/remove
+Content-Type: application/json
 X-CSRF-Token: <csrf_token>
+
+{
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 2,
+    "timestamp": "2026-01-18T12:00:01Z",
+    "payload": {}
+}
 ```
 
 **Response (200):**
 
 ```json
 {
-    "message": "Setting 'kraken_api_key' deleted successfully"
+    "type": "message",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 2,
+    "timestamp": "2026-01-18T12:00:01Z",
+    "payload": "Setting 'kraken_api_key' deleted successfully"
 }
 ```
 

@@ -179,7 +179,7 @@ describe('ProtectedRoute', () => {
       canAccess: vi.fn(),
     } as never)
     render(
-      <ProtectedRoute requiredPermission='write:data'>
+      <ProtectedRoute requiredPermission={'write:data' as never}>
         <div>Protected Content</div>
       </ProtectedRoute>
     )
@@ -215,7 +215,11 @@ describe('ProtectedRoute', () => {
       canAccess,
     } as never)
     render(
-      <ProtectedRoute requiredRole='admin' requiredPermission='write:data' resource='settings'>
+      <ProtectedRoute
+        requiredRole='admin'
+        requiredPermission={'write:data' as never}
+        resource='settings'
+      >
         <div>Protected Content</div>
       </ProtectedRoute>
     )

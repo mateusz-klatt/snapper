@@ -333,32 +333,6 @@ describe('APIClient', () => {
 
       expect(callArgs.body).toBeUndefined()
     })
-    it('provides PUT convenience method', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-      })
-      await apiClient.put('/test', { data: 'test' })
-      expect(mockFetch).toHaveBeenCalledWith('/test', expect.objectContaining({ method: 'PUT' }))
-    })
-    it('provides PUT convenience method without body', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-      })
-      await apiClient.put('/test')
-      const callArgs = mockFetch.mock.calls[0][1]
-
-      expect(callArgs.body).toBeUndefined()
-    })
-    it('provides DELETE convenience method', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-      })
-      await apiClient.delete('/test')
-      expect(mockFetch).toHaveBeenCalledWith('/test', expect.objectContaining({ method: 'DELETE' }))
-    })
   })
   describe('JSON convenience methods', () => {
     it('provides getJSON method', async () => {
@@ -425,26 +399,6 @@ describe('APIClient', () => {
       const data = await apiClient.postJSON('/test', { input: 'data' })
 
       expect(data).toEqual({ data: 'test' })
-    })
-    it('provides putJSON method', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ data: 'test' }),
-      })
-      const data = await apiClient.putJSON('/test', { input: 'data' })
-
-      expect(data).toEqual({ data: 'test' })
-    })
-    it('provides deleteJSON method', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ success: true }),
-      })
-      const data = await apiClient.deleteJSON('/test')
-
-      expect(data).toEqual({ success: true })
     })
   })
   describe('cookie management', () => {
@@ -552,6 +506,7 @@ describe('domain API methods', () => {
             pid: 1234,
           },
           backtests: {},
+          strategies: [],
         },
       }),
     })
@@ -1048,7 +1003,7 @@ describe('domain API methods', () => {
     expect(result.payload.key).toBe('setting1')
     expect(result.payload.value).toBe('new-value')
   })
-  it('deleteSetting deletes a setting', async () => {
+  it('removeSetting removes a setting', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -1061,7 +1016,7 @@ describe('domain API methods', () => {
         payload: 'Setting deleted successfully',
       }),
     })
-    const result = await apiClient.deleteSetting('setting1')
+    const result = await apiClient.removeSetting('setting1')
 
     expect(result).toEqual({
       type: 'message',
@@ -1072,8 +1027,8 @@ describe('domain API methods', () => {
       payload: 'Setting deleted successfully',
     })
     expect(mockFetch).toHaveBeenCalledWith(
-      expect.stringContaining('/api/settings/setting1'),
-      expect.objectContaining({ method: 'DELETE' })
+      expect.stringContaining('/api/settings/setting1/remove'),
+      expect.objectContaining({ method: 'POST' })
     )
   })
   it('getProcessSchema returns process schema', async () => {
@@ -1098,6 +1053,8 @@ describe('domain API methods', () => {
           method: 'run',
           default_enabled: true,
           default_mode: 'thread',
+          default_args: [],
+          default_kwargs: {},
           lifecycle: 'long_running',
         },
       }),
@@ -1337,7 +1294,7 @@ describe('domain API methods', () => {
       json: async () => responseData,
     })
     const result = await apiClient.startProcessByName('test-process', {
-      mode: 'live',
+      mode: 'live' as 'thread',
       args: [1, 2],
       kwargs: { param: 'value' },
       autostart: true,
@@ -1427,10 +1384,11 @@ describe('domain API methods', () => {
     expect(call[1].method).toBe('POST')
     const body = JSON.parse(call[1].body)
 
-    expect(body.current_password).toBe('oldPassword')
-    expect(body.new_password).toBe('newPassword')
+    expect(body.payload.current_password).toBe('oldPassword')
+    expect(body.payload.new_password).toBe('newPassword')
     expect(body.public_id).toBeDefined()
     expect(body.session_id).toBe('test-session-id')
+    expect(body.timestamp).toBeDefined()
   })
 })
 describe('user management API methods', () => {
@@ -1499,6 +1457,7 @@ describe('user management API methods', () => {
           email: 'e@e.com',
           role: 'viewer',
           is_active: true,
+          created_at: '2026-01-01T00:00:00Z',
         },
       }),
     })
@@ -1516,7 +1475,7 @@ describe('user management API methods', () => {
       expect.objectContaining({ method: 'POST' })
     )
   })
-  it('updateUser puts user data', async () => {
+  it('updateUser posts user data', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -1535,6 +1494,7 @@ describe('user management API methods', () => {
           email: 'new@e.com',
           role: 'admin',
           is_active: true,
+          created_at: '2026-01-01T00:00:00Z',
         },
       }),
     })
@@ -1546,11 +1506,11 @@ describe('user management API methods', () => {
 
     expect(result.payload.username).toBe('admin')
     expect(mockFetch).toHaveBeenCalledWith(
-      '/api/auth/users/admin',
-      expect.objectContaining({ method: 'PUT' })
+      '/api/auth/users/admin/update',
+      expect.objectContaining({ method: 'POST' })
     )
   })
-  it('deactivateUser deletes user', async () => {
+  it('deactivateUser deactivates user', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -1566,8 +1526,8 @@ describe('user management API methods', () => {
 
     expect(result.payload).toBe('User deactivated')
     expect(mockFetch).toHaveBeenCalledWith(
-      '/api/auth/users/testuser',
-      expect.objectContaining({ method: 'DELETE' })
+      '/api/auth/users/testuser/deactivate',
+      expect.objectContaining({ method: 'POST' })
     )
   })
   it('adminResetPassword resets password', async () => {
@@ -1701,24 +1661,6 @@ describe('cacheWsTicketFromResponse', () => {
       'HTTP 400: Bad Request'
     )
   })
-  it('throws error when putJSON receives non-ok response', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-      json: vi.fn().mockResolvedValue({ detail: 'Server error' }),
-    })
-    await expect(apiClient.putJSON('/test', { data: 'test' })).rejects.toThrow('Server error')
-  })
-  it('throws error when deleteJSON receives non-ok response', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: 'Not Found',
-      json: vi.fn().mockResolvedValue({ detail: 'Resource not found' }),
-    })
-    await expect(apiClient.deleteJSON('/test')).rejects.toThrow('Resource not found')
-  })
   it('handles JSON parse error in CSRF retry logic', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -1739,21 +1681,11 @@ describe('cacheWsTicketFromResponse', () => {
       const call = mockFetch.mock.calls[0]
       const body = JSON.parse(call[1].body)
 
-      expect(body.key).toBe('value')
+      expect(body.payload.key).toBe('value')
       expect(body.public_id).toBeDefined()
       expect(body.session_id).toBe('test-session-id')
       expect(body.sequence_id).toEqual(expect.any(Number))
-    })
-    it('stamps PUT body with provenance fields', async () => {
-      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
-      await apiClient.put('/api/test', { key: 'value' })
-      const call = mockFetch.mock.calls[0]
-      const body = JSON.parse(call[1].body)
-
-      expect(body.key).toBe('value')
-      expect(body.public_id).toBeDefined()
-      expect(body.session_id).toBe('test-session-id')
-      expect(body.sequence_id).toEqual(expect.any(Number))
+      expect(body.timestamp).toBeDefined()
     })
     it('does not stamp GET requests', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
@@ -1765,13 +1697,6 @@ describe('cacheWsTicketFromResponse', () => {
     it('does not stamp POST without body', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
       await apiClient.post('/api/test')
-      const call = mockFetch.mock.calls[0]
-
-      expect(call[1].body).toBeUndefined()
-    })
-    it('does not stamp DELETE requests', async () => {
-      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
-      await apiClient.delete('/api/test')
       const call = mockFetch.mock.calls[0]
 
       expect(call[1].body).toBeUndefined()

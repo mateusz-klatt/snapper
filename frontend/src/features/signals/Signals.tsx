@@ -65,7 +65,7 @@ const SignalCard: React.FC<{ signal: Signal }> = ({ signal }) => {
             </span>
           )}
         </div>
-        <div className='text-xs text-muted-500'>{formatTime(signal.firedAt)}</div>
+        <div className='text-xs text-muted-500'>{formatTime(signal.firedAt as Date)}</div>
       </div>
       <div className='grid grid-cols-3 gap-4 text-sm mb-3'>
         <div>
@@ -114,18 +114,28 @@ export const Signals: React.FC = () => {
     totalSignals > 0 ? filteredSignals.reduce((sum, s) => sum + s.strength, 0) / totalSignals : 0
 
   const handleExport = () => {
-    const rows = filteredSignals.map(s => ({
-      instrument: s.instrument,
-      exchange: s.exchange,
-      side: s.side,
-      strength: s.strength,
-      strategy: s.strategyName ?? '',
-      price: s.price ?? '',
-      reason: s.reason,
-      fired_at: s.firedAt.toISOString(),
-    }))
+    const headers = [
+      'instrument',
+      'exchange',
+      'side',
+      'strength',
+      'strategy',
+      'price',
+      'reason',
+      'fired_at',
+    ]
+    const rows = filteredSignals.map(s => [
+      s.instrument,
+      s.exchange,
+      s.side,
+      String(s.strength),
+      s.strategyName ?? '',
+      s.price != null ? String(s.price) : '',
+      s.reason,
+      (s.firedAt as Date).toISOString(),
+    ])
 
-    exportToCSV(rows, 'signals')
+    exportToCSV('signals.csv', headers, rows)
   }
 
   if (isLoading) {

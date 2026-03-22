@@ -2,14 +2,20 @@
 
 This module defines request/response schemas for the settings management
 endpoints, supporting CRUD operations on application settings.
+
+Request bodies are plain BaseModel (domain intent only). Each is wrapped
+in a PayloadRequest envelope that carries provenance fields.
 """
 
 from datetime import datetime
 from typing import Literal
 
+from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
 
@@ -38,42 +44,58 @@ class SettingRead(StrictDataSchema[Literal["setting_read"]]):
     updated_by: str | None = None
 
 
-class SettingUpdate(StrictDataSchema[Literal["setting_update"]]):
-    """Setting update request schema.
-
-    Used when updating an existing setting.
+class SettingUpdateBody(BaseModel):
+    """Setting update request body.
 
     Attributes:
-        type: Payload item type discriminator.
         value: New setting value as string.
         category: Setting category (defaults to 'system').
         description: Optional description.
     """
 
-    type: Literal["setting_update"] = "setting_update"
+    model_config = ConfigDict(extra="forbid")
+
     value: str = Field(..., description="Setting value as string")
     category: str = Field(default="system", description="Setting category")
     description: str | None = Field(None, description="Setting description")
 
 
-class SettingCreate(StrictDataSchema[Literal["setting_create"]]):
-    """Setting creation request schema.
-
-    Used when creating a new setting.
+class SettingUpdate(PayloadRequest[Literal["setting_update"], SettingUpdateBody]):
+    """Setting update request envelope.
 
     Attributes:
         type: Payload item type discriminator.
+    """
+
+    type: Literal["setting_update"] = "setting_update"
+
+
+class SettingCreateBody(BaseModel):
+    """Setting creation request body.
+
+    Attributes:
         key: Unique setting key identifier.
         value: Setting value as string.
         category: Setting category (defaults to 'system').
         description: Optional description.
     """
 
-    type: Literal["setting_create"] = "setting_create"
+    model_config = ConfigDict(extra="forbid")
+
     key: str = Field(..., description="Setting key")
     value: str = Field(..., description="Setting value as string")
     category: str = Field(default="system", description="Setting category")
     description: str | None = Field(None, description="Setting description")
+
+
+class SettingCreate(PayloadRequest[Literal["setting_create"], SettingCreateBody]):
+    """Setting creation request envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["setting_create"] = "setting_create"
 
 
 class SettingResponse(PayloadResponse[Literal["setting_response"], SettingRead]):
@@ -103,7 +125,32 @@ class SettingListResponse(PayloadListResponse[Literal["setting_list"], SettingRe
     type: Literal["setting_list"] = "setting_list"
 
 
+class RemoveSettingBody(BaseModel):
+    """Remove setting command body (empty).
+
+    Command-style endpoint: no domain fields needed, provenance
+    is carried on the PayloadRequest envelope.
+
+    Attributes:
+        (none — empty body signals intent via URL path)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RemoveSettingRequest(PayloadRequest[Literal["remove_setting_request"], RemoveSettingBody]):
+    """Remove setting request envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["remove_setting_request"] = "remove_setting_request"
+
+
 __all__ = [
+    "RemoveSettingBody",
+    "RemoveSettingRequest",
     "SettingRead",
     "SettingUpdate",
     "SettingCreate",

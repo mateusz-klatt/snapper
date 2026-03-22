@@ -7,8 +7,8 @@ permission (admin role).
 Endpoints:
     - ``GET /settings`` - List all settings, optionally filtered by category.
     - ``GET /settings/categories`` - List distinct setting categories.
-    - ``PUT /settings/{key}`` - Update or create a setting.
-    - ``DELETE /settings/{key}`` - Delete a setting.
+    - ``POST /settings/{key}/set`` - Set (update or create) a setting.
+    - ``POST /settings/{key}/remove`` - Remove a setting.
 
 Settings are stored in the ``settings`` table with encryption support
 for sensitive values (API keys, secrets).
@@ -39,6 +39,7 @@ from sqlalchemy import update
 
 from snapper.api.schemas.base import MessageResponse
 from snapper.api.schemas.health import SettingCategoriesResponse
+from snapper.api.schemas.settings import RemoveSettingRequest
 from snapper.api.schemas.settings import SettingListResponse
 from snapper.api.schemas.settings import SettingRead
 from snapper.api.schemas.settings import SettingResponse
@@ -149,15 +150,15 @@ async def get_setting_categories(
         )
 
 
-@router.put("/{key}", responses={404: {"description": "Setting not found"}})
-async def update_setting(
+@router.post("/{key}/set", responses={404: {"description": "Setting not found"}})
+async def set_setting(
     http_request: Request,
     key: str,
     body: SettingUpdate,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> SettingResponse:
-    """Update or create a setting by key.
+    """Set a setting value by key (update or create).
 
     Args:
         http_request: FastAPI request (provides REST tracker for provenance).
@@ -178,9 +179,9 @@ async def update_setting(
     )
     await settings_service.update_setting(
         key=key,
-        value=body.value,
-        category=body.category,
-        description=body.description,
+        value=body.payload.value,
+        category=body.payload.category,
+        description=body.payload.description,
         updated_by=user.username,
     )
     repository = get_repository(settings.db_url)
@@ -217,22 +218,24 @@ async def update_setting(
         )
 
 
-@router.delete("/{key}", responses={404: {"description": "Setting not found"}})
-async def delete_setting(
+@router.post("/{key}/remove", responses={404: {"description": "Setting not found"}})
+async def remove_setting(
     request: Request,
     key: str,
+    _body: RemoveSettingRequest,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
-    """Delete a setting by key.
+    """Remove a setting by key (soft-delete via bitemporal close).
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
-        key: The setting key to delete.
+        key: The setting key to remove.
+        _body: Request envelope with provenance (payload is empty).
         user: Authenticated user with CONFIGURE_SYSTEM permission.
 
     Returns:
-        Success message confirming deletion.
+        Success message confirming removal.
 
     Raises:
         HTTPException: If setting not found.

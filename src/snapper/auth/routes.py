@@ -30,6 +30,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
 from snapper.auth.schemas.requests import ChangePasswordRequest
 from snapper.auth.schemas.requests import CreateUserRequest
+from snapper.auth.schemas.requests import DeactivateUserRequest
 from snapper.auth.schemas.requests import LoginRequest
 from snapper.auth.schemas.requests import UpdateUserRequest
 from snapper.auth.schemas.responses import LoginData
@@ -113,17 +114,19 @@ async def login(
     Raises:
         HTTPException: 401 if credentials invalid.
     """
-    enforce_failed_login_rate_limit(request, login_data.username)
+    enforce_failed_login_rate_limit(request, login_data.payload.username)
     user_service = get_user_service()
     settings = request.app.state.settings
-    user = await user_service.authenticate_user(login_data.username, login_data.password)
+    user = await user_service.authenticate_user(
+        login_data.payload.username, login_data.payload.password
+    )
     if not user:
-        register_failed_login_attempt(request, login_data.username)
+        register_failed_login_attempt(request, login_data.payload.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
-    clear_failed_login_attempts(request, login_data.username)
+    clear_failed_login_attempts(request, login_data.payload.username)
     token_manager = get_token_manager()
     token_pair = token_manager.create_tokens(AuthPrincipal(username=user.username, role=user.role))
     csrf_manager = get_csrf_manager()
@@ -439,11 +442,11 @@ async def create_user(
     user_service = get_user_service()
     try:
         new_user = await user_service.create_user(
-            username=user_data.username,
-            password=user_data.password,
-            email=user_data.email,
-            role=user_data.role,
-            is_active=user_data.is_active,
+            username=user_data.payload.username,
+            password=user_data.payload.password,
+            email=user_data.payload.email,
+            role=user_data.payload.role,
+            is_active=user_data.payload.is_active,
         )
         sid, seq, pid, ts = _mint_provenance(request)
         return UserResponse(
@@ -460,7 +463,7 @@ async def create_user(
         ) from e
 
 
-@router.put("/users/{user_id}")
+@router.post("/users/{user_id}/update")
 async def update_user(
     request: Request,
     user_id: str,
@@ -484,7 +487,10 @@ async def update_user(
     """
     user_service = get_user_service()
     updated_user = await user_service.update_user(
-        user_id=user_id, email=user_data.email, role=user_data.role, is_active=user_data.is_active
+        user_id=user_id,
+        email=user_data.payload.email,
+        role=user_data.payload.role,
+        is_active=user_data.payload.is_active,
     )
     if not updated_user:
         raise HTTPException(
@@ -500,10 +506,11 @@ async def update_user(
     )
 
 
-@router.delete("/users/{user_id}")
-async def delete_user(
+@router.post("/users/{user_id}/deactivate")
+async def deactivate_user(
     request: Request,
     user_id: str,
+    _body: DeactivateUserRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> MessageResponse:
@@ -512,18 +519,19 @@ async def delete_user(
     Args:
         request: FastAPI request (provides REST tracker for provenance).
         user_id: Target user ID to deactivate.
+        _body: Request envelope with provenance (payload is empty).
         current_user: Authenticated user with MANAGE_USERS permission.
 
     Returns:
         Success message.
 
     Raises:
-        HTTPException: If user not found or trying to delete self.
+        HTTPException: If user not found or trying to deactivate self.
     """
     user_service = get_user_service()
     if user_id == current_user.username:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete your own account"
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot deactivate your own account"
         )
     success = await user_service.delete_user(user_id)
     if not success:
@@ -568,8 +576,8 @@ async def change_user_password(
             )
     success = await user_service.change_password(
         user_id=user_id,
-        old_password=password_data.current_password,
-        new_password=password_data.new_password,
+        old_password=password_data.payload.current_password,
+        new_password=password_data.payload.new_password,
     )
     if not success:
         raise HTTPException(
@@ -605,7 +613,7 @@ async def admin_reset_user_password(
     """
     user_service = get_user_service()
     try:
-        await user_service.admin_reset_password(user_id, password_data.new_password)
+        await user_service.admin_reset_password(user_id, password_data.payload.new_password)
         return _message_response(request, f"Password reset successfully for user {user_id}")
     except ValueError as e:
         raise HTTPException(

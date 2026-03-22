@@ -1,5 +1,4 @@
 export type {
-  WsMessageSchema,
   TickData,
   CandleData,
   TradeData,

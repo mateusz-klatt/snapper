@@ -76,7 +76,7 @@ describe('topics', () => {
         timeframe: '1m',
       })
 
-      expect(getMessageTopic(message)).toBe('market.kraken.BTC-USD.candles.1m')
+      expect(getMessageTopic(message as never)).toBe('market.kraken.BTC-USD.candles.1m')
     })
     it('returns fallback for candle with missing data', () => {
       const message = createCandle({
@@ -85,7 +85,7 @@ describe('topics', () => {
         timeframe: '',
       })
 
-      expect(getMessageTopic(message)).toBe('market.')
+      expect(getMessageTopic(message as never)).toBe('market.')
     })
     it('builds topic from tick message data', () => {
       const message = createTick({
@@ -93,7 +93,7 @@ describe('topics', () => {
         exchange: 'ZONDA',
       })
 
-      expect(getMessageTopic(message)).toBe('market.zonda.ETH-EUR.ticks')
+      expect(getMessageTopic(message as never)).toBe('market.zonda.ETH-EUR.ticks')
     })
     it('returns fallback for tick with missing data', () => {
       const message = createTick({
@@ -101,17 +101,17 @@ describe('topics', () => {
         exchange: '',
       })
 
-      expect(getMessageTopic(message)).toBe('market.')
+      expect(getMessageTopic(message as never)).toBe('market.')
     })
     it('returns orders prefix for order message', () => {
       const message = createOrder()
 
-      expect(getMessageTopic(message)).toBe('orders.')
+      expect(getMessageTopic(message as never)).toBe('orders.')
     })
     it('returns executions prefix for execution message', () => {
       const message = createExecution()
 
-      expect(getMessageTopic(message)).toBe('executions.')
+      expect(getMessageTopic(message as never)).toBe('executions.')
     })
     it('builds topic from signal message data', () => {
       const message = createSignal({
@@ -119,7 +119,7 @@ describe('topics', () => {
         instrument: 'BTC-USD',
       })
 
-      expect(getMessageTopic(message)).toBe('signals.kraken.BTC-USD.live')
+      expect(getMessageTopic(message as never)).toBe('signals.kraken.BTC-USD.live')
     })
     it('returns fallback for signal with missing data', () => {
       const message = createSignal({
@@ -127,17 +127,17 @@ describe('topics', () => {
         instrument: '',
       })
 
-      expect(getMessageTopic(message)).toBe('signals.')
+      expect(getMessageTopic(message as never)).toBe('signals.')
     })
     it('returns heartbeats prefix for heartbeat message', () => {
       const message = createHeartbeat()
 
-      expect(getMessageTopic(message)).toBe('system.heartbeats.')
+      expect(getMessageTopic(message as never)).toBe('system.heartbeats.')
     })
     it('returns message type for unknown types', () => {
       const message = createError({ message: 'test' })
 
-      expect(getMessageTopic(message)).toBe('error')
+      expect(getMessageTopic(message as never)).toBe('error')
     })
   })
   describe('shouldThrottle', () => {

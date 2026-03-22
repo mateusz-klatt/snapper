@@ -1,5 +1,3 @@
-import type { WSPingRequest } from '../../types/ws'
-
 export function calculateReconnectDelay(
   attempt: number,
   baseInterval: number,
@@ -16,7 +14,7 @@ export function shouldReconnect(
   return !isReconnecting && reconnectAttempts < maxReconnectAttempts
 }
 
-export function createHeartbeatMessage(): WSPingRequest {
+export function createHeartbeatMessage(): { type: 'ping' } {
   return { type: 'ping' }
 }
 

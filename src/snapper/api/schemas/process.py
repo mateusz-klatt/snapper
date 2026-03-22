@@ -22,6 +22,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ProcessLifecycleType
@@ -82,20 +83,18 @@ __all__ = [
 ]
 
 
-class ProcessStartRequest(StrictDataSchema[Literal["process_start_request"]]):
-    """Process start request schema.
-
-    Used to start a configured process with optional parameter overrides.
+class ProcessStartBody(BaseModel):
+    """Process start request body.
 
     Attributes:
-        type: Payload item type discriminator.
         mode: Execution mode (thread/process) override.
         args: Constructor positional arguments override.
         kwargs: Constructor keyword arguments override.
         autostart: Toggle autostart flag (None keeps stored value).
     """
 
-    type: Literal["process_start_request"] = "process_start_request"
+    model_config = ConfigDict(extra="forbid")
+
     mode: ProcessMode | None = Field(
         None,
         description="Execution mode (thread/process) - for ProcessLauncherService, not constructor",
@@ -117,13 +116,20 @@ class ProcessStartRequest(StrictDataSchema[Literal["process_start_request"]]):
     )
 
 
-class ProcessCreateRequest(StrictDataSchema[Literal["process_create_request"]]):
-    """Process creation request schema.
-
-    Used to create a new process configuration from a template.
+class ProcessStartRequest(PayloadRequest[Literal["process_start_request"], ProcessStartBody]):
+    """Process start request envelope.
 
     Attributes:
         type: Payload item type discriminator.
+    """
+
+    type: Literal["process_start_request"] = "process_start_request"
+
+
+class ProcessCreateBody(BaseModel):
+    """Process creation request body.
+
+    Attributes:
         name: Unique process name (lowercase alphanumeric with underscores).
         template: Registered process identifier used as template.
         enabled: Whether process should autostart on boot.
@@ -133,7 +139,8 @@ class ProcessCreateRequest(StrictDataSchema[Literal["process_create_request"]]):
         note: Optional note stored alongside configuration.
     """
 
-    type: Literal["process_create_request"] = "process_create_request"
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(
         ...,
         description=_UNIQUE_PROCESS_NAME_DESC,
@@ -168,38 +175,64 @@ class ProcessCreateRequest(StrictDataSchema[Literal["process_create_request"]]):
     )
 
 
-class TradeStartRequest(StrictDataSchema[Literal["trade_start_request"]]):
-    """Trade execution start request schema.
-
-    Used to start live trading with a specific strategy.
+class ProcessCreateRequest(PayloadRequest[Literal["process_create_request"], ProcessCreateBody]):
+    """Process creation request envelope.
 
     Attributes:
         type: Payload item type discriminator.
+    """
+
+    type: Literal["process_create_request"] = "process_create_request"
+
+
+class TradeStartBody(BaseModel):
+    """Trade execution start request body.
+
+    Attributes:
         strategy: Strategy name to trade with.
         paper: Enable paper trading mode.
     """
 
-    type: Literal["trade_start_request"] = "trade_start_request"
+    model_config = ConfigDict(extra="forbid")
+
     strategy: str = Field(description="Strategy name to trade with")
     paper: bool = Field(default=False, description="Enable paper trading mode")
 
 
-class BacktestRequest(StrictDataSchema[Literal["backtest_request"]]):
-    """Backtest request schema.
-
-    Used to start a backtest run.
+class TradeStartRequest(PayloadRequest[Literal["trade_start_request"], TradeStartBody]):
+    """Trade execution start request envelope.
 
     Attributes:
         type: Payload item type discriminator.
+    """
+
+    type: Literal["trade_start_request"] = "trade_start_request"
+
+
+class BacktestBody(BaseModel):
+    """Backtest request body.
+
+    Attributes:
         strategy: Strategy name to backtest.
         start: Start date in YYYY-MM-DD format.
         end: End date in YYYY-MM-DD format.
     """
 
-    type: Literal["backtest_request"] = "backtest_request"
+    model_config = ConfigDict(extra="forbid")
+
     strategy: str = Field(description="Strategy name to backtest")
     start: str = Field(description="Start date in YYYY-MM-DD format")
     end: str = Field(description="End date in YYYY-MM-DD format")
+
+
+class BacktestRequest(PayloadRequest[Literal["backtest_request"], BacktestBody]):
+    """Backtest request envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["backtest_request"] = "backtest_request"
 
 
 class ProcessStatus(BaseModel):
@@ -251,7 +284,7 @@ class StrategyStatusPayload(BaseModel):
 
     strategy_name: str = Field(description="Strategy name")
     status: str = Field(description="Current strategy status")
-    details: dict[str, Any] = Field(default_factory=dict, description="Full raw status")
+    details: dict[str, Any] = Field(default={}, description="Full raw status")
     signals_generated: int | None = Field(None, description="Signals generated count")
     trades_executed: int | None = Field(None, description="Trades executed count")
     last_signal: str | None = Field(None, description="Last signal description")
@@ -309,7 +342,7 @@ class SystemStatusData(StrictDataSchema[Literal["system_status"]]):
     trader: ProcessStatus
     backtests: dict[str, ProcessStatus]
     strategies: list[StrategyStatusPayload] = Field(
-        default_factory=list, description="List of active strategies from strategy_runner"
+        default=[], description="List of active strategies from strategy_runner"
     )
 
 
@@ -416,7 +449,7 @@ class AvailableProcess(StrictDataSchema[Literal["available_process"]]):
     description: str = Field(description="Human-readable description")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
     role: ProcessRoleType = Field(description=_ROLE_DESC)
-    tags: list[str] = Field(default_factory=list, description="Categorization tags")
+    tags: list[str] = Field(default=[], description="Categorization tags")
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
 
 
@@ -466,12 +499,12 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     mode: ProcessMode = Field(description="Execution mode (thread/process)")
     class_path: str = Field(description=_CLASS_PATH_DESC)
     method: str = Field(description=_METHOD_DESC)
-    args: list[Any] = Field(default_factory=list, description="Constructor arguments")
-    kwargs: dict[str, Any] = Field(default_factory=dict, description="Constructor kwargs")
+    args: list[Any] = Field(default=[], description="Constructor arguments")
+    kwargs: dict[str, Any] = Field(default={}, description="Constructor kwargs")
     note: str | None = Field(None, description="Optional note")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
     role: ProcessRoleType = Field(description=_ROLE_DESC)
-    tags: list[str] = Field(default_factory=list, description="Categorization tags")
+    tags: list[str] = Field(default=[], description="Categorization tags")
     parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
     is_one_shot: bool = Field(description="Whether process is one-shot task")
     active_public_id: str | None = Field(None, description="Active public ID if running")
@@ -602,8 +635,8 @@ class ProcessSchemaData(StrictDataSchema[Literal["process_schema"]]):
     method: str = Field(description=_METHOD_DESC)
     default_enabled: bool = Field(description="Default autostart setting")
     default_mode: ProcessMode = Field(description="Default execution mode")
-    default_args: list[Any] = Field(default_factory=list, description="Default arguments")
-    default_kwargs: dict[str, Any] = Field(default_factory=dict, description="Default kwargs")
+    default_args: list[Any] = Field(default=[], description="Default arguments")
+    default_kwargs: dict[str, Any] = Field(default={}, description="Default kwargs")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 
 
@@ -647,7 +680,7 @@ class ProcessRun(StrictDataSchema[Literal["process_run"]]):
     parameters: dict[str, Any] | None = Field(None, description="Run parameters")
     result: dict[str, Any] | None = Field(None, description="Run result if completed")
     error: str | None = Field(None, description="Error message if failed")
-    tags: list[str] = Field(default_factory=list, description="Process tags")
+    tags: list[str] = Field(default=[], description="Process tags")
     started_at: str = Field(description="Start time in ISO format")
     completed_at: str | None = Field(None, description="Completion time if finished")
 

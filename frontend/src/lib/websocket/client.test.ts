@@ -89,13 +89,13 @@ class MockWebSocket {
     this.url = url
     setTimeout(() => {
       this.readyState = MockWebSocket.OPEN
-      this.onopen?.(new Event('open'))
+      this.onopen?.call(this as unknown as WebSocket, new Event('open'))
     }, 10)
   }
   send = vi.fn()
   close = vi.fn(() => {
     this.readyState = MockWebSocket.CLOSED
-    this.onclose?.(new CloseEvent('close'))
+    this.onclose?.call(this as unknown as WebSocket, new CloseEvent('close'))
   })
 }
 

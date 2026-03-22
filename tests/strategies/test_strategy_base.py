@@ -780,6 +780,7 @@ async def test_emit_signal_persists_with_stamped_provenance(
         sequence_id=7,
         public_id="test-public-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
     )
     mock_publisher = MagicMock()
     mock_publisher.send = AsyncMock(return_value=stamped)

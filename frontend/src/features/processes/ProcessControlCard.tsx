@@ -31,29 +31,18 @@ const formatDetailValue = (value: unknown): string => {
 }
 
 const HeartbeatIndicator: React.FC<{ heartbeat: HeartbeatData }> = ({ heartbeat }) => {
-  const isUnknown = heartbeat.status === 'unknown'
-
-  let color = 'text-muted-400'
-  let dot = 'bg-muted-400'
-
-  if (!isUnknown) {
-    color = heartbeat.healthy ? 'text-accent-400' : 'text-loss-400'
-    dot = heartbeat.healthy ? 'bg-accent-400' : 'bg-loss-400'
-  }
+  const color = heartbeat.healthy ? 'text-accent-400' : 'text-loss-400'
+  const dot = heartbeat.healthy ? 'bg-accent-400' : 'bg-loss-400'
 
   return (
     <div className={clsx('flex items-center gap-1.5 text-xs', color)}>
       <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', dot)} />
-      {isUnknown ? (
-        <span className='opacity-70'>waiting</span>
-      ) : (
-        <span>
-          {heartbeat.status}
-          {heartbeat.lag_ms !== undefined && (
-            <span className='opacity-70 ml-1'>({heartbeat.lag_ms}ms)</span>
-          )}
-        </span>
-      )}
+      <span>
+        {heartbeat.status}
+        {heartbeat.lag_ms !== undefined && (
+          <span className='opacity-70 ml-1'>({heartbeat.lag_ms}ms)</span>
+        )}
+      </span>
     </div>
   )
 }

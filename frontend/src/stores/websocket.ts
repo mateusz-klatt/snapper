@@ -166,7 +166,7 @@ export function useWebSocketConnection(url?: string, options?: WebSocketConnecti
 
   useEffect(() => {
     let isMounted = true
-    let retryTimeout: number | null = null
+    let retryTimeout: ReturnType<typeof setTimeout> | null = null
 
     const attemptConnection = async () => {
       if (!isMounted) {

@@ -48,12 +48,12 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
   const processSchema = useProcessSchema(selectedTemplate, {
     enabled: open && selectedTemplate.length > 0,
   })
-  const defaultArgs: unknown[] = processSchema.data?.default_args ?? []
+  const defaultArgs: unknown[] = processSchema.data?.payload.default_args ?? []
   const defaultKwargs = useMemo(() => {
-    const payload = processSchema.data?.default_kwargs ?? {}
+    const raw = processSchema.data?.payload.default_kwargs ?? {}
 
-    return typeof payload === 'object' && payload !== null ? { ...payload } : {}
-  }, [processSchema.data?.default_kwargs])
+    return typeof raw === 'object' && raw !== null ? { ...raw } : {}
+  }, [processSchema.data?.payload.default_kwargs])
   const defaultStrategyName =
     typeof defaultKwargs.name === 'string' ? defaultKwargs.name : undefined
 
@@ -62,12 +62,12 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
       return
     }
 
-    const schemaMode = processSchema.data?.default_mode
+    const schemaMode = processSchema.data?.payload.default_mode
 
     if (schemaMode === 'thread' || schemaMode === 'process') {
       setExecutionMode(schemaMode)
     }
-  }, [open, processSchema.data?.default_mode])
+  }, [open, processSchema.data?.payload.default_mode])
   useEffect(() => {
     if (!open) {
       setSelectedTemplate('')

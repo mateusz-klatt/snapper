@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { SettingItem } from './SettingItem'
 import { AddSettingModal } from './AddSettingModal'
 import { ThemeSelect } from '../../components/ThemeSelect'

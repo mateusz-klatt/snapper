@@ -72,7 +72,17 @@ describe('auth store', () => {
   })
   it('useAuth exposes store selectors', () => {
     useAuthStore.setState({
-      user: { username: 'viewer', role: 'viewer', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'viewer',
+        role: 'viewer',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
       isLoading: false,
       error: null,
@@ -91,7 +101,17 @@ describe('auth store', () => {
   })
   it('hasRole returns true for user role', () => {
     useAuthStore.setState({
-      user: { username: 'admin', role: 'admin', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'admin',
+        role: 'admin',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -100,7 +120,17 @@ describe('auth store', () => {
   })
   it('hasRole supports role hierarchy - admin has operator role', () => {
     useAuthStore.setState({
-      user: { username: 'admin', role: 'admin', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'admin',
+        role: 'admin',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -110,7 +140,17 @@ describe('auth store', () => {
   })
   it('hasRole supports role hierarchy - operator has viewer role', () => {
     useAuthStore.setState({
-      user: { username: 'operator', role: 'operator', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'operator',
+        role: 'operator',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -125,7 +165,17 @@ describe('auth store', () => {
   })
   it('hasPermission returns true for admin with all permissions', () => {
     useAuthStore.setState({
-      user: { username: 'admin', role: 'admin', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'admin',
+        role: 'admin',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -136,7 +186,17 @@ describe('auth store', () => {
   })
   it('hasPermission checks operator permissions', () => {
     useAuthStore.setState({
-      user: { username: 'operator', role: 'operator', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'operator',
+        role: 'operator',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -147,7 +207,17 @@ describe('auth store', () => {
   })
   it('hasPermission checks viewer permissions', () => {
     useAuthStore.setState({
-      user: { username: 'viewer', role: 'viewer', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'viewer',
+        role: 'viewer',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -159,9 +229,15 @@ describe('auth store', () => {
   it('hasPermission falls back to empty permissions for unknown role', () => {
     useAuthStore.setState({
       user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         username: 'mystery',
         role: 'unknown' as unknown as 'viewer',
         is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
       },
       isAuthenticated: true,
     })
@@ -176,7 +252,17 @@ describe('auth store', () => {
   })
   it('canAccess checks admin resource access', () => {
     useAuthStore.setState({
-      user: { username: 'admin', role: 'admin', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'admin',
+        role: 'admin',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -187,7 +273,17 @@ describe('auth store', () => {
   })
   it('canAccess checks operator resource access', () => {
     useAuthStore.setState({
-      user: { username: 'operator', role: 'operator', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'operator',
+        role: 'operator',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -199,7 +295,17 @@ describe('auth store', () => {
   })
   it('canAccess checks viewer resource access', () => {
     useAuthStore.setState({
-      user: { username: 'viewer', role: 'viewer', is_active: true },
+      user: {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'viewer',
+        role: 'viewer',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
       isAuthenticated: true,
     })
     const state = useAuthStore.getState()
@@ -215,7 +321,17 @@ describe('auth store', () => {
   })
   describe('login', () => {
     it('successfully logs in user', async () => {
-      const mockUser = { username: 'testuser', role: 'admin' as const, is_active: true }
+      const mockUser = {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'testuser',
+        role: 'admin' as const,
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      }
 
       vi.mocked(apiClient.post).mockResolvedValueOnce({
         ok: true,
@@ -282,7 +398,19 @@ describe('auth store', () => {
               ok: true,
               json: () =>
                 Promise.resolve({
-                  payload: { user: { username: 'test', role: 'admin', is_active: true } },
+                  payload: {
+                    user: {
+                      type: 'user_profile' as const,
+                      sequence_id: 0,
+                      public_id: 'test-pid',
+                      timestamp: '2024-01-01T00:00:00Z',
+                      session_id: 'test-sid',
+                      username: 'test',
+                      role: 'admin',
+                      is_active: true,
+                      created_at: '2026-01-01T00:00:00Z',
+                    },
+                  },
                 }),
             } as Response)
           })
@@ -296,7 +424,17 @@ describe('auth store', () => {
   describe('logout', () => {
     beforeEach(() => {
       useAuthStore.setState({
-        user: { username: 'admin', role: 'admin', is_active: true },
+        user: {
+          type: 'user_profile' as const,
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          username: 'admin',
+          role: 'admin',
+          is_active: true,
+          created_at: '2026-01-01T00:00:00Z',
+        },
         isAuthenticated: true,
         csrfToken: 'test-csrf',
       })
@@ -340,12 +478,32 @@ describe('auth store', () => {
   describe('refreshToken', () => {
     beforeEach(() => {
       useAuthStore.setState({
-        user: { username: 'admin', role: 'admin', is_active: true },
+        user: {
+          type: 'user_profile' as const,
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          username: 'admin',
+          role: 'admin',
+          is_active: true,
+          created_at: '2026-01-01T00:00:00Z',
+        },
         isAuthenticated: true,
       })
     })
     it('successfully refreshes token', async () => {
-      const mockUser = { username: 'admin', role: 'admin' as const, is_active: true }
+      const mockUser = {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'admin',
+        role: 'admin' as const,
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      }
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
         payload: {
@@ -373,7 +531,19 @@ describe('auth store', () => {
       vi.mocked(apiClient.get).mockResolvedValueOnce({
         ok: true,
         json: () =>
-          Promise.resolve({ payload: { username: 'admin', role: 'admin', is_active: true } }),
+          Promise.resolve({
+            payload: {
+              type: 'user_profile' as const,
+              sequence_id: 0,
+              public_id: 'test-pid',
+              timestamp: '2024-01-01T00:00:00Z',
+              session_id: 'test-sid',
+              username: 'admin',
+              role: 'admin',
+              is_active: true,
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          }),
       } as Response)
       const state = useAuthStore.getState()
 
@@ -395,7 +565,17 @@ describe('auth store', () => {
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
         payload: {
           csrf_token: 'csrf',
-          user: { username: 'admin', role: 'admin', is_active: true },
+          user: {
+            type: 'user_profile' as const,
+            sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
+            username: 'admin',
+            role: 'admin',
+            is_active: true,
+            created_at: '2026-01-01T00:00:00Z',
+          },
         },
       })
       const state = useAuthStore.getState()
@@ -410,7 +590,17 @@ describe('auth store', () => {
         payload: {
           csrf_token: 'csrf',
           ws_token: 'token',
-          user: { username: 'admin', role: 'admin', is_active: true },
+          user: {
+            type: 'user_profile' as const,
+            sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
+            username: 'admin',
+            role: 'admin',
+            is_active: true,
+            created_at: '2026-01-01T00:00:00Z',
+          },
         },
       })
       const state = useAuthStore.getState()
@@ -419,7 +609,17 @@ describe('auth store', () => {
       expect(storeWsTicket).toHaveBeenCalledWith(null)
     })
     it('sets null csrf token when refresh response omits it', async () => {
-      const mockUser = { username: 'admin', role: 'admin' as const, is_active: true }
+      const mockUser = {
+        type: 'user_profile' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        username: 'admin',
+        role: 'admin' as const,
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      }
 
       vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
         payload: {
@@ -485,7 +685,17 @@ describe('auth store', () => {
   describe('silentLogout', () => {
     beforeEach(() => {
       useAuthStore.setState({
-        user: { username: 'admin', role: 'admin', is_active: true },
+        user: {
+          type: 'user_profile' as const,
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          username: 'admin',
+          role: 'admin',
+          is_active: true,
+          created_at: '2026-01-01T00:00:00Z',
+        },
         isAuthenticated: true,
         csrfToken: 'test-csrf',
       })
@@ -519,7 +729,17 @@ describe('auth store', () => {
   describe('canAccess with unknown resource', () => {
     it('returns false for unknown resource', () => {
       useAuthStore.setState({
-        user: { username: 'admin', role: 'admin', is_active: true },
+        user: {
+          type: 'user_profile' as const,
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          username: 'admin',
+          role: 'admin',
+          is_active: true,
+          created_at: '2026-01-01T00:00:00Z',
+        },
         isAuthenticated: true,
       })
       const state = useAuthStore.getState()
@@ -542,7 +762,17 @@ describe('auth store', () => {
         status: 200,
       } as Response)
       useAuthStore.setState({
-        user: { username: 'admin', role: 'admin', is_active: true },
+        user: {
+          type: 'user_profile' as const,
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
+          username: 'admin',
+          role: 'admin',
+          is_active: true,
+          created_at: '2026-01-01T00:00:00Z',
+        },
         isAuthenticated: true,
       })
       const callback = (window as Window & { authLogoutCallback?: () => void }).authLogoutCallback

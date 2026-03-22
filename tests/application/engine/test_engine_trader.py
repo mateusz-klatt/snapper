@@ -293,6 +293,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -340,6 +341,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="sell",
@@ -386,6 +388,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -427,6 +430,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test_strategy",
             instrument="UNKNOWN-USD",
             side="buy",
@@ -472,6 +476,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test_strategy",
             instrument="BTC-USD",
             side="buy",
@@ -516,6 +521,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test",
             instrument="BTC-USD",
             side="buy",
@@ -551,6 +557,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test_strategy",
             instrument="NONTRADEABLE-USD",
             side="buy",
@@ -594,6 +601,7 @@ class TestTraderCoverage:
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
             strategy_name="test",
             instrument="BTC-USD",
             side="buy",
@@ -1011,6 +1019,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         sequence_id=0,
         public_id="test-public-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
         instrument="BTC-USD",
         side="buy",
         strength=0.5,
@@ -1026,6 +1035,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         sequence_id=0,
         public_id="test-public-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
         instrument="BTC-USD",
         side="buy",
         strength=0.5,
@@ -1039,6 +1049,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         sequence_id=0,
         public_id="test-public-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
         instrument="BTC-USD",
         side="buy",
         strength=0.5,
@@ -1053,6 +1064,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         sequence_id=0,
         public_id="test-public-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
         instrument="BTC-USD",
         side="buy",
         price=10.0,
@@ -1072,6 +1084,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         sequence_id=0,
         public_id="test-public-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
         instrument="BTC-USD",
         side="sell",
         strength=1.0,
@@ -1123,6 +1136,7 @@ async def test_listen_signals_processes_single_message(monkeypatch: pytest.Monke
         "strength": 0.5,
         "exchange": "kraken",
         "reason": "test",
+        "fired_at": "2024-01-01T00:00:00Z",
     }
     subscriber.messages.append(("signals.kraken.BTC-USD.live", json.dumps(message).encode("utf-8")))
     coord.signal_subscriber = cast(Any, subscriber)
@@ -1297,6 +1311,7 @@ async def test_handle_execution_fill_success(monkeypatch: pytest.MonkeyPatch) ->
         fee=0.5,
         fee_asset="USD",
         status="filled",
+        executed_at=datetime.now(UTC),
     )
     coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
 
@@ -1329,6 +1344,7 @@ async def test_handle_execution_fill_invariant_exchange_mismatch(
         fee=0.5,
         fee_asset="USD",
         status="filled",
+        executed_at=datetime.now(UTC),
     )
     coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
 
@@ -1361,6 +1377,7 @@ async def test_handle_execution_fill_invariant_instrument_mismatch(
         fee=0.5,
         fee_asset="USD",
         status="filled",
+        executed_at=datetime.now(UTC),
     )
     coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
 
@@ -1391,6 +1408,7 @@ async def test_handle_execution_fill_malformed_topic(monkeypatch: pytest.MonkeyP
         fee=0.5,
         fee_asset="USD",
         status="filled",
+        executed_at=datetime.now(UTC),
     )
     coord._handle_execution_fill("orders.events.kraken", fill)
 
@@ -1441,6 +1459,7 @@ async def test_listen_signals_routes_execution_fill(monkeypatch: pytest.MonkeyPa
                     "fee": 0.1,
                     "fee_asset": "USD",
                     "status": "filled",
+                    "executed_at": "2024-01-01T00:00:00Z",
                 }
             ).encode("utf-8"),
         )

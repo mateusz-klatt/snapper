@@ -36,10 +36,17 @@ from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.schemas.requests import AdminResetPasswordBody
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
+from snapper.auth.schemas.requests import ChangePasswordBody
 from snapper.auth.schemas.requests import ChangePasswordRequest
+from snapper.auth.schemas.requests import CreateUserBody
 from snapper.auth.schemas.requests import CreateUserRequest
+from snapper.auth.schemas.requests import DeactivateUserBody
+from snapper.auth.schemas.requests import DeactivateUserRequest
+from snapper.auth.schemas.requests import LoginBody
 from snapper.auth.schemas.requests import LoginRequest
+from snapper.auth.schemas.requests import UpdateUserBody
 from snapper.auth.schemas.requests import UpdateUserRequest
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
@@ -139,12 +146,12 @@ def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
     login_response = test_client.post(
         "/api/auth/login",
         json={
+            "type": "login_request",
             "session_id": "",
             "sequence_id": 0,
             "public_id": "test-pid",
             "timestamp": "2024-01-01T00:00:00Z",
-            "username": username,
-            "password": password,
+            "payload": {"username": username, "password": password},
         },
     )
     assert login_response.status_code == 200
@@ -440,12 +447,12 @@ def _prepare_ws_token_v2(test_client: Any, *, username: str, password: str) -> t
     login_response = test_client.post(
         "/api/auth/login",
         json={
+            "type": "login_request",
             "session_id": "",
             "sequence_id": 0,
             "public_id": "test-pid",
             "timestamp": "2024-01-01T00:00:00Z",
-            "username": username,
-            "password": password,
+            "payload": {"username": username, "password": password},
         },
     )
     assert login_response.status_code == 200
@@ -3140,6 +3147,7 @@ class StubUserService:
             email=email,
             role=role,
             is_active=is_active,
+            created_at=datetime.now(UTC),
         )
         self.created_users.append(
             {
@@ -3223,6 +3231,7 @@ def test_login_success_sets_cookies(
         username="bob",
         email="bob@example.com",
         role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
     )
     user_service.authenticated_user = user
     csrf_manager.token = "csrf-new"
@@ -3234,12 +3243,12 @@ def test_login_success_sets_cookies(
     response = client.post(
         "/auth/login",
         json={
+            "type": "login_request",
             "session_id": "",
             "sequence_id": 0,
             "public_id": "test-pid",
             "timestamp": "2024-01-01T00:00:00Z",
-            "username": "bob",
-            "password": "secret",
+            "payload": {"username": "bob", "password": "secret"},
         },
     )
     assert response.status_code == 200
@@ -3267,12 +3276,12 @@ def test_login_failure_returns_401(
     response = client.post(
         "/auth/login",
         json={
+            "type": "login_request",
             "session_id": "",
             "sequence_id": 0,
             "public_id": "test-pid",
             "timestamp": "2024-01-01T00:00:00Z",
-            "username": "bob",
-            "password": "wrong",
+            "payload": {"username": "bob", "password": "wrong"},
         },
     )
     assert response.status_code == 401
@@ -3306,6 +3315,7 @@ def test_refresh_token_success(
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="bob",
         role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
     )
     user_service.user_by_id = user
     token_manager.create_tokens_response = TokenPair(
@@ -3348,6 +3358,7 @@ def test_get_current_user_profile_returns_user(
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="alice",
         role=UserRole.ADMIN,
+        created_at=datetime.now(UTC),
     )
     response = client.get("/auth/me")
     assert response.status_code == 200
@@ -3476,6 +3487,7 @@ def test_get_current_user_info(
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="alice",
         role=UserRole.ADMIN,
+        created_at=datetime.now(UTC),
     )
     response = client.get("/auth/me")
     assert response.status_code == 200
@@ -3503,6 +3515,7 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             username="alice",
             role=UserRole.ADMIN,
+            created_at=datetime.now(UTC),
         ),
         UserProfile(
             session_id="test-sid",
@@ -3511,6 +3524,7 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             username="bob",
             role=UserRole.OPERATOR,
+            created_at=datetime.now(UTC),
         ),
     ]
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
@@ -3539,6 +3553,7 @@ async def test_create_user_success(monkeypatch: Any) -> None:
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         username="charlie",
         role=UserRole.VIEWER,
+        created_at=datetime.now(UTC),
     )
     stub_service.create_user_result = created_user
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
@@ -3547,11 +3562,13 @@ async def test_create_user_success(monkeypatch: Any) -> None:
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        username="charlie",
-        password="pass-pass",
-        email="c@example.com",
-        role=UserRole.VIEWER,
-        is_active=True,
+        payload=CreateUserBody(
+            username="charlie",
+            password="pass-pass",
+            email="c@example.com",
+            role=UserRole.VIEWER,
+            is_active=True,
+        ),
     )
     result = await routes.create_user(
         request=_make_rest_request(),
@@ -3578,11 +3595,13 @@ async def test_create_user_value_error(monkeypatch: Any) -> None:
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        username="dup",
-        password="pass-pass",
-        email=None,
-        role=UserRole.VIEWER,
-        is_active=True,
+        payload=CreateUserBody(
+            username="dup",
+            password="pass-pass",
+            email=None,
+            role=UserRole.VIEWER,
+            is_active=True,
+        ),
     )
     with pytest.raises(HTTPException) as exc:
         await routes.create_user(
@@ -3610,9 +3629,11 @@ async def test_update_user_not_found(monkeypatch: Any) -> None:
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        email=None,
-        role=UserRole.VIEWER,
-        is_active=False,
+        payload=UpdateUserBody(
+            email=None,
+            role=UserRole.VIEWER,
+            is_active=False,
+        ),
     )
     with pytest.raises(HTTPException) as exc:
         await routes.update_user(
@@ -3642,6 +3663,7 @@ async def test_update_user_success(monkeypatch: Any) -> None:
         username="dora",
         role=UserRole.OPERATOR,
         is_active=True,
+        created_at=datetime.now(UTC),
     )
     stub_service.update_user_result = updated_user
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
@@ -3650,9 +3672,11 @@ async def test_update_user_success(monkeypatch: Any) -> None:
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        email="dora@example.com",
-        role=UserRole.OPERATOR,
-        is_active=True,
+        payload=UpdateUserBody(
+            email="dora@example.com",
+            role=UserRole.OPERATOR,
+            is_active=True,
+        ),
     )
     result = await routes.update_user(
         request=_make_rest_request(),
@@ -3666,11 +3690,11 @@ async def test_update_user_success(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio()
-async def test_delete_user_success(monkeypatch: Any) -> None:
-    """Delete user returns success message.
+async def test_deactivate_user_success(monkeypatch: Any) -> None:
+    """Deactivate user returns success message.
 
-    Given: Existing user to delete,
-    When: Deleting user,
+    Given: Existing user to deactivate,
+    When: Deactivating user,
     Then: Returns deactivation success message.
     """
     stub_service = StubUserService()
@@ -3678,9 +3702,17 @@ async def test_delete_user_success(monkeypatch: Any) -> None:
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
-    result = await routes.delete_user(
+    body = DeactivateUserRequest(
+        session_id="test-sid",
+        sequence_id=0,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        payload=DeactivateUserBody(),
+    )
+    result = await routes.deactivate_user(
         request=mock_request,
         user_id="user-2",
+        _body=body,
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
@@ -3689,21 +3721,29 @@ async def test_delete_user_success(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio()
-async def test_delete_user_self_forbidden(monkeypatch: Any) -> None:
-    """Delete user cannot delete self.
+async def test_deactivate_user_self_forbidden(monkeypatch: Any) -> None:
+    """Deactivate user cannot deactivate self.
 
-    Given: Admin trying to delete own account,
-    When: Calling delete with own user_id,
+    Given: Admin trying to deactivate own account,
+    When: Calling deactivate with own user_id,
     Then: Raises HTTPException with 400 status.
     """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
+    body = DeactivateUserRequest(
+        session_id="test-sid",
+        sequence_id=0,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        payload=DeactivateUserBody(),
+    )
     with pytest.raises(HTTPException) as exc:
-        await routes.delete_user(
+        await routes.deactivate_user(
             request=mock_request,
             user_id="self",
+            _body=body,
             current_user=AuthPrincipal(username="self", role=UserRole.ADMIN),
             _csrf=None,
         )
@@ -3711,11 +3751,11 @@ async def test_delete_user_self_forbidden(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio()
-async def test_delete_user_not_found(monkeypatch: Any) -> None:
-    """Delete user returns 404 when not found.
+async def test_deactivate_user_not_found(monkeypatch: Any) -> None:
+    """Deactivate user returns 404 when not found.
 
     Given: Non-existent user_id,
-    When: Deleting user,
+    When: Deactivating user,
     Then: Raises HTTPException with 404 status.
     """
     stub_service = StubUserService()
@@ -3723,10 +3763,18 @@ async def test_delete_user_not_found(monkeypatch: Any) -> None:
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
+    body = DeactivateUserRequest(
+        session_id="test-sid",
+        sequence_id=0,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        payload=DeactivateUserBody(),
+    )
     with pytest.raises(HTTPException) as exc:
-        await routes.delete_user(
+        await routes.deactivate_user(
             request=mock_request,
             user_id="missing",
+            _body=body,
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
@@ -3748,8 +3796,10 @@ async def test_change_user_password_success(monkeypatch: Any) -> None:
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        current_password="old-pass",
-        new_password="new-password",
+        payload=ChangePasswordBody(
+            current_password="old-pass",
+            new_password="new-password",
+        ),
     )
     result = await routes.change_user_password(
         request=_make_rest_request(),
@@ -3777,8 +3827,10 @@ async def test_change_user_password_forbidden(monkeypatch: Any) -> None:
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        current_password="old-pass",
-        new_password="new-password",
+        payload=ChangePasswordBody(
+            current_password="old-pass",
+            new_password="new-password",
+        ),
     )
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
@@ -3807,8 +3859,10 @@ async def test_change_user_password_invalid_current(monkeypatch: Any) -> None:
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        current_password="old-pass",
-        new_password="new-password",
+        payload=ChangePasswordBody(
+            current_password="old-pass",
+            new_password="new-password",
+        ),
     )
     with pytest.raises(HTTPException) as exc:
         await routes.change_user_password(
@@ -3836,8 +3890,10 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
         sequence_id=1,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        current_password="irrelevant",
-        new_password="new-password",
+        payload=ChangePasswordBody(
+            current_password="irrelevant",
+            new_password="new-password",
+        ),
     )
     result = await routes.change_user_password(
         request=_make_rest_request(),
@@ -3891,7 +3947,9 @@ async def test_admin_reset_password_handles_repository_error(
                 sequence_id=1,
                 public_id="test-pid",
                 timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-                new_password="super-secret",
+                payload=AdminResetPasswordBody(
+                    new_password="super-secret",
+                ),
             ),
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
@@ -3926,7 +3984,9 @@ async def test_admin_reset_password_success(monkeypatch: Any) -> None:
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-            new_password="super-secret",
+            payload=AdminResetPasswordBody(
+                new_password="super-secret",
+            ),
         ),
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
@@ -3959,7 +4019,9 @@ async def test_admin_reset_password_user_not_found(monkeypatch: Any) -> None:
                 sequence_id=1,
                 public_id="test-pid",
                 timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-                new_password="super-secret",
+                payload=AdminResetPasswordBody(
+                    new_password="super-secret",
+                ),
             ),
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
@@ -4010,12 +4072,12 @@ class TestAuthRoutesCoverage:
         response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "admin",
-                "password": "AdminSnapper2026!",
+                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
             },
         )
         assert response.status_code == 200
@@ -4037,12 +4099,12 @@ class TestAuthRoutesCoverage:
         response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "operator",
-                "password": "OpSnapper2026!",
+                "payload": {"username": "operator", "password": "OpSnapper2026!"},
             },
         )
         assert response.status_code == 200
@@ -4060,12 +4122,12 @@ class TestAuthRoutesCoverage:
         response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "viewer",
-                "password": "ViewSnapper2026!",
+                "payload": {"username": "viewer", "password": "ViewSnapper2026!"},
             },
         )
         assert response.status_code == 200
@@ -4083,12 +4145,12 @@ class TestAuthRoutesCoverage:
         response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "nonexistent",
-                "password": "AdminSnapper2026!",
+                "payload": {"username": "nonexistent", "password": "AdminSnapper2026!"},
             },
         )
         assert response.status_code == 401
@@ -4104,12 +4166,12 @@ class TestAuthRoutesCoverage:
         response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "admin",
-                "password": "wrongpassword",
+                "payload": {"username": "admin", "password": "wrongpassword"},
             },
         )
         assert response.status_code == 401
@@ -4122,7 +4184,17 @@ class TestAuthRoutesCoverage:
         When: Attempting login,
         Then: Returns 422 validation error.
         """
-        response = client.post("/api/auth/login", json={"username": "admin"})
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "type": "login_request",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test-pid",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "payload": {"username": "admin"},
+            },
+        )
         assert response.status_code == 422
 
     def test_refresh_token_missing(self, client: TestClient) -> None:
@@ -4161,12 +4233,12 @@ class TestAuthRoutesCoverage:
         login_response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "admin",
-                "password": "AdminSnapper2026!",
+                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
             },
         )
         assert login_response.status_code == 200
@@ -4212,12 +4284,12 @@ class TestAuthRoutesCoverage:
         login_response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "admin",
-                "password": "AdminSnapper2026!",
+                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
             },
         )
         assert login_response.status_code == 200
@@ -4258,12 +4330,12 @@ class TestAuthRoutesCoverage:
         login_response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "admin",
-                "password": "AdminSnapper2026!",
+                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
             },
         )
         csrf_token = login_response.cookies.get("csrf_token")
@@ -4310,12 +4382,12 @@ class TestAuthRoutesCoverage:
         login_response = client.post(
             "/api/auth/login",
             json={
+                "type": "login_request",
                 "session_id": "",
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "username": "admin",
-                "password": "AdminSnapper2026!",
+                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
             },
         )
         assert login_response.status_code == 200
@@ -4702,12 +4774,14 @@ class TestUserManagementCoverage:
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-            username="testuser",
-            password="password123",
-            role=UserRole.VIEWER,
+            payload=CreateUserBody(
+                username="testuser",
+                password="password123",
+                role=UserRole.VIEWER,
+            ),
         )
-        assert create_req.username == "testuser"
-        assert create_req.role == UserRole.VIEWER
+        assert create_req.payload.username == "testuser"
+        assert create_req.payload.role == UserRole.VIEWER
 
     def test_user_model_fields(self) -> None:
         """UserProfile model has all required fields.
@@ -4725,6 +4799,7 @@ class TestUserManagementCoverage:
             email="test@example.com",
             role=UserRole.ADMIN,
             is_active=True,
+            created_at=datetime.now(UTC),
         )
         assert user.username == "testuser"
         assert user.username == "testuser"
@@ -4817,13 +4892,15 @@ class TestUserManagementCoverage:
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-            username="testuser",
-            password="password123",
-            remember_me=True,
+            payload=LoginBody(
+                username="testuser",
+                password="password123",
+                remember_me=True,
+            ),
         )
-        assert login_req.username == "testuser"
-        assert login_req.password == "password123"
-        assert login_req.remember_me is True
+        assert login_req.payload.username == "testuser"
+        assert login_req.payload.password == "password123"
+        assert login_req.payload.remember_me is True
 
     def test_websocket_auth_models(self) -> None:
         """WebSocket auth models hold auth data.

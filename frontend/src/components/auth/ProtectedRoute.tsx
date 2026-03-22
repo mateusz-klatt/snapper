@@ -1,11 +1,12 @@
 import React from 'react'
 import { useAuth } from '../../stores/auth'
+import type { Permission } from '../../types/permissions.generated'
 import LoginForm from './LoginForm'
 
 interface ProtectedRouteProps {
   children: React.ReactNode
   requiredRole?: 'viewer' | 'operator' | 'admin'
-  requiredPermission?: string
+  requiredPermission?: Permission
   resource?: string
   fallback?: React.ReactNode
 }

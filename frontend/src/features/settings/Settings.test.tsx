@@ -46,7 +46,7 @@ vi.mock('../../lib/apiClient', () => ({
     getSettings: vi.fn(),
     getSettingCategories: vi.fn(),
     updateSetting: vi.fn(),
-    deleteSetting: vi.fn(),
+    removeSetting: vi.fn(),
   },
 }))
 vi.mock('../../stores/auth', () => ({
@@ -212,7 +212,7 @@ describe('Settings', () => {
       description: 'API',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'tester',
-    })
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('api.url')).toBeTruthy()
@@ -251,7 +251,7 @@ describe('Settings', () => {
       description: 'Application name',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'admin',
-    })
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.name')).toBeTruthy()
@@ -294,10 +294,10 @@ describe('Settings', () => {
       count: mockSettings.length,
     } as never)
 
-    let resolveUpdate: (v: unknown) => void = () => {}
+    let resolveUpdate: (v: never) => void = () => {}
 
     vi.mocked(apiClient.updateSetting).mockImplementation(
-      () => new Promise(resolve => (resolveUpdate = resolve))
+      () => new Promise(resolve => (resolveUpdate = resolve as (v: never) => void))
     )
     renderSettings(<Settings />)
     await waitFor(() => expect(screen.getByText('busy.key')).toBeTruthy())
@@ -315,7 +315,7 @@ describe('Settings', () => {
       description: 'Busy setting',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'tester',
-    })
+    } as never)
     await waitFor(() => expect(screen.queryByText('Saving...')).toBeNull())
   })
   it('passes isSaving to SettingItem during delete', async () => {
@@ -335,17 +335,17 @@ describe('Settings', () => {
       .mockResolvedValueOnce({ payload: mockSettings, count: mockSettings.length } as never)
       .mockResolvedValue({ payload: [], count: 0 } as never)
 
-    let resolveDelete: (v: unknown) => void = () => {}
+    let resolveDelete: (v: never) => void = () => {}
 
-    vi.mocked(apiClient.deleteSetting).mockImplementation(
-      () => new Promise(resolve => (resolveDelete = resolve))
+    vi.mocked(apiClient.removeSetting).mockImplementation(
+      () => new Promise(resolve => (resolveDelete = resolve as (v: never) => void))
     )
     renderSettings(<Settings />)
     await waitFor(() => expect(screen.getByText('del.busy')).toBeTruthy())
     await userEvent.click(screen.getByRole('button', { name: /delete/i }))
     await userEvent.click(screen.getByRole('button', { name: /Yes, Delete/i }))
     await waitFor(() => expect(screen.getByText('Deleting...')).toBeTruthy())
-    resolveDelete({ message: 'deleted' })
+    resolveDelete({ message: 'deleted' } as never)
     await waitFor(() => expect(screen.queryByText('Deleting...')).toBeNull())
   })
   it('displays query error without dismiss button', async () => {
@@ -458,7 +458,7 @@ describe('Settings', () => {
       description: 'Application name',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'admin',
-    })
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('app.name')).toBeTruthy()
@@ -732,7 +732,7 @@ describe('Settings', () => {
       description: 'API key',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'admin',
-    })
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('auth.api_key')).toBeTruthy()
@@ -775,7 +775,7 @@ describe('Settings', () => {
       description: 'Secret config',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'admin',
-    })
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('auth_secret_key')).toBeTruthy()
@@ -1078,7 +1078,7 @@ describe('Settings', () => {
       description: 'JSON Config',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'admin',
-    })
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('config.json')).toBeTruthy()
@@ -1148,7 +1148,7 @@ describe('Settings', () => {
       description: 'API credentials',
       updated_at: '2024-01-02T00:00:00Z',
       updated_by: 'admin',
-    })
+    } as never)
     renderSettings(<Settings />)
     await waitFor(() => {
       expect(screen.getByText('api_key')).toBeTruthy()
@@ -1238,7 +1238,7 @@ describe('Settings', () => {
       vi.mocked(apiClient.getSettings)
         .mockResolvedValueOnce({ payload: mockSettings, count: mockSettings.length } as never)
         .mockResolvedValue({ payload: [], count: 0 } as never)
-      vi.mocked(apiClient.deleteSetting).mockResolvedValue({ message: 'Setting deleted' })
+      vi.mocked(apiClient.removeSetting).mockResolvedValue({ payload: 'Setting deleted' })
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('test.setting')).toBeTruthy()
@@ -1250,7 +1250,7 @@ describe('Settings', () => {
 
       await userEvent.click(confirmButton)
       await waitFor(() => {
-        expect(apiClient.deleteSetting).toHaveBeenCalledWith('test.setting')
+        expect(apiClient.removeSetting).toHaveBeenCalledWith('test.setting')
       })
       await waitFor(() => {
         expect(screen.queryByText('test.setting')).toBeFalsy()
@@ -1273,7 +1273,7 @@ describe('Settings', () => {
         payload: mockSettings,
         count: mockSettings.length,
       } as never)
-      vi.mocked(apiClient.deleteSetting).mockRejectedValue(new Error('Delete failed'))
+      vi.mocked(apiClient.removeSetting).mockRejectedValue(new Error('Delete failed'))
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('test.setting')).toBeTruthy()
@@ -1306,7 +1306,7 @@ describe('Settings', () => {
         payload: mockSettings,
         count: mockSettings.length,
       } as never)
-      vi.mocked(apiClient.deleteSetting).mockRejectedValue('unknown error')
+      vi.mocked(apiClient.removeSetting).mockRejectedValue('unknown error')
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('test.setting')).toBeTruthy()
@@ -1352,7 +1352,7 @@ describe('Settings', () => {
       vi.mocked(apiClient.getSettings)
         .mockResolvedValueOnce({ payload: [], count: 0 } as never)
         .mockResolvedValue({ payload: [newSetting], count: 1 } as never)
-      vi.mocked(apiClient.updateSetting).mockResolvedValue(newSetting)
+      vi.mocked(apiClient.updateSetting).mockResolvedValue(newSetting as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()
@@ -1401,7 +1401,7 @@ describe('Settings', () => {
 
       vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['api'])
       vi.mocked(apiClient.getSettings).mockResolvedValue({ payload: [], count: 0 } as never)
-      vi.mocked(apiClient.updateSetting).mockResolvedValue(newSetting)
+      vi.mocked(apiClient.updateSetting).mockResolvedValue(newSetting as never)
       renderSettings(<Settings />)
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeTruthy()

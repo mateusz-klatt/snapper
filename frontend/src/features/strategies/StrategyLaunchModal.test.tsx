@@ -30,6 +30,11 @@ describe('StrategyLaunchModal', () => {
   const mockOnSubmit = vi.fn()
   const mockTemplates: AvailableProcess[] = [
     {
+      type: 'available_process' as const,
+      sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: '2024-01-01T00:00:00Z',
+      session_id: 'test-sid',
       name: 'strategy_macd',
       class_path: 'snapper.strategies.macd',
       method: 'main',
@@ -274,9 +279,11 @@ describe('StrategyLaunchModal', () => {
 
     vi.mocked(useProcessSchema).mockReturnValue({
       data: {
-        default_args: [],
-        default_kwargs: { name: 'test_strategy' },
-        default_mode: 'thread',
+        payload: {
+          default_args: [],
+          default_kwargs: { name: 'test_strategy' },
+          default_mode: 'thread',
+        },
       },
       isLoading: false,
       error: null,
@@ -357,6 +364,11 @@ describe('StrategyLaunchModal', () => {
     const user = userEvent.setup()
     const multipleTemplates: AvailableProcess[] = [
       {
+        type: 'available_process' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         name: 'strategy_macd',
         class_path: 'snapper.strategies.macd',
         method: 'main',
@@ -367,6 +379,11 @@ describe('StrategyLaunchModal', () => {
         parameters_schema: null,
       },
       {
+        type: 'available_process' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         name: 'strategy_rsi',
         class_path: 'snapper.strategies.rsi',
         method: 'main',
@@ -404,9 +421,11 @@ describe('StrategyLaunchModal', () => {
 
     vi.mocked(useProcessSchema).mockReturnValue({
       data: {
-        default_args: [],
-        default_kwargs: 'invalid',
-        default_mode: 'thread',
+        payload: {
+          default_args: [],
+          default_kwargs: 'invalid',
+          default_mode: 'thread',
+        },
       },
       isLoading: false,
       error: null,
@@ -513,9 +532,11 @@ describe('StrategyLaunchModal', () => {
 
     vi.mocked(useProcessSchema).mockReturnValue({
       data: {
-        default_args: [],
-        default_kwargs: {},
-        default_mode: 'process',
+        payload: {
+          default_args: [],
+          default_kwargs: {},
+          default_mode: 'process',
+        },
       },
       isLoading: false,
       error: null,
@@ -543,9 +564,11 @@ describe('StrategyLaunchModal', () => {
 
     vi.mocked(useProcessSchema).mockReturnValue({
       data: {
-        default_args: [],
-        default_kwargs: { name: 'test', output: 'signals.original' },
-        default_mode: 'thread',
+        payload: {
+          default_args: [],
+          default_kwargs: { name: 'test', output: 'signals.original' },
+          default_mode: 'thread',
+        },
       },
       isLoading: false,
       error: null,
@@ -582,9 +605,11 @@ describe('StrategyLaunchModal', () => {
 
     vi.mocked(useProcessSchema).mockReturnValue({
       data: {
-        default_args: [],
-        default_kwargs: { name: 'test', output: 'signals' },
-        default_mode: 'thread',
+        payload: {
+          default_args: [],
+          default_kwargs: { name: 'test', output: 'signals' },
+          default_mode: 'thread',
+        },
       },
       isLoading: false,
       error: null,
@@ -613,6 +638,11 @@ describe('StrategyLaunchModal', () => {
   it('shows fallback description when template lacks description', async () => {
     const templates: AvailableProcess[] = [
       {
+        type: 'available_process' as const,
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         name: 'strategy_simple',
         class_path: 'snapper.strategies.simple',
         method: 'main',

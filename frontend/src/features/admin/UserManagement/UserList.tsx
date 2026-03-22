@@ -92,7 +92,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
 
     return (
       user.username.toLowerCase().includes(term) ||
-      user.email.toLowerCase().includes(term) ||
+      user.email?.toLowerCase().includes(term) ||
       user.role.toLowerCase().includes(term)
     )
   })

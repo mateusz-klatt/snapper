@@ -142,6 +142,10 @@ describe('WSDispatcher', () => {
       const nowIso = new Date().toISOString()
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -165,6 +169,10 @@ describe('WSDispatcher', () => {
       const nowIso = new Date().toISOString()
       const candleMessage = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -204,6 +212,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -244,6 +256,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const orderMessage: OrderData = {
         type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'client-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -286,6 +302,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const orderMessage: OrderData = {
         type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'client-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -332,6 +352,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const execMessage: ExecutionData = {
         type: 'execution',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'ord-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -378,6 +402,9 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const execMessage: ExecutionData = {
         type: 'execution',
+        sequence_id: 0,
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         public_id: 'uuid-1',
         client_order_id: 'ord-1',
         exchange: 'kraken',
@@ -417,6 +444,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const signalMessage: SignalData = {
         type: 'signal',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         fired_at: new Date().toISOString(),
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -461,6 +492,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const signalMessage: SignalData = {
         type: 'signal',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         fired_at: firedAt,
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -502,6 +537,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -540,6 +579,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -572,6 +615,10 @@ describe('WSDispatcher', () => {
       const nowIso = new Date().toISOString()
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: '',
         exchange: 'kraken',
         timeframe: '',
@@ -596,6 +643,10 @@ describe('WSDispatcher', () => {
       const nowIso = new Date().toISOString()
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'ETH-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -637,6 +688,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -678,6 +733,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -708,6 +767,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -733,6 +796,10 @@ describe('WSDispatcher', () => {
       dispatcher.startBuffering('ETH-USD', 'kraken', '1m')
       const candleMessage: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'ETH-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -757,6 +824,10 @@ describe('WSDispatcher', () => {
       const candleHandler = messageHandlers.get('candle')
       const candle1: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -769,6 +840,10 @@ describe('WSDispatcher', () => {
       }
       const candle2: CandleData = {
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -832,6 +907,10 @@ describe('WSDispatcher', () => {
 
       candleHandler?.({
         type: 'candle',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         instrument: 'BTC-USD',
         exchange: 'kraken',
         timeframe: '1m',
@@ -912,6 +991,9 @@ describe('WSDispatcher', () => {
       const nowIso = new Date().toISOString()
       const tradeMessage: TradeData = {
         type: 'trade',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        session_id: 'test-sid',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         price: 50250,
@@ -932,6 +1014,9 @@ describe('WSDispatcher', () => {
       const nowIso = new Date().toISOString()
       const heartbeatMessage: HeartbeatData = {
         type: 'heartbeat',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        session_id: 'test-sid',
         component: 'bridge',
         status: 'healthy',
         timestamp: nowIso,
@@ -1036,6 +1121,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const heartbeatMessage = {
         type: 'heartbeat',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
       }
       const heartbeatHandler = messageHandlers.get('heartbeat')
 
@@ -1047,6 +1136,9 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const heartbeatMessage = {
         type: 'heartbeat',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        session_id: 'test-sid',
         status: 'healthy',
         timestamp: new Date().toISOString(),
         lag_ms: 5,
@@ -1165,6 +1257,10 @@ describe('WSDispatcher', () => {
       dispatcher.startTradeBuffering()
       const orderMessage: OrderData = {
         type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'client-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -1191,6 +1287,10 @@ describe('WSDispatcher', () => {
       dispatcher.startTradeBuffering()
       const execMessage: ExecutionData = {
         type: 'execution',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'ord-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -1215,6 +1315,10 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const execMessage: ExecutionData = {
         type: 'execution',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'ord-drop',
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -1239,12 +1343,16 @@ describe('WSDispatcher', () => {
       dispatcher.attach(mockWsClient)
       const signalMessage: SignalData = {
         type: 'signal',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        session_id: 'test-sid',
         instrument: 'BTC/USD',
         exchange: 'kraken',
         side: 'buy',
         strength: 0.9,
         reason: 'test',
         timestamp: new Date().toISOString(),
+        fired_at: '2026-01-15T10:30:00Z',
       }
       const signalHandler = messageHandlers.get('signal')
 
@@ -1260,6 +1368,10 @@ describe('WSDispatcher', () => {
       dispatcher.startTradeBuffering()
       const signalMessage: SignalData = {
         type: 'signal',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         fired_at: new Date().toISOString(),
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -1284,6 +1396,10 @@ describe('WSDispatcher', () => {
 
       orderHandler?.({
         type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'buffered-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -1312,6 +1428,10 @@ describe('WSDispatcher', () => {
 
       execHandler?.({
         type: 'execution',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'buffered-exec-1',
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -1342,6 +1462,10 @@ describe('WSDispatcher', () => {
 
       signalHandler?.({
         type: 'signal',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         fired_at: new Date().toISOString(),
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -1381,6 +1505,10 @@ describe('WSDispatcher', () => {
 
       orderHandler?.({
         type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'discarded-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -1409,6 +1537,10 @@ describe('WSDispatcher', () => {
       expect(() =>
         orderHandler?.({
           type: 'order',
+          sequence_id: 0,
+          public_id: 'test-pid',
+          timestamp: '2024-01-01T00:00:00Z',
+          session_id: 'test-sid',
           client_order_id: 'no-cache-1',
           instrument: 'BTC/USD',
           exchange: 'kraken',
@@ -1433,6 +1565,10 @@ describe('WSDispatcher', () => {
 
       orderHandler?.({
         type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'skip-undef-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -1460,6 +1596,10 @@ describe('WSDispatcher', () => {
 
       execHandler?.({
         type: 'execution',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'skip-undef-exec',
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -1489,6 +1629,10 @@ describe('WSDispatcher', () => {
 
       signalHandler?.({
         type: 'signal',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         fired_at: new Date().toISOString(),
         exchange: 'kraken',
         instrument: 'BTC/USD',
@@ -1519,6 +1663,10 @@ describe('WSDispatcher', () => {
 
       orderHandler?.({
         type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
         client_order_id: 'multi-1',
         instrument: 'BTC/USD',
         exchange: 'kraken',

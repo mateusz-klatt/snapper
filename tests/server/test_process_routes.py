@@ -10,7 +10,9 @@ import pytest
 from fastapi import HTTPException
 from fastapi import Request
 
+from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
+from snapper.api.schemas.process import ProcessStartBody
 from snapper.api.schemas.process import ProcessStartRequest
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
@@ -481,14 +483,16 @@ class TestStartProcess:
             )
         )
         body = ProcessStartRequest(
-            mode="process",
-            args=["arg1"],
-            kwargs={"endpoint": "tcp://0.0.0.0:6666"},
-            autostart=True,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(
+                mode="process",
+                args=["arg1"],
+                kwargs={"endpoint": "tcp://0.0.0.0:6666"},
+                autostart=True,
+            ),
         )
         result = await start_process(
             http_request=_make_rest_request(),
@@ -522,14 +526,16 @@ class TestStartProcess:
             return_value=ProcessStartResult(status="success", message="started")
         )
         body = ProcessStartRequest(
-            mode=None,
-            args=None,
-            kwargs=None,
-            autostart=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(
+                mode=None,
+                args=None,
+                kwargs=None,
+                autostart=None,
+            ),
         )
         result = await start_process(
             http_request=_make_rest_request(),
@@ -583,19 +589,21 @@ class TestProcessStartRequest:
         Then: All fields are correctly assigned.
         """
         request = ProcessStartRequest(
-            mode="process",
-            args=["arg1", 2],
-            kwargs={"key": "value"},
-            autostart=False,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(
+                mode="process",
+                args=["arg1", 2],
+                kwargs={"key": "value"},
+                autostart=False,
+            ),
         )
-        assert request.mode == "process"
-        assert request.args == ["arg1", 2]
-        assert request.kwargs == {"key": "value"}
-        assert request.autostart is False
+        assert request.payload.mode == "process"
+        assert request.payload.args == ["arg1", 2]
+        assert request.payload.kwargs == {"key": "value"}
+        assert request.payload.autostart is False
 
     def test_process_start_request_defaults(self) -> None:
         """Test ProcessStartRequest with None defaults.
@@ -605,19 +613,21 @@ class TestProcessStartRequest:
         Then: All fields are None.
         """
         request = ProcessStartRequest(
-            mode=None,
-            args=None,
-            kwargs=None,
-            autostart=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(
+                mode=None,
+                args=None,
+                kwargs=None,
+                autostart=None,
+            ),
         )
-        assert request.mode is None
-        assert request.args is None
-        assert request.kwargs is None
-        assert request.autostart is None
+        assert request.payload.mode is None
+        assert request.payload.args is None
+        assert request.payload.kwargs is None
+        assert request.payload.autostart is None
 
 
 class TestCreateProcessConfiguration:
@@ -671,17 +681,19 @@ class TestCreateProcessConfiguration:
             )
         }
         request = ProcessCreateRequest(
-            name="strategy_macd_custom",
-            template="strategy_macd_btc_1h",
-            enabled=True,
-            mode="process",
-            args=[],
-            kwargs={"name": "macd_custom"},
-            note="UI created",
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessCreateBody(
+                name="strategy_macd_custom",
+                template="strategy_macd_btc_1h",
+                enabled=True,
+                mode="process",
+                args=[],
+                kwargs={"name": "macd_custom"},
+                note="UI created",
+            ),
         )
         settings = MagicMock()
         result = await create_process_configuration(
@@ -726,17 +738,19 @@ class TestCreateProcessConfiguration:
         """
         mock_get_registry.return_value = {}
         request = ProcessCreateRequest(
-            name="unknown",
-            template="missing",
-            enabled=None,
-            mode=None,
-            args=None,
-            kwargs=None,
-            note=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessCreateBody(
+                name="unknown",
+                template="missing",
+                enabled=None,
+                mode=None,
+                args=None,
+                kwargs=None,
+                note=None,
+            ),
         )
         factory = MagicMock()
         settings = MagicMock()
@@ -792,17 +806,19 @@ class TestCreateProcessConfiguration:
             )
         }
         request = ProcessCreateRequest(
-            name="strategy_macd_custom",
-            template="strategy_macd_btc_1h",
-            enabled=None,
-            mode=None,
-            args=None,
-            kwargs=None,
-            note=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessCreateBody(
+                name="strategy_macd_custom",
+                template="strategy_macd_btc_1h",
+                enabled=None,
+                mode=None,
+                args=None,
+                kwargs=None,
+                note=None,
+            ),
         )
         with pytest.raises(HTTPException) as exc_info:
             await create_process_configuration(
@@ -889,17 +905,19 @@ class TestProcessRoutesEdgeCases:
             )
         }
         request = ProcessCreateRequest(
-            name="test_process",
-            template="test_template",
-            enabled=True,
-            mode="thread",
-            args=None,
-            kwargs={"custom": "value"},
-            note=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessCreateBody(
+                name="test_process",
+                template="test_template",
+                enabled=True,
+                mode="thread",
+                args=None,
+                kwargs={"custom": "value"},
+                note=None,
+            ),
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -943,17 +961,19 @@ class TestProcessRoutesEdgeCases:
             )
         }
         request = ProcessCreateRequest(
-            name="test_process",
-            template="test_template",
-            enabled=True,
-            mode="thread",
-            args=None,
-            kwargs={"custom": "value"},
-            note=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessCreateBody(
+                name="test_process",
+                template="test_template",
+                enabled=True,
+                mode="thread",
+                args=None,
+                kwargs={"custom": "value"},
+                note=None,
+            ),
         )
         await create_process_configuration(
             http_request=_make_rest_request(),
@@ -998,17 +1018,19 @@ class TestProcessRoutesEdgeCases:
             )
         }
         request = ProcessCreateRequest(
-            name="test_process",
-            template="test_template",
-            enabled=True,
-            mode="thread",
-            args=None,
-            kwargs=None,
-            note=None,
             session_id="test-sid",
             sequence_id=1,
             public_id="test-pid",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessCreateBody(
+                name="test_process",
+                template="test_template",
+                enabled=True,
+                mode="thread",
+                args=None,
+                kwargs=None,
+                note=None,
+            ),
         )
         await create_process_configuration(
             http_request=_make_rest_request(),

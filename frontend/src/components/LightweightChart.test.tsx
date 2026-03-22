@@ -294,9 +294,9 @@ describe('LightweightChart', () => {
     expect(() => render(<LightweightChart data={sampleData} />)).not.toThrow()
   })
   it('applies dark theme via applyOptions when isDarkMode is true', () => {
-    vi.mocked(useAppStore).mockImplementation((selector: (s: { isDarkMode: boolean }) => boolean) =>
-      selector({ isDarkMode: true })
-    )
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: { isDarkMode: boolean }) => boolean
+    ) => selector({ isDarkMode: true })) as never)
     render(<LightweightChart data={sampleData} />)
     expect(mockApplyOptions).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -306,18 +306,18 @@ describe('LightweightChart', () => {
         }),
       })
     )
-    vi.mocked(useAppStore).mockImplementation((selector: (s: { isDarkMode: boolean }) => boolean) =>
-      selector({ isDarkMode: false })
-    )
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: { isDarkMode: boolean }) => boolean
+    ) => selector({ isDarkMode: false })) as never)
   })
   it('applies theme changes without recreating chart', () => {
     const { rerender } = render(<LightweightChart data={sampleData} />)
     const initialCreateCount = mockCreateChart.mock.calls.length
 
     mockApplyOptions.mockClear()
-    vi.mocked(useAppStore).mockImplementation((selector: (s: { isDarkMode: boolean }) => boolean) =>
-      selector({ isDarkMode: true })
-    )
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: { isDarkMode: boolean }) => boolean
+    ) => selector({ isDarkMode: true })) as never)
     rerender(<LightweightChart data={sampleData} />)
     expect(mockCreateChart).toHaveBeenCalledTimes(initialCreateCount)
     expect(mockApplyOptions).toHaveBeenCalledWith(
@@ -327,8 +327,8 @@ describe('LightweightChart', () => {
         }),
       })
     )
-    vi.mocked(useAppStore).mockImplementation((selector: (s: { isDarkMode: boolean }) => boolean) =>
-      selector({ isDarkMode: false })
-    )
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: { isDarkMode: boolean }) => boolean
+    ) => selector({ isDarkMode: false })) as never)
   })
 })

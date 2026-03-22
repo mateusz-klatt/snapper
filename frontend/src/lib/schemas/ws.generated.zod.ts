@@ -54,7 +54,7 @@ export const ExecutionDataSchema = z
     fee: z.number(),
     fee_asset: z.string(),
     status: z.enum(['filled', 'partial']),
-    executed_at: z.iso.datetime().optional(),
+    executed_at: z.iso.datetime(),
   })
   .strict()
 
@@ -69,7 +69,7 @@ export const HeartbeatDataSchema = z
     sequence: z.number().int(),
     status: z.enum(['healthy', 'warning', 'error']),
     lag_ms: z.number().int(),
-    meta: z.record(z.string(), z.unknown()).optional(),
+    meta: z.record(z.string(), z.unknown()),
   })
   .strict()
 
@@ -108,7 +108,7 @@ export const OrderDataSchema = z
     reason: z.string().nullable(),
     time_in_force: z.string().nullable(),
     error: z.string().nullable(),
-    created_at: z.iso.datetime().optional(),
+    created_at: z.iso.datetime(),
     updated_at: z.iso.datetime().nullable(),
   })
   .strict()
@@ -230,7 +230,7 @@ export const SignalDataSchema = z
     reason: z.string(),
     price: z.number().nullable(),
     strategy_name: z.string().nullable(),
-    fired_at: z.iso.datetime().optional(),
+    fired_at: z.iso.datetime(),
   })
   .strict()
 
@@ -430,7 +430,7 @@ export const WSSubscriptionSuccessResponseSchema = z
     action: z.enum(['subscribe', 'unsubscribe']),
     status: z.enum(['subscribed', 'unsubscribed', 'partial', 'denied', 'no_topics']),
     topics: z.array(z.string()),
-    denied_topics: z.array(z.string()).optional(),
+    denied_topics: z.array(z.string()),
     active_subscriptions: z.array(z.string()),
     message: z.string().nullable(),
   })

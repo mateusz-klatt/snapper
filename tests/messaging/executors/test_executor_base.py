@@ -2638,6 +2638,7 @@ class TestExecutorCoverage:
             fee=5.0,
             fee_asset="USD",
             status="filled",
+            executed_at=datetime.now(UTC),
         )
         await service_any._publish_execution("orders.events.kraken.BTC-USD.executed", fill_msg)
         mock_publisher.send.assert_awaited_once()
@@ -2672,6 +2673,7 @@ class TestExecutorCoverage:
             fee=0.0,
             fee_asset="USD",
             status="filled",
+            executed_at=datetime.now(UTC),
         )
         await service_any._publish_execution("orders.events.kraken.BTC-USD.executed", fill_msg)
 
@@ -3319,6 +3321,7 @@ class TestExecutorCoverage:
             fee=0.0,
             fee_asset="USD",
             status="filled",
+            executed_at=datetime.now(UTC),
         )
         await service_any._publish_execution("orders.events.kraken.BTC-USD.executed", fill_msg)
         service_any.msg_publisher.send.assert_awaited_once()

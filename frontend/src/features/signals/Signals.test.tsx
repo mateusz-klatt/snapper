@@ -58,6 +58,7 @@ vi.mock('../../lib/apiClient', () => ({
           type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.85,
@@ -69,12 +70,24 @@ vi.mock('../../lib/apiClient', () => ({
           type: 'signal',
           instrument: 'ETH-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'sell',
           strength: 0.65,
           reason: 'Overbought RSI',
           strategy_name: 'rsi',
           price: 2800,
+        },
+        {
+          type: 'signal',
+          instrument: 'SOL-USD',
+          exchange: 'kraken',
+          timestamp: new Date().toISOString(),
+          side: 'sell',
+          strength: 0.5,
+          reason: 'Test without fired_at',
+          strategy_name: 'test',
+          price: 100,
         },
       ],
       count: 2,
@@ -169,8 +182,8 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    expect(screen.getByText('BUY')).toBeInTheDocument()
-    expect(screen.getByText('SELL')).toBeInTheDocument()
+    expect(screen.getAllByText('BUY').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('SELL').length).toBeGreaterThan(0)
     expect(screen.getAllByText('macd').length).toBeGreaterThan(0)
     expect(screen.getAllByText('rsi').length).toBeGreaterThan(0)
     expect(screen.getByText('Strong momentum breakout')).toBeInTheDocument()
@@ -185,13 +198,11 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    const totalSignals = screen.getByText('2')
+    const totalSignals = screen.getByText('3')
 
     expect(totalSignals).toBeInTheDocument()
-    const buySignals = screen.getAllByText('1')
-
-    expect(buySignals.length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByText('75%')).toBeInTheDocument()
+    expect(screen.getAllByText('1').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('67%')).toBeInTheDocument()
   })
   it('displays balanced stats when signal distribution is even', async () => {
     const queryClient = createTestQueryClient()
@@ -202,9 +213,7 @@ describe('Signals', () => {
       </QueryClientProvider>
     )
     await screen.findByText('BTC-USD')
-    const buyCount = screen.getAllByText('1')
-
-    expect(buyCount.length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('1').length).toBeGreaterThanOrEqual(1)
   })
   it('displays all buy stats when buy signals dominate', async () => {
     const { apiClient } = await import('../../lib/apiClient')
@@ -215,6 +224,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.9,
@@ -226,6 +236,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'ETH-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.7,
@@ -256,6 +267,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'sell',
           strength: 0.9,
@@ -267,6 +279,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'ETH-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'sell',
           strength: 0.7,
@@ -309,6 +322,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'SOL-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.45,
@@ -338,6 +352,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'XRP-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'sell',
           strength: 0.25,
@@ -367,6 +382,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'ADA-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.75,
@@ -397,6 +413,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'DOT-USD',
           exchange: 'kraken',
+          timestamp: fifteenMinutesAgo,
           fired_at: fifteenMinutesAgo,
           side: 'sell',
           strength: 0.8,
@@ -427,6 +444,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'LINK-USD',
           exchange: 'kraken',
+          timestamp: threeHoursAgo,
           fired_at: threeHoursAgo,
           side: 'buy',
           strength: 0.9,
@@ -457,6 +475,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'AVAX-USD',
           exchange: 'kraken',
+          timestamp: twoDaysAgo,
           fired_at: twoDaysAgo,
           side: 'sell',
           strength: 0.7,
@@ -503,6 +522,7 @@ describe('Signals', () => {
             type: 'signal',
             instrument: 'BTC-USD',
             exchange: 'kraken',
+            timestamp: new Date().toISOString(),
             fired_at: new Date().toISOString(),
             side: 'buy',
             strength: 0.85,
@@ -514,6 +534,7 @@ describe('Signals', () => {
             type: 'signal',
             instrument: 'ETH-USD',
             exchange: 'kraken',
+            timestamp: new Date().toISOString(),
             fired_at: new Date().toISOString(),
             side: 'sell',
             strength: 0.65,
@@ -550,6 +571,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.85,
@@ -561,6 +583,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'ETH-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'sell',
           strength: 0.65,
@@ -593,6 +616,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.85,
@@ -637,6 +661,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
+          timestamp: new Date().toISOString(),
           fired_at: new Date().toISOString(),
           side: 'buy',
           strength: 0.85,
@@ -674,8 +699,9 @@ describe('Signals', () => {
 
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
-      expect.arrayContaining([expect.objectContaining({ instrument: 'BTC-USD', side: 'buy' })]),
-      'signals'
+      'signals.csv',
+      ['instrument', 'exchange', 'side', 'strength', 'strategy', 'price', 'reason', 'fired_at'],
+      expect.arrayContaining([expect.arrayContaining(['BTC-USD', 'kraken', 'buy'])])
     )
   })
   it('disables export button when no signals', async () => {
@@ -704,6 +730,7 @@ describe('Signals', () => {
           instrument: 'SOL-USD',
           exchange: 'kraken',
           fired_at: undefined as unknown as string,
+          timestamp: new Date().toISOString(),
           side: 'buy',
           strength: 0.5,
           reason: 'test reason',
@@ -736,6 +763,7 @@ describe('Signals', () => {
           instrument: 'SOL-USD',
           exchange: 'kraken',
           fired_at: undefined as unknown as string,
+          timestamp: '2026-01-15T10:30:00Z',
           side: 'sell',
           strength: 0.6,
           reason: 'test',
@@ -757,18 +785,9 @@ describe('Signals', () => {
 
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
-      [
-        expect.objectContaining({
-          instrument: 'SOL-USD',
-          side: 'sell',
-          strength: 0.6,
-          price: '',
-          strategy: '',
-          reason: 'test',
-          fired_at: expect.any(String),
-        }),
-      ],
-      'signals'
+      'signals.csv',
+      ['instrument', 'exchange', 'side', 'strength', 'strategy', 'price', 'reason', 'fired_at'],
+      [expect.arrayContaining(['SOL-USD', 'kraken', 'sell', '0.6'])]
     )
   })
   it('exports signals with null price and null strategy_name', async () => {
@@ -783,6 +802,7 @@ describe('Signals', () => {
           type: 'signal',
           instrument: 'BTC-USD',
           exchange: 'kraken',
+          timestamp: '2024-01-01T00:00:00Z',
           fired_at: '2024-01-01T00:00:00Z',
           side: 'buy',
           strength: 0.85,
@@ -805,18 +825,9 @@ describe('Signals', () => {
 
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
-      [
-        expect.objectContaining({
-          instrument: 'BTC-USD',
-          side: 'buy',
-          strength: 0.85,
-          price: '',
-          strategy: '',
-          reason: null,
-          fired_at: '2024-01-01T00:00:00.000Z',
-        }),
-      ],
-      'signals'
+      'signals.csv',
+      ['instrument', 'exchange', 'side', 'strength', 'strategy', 'price', 'reason', 'fired_at'],
+      [['BTC-USD', 'kraken', 'buy', '0.85', '', '', null, '2024-01-01T00:00:00.000Z']]
     )
   })
 })

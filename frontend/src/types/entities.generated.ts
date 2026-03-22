@@ -60,7 +60,7 @@ export interface Execution {
   fee: number
   feeAsset: string
   status: 'filled' | 'partial'
-  executedAt?: Date
+  executedAt: Date
 }
 
 /**
@@ -117,7 +117,7 @@ export interface Order {
   reason?: string | null
   timeInForce?: string | null
   error?: string | null
-  createdAt?: Date
+  createdAt: Date
   updatedAt?: Date | null
 }
 
@@ -247,7 +247,7 @@ export interface Signal {
   reason: string
   price?: number | null
   strategyName?: string | null
-  firedAt?: Date
+  firedAt: Date
 }
 
 /**
@@ -325,7 +325,7 @@ export interface AdminResetPassword {
   publicId: string
   timestamp: Date
   sessionId: string
-  newPassword: string
+  payload: Record<string, unknown>
 }
 
 /**
@@ -337,8 +337,7 @@ export interface ChangePassword {
   publicId: string
   timestamp: Date
   sessionId: string
-  currentPassword: string
-  newPassword: string
+  payload: Record<string, unknown>
 }
 
 /**
@@ -350,11 +349,19 @@ export interface CreateUser {
   publicId: string
   timestamp: Date
   sessionId: string
-  username: string
-  email?: string | null
-  password: string
-  role: 'viewer' | 'operator' | 'admin'
-  isActive?: boolean
+  payload: Record<string, unknown>
+}
+
+/**
+ * DeactivateUser request entity.
+ * Use with deactivateUserToAPI() transform.
+ */
+export interface DeactivateUser {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
 }
 
 /**
@@ -366,9 +373,7 @@ export interface Login {
   publicId: string
   timestamp: Date
   sessionId: string
-  username: string
-  password: string
-  rememberMe?: boolean
+  payload: Record<string, unknown>
 }
 
 /**
@@ -380,13 +385,7 @@ export interface ProcessCreate {
   publicId: string
   timestamp: Date
   sessionId: string
-  name: string
-  template: string
-  enabled?: boolean | null
-  mode?: 'thread' | 'process' | null
-  args?: unknown[] | null
-  kwargs?: Record<string, unknown> | null
-  note?: string | null
+  payload: Record<string, unknown>
 }
 
 /**
@@ -398,10 +397,19 @@ export interface ProcessStart {
   publicId: string
   timestamp: Date
   sessionId: string
-  mode?: 'thread' | 'process' | null
-  args?: unknown[] | null
-  kwargs?: Record<string, unknown> | null
-  autostart?: boolean | null
+  payload: Record<string, unknown>
+}
+
+/**
+ * RemoveSetting request entity.
+ * Use with removeSettingToAPI() transform.
+ */
+export interface RemoveSetting {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
 }
 
 /**
@@ -413,7 +421,5 @@ export interface UpdateUser {
   publicId: string
   timestamp: Date
   sessionId: string
-  email?: string | null
-  role?: 'viewer' | 'operator' | 'admin' | null
-  isActive?: boolean | null
+  payload: Record<string, unknown>
 }

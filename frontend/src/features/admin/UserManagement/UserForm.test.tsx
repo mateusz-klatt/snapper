@@ -7,6 +7,7 @@ import { toast } from 'react-hot-toast'
 import UserForm from './UserForm'
 import type { UserProfile } from '../../../types/api'
 import { apiClient } from '../../../lib/apiClient'
+import { makeUserProfile, makeEnvelope } from '../../../test/factories'
 
 vi.mock('../../../components/ThemeSelect', () => ({
   ThemeSelect: ({
@@ -78,9 +79,13 @@ describe('UserForm', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(apiClient.createUser).mockResolvedValue({ message: 'created' })
-    vi.mocked(apiClient.updateUser).mockResolvedValue({ message: 'updated' })
-    vi.mocked(apiClient.adminResetPassword).mockResolvedValue({ message: 'reset' })
+    vi.mocked(apiClient.createUser).mockResolvedValue(
+      makeEnvelope('user_response', makeUserProfile({ username: 'created' })) as never
+    )
+    vi.mocked(apiClient.updateUser).mockResolvedValue(
+      makeEnvelope('user_response', makeUserProfile({ username: 'updated' })) as never
+    )
+    vi.mocked(apiClient.adminResetPassword).mockResolvedValue({ payload: 'reset' })
   })
   it('renders user form when open', () => {
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} />)
@@ -98,13 +103,13 @@ describe('UserForm', () => {
     expect(screen.getByLabelText(/role/i)).toBeTruthy()
   })
   it('shows edit mode with existing user', () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     expect(screen.getByText(/Edit User/i)).toBeTruthy()
@@ -175,13 +180,13 @@ describe('UserForm', () => {
     })
   })
   it('updates user successfully', async () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const emailInput = screen.getByLabelText(/email/i)
@@ -201,25 +206,25 @@ describe('UserForm', () => {
     })
   })
   it('shows reset password checkbox in edit mode', () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     expect(screen.getByLabelText(/reset user password/i)).toBeTruthy()
   })
   it('resets user password successfully', async () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const resetCheckbox = screen.getByLabelText(/reset user password/i)
@@ -257,13 +262,13 @@ describe('UserForm', () => {
     })
   })
   it('renders with correct initial state for existing user', async () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'existing',
       email: 'existing@test.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     await waitFor(() => {
@@ -345,13 +350,13 @@ describe('UserForm', () => {
     expect(apiClient.createUser).not.toHaveBeenCalled()
   })
   it('validates password length when resetting in edit mode', async () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const resetCheckbox = screen.getByLabelText(/reset user password/i)
@@ -369,13 +374,13 @@ describe('UserForm', () => {
     })
   })
   it('validates password required when reset checked but empty', async () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const resetCheckbox = screen.getByLabelText(/reset user password/i)
@@ -390,13 +395,13 @@ describe('UserForm', () => {
   })
   it('handles update user error', async () => {
     vi.mocked(apiClient.updateUser).mockRejectedValue(new Error('HTTP 500: Internal Server Error'))
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const emailInput = screen.getByLabelText(/email/i)
@@ -414,13 +419,13 @@ describe('UserForm', () => {
     vi.mocked(apiClient.adminResetPassword).mockRejectedValue(
       new Error('HTTP 500: Internal Server Error')
     )
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const resetCheckbox = screen.getByLabelText(/reset user password/i)
@@ -449,13 +454,13 @@ describe('UserForm', () => {
   })
   it('uses fallback toast message on update error without message', async () => {
     vi.mocked(apiClient.updateUser).mockRejectedValue(new Error(''))
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const submitButton = screen.getByRole('button', { name: /save/i })
@@ -467,13 +472,13 @@ describe('UserForm', () => {
   })
   it('uses fallback toast message on reset error without message', async () => {
     vi.mocked(apiClient.adminResetPassword).mockRejectedValue(new Error(''))
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const resetCheckbox = screen.getByLabelText(/reset user password/i)
@@ -488,13 +493,13 @@ describe('UserForm', () => {
     })
   })
   it('toggles password visibility in reset password mode', async () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'testuser',
       email: 'test@example.com',
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const resetCheckbox = screen.getByLabelText(/reset user password/i)
@@ -514,13 +519,13 @@ describe('UserForm', () => {
     }
   })
   it('handles user with null email', () => {
-    const existingUser: UserProfile = {
+    const existingUser: UserProfile = makeUserProfile({
       username: 'nullemail',
       email: null,
       role: 'viewer',
       is_active: true,
       created_at: '2024-01-01T00:00:00Z',
-    }
+    })
 
     renderWithProviders(<UserForm open={true} onClose={mockOnClose} user={existingUser} />)
     const emailInput = screen.getByLabelText(/email/i)

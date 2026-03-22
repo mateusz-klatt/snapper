@@ -5,7 +5,7 @@ import { Button } from '../../../components/ui'
 import { Modal } from '../../../components/ui/Modal'
 import { ThemeSelect } from '../../../components/ThemeSelect'
 import { useCreateUser, useUpdateUser, useAdminResetPassword } from '../../../hooks/queries'
-import type { UserProfile } from '../../../types/api'
+import type { UserProfile, UserRole } from '../../../types/api'
 
 interface UserFormProps {
   user?: UserProfile
@@ -14,11 +14,17 @@ interface UserFormProps {
 }
 
 const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) => {
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<{
+    username: string
+    password: string
+    email: string
+    role: UserRole
+    is_active: boolean
+  }>({
     username: user?.username || '',
     password: '',
     email: user?.email || '',
-    role: user?.role || ('viewer' as const),
+    role: user?.role || 'viewer',
     is_active: user?.is_active ?? true,
   })
   const [showPassword, setShowPassword] = useState(false)
@@ -56,7 +62,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
       username: string
       password: string
       email: string
-      role: string
+      role: UserRole
       is_active: boolean
     }) => {
       createMutation.mutate(data, {
@@ -70,7 +76,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
     isPending: createMutation.isPending,
   }
   const updateUserMutation = {
-    mutate: (data: { email: string; role: string; is_active: boolean }) => {
+    mutate: (data: { email: string; role: UserRole; is_active: boolean }) => {
       updateMutation.mutate(
         { userId: formData.username, data },
         {

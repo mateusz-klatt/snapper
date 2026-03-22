@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { Components } from '../types/api.generated'
-import type { LoginRequest } from '../types/api'
+import type { LoginBody } from '../types/api'
 import { RESOURCE_ACCESS, ROLE_PERMISSIONS } from '../types/permissions.generated'
 import type { Permission } from '../types/permissions.generated'
 import { apiClient } from '../lib/apiClient'
@@ -19,7 +19,7 @@ interface AuthState {
   isLoading: boolean
   error: string | null
   csrfToken: string | null
-  login: (credentials: LoginRequest) => Promise<void>
+  login: (credentials: LoginBody) => Promise<void>
   logout: () => Promise<void>
   silentLogout: () => void
   refreshToken: () => Promise<void>
@@ -50,7 +50,7 @@ export const useAuthStore = create<AuthState>()(
         isLoading: false,
         error: null,
         csrfToken: null,
-        login: async (credentials: LoginRequest) => {
+        login: async (credentials: LoginBody) => {
           try {
             set({ isLoading: true, error: null })
             const response = await apiClient.post('/api/auth/login', credentials, {

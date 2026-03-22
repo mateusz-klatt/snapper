@@ -33,24 +33,24 @@ import type {
   SystemStatusResponse,
   SettingListResponse,
   SettingResponse,
-  SettingUpdate,
+  SettingUpdateBody,
   ConfiguredProcessesResponse,
   ProcessSummaryResponse,
   AvailableProcessesResponse,
   ProcessRunsResponse,
   ProcessSchemaResponse,
-  ProcessCreateRequest,
+  ProcessCreateBody,
   ProcessCreateResponse,
-  ProcessStartRequest,
+  ProcessStartBody,
   ProcessStartResponse,
   ProcessStopResponse,
   StrategyListResponse,
-  ChangePasswordRequest,
+  ChangePasswordBody,
   UserListResponse,
   UserResponse,
-  CreateUserRequest,
-  UpdateUserRequest,
-  AdminResetPasswordRequest,
+  CreateUserBody,
+  UpdateUserBody,
+  AdminResetPasswordBody,
   ExchangeListResponse,
   InstrumentListResponse,
   OrderListResponse,
@@ -194,16 +194,6 @@ class APIClient {
       body: body ? JSON.stringify(stampProvenance(body)) : undefined,
     })
   }
-  public async put(url: string, body?: unknown, options: RequestOptions = {}): Promise<Response> {
-    return this.request(url, {
-      ...options,
-      method: 'PUT',
-      body: body ? JSON.stringify(stampProvenance(body)) : undefined,
-    })
-  }
-  public async delete(url: string, options: RequestOptions = {}): Promise<Response> {
-    return this.request(url, { ...options, method: 'DELETE' })
-  }
   private async extractErrorMessage(response: Response): Promise<string> {
     try {
       const data = await response.json()
@@ -234,24 +224,6 @@ class APIClient {
   }
   public async postJSON<T>(url: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
     const response = await this.post(url, body, options)
-
-    if (!response.ok) {
-      throw new Error(await this.extractErrorMessage(response))
-    }
-
-    return response.json()
-  }
-  public async putJSON<T>(url: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
-    const response = await this.put(url, body, options)
-
-    if (!response.ok) {
-      throw new Error(await this.extractErrorMessage(response))
-    }
-
-    return response.json()
-  }
-  public async deleteJSON<T>(url: string, options: RequestOptions = {}): Promise<T> {
-    const response = await this.delete(url, options)
 
     if (!response.ok) {
       throw new Error(await this.extractErrorMessage(response))
@@ -391,22 +363,22 @@ class APIClient {
 
     return response.payload
   }
-  async updateSetting(key: string, data: SettingUpdate): Promise<SettingResponse> {
-    const response = await this.putJSON(`/api/settings/${encodeURIComponent(key)}`, data)
+  async updateSetting(key: string, data: SettingUpdateBody): Promise<SettingResponse> {
+    const response = await this.postJSON(`/api/settings/${encodeURIComponent(key)}/set`, data)
 
-    return validateResponse(response, SettingResponseSchema, '/settings/:key')
+    return validateResponse(response, SettingResponseSchema, '/settings/:key/set')
   }
-  async deleteSetting(key: string): Promise<{ payload: string }> {
-    const data = await this.deleteJSON(`/api/settings/${encodeURIComponent(key)}`)
+  async removeSetting(key: string): Promise<{ payload: string }> {
+    const data = await this.postJSON(`/api/settings/${encodeURIComponent(key)}/remove`, {})
 
-    return validateResponse(data, MessageResponseSchema, '/settings/:key DELETE')
+    return validateResponse(data, MessageResponseSchema, '/settings/:key/remove')
   }
   async getProcessSchema(name: string): Promise<ProcessSchemaResponse> {
     const data = await this.getJSON(`/api/processes/schema/${encodeURIComponent(name)}`)
 
     return validateResponse(data, ProcessSchemaResponseSchema, '/processes/schema/:name')
   }
-  async createProcessConfig(body: ProcessCreateRequest): Promise<ProcessCreateResponse> {
+  async createProcessConfig(body: ProcessCreateBody): Promise<ProcessCreateResponse> {
     const data = await this.postJSON('/api/processes', body)
 
     return validateResponse(data, ProcessCreateResponseSchema, '/processes')
@@ -443,7 +415,7 @@ class APIClient {
   }
   async startProcessByName(
     name: string,
-    options?: ProcessStartRequest
+    options?: ProcessStartBody
   ): Promise<ProcessStartResponse> {
     const data = await this.postJSON(
       `/api/processes/${encodeURIComponent(name)}/start`,
@@ -462,7 +434,7 @@ class APIClient {
     currentPassword: string,
     newPassword: string
   ): Promise<{ payload: string }> {
-    const body: ChangePasswordRequest = {
+    const body: ChangePasswordBody = {
       current_password: currentPassword,
       new_password: newPassword,
     }
@@ -478,24 +450,24 @@ class APIClient {
 
     return validateResponse(data, UserListResponseSchema, '/auth/users')
   }
-  async createUser(body: CreateUserRequest): Promise<UserResponse> {
+  async createUser(body: CreateUserBody): Promise<UserResponse> {
     const data = await this.postJSON('/api/auth/users', body)
 
     return validateResponse(data, UserResponseSchema, '/auth/users POST')
   }
-  async updateUser(userId: string, body: UpdateUserRequest): Promise<UserResponse> {
-    const data = await this.putJSON(`/api/auth/users/${encodeURIComponent(userId)}`, body)
+  async updateUser(userId: string, body: UpdateUserBody): Promise<UserResponse> {
+    const data = await this.postJSON(`/api/auth/users/${encodeURIComponent(userId)}/update`, body)
 
-    return validateResponse(data, UserResponseSchema, '/auth/users/:id PUT')
+    return validateResponse(data, UserResponseSchema, '/auth/users/:id/update')
   }
   async deactivateUser(userId: string): Promise<{ payload: string }> {
-    const data = await this.deleteJSON(`/api/auth/users/${encodeURIComponent(userId)}`)
+    const data = await this.postJSON(`/api/auth/users/${encodeURIComponent(userId)}/deactivate`, {})
 
-    return validateResponse(data, MessageResponseSchema, '/auth/users/:id DELETE')
+    return validateResponse(data, MessageResponseSchema, '/auth/users/:id/deactivate')
   }
   async adminResetPassword(
     userId: string,
-    body: AdminResetPasswordRequest
+    body: AdminResetPasswordBody
   ): Promise<{ payload: string }> {
     const data = await this.postJSON(
       `/api/auth/users/${encodeURIComponent(userId)}/admin-reset-password`,
@@ -514,10 +486,11 @@ function stampProvenance(body: unknown): unknown {
   const tracker = getTracker()
 
   return {
-    ...(body as Record<string, unknown>),
     public_id: uuid7(),
     session_id: tracker.sessionId,
     sequence_id: tracker.nextSequence('control'),
+    timestamp: new Date().toISOString(),
+    payload: body,
   }
 }
 

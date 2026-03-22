@@ -119,7 +119,7 @@ class GapDetectionStats(BaseModel):
 
     bridge: GapStats = Field(description="ZMQ bridge gap detection stats")
     rest_clients: dict[str, GapStats] = Field(
-        default_factory=dict,
+        default={},
         description="Per-session REST client gap stats",
     )
 
@@ -209,7 +209,7 @@ class ZmqHealthData(StrictDataSchema[Literal["zmq_health"]]):
     message_stats: dict[str, TopicMetricSnapshot] = Field(
         description="Message statistics per topic"
     )
-    errors: list[str] = Field(default_factory=list, description="Error messages if not healthy")
+    errors: list[str] = Field(default=[], description="Error messages if not healthy")
 
 
 class ZmqHealthResponse(PayloadResponse[Literal["zmq_health_response"], ZmqHealthData]):

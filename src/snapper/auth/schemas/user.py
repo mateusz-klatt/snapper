@@ -4,11 +4,8 @@ This module defines the user profile schema used throughout
 the authentication and authorization system.
 """
 
-from datetime import UTC
 from datetime import datetime
 from typing import Literal
-
-from pydantic import Field
 
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
@@ -34,4 +31,4 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
     email: str | None = None
     role: UserRole
     is_active: bool = True
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime

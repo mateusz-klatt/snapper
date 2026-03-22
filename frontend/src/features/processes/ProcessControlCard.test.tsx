@@ -210,18 +210,23 @@ describe('ProcessControlCard', () => {
     )
     expect(screen.getByText(/error/i)).toBeInTheDocument()
   })
-  it('displays heartbeat as waiting when status is unknown', () => {
+  it('displays heartbeat as unknown when status is unknown', () => {
     renderWithMocks(
       <ProcessControlCard
         title='Test Process'
         description='Test description'
         status='running'
-        heartbeat={{ status: 'unknown', lag_ms: undefined, timestamp: 0, healthy: false }}
+        heartbeat={{
+          status: 'unknown' as 'healthy',
+          lag_ms: undefined,
+          timestamp: 0,
+          healthy: false,
+        }}
         onStart={mockOnStart}
         onStop={mockOnStop}
       />
     )
-    expect(screen.getByText(/waiting/i)).toBeInTheDocument()
+    expect(screen.getByText(/unknown/i)).toBeInTheDocument()
   })
   it('omits heartbeat section when heartbeat is not provided', () => {
     renderWithMocks(

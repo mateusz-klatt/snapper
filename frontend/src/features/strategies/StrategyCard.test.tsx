@@ -275,7 +275,7 @@ describe('StrategyCard', () => {
               healthy: true,
             },
             'binance.ETH-USD': {
-              status: 'stale',
+              status: 'stale' as 'error',
               lag_ms: 6000,
               heartbeat_age_ms: 10000,
               healthy: false,

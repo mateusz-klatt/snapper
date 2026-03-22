@@ -107,9 +107,7 @@ const ExecutionCard: React.FC<{ execution: Execution }> = ({ execution }) => {
         </div>
         <div className='col-span-2'>
           <div className='text-muted-500'>Executed</div>
-          <div className='text-xs text-alpine-900'>
-            {execution.executedAt?.toLocaleString() ?? 'N/A'}
-          </div>
+          <div className='text-xs text-alpine-900'>{execution.executedAt.toLocaleString()}</div>
         </div>
         {fees > 0 && (
           <div>
@@ -169,7 +167,7 @@ export const Orders: React.FC = () => {
       (e.price * e.size).toFixed(2),
       e.fee ? e.fee.toFixed(2) : '0',
       e.feeAsset ?? '',
-      e.executedAt ? e.executedAt.toLocaleString() : '',
+      e.executedAt.toLocaleString(),
     ])
 
     exportToCSV('executions.csv', headers, rows)

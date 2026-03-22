@@ -156,7 +156,7 @@ export const Strategies: React.FC = () => {
     startProcess.mutate(
       {
         name: processName,
-        mode: mode || 'thread',
+        mode: (mode || 'thread') as 'thread' | 'process',
       },
       {
         onSuccess: () => {

@@ -33,7 +33,6 @@ System message classes:
     ReplayEndData: Historical data replay end marker.
 """
 
-from datetime import UTC
 from datetime import datetime
 from typing import Any
 from typing import Literal
@@ -160,7 +159,7 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
     reason: str
     price: float | None = None
     strategy_name: str | None = None
-    fired_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    fired_at: datetime
 
     @model_validator(mode="after")
     def _paper_requires_strategy_name(self) -> Self:
@@ -208,7 +207,7 @@ class ExecutionData(StrictDataSchema[Literal["execution"]]):
     fee: float
     fee_asset: str
     status: FillStatus
-    executed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    executed_at: datetime
 
 
 class OrderData(StrictDataSchema[Literal["order"]]):
@@ -254,7 +253,7 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     reason: str | None = None
     time_in_force: str | None = None
     error: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime
     updated_at: datetime | None = None
 
 
@@ -408,7 +407,7 @@ class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
     sequence: int
     status: HealthStatus
     lag_ms: int
-    meta: dict[str, Any] = Field(default_factory=dict)
+    meta: dict[str, Any] = Field(default={})
 
 
 class SettingChangedData(StrictDataSchema[Literal["setting_changed"]]):

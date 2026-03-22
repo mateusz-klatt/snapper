@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { Modal } from '../../components/ui/Modal'
 import { ThemeSelect } from '../../components/ThemeSelect'
 

@@ -51,6 +51,7 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
         username="testuser",
         role=UserRole.VIEWER,
         is_active=True,
+        created_at=datetime.now(UTC),
     )
     mock_service = AsyncMock()
     mock_service.get_user_by_id = AsyncMock(return_value=expected_profile)
@@ -127,10 +128,10 @@ class TestUserManagementBasic:
         assert response.status_code == 401
 
     def test_update_user_unauthorized(self) -> None:
-        """Test PUT /auth/users/{id} returns 401 without authentication.
+        """Test POST /auth/users/{id}/update returns 401 without authentication.
 
         Given: An unauthenticated HTTP client and user update data.
-        When: A PUT request is made to /auth/users/some-id.
+        When: A POST request is made to /auth/users/some-id/update.
         Then: The response status code is 401 Unauthorized.
         """
         update_data = {
@@ -138,17 +139,24 @@ class TestUserManagementBasic:
             "role": "operator",
             "is_active": False,
         }
-        response = client.put("/auth/users/some-id", json=update_data)
+        response = client.post("/auth/users/some-id/update", json=update_data)
         assert response.status_code == 401
 
-    def test_delete_user_unauthorized(self) -> None:
-        """Test DELETE /auth/users/{id} returns 401 without authentication.
+    def test_deactivate_user_unauthorized(self) -> None:
+        """Test POST /auth/users/{id}/deactivate returns 401 without authentication.
 
         Given: An unauthenticated HTTP client.
-        When: A DELETE request is made to /auth/users/some-id.
+        When: A POST request is made to /auth/users/some-id/deactivate.
         Then: The response status code is 401 Unauthorized.
         """
-        response = client.delete("/auth/users/some-id")
+        body = {
+            "public_id": "test-pid",
+            "session_id": "test-sid",
+            "sequence_id": 0,
+            "timestamp": "2024-01-01T00:00:00Z",
+            "payload": {},
+        }
+        response = client.post("/auth/users/some-id/deactivate", json=body)
         assert response.status_code == 401
 
     def test_change_password_unauthorized(self) -> None:
@@ -186,6 +194,7 @@ class TestUserManagementBasic:
                 username="testuser",
                 role=UserRole.VIEWER,
                 is_active=True,
+                created_at=datetime.now(UTC),
             )
         ]
         mock_get_service.return_value = mock_user_service

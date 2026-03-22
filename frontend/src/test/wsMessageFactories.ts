@@ -258,7 +258,7 @@ export function createHeartbeat(
     sequence: overrides.sequence ?? 0,
     status: overrides.status ?? ('healthy' as const),
     lag_ms: overrides.lag_ms ?? 0,
-    meta: overrides.meta,
+    meta: overrides.meta ?? {},
   }
 }
 

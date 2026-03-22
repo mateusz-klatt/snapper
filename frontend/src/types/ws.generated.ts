@@ -337,7 +337,7 @@ export interface ExecutionData {
   fee: number;
   fee_asset: string;
   status: Status;
-  executed_at?: string;
+  executed_at: string;
 }
 /**
  * Component health heartbeat message.
@@ -437,7 +437,7 @@ export interface OrderData {
   reason?: Reason;
   time_in_force?: TimeInForce;
   error?: Error;
-  created_at?: string;
+  created_at: string;
   updated_at?: UpdatedAt;
 }
 /**
@@ -645,7 +645,7 @@ export interface SignalData {
   reason: string;
   price?: Price2;
   strategy_name?: StrategyName;
-  fired_at?: string;
+  fired_at: string;
 }
 /**
  * Symbol alias cache invalidation message.

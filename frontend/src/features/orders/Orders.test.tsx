@@ -117,6 +117,10 @@ describe('Orders', () => {
   it('displays orders when data is loaded', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -158,6 +162,10 @@ describe('Orders', () => {
   it('displays executions when data is loaded', async () => {
     const mockExecutions: Execution[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         size: 1,
         price: 50000,
@@ -191,6 +199,10 @@ describe('Orders', () => {
   it('shows order count in tab', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -219,6 +231,10 @@ describe('Orders', () => {
   it('shows execution count in tab', async () => {
     const mockExecutions: Execution[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         size: 1,
         price: 50000,
@@ -310,6 +326,10 @@ describe('Orders', () => {
   it('displays order card with buy side', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -340,6 +360,10 @@ describe('Orders', () => {
   it('displays order card with sell side', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '2',
         instrument: 'ETH/USD',
         exchange: 'kraken',
@@ -370,6 +394,10 @@ describe('Orders', () => {
   it('displays order with different statuses', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '3',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -398,6 +426,10 @@ describe('Orders', () => {
   it('displays order with new status', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '6',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -426,6 +458,10 @@ describe('Orders', () => {
   it('displays rejected order status', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '4',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -455,6 +491,10 @@ describe('Orders', () => {
   it('displays partially_filled order status', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '5',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -484,6 +524,10 @@ describe('Orders', () => {
     const user = userEvent.setup()
     const mockExecutions: Execution[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '10',
         size: 1.5,
         price: 50000,
@@ -532,6 +576,10 @@ describe('Orders', () => {
     const user = userEvent.setup()
     const mockExecutions: Execution[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '20',
         size: 2,
         price: 30000,
@@ -564,6 +612,10 @@ describe('Orders', () => {
     const user = userEvent.setup()
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -577,6 +629,10 @@ describe('Orders', () => {
         updatedAt: null,
       },
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '2',
         instrument: 'ETH/USD',
         exchange: 'kraken',
@@ -635,6 +691,10 @@ describe('Orders', () => {
   it('displays order with rejected status', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -664,6 +724,10 @@ describe('Orders', () => {
   it('displays order with error status', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'ETH/USD',
         exchange: 'kraken',
@@ -693,6 +757,10 @@ describe('Orders', () => {
   it('displays order with partially_filled status', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'SOL/USD',
         exchange: 'kraken',
@@ -722,6 +790,10 @@ describe('Orders', () => {
   it('shows N/A when order created_at is missing', async () => {
     const mockOrders = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '7',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -750,6 +822,10 @@ describe('Orders', () => {
   it('displays order with unknown status using default styling', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'DOGE/USD',
         exchange: 'kraken',
@@ -779,6 +855,10 @@ describe('Orders', () => {
   it('shows N/A when order side is null', async () => {
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '8',
         instrument: 'LTC/USD',
         exchange: 'kraken',
@@ -805,16 +885,21 @@ describe('Orders', () => {
       expect(screen.getByText('N/A')).toBeInTheDocument()
     })
   })
-  it('shows N/A when execution executedAt is undefined', async () => {
+  it('shows formatted date when execution executedAt is present', async () => {
     const user = userEvent.setup()
+    const executedDate = new Date('2024-01-01T00:00:00Z')
     const mockExecutions: Execution[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '200',
         size: 1,
         price: 40000,
         fee: 10,
         feeAsset: 'USD',
-        executedAt: undefined,
+        executedAt: executedDate,
         instrument: 'BTC/USD',
         side: 'buy',
         exchange: 'kraken',
@@ -834,7 +919,7 @@ describe('Orders', () => {
     await user.click(executionsTab)
     await waitFor(() => {
       expect(screen.getByText('Order #200')).toBeInTheDocument()
-      expect(screen.getByText('N/A')).toBeInTheDocument()
+      expect(screen.getByText(executedDate.toLocaleString())).toBeInTheDocument()
     })
   })
   it('exports orders to CSV when export button clicked', async () => {
@@ -842,6 +927,10 @@ describe('Orders', () => {
     const user = userEvent.setup()
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '1',
         instrument: 'BTC/USD',
         exchange: 'kraken',
@@ -880,6 +969,10 @@ describe('Orders', () => {
     const user = userEvent.setup()
     const mockExecutions: Execution[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: 'client-10',
         size: 1.5,
         price: 50000,
@@ -920,6 +1013,10 @@ describe('Orders', () => {
     const user = userEvent.setup()
     const mockOrders: Order[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: '9',
         instrument: 'ETH/USD',
         exchange: 'kraken',
@@ -953,17 +1050,22 @@ describe('Orders', () => {
       [['ETH/USD', '', 'market', 'open', '2.0000', 'Market', '']]
     )
   })
-  it('exports executions with null fee and missing executedAt', async () => {
+  it('exports executions with zero fee and null feeAsset', async () => {
     const { exportToCSV } = await import('../../lib/csvExport')
     const user = userEvent.setup()
+    const executedDate = new Date('2024-01-01T00:00:00Z')
     const mockExecutions: Execution[] = [
       {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
         clientOrderId: 'client-20',
         size: 1,
         price: 30000,
         fee: 0,
         feeAsset: null as unknown as string,
-        executedAt: undefined,
+        executedAt: executedDate,
         instrument: 'BTC/USD',
         side: 'sell',
         exchange: 'kraken',
@@ -990,7 +1092,19 @@ describe('Orders', () => {
     expect(exportToCSV).toHaveBeenCalledWith(
       'executions.csv',
       ['Order ID', 'Instrument', 'Side', 'Size', 'Price', 'Total', 'Fee', 'Fee Asset', 'Executed'],
-      [['client-20', 'BTC/USD', 'sell', '1.0000', '30000.00', '30000.00', '0', '', '']]
+      [
+        [
+          'client-20',
+          'BTC/USD',
+          'sell',
+          '1.0000',
+          '30000.00',
+          '30000.00',
+          '0',
+          '',
+          executedDate.toLocaleString(),
+        ],
+      ]
     )
   })
 })
