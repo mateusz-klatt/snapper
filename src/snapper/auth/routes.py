@@ -42,6 +42,8 @@ from snapper.auth.schemas.responses import UserResponse
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.json_body import json_body
+from snapper.server.json_body import openapi_schema
 from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
@@ -93,11 +95,11 @@ def _message_response(request: Request, message: str) -> MessageResponse:
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-@router.post("/login")
+@router.post("/login", openapi_extra=openapi_schema(LoginRequest))
 async def login(
     request: Request,
     response: Response,
-    login_data: LoginRequest,
+    login_data: Annotated[LoginRequest, Depends(json_body(LoginRequest))],
 ) -> LoginResponse:
     """Authenticate user and create session.
 
@@ -419,12 +421,12 @@ async def get_users(
     )
 
 
-@router.post("/users")
+@router.post("/users", openapi_extra=openapi_schema(CreateUserRequest))
 async def create_user(
     request: Request,
-    user_data: CreateUserRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    user_data: Annotated[CreateUserRequest, Depends(json_body(CreateUserRequest))],
 ) -> UserResponse:
     """Create a new user account.
 
@@ -463,13 +465,13 @@ async def create_user(
         ) from e
 
 
-@router.post("/users/{user_id}/update")
+@router.post("/users/{user_id}/update", openapi_extra=openapi_schema(UpdateUserRequest))
 async def update_user(
     request: Request,
     user_id: str,
-    user_data: UpdateUserRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    user_data: Annotated[UpdateUserRequest, Depends(json_body(UpdateUserRequest))],
 ) -> UserResponse:
     """Update an existing user's profile.
 
@@ -506,13 +508,13 @@ async def update_user(
     )
 
 
-@router.post("/users/{user_id}/deactivate")
+@router.post("/users/{user_id}/deactivate", openapi_extra=openapi_schema(DeactivateUserRequest))
 async def deactivate_user(
     request: Request,
     user_id: str,
-    _body: DeactivateUserRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    _body: Annotated[DeactivateUserRequest, Depends(json_body(DeactivateUserRequest))],
 ) -> MessageResponse:
     """Deactivate a user account.
 
@@ -541,14 +543,16 @@ async def deactivate_user(
     return _message_response(request, f"User '{user_id}' has been deactivated")
 
 
-@router.post("/users/{user_id}/change-password")
+@router.post(
+    "/users/{user_id}/change-password", openapi_extra=openapi_schema(ChangePasswordRequest)
+)
 @limiter.limit(PASSWORD_CHANGE_RATE_LIMIT)
 async def change_user_password(
     request: Request,
     user_id: str,
-    password_data: ChangePasswordRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    password_data: Annotated[ChangePasswordRequest, Depends(json_body(ChangePasswordRequest))],
 ) -> MessageResponse:
     """Change a user's password.
 
@@ -587,14 +591,18 @@ async def change_user_password(
     return _message_response(request, "Password changed successfully")
 
 
-@router.post("/users/{user_id}/admin-reset-password")
+@router.post(
+    "/users/{user_id}/admin-reset-password", openapi_extra=openapi_schema(AdminResetPasswordRequest)
+)
 @limiter.limit(PASSWORD_RESET_RATE_LIMIT)
 async def admin_reset_user_password(
     request: Request,
     user_id: str,
-    password_data: AdminResetPasswordRequest,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    password_data: Annotated[
+        AdminResetPasswordRequest, Depends(json_body(AdminResetPasswordRequest))
+    ],
 ) -> MessageResponse:
     """Admin endpoint to reset a user's password without current password.
 

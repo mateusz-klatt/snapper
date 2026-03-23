@@ -317,22 +317,10 @@ export interface TopicMetric {
 
 
 /**
- * AdminResetPassword request entity.
- * Use with adminResetPasswordToAPI() transform.
+ * Login request entity.
+ * Use with loginToAPI() transform.
  */
-export interface AdminResetPassword {
-  sequenceId: number
-  publicId: string
-  timestamp: Date
-  sessionId: string
-  payload: Record<string, unknown>
-}
-
-/**
- * ChangePassword request entity.
- * Use with changePasswordToAPI() transform.
- */
-export interface ChangePassword {
+export interface Login {
   sequenceId: number
   publicId: string
   timestamp: Date
@@ -353,6 +341,18 @@ export interface CreateUser {
 }
 
 /**
+ * UpdateUser request entity.
+ * Use with updateUserToAPI() transform.
+ */
+export interface UpdateUser {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
  * DeactivateUser request entity.
  * Use with deactivateUserToAPI() transform.
  */
@@ -365,10 +365,34 @@ export interface DeactivateUser {
 }
 
 /**
- * Login request entity.
- * Use with loginToAPI() transform.
+ * ChangePassword request entity.
+ * Use with changePasswordToAPI() transform.
  */
-export interface Login {
+export interface ChangePassword {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
+ * AdminResetPassword request entity.
+ * Use with adminResetPasswordToAPI() transform.
+ */
+export interface AdminResetPassword {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
+ * RemoveSetting request entity.
+ * Use with removeSettingToAPI() transform.
+ */
+export interface RemoveSetting {
   sequenceId: number
   publicId: string
   timestamp: Date
@@ -393,30 +417,6 @@ export interface ProcessCreate {
  * Use with processStartToAPI() transform.
  */
 export interface ProcessStart {
-  sequenceId: number
-  publicId: string
-  timestamp: Date
-  sessionId: string
-  payload: Record<string, unknown>
-}
-
-/**
- * RemoveSetting request entity.
- * Use with removeSettingToAPI() transform.
- */
-export interface RemoveSetting {
-  sequenceId: number
-  publicId: string
-  timestamp: Date
-  sessionId: string
-  payload: Record<string, unknown>
-}
-
-/**
- * UpdateUser request entity.
- * Use with updateUserToAPI() transform.
- */
-export interface UpdateUser {
   sequenceId: number
   publicId: string
   timestamp: Date

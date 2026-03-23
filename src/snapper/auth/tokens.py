@@ -4,6 +4,7 @@ This module provides JWT token creation, verification, and lifecycle
 management including blacklisting and WebSocket token rotation.
 """
 
+import json as json_mod
 import secrets
 import uuid
 from datetime import UTC
@@ -199,7 +200,7 @@ class TokenManager:
                 self.settings.auth_secret_key,
                 algorithms=[self.settings.auth_algorithm],
             )
-            token_data = TokenClaims(**payload)
+            token_data = TokenClaims.model_validate_json(json_mod.dumps(payload))
             self._cleanup_old_blacklist_entries()
             if self._is_token_blacklisted(token_data.jti):
                 logger.warning(f"Attempted use of blacklisted token: {token_data.jti}")

@@ -1,0 +1,241 @@
+"""Tests for json_body FastAPI dependency and OpenAPI schema helpers."""
+
+from datetime import UTC
+from datetime import datetime
+from typing import Any
+
+import pytest
+from fastapi import APIRouter
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import ValidationError
+
+from snapper.server.json_body import _SCHEMA_REGISTRY
+from snapper.server.json_body import _lift_defs
+from snapper.server.json_body import _strip_defaults
+from snapper.server.json_body import json_body
+from snapper.server.json_body import openapi_schema
+from snapper.server.json_body import patch_openapi
+
+
+class _StubRequest:
+    """Minimal Request stub that returns pre-set body bytes."""
+
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    async def body(self) -> bytes:
+        """Return pre-set raw bytes."""
+        return self._raw
+
+
+class TestJsonBody:
+    """Verify json_body dependency validates via Pydantic JSON mode."""
+
+    @pytest.mark.asyncio()
+    async def test_valid_json_returns_model(self) -> None:
+        """Validate correct JSON body is parsed into model.
+
+        Given: Raw JSON bytes with an ISO timestamp,
+        When: json_body dependency is called,
+        Then: Returns a validated model with datetime coerced from string.
+        """
+
+        class StrictModel(BaseModel):
+            model_config = ConfigDict(strict=True, extra="forbid")
+            ts: datetime
+            name: str
+
+        dep = json_body(StrictModel)
+        req = _StubRequest(b'{"ts": "2024-01-01T00:00:00Z", "name": "test"}')
+        result = await dep(req)
+        assert result.ts == datetime(2024, 1, 1, tzinfo=UTC)
+        assert result.name == "test"
+
+    @pytest.mark.asyncio()
+    async def test_invalid_json_raises_validation_error(self) -> None:
+        """Validate malformed body raises RequestValidationError.
+
+        Given: Raw JSON bytes that fail model validation,
+        When: json_body dependency is called,
+        Then: RequestValidationError is raised with body location.
+        """
+
+        class StrictModel(BaseModel):
+            model_config = ConfigDict(strict=True, extra="forbid")
+            ts: datetime
+
+        dep = json_body(StrictModel)
+        req = _StubRequest(b'{"ts": 12345}')
+        with pytest.raises(RequestValidationError):
+            await dep(req)
+
+    @pytest.mark.asyncio()
+    async def test_json_mode_accepts_str_datetime_that_python_mode_rejects(self) -> None:
+        """Demonstrate JSON mode allows str->datetime that Python mode rejects.
+
+        Given: A strict model with a datetime field,
+        When: An ISO string is in the JSON body,
+        Then: json_body succeeds (JSON mode) while model_validate(dict) would fail.
+        """
+
+        class StrictModel(BaseModel):
+            model_config = ConfigDict(strict=True, extra="forbid")
+            ts: datetime
+
+        dep = json_body(StrictModel)
+        req = _StubRequest(b'{"ts": "2024-06-15T12:00:00+00:00"}')
+        result = await dep(req)
+        assert isinstance(result.ts, datetime)
+
+        with pytest.raises(ValidationError):
+            StrictModel.model_validate({"ts": "2024-06-15T12:00:00+00:00"})
+
+
+class TestStripDefaults:
+    """Verify _strip_defaults aligns Pydantic output with FastAPI conventions."""
+
+    def test_removes_default_keys_and_trims_required(self) -> None:
+        """Validate default keys are removed and required list is trimmed.
+
+        Given: A schema with properties that have default values,
+        When: _lift_defs processes it,
+        Then: default keys are removed and fields dropped from required.
+        """
+        schema: dict[str, Any] = {
+            "type": "object",
+            "required": ["name", "enabled"],
+            "properties": {
+                "name": {"type": "string"},
+                "enabled": {"type": "boolean", "default": False},
+            },
+        }
+        result: dict[str, Any] = _strip_defaults(schema)
+        assert result["required"] == ["name"]
+        assert "default" not in result["properties"]["enabled"]
+
+    def test_deletes_required_when_all_defaulted(self) -> None:
+        """Validate required key is deleted when all fields have defaults.
+
+        Given: A schema where every field has a default,
+        When: _strip_defaults processes it,
+        Then: The required key is removed entirely.
+        """
+        schema: dict[str, Any] = {
+            "type": "object",
+            "required": ["x"],
+            "properties": {
+                "x": {"type": "integer", "default": 0},
+            },
+        }
+        result: dict[str, Any] = _strip_defaults(schema)
+        assert "required" not in result
+
+
+class TestLiftDefs:
+    """Verify _lift_defs extracts $defs and rewrites $ref paths."""
+
+    def test_rewrites_ref_paths(self) -> None:
+        """Validate $defs are extracted and $ref paths point to components/schemas.
+
+        Given: A schema with $defs and local $ref pointers,
+        When: _lift_defs is called,
+        Then: Root schema refs point to components/schemas and sub-schemas are returned.
+        """
+        schema: dict[str, Any] = {
+            "$defs": {
+                "Inner": {"type": "object", "properties": {"x": {"type": "integer"}}},
+            },
+            "type": "object",
+            "properties": {
+                "payload": {"$ref": "#/$defs/Inner"},
+            },
+        }
+        rewritten, subs = _lift_defs(schema)
+        assert rewritten["properties"]["payload"] == {"$ref": "#/components/schemas/Inner"}
+        assert "Inner" in subs
+        assert "$defs" not in rewritten
+
+    def test_no_defs_passthrough(self) -> None:
+        """Validate schemas without $defs pass through unchanged.
+
+        Given: A schema with no $defs,
+        When: _lift_defs is called,
+        Then: Schema is returned unchanged, no sub-schemas extracted.
+        """
+        schema: dict[str, Any] = {"type": "object", "properties": {"x": {"type": "string"}}}
+        rewritten, subs = _lift_defs(schema)
+        assert rewritten == {"type": "object", "properties": {"x": {"type": "string"}}}
+        assert subs == {}
+
+
+class TestOpenApiSchema:
+    """Verify openapi_schema builds correct openapi_extra dict."""
+
+    def test_returns_ref_to_components(self) -> None:
+        """Validate openapi_schema returns $ref to components/schemas.
+
+        Given: A Pydantic model,
+        When: openapi_schema is called,
+        Then: Returns requestBody with $ref to components/schemas/{ModelName}.
+        """
+
+        class MyModel(BaseModel):
+            name: str
+
+        result = openapi_schema(MyModel)
+        ref = result["requestBody"]["content"]["application/json"]["schema"]
+        assert ref == {"$ref": "#/components/schemas/MyModel"}
+
+
+class TestPatchOpenapi:
+    """Verify patch_openapi injects schemas into components/schemas."""
+
+    def test_injects_registered_schemas(self) -> None:
+        """Validate patch_openapi adds registered schemas to the spec.
+
+        Given: An app with openapi_schema-registered models,
+        When: patch_openapi is called and openapi() is invoked,
+        Then: Registered schemas appear in components/schemas.
+        """
+
+        class PatchTestModel(BaseModel):
+            value: int
+
+        openapi_schema(PatchTestModel)
+        assert "PatchTestModel" in _SCHEMA_REGISTRY
+
+        app = FastAPI()
+        patch_openapi(app)
+        spec = app.openapi()
+        schemas = spec.get("components", {}).get("schemas", {})
+        assert "PatchTestModel" in schemas
+
+    def test_does_not_overwrite_existing_schemas(self) -> None:
+        """Validate patch_openapi preserves pre-existing native schemas.
+
+        Given: A FastAPI app with a route whose response model produces a
+               schema name that collides with a registered json_body schema,
+        When: patch_openapi is called and openapi() is invoked,
+        Then: The native schema is kept, not overwritten by the registry.
+        """
+
+        class SharedName(BaseModel):
+            native_field: str
+
+        openapi_schema(SharedName)
+
+        router = APIRouter()
+
+        @router.get("/test", response_model=SharedName)
+        async def _get() -> SharedName:
+            return SharedName(native_field="x")
+
+        app = FastAPI()
+        app.include_router(router)
+        patch_openapi(app)
+        spec = app.openapi()
+        schema = spec["components"]["schemas"]["SharedName"]
+        assert "native_field" in schema["properties"]

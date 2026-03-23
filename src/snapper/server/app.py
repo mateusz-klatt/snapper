@@ -137,6 +137,7 @@ from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
+from snapper.server.json_body import patch_openapi
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
@@ -342,6 +343,8 @@ def create_app() -> FastAPI:
     app.include_router(strategy_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
+
+    patch_openapi(app)
 
     app.state.manager = manager
     if os.path.exists("frontend/dist"):

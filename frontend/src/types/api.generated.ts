@@ -929,47 +929,6 @@ export type webhooks = Record<string, never>;
 export type Components = {
     schemas: {
         /**
-         * AdminResetPasswordBody
-         * @description Admin password reset request body.
-         *
-         *     Used by admins to reset another user's password
-         *     without knowing the current password.
-         *
-         *     Attributes:
-         *         new_password: New password to set (min 8 chars).
-         */
-        AdminResetPasswordBody: {
-            /** New Password */
-            new_password: string;
-        };
-        /**
-         * AdminResetPasswordRequest
-         * @description Admin password reset request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        AdminResetPasswordRequest: {
-            /**
-             * Type
-             * @default admin_reset_password_request
-             * @constant
-             */
-            type: "admin_reset_password_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["AdminResetPasswordBody"];
-        };
-        /**
          * AvailableProcess
          * @description Available process template response schema.
          *
@@ -1085,49 +1044,6 @@ export type Components = {
              * @description Number of items in payload
              */
             count: number;
-        };
-        /**
-         * ChangePasswordBody
-         * @description Change password request body.
-         *
-         *     Used by authenticated users to change their own password.
-         *
-         *     Attributes:
-         *         current_password: Current password for verification.
-         *         new_password: New password (min 8 chars).
-         */
-        ChangePasswordBody: {
-            /** Current Password */
-            current_password: string;
-            /** New Password */
-            new_password: string;
-        };
-        /**
-         * ChangePasswordRequest
-         * @description Change password request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        ChangePasswordRequest: {
-            /**
-             * Type
-             * @default change_password_request
-             * @constant
-             */
-            type: "change_password_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["ChangePasswordBody"];
         };
         /**
          * ConfiguredProcess
@@ -1335,96 +1251,6 @@ export type Components = {
              * @default 0
              */
             active_clients: number;
-        };
-        /**
-         * CreateUserBody
-         * @description Create user request body.
-         *
-         *     Attributes:
-         *         username: Unique username (3-64 chars).
-         *         email: Optional email address.
-         *         password: Password (min 8 chars).
-         *         role: User role to assign.
-         *         is_active: Whether account is active.
-         */
-        CreateUserBody: {
-            /** Username */
-            username: string;
-            /** Email */
-            email?: string | null;
-            /** Password */
-            password: string;
-            role: Components["schemas"]["UserRole"];
-            /**
-             * Is Active
-             * @default true
-             */
-            is_active: boolean;
-        };
-        /**
-         * CreateUserRequest
-         * @description Create user request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        CreateUserRequest: {
-            /**
-             * Type
-             * @default create_user_request
-             * @constant
-             */
-            type: "create_user_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["CreateUserBody"];
-        };
-        /**
-         * DeactivateUserBody
-         * @description Deactivate user command body (empty).
-         *
-         *     Command-style endpoint: no domain fields needed, provenance
-         *     is carried on the PayloadRequest envelope.
-         *
-         *     Attributes:
-         *         (none — empty body signals intent via URL path)
-         */
-        DeactivateUserBody: Record<string, never>;
-        /**
-         * DeactivateUserRequest
-         * @description Deactivate user request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        DeactivateUserRequest: {
-            /**
-             * Type
-             * @default deactivate_user_request
-             * @constant
-             */
-            type: "deactivate_user_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["DeactivateUserBody"];
         };
         /**
          * ExchangeListResponse
@@ -1776,26 +1602,6 @@ export type Components = {
             count: number;
         };
         /**
-         * LoginBody
-         * @description Login request body.
-         *
-         *     Attributes:
-         *         username: User's login name.
-         *         password: User's password.
-         *         remember_me: If True, extends refresh token lifetime.
-         */
-        LoginBody: {
-            /** Username */
-            username: string;
-            /** Password */
-            password: string;
-            /**
-             * Remember Me
-             * @default false
-             */
-            remember_me: boolean;
-        };
-        /**
          * LoginData
          * @description Login payload data.
          *
@@ -1828,33 +1634,6 @@ export type Components = {
             /** Expires In */
             expires_in: number;
             user: Components["schemas"]["UserProfile"];
-        };
-        /**
-         * LoginRequest
-         * @description Login request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        LoginRequest: {
-            /**
-             * Type
-             * @default login_request
-             * @constant
-             */
-            type: "login_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["LoginBody"];
         };
         /**
          * LoginResponse
@@ -2152,58 +1931,6 @@ export type Components = {
             total: number;
         };
         /**
-         * ProcessCreateBody
-         * @description Process creation request body.
-         *
-         *     Attributes:
-         *         name: Unique process name (lowercase alphanumeric with underscores).
-         *         template: Registered process identifier used as template.
-         *         enabled: Whether process should autostart on boot.
-         *         mode: Execution mode override (thread/process).
-         *         args: Constructor positional arguments.
-         *         kwargs: Constructor keyword arguments.
-         *         note: Optional note stored alongside configuration.
-         */
-        ProcessCreateBody: {
-            /**
-             * Name
-             * @description Unique process name
-             */
-            name: string;
-            /**
-             * Template
-             * @description Registered process identifier used as template
-             */
-            template: string;
-            /**
-             * Enabled
-             * @description Whether process should autostart on boot
-             */
-            enabled?: boolean | null;
-            /**
-             * Mode
-             * @description Execution mode override (thread/process)
-             */
-            mode?: ("thread" | "process") | null;
-            /**
-             * Args
-             * @description Constructor positional arguments
-             */
-            args?: unknown[] | null;
-            /**
-             * Kwargs
-             * @description Constructor keyword arguments
-             */
-            kwargs?: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Note
-             * @description Optional note stored alongside configuration
-             */
-            note?: string | null;
-        };
-        /**
          * ProcessCreateData
          * @description Process creation data schema.
          *
@@ -2238,33 +1965,6 @@ export type Components = {
             status: "created";
             /** @description Created process info */
             process: Components["schemas"]["ProcessCreatedInfo"];
-        };
-        /**
-         * ProcessCreateRequest
-         * @description Process creation request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        ProcessCreateRequest: {
-            /**
-             * Type
-             * @default process_create_request
-             * @constant
-             */
-            type: "process_create_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["ProcessCreateBody"];
         };
         /**
          * ProcessCreateResponse
@@ -2567,50 +2267,6 @@ export type Components = {
             payload: Components["schemas"]["ProcessSchemaData"];
         };
         /**
-         * ProcessStartBody
-         * @description Process start request body.
-         *
-         *     Attributes:
-         *         mode: Execution mode (thread/process) override.
-         *         args: Constructor positional arguments override.
-         *         kwargs: Constructor keyword arguments override.
-         *         autostart: Toggle autostart flag (None keeps stored value).
-         */
-        ProcessStartBody: {
-            /**
-             * Mode
-             * @description Execution mode (thread/process) - for ProcessLauncherService, not constructor
-             * @example thread
-             * @example process
-             */
-            mode?: ("thread" | "process") | null;
-            /**
-             * Args
-             * @description Constructor positional arguments override
-             * @example [
-             *       "arg1",
-             *       2,
-             *       3
-             *     ]
-             */
-            args?: unknown[] | null;
-            /**
-             * Kwargs
-             * @description Constructor keyword arguments override
-             * @example {
-             *       "endpoint": "tcp://0.0.0.0:5555"
-             *     }
-             */
-            kwargs?: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Autostart
-             * @description Toggle autostart flag; None keeps stored value
-             */
-            autostart?: boolean | null;
-        };
-        /**
          * ProcessStartData
          * @description Process start data schema.
          *
@@ -2660,33 +2316,6 @@ export type Components = {
              * @description Additional message
              */
             message?: string | null;
-        };
-        /**
-         * ProcessStartRequest
-         * @description Process start request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        ProcessStartRequest: {
-            /**
-             * Type
-             * @default process_start_request
-             * @constant
-             */
-            type: "process_start_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["ProcessStartBody"];
         };
         /**
          * ProcessStartResponse
@@ -2971,44 +2600,6 @@ export type Components = {
             payload: Components["schemas"]["RefreshData"];
         };
         /**
-         * RemoveSettingBody
-         * @description Remove setting command body (empty).
-         *
-         *     Command-style endpoint: no domain fields needed, provenance
-         *     is carried on the PayloadRequest envelope.
-         *
-         *     Attributes:
-         *         (none — empty body signals intent via URL path)
-         */
-        RemoveSettingBody: Record<string, never>;
-        /**
-         * RemoveSettingRequest
-         * @description Remove setting request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        RemoveSettingRequest: {
-            /**
-             * Type
-             * @default remove_setting_request
-             * @constant
-             */
-            type: "remove_setting_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["RemoveSettingBody"];
-        };
-        /**
          * SettingCategoriesResponse
          * @description Setting categories list response.
          *
@@ -3157,60 +2748,6 @@ export type Components = {
             /** Session Id */
             session_id: string;
             payload: Components["schemas"]["SettingRead"];
-        };
-        /**
-         * SettingUpdate
-         * @description Setting update request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        SettingUpdate: {
-            /**
-             * Type
-             * @default setting_update
-             * @constant
-             */
-            type: "setting_update";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["SettingUpdateBody"];
-        };
-        /**
-         * SettingUpdateBody
-         * @description Setting update request body.
-         *
-         *     Attributes:
-         *         value: New setting value as string.
-         *         category: Setting category (defaults to 'system').
-         *         description: Optional description.
-         */
-        SettingUpdateBody: {
-            /**
-             * Value
-             * @description Setting value as string
-             */
-            value: string;
-            /**
-             * Category
-             * @description Setting category
-             * @default system
-             */
-            category: string;
-            /**
-             * Description
-             * @description Setting description
-             */
-            description?: string | null;
         };
         /**
          * SignalData
@@ -3648,51 +3185,6 @@ export type Components = {
             pattern?: string | null;
         };
         /**
-         * UpdateUserBody
-         * @description Update user request body.
-         *
-         *     All fields are optional - only provided fields are updated.
-         *
-         *     Attributes:
-         *         email: New email address.
-         *         role: New role assignment.
-         *         is_active: New active status.
-         */
-        UpdateUserBody: {
-            /** Email */
-            email?: string | null;
-            role?: Components["schemas"]["UserRole"] | null;
-            /** Is Active */
-            is_active?: boolean | null;
-        };
-        /**
-         * UpdateUserRequest
-         * @description Update user request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
-        UpdateUserRequest: {
-            /**
-             * Type
-             * @default update_user_request
-             * @constant
-             */
-            type: "update_user_request";
-            /** Sequence Id */
-            sequence_id: number;
-            /** Public Id */
-            public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
-            timestamp: string;
-            /** Session Id */
-            session_id: string;
-            payload: Components["schemas"]["UpdateUserBody"];
-        };
-        /**
          * UserListResponse
          * @description User list response schema.
          *
@@ -4115,6 +3607,497 @@ export type Components = {
             session_id: string;
             payload: Components["schemas"]["ZmqHealthData"];
         };
+        /**
+         * LoginRequest
+         * @description Login request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        LoginRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "login_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["LoginBody"];
+        };
+        /**
+         * LoginBody
+         * @description Login request body.
+         *
+         *     Attributes:
+         *         username: User's login name.
+         *         password: User's password.
+         *         remember_me: If True, extends refresh token lifetime.
+         */
+        LoginBody: {
+            /** Username */
+            username: string;
+            /** Password */
+            password: string;
+            /** Remember Me */
+            remember_me?: boolean;
+        };
+        /**
+         * CreateUserRequest
+         * @description Create user request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        CreateUserRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "create_user_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["CreateUserBody"];
+        };
+        /**
+         * CreateUserBody
+         * @description Create user request body.
+         *
+         *     Attributes:
+         *         username: Unique username (3-64 chars).
+         *         email: Optional email address.
+         *         password: Password (min 8 chars).
+         *         role: User role to assign.
+         *         is_active: Whether account is active.
+         */
+        CreateUserBody: {
+            /** Username */
+            username: string;
+            /** Email */
+            email?: string | null;
+            /** Password */
+            password: string;
+            role: Components["schemas"]["UserRole"];
+            /** Is Active */
+            is_active?: boolean;
+        };
+        /**
+         * UpdateUserRequest
+         * @description Update user request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        UpdateUserRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "update_user_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["UpdateUserBody"];
+        };
+        /**
+         * UpdateUserBody
+         * @description Update user request body.
+         *
+         *     All fields are optional - only provided fields are updated.
+         *
+         *     Attributes:
+         *         email: New email address.
+         *         role: New role assignment.
+         *         is_active: New active status.
+         */
+        UpdateUserBody: {
+            /** Email */
+            email?: string | null;
+            role?: Components["schemas"]["UserRole"] | null;
+            /** Is Active */
+            is_active?: boolean | null;
+        };
+        /**
+         * DeactivateUserRequest
+         * @description Deactivate user request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        DeactivateUserRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "deactivate_user_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["DeactivateUserBody"];
+        };
+        /**
+         * DeactivateUserBody
+         * @description Deactivate user command body (empty).
+         *
+         *     Command-style endpoint: no domain fields needed, provenance
+         *     is carried on the PayloadRequest envelope.
+         *
+         *     Attributes:
+         *         (none — empty body signals intent via URL path)
+         */
+        DeactivateUserBody: Record<string, never>;
+        /**
+         * ChangePasswordRequest
+         * @description Change password request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        ChangePasswordRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "change_password_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["ChangePasswordBody"];
+        };
+        /**
+         * ChangePasswordBody
+         * @description Change password request body.
+         *
+         *     Used by authenticated users to change their own password.
+         *
+         *     Attributes:
+         *         current_password: Current password for verification.
+         *         new_password: New password (min 8 chars).
+         */
+        ChangePasswordBody: {
+            /** Current Password */
+            current_password: string;
+            /** New Password */
+            new_password: string;
+        };
+        /**
+         * AdminResetPasswordRequest
+         * @description Admin password reset request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        AdminResetPasswordRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "admin_reset_password_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["AdminResetPasswordBody"];
+        };
+        /**
+         * AdminResetPasswordBody
+         * @description Admin password reset request body.
+         *
+         *     Used by admins to reset another user's password
+         *     without knowing the current password.
+         *
+         *     Attributes:
+         *         new_password: New password to set (min 8 chars).
+         */
+        AdminResetPasswordBody: {
+            /** New Password */
+            new_password: string;
+        };
+        /**
+         * SettingUpdate
+         * @description Setting update request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        SettingUpdate: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "setting_update";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["SettingUpdateBody"];
+        };
+        /**
+         * SettingUpdateBody
+         * @description Setting update request body.
+         *
+         *     Attributes:
+         *         value: New setting value as string.
+         *         category: Setting category (defaults to 'system').
+         *         description: Optional description.
+         */
+        SettingUpdateBody: {
+            /**
+             * Value
+             * @description Setting value as string
+             */
+            value: string;
+            /**
+             * Category
+             * @description Setting category
+             */
+            category?: string;
+            /**
+             * Description
+             * @description Setting description
+             */
+            description?: string | null;
+        };
+        /**
+         * RemoveSettingRequest
+         * @description Remove setting request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        RemoveSettingRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "remove_setting_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["RemoveSettingBody"];
+        };
+        /**
+         * RemoveSettingBody
+         * @description Remove setting command body (empty).
+         *
+         *     Command-style endpoint: no domain fields needed, provenance
+         *     is carried on the PayloadRequest envelope.
+         *
+         *     Attributes:
+         *         (none — empty body signals intent via URL path)
+         */
+        RemoveSettingBody: Record<string, never>;
+        /**
+         * ProcessCreateRequest
+         * @description Process creation request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        ProcessCreateRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "process_create_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["ProcessCreateBody"];
+        };
+        /**
+         * ProcessCreateBody
+         * @description Process creation request body.
+         *
+         *     Attributes:
+         *         name: Unique process name (lowercase alphanumeric with underscores).
+         *         template: Registered process identifier used as template.
+         *         enabled: Whether process should autostart on boot.
+         *         mode: Execution mode override (thread/process).
+         *         args: Constructor positional arguments.
+         *         kwargs: Constructor keyword arguments.
+         *         note: Optional note stored alongside configuration.
+         */
+        ProcessCreateBody: {
+            /**
+             * Name
+             * @description Unique process name
+             */
+            name: string;
+            /**
+             * Template
+             * @description Registered process identifier used as template
+             */
+            template: string;
+            /**
+             * Enabled
+             * @description Whether process should autostart on boot
+             */
+            enabled?: boolean | null;
+            /**
+             * Mode
+             * @description Execution mode override (thread/process)
+             */
+            mode?: ("thread" | "process") | null;
+            /**
+             * Args
+             * @description Constructor positional arguments
+             */
+            args?: unknown[] | null;
+            /**
+             * Kwargs
+             * @description Constructor keyword arguments
+             */
+            kwargs?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Note
+             * @description Optional note stored alongside configuration
+             */
+            note?: string | null;
+        };
+        /**
+         * ProcessStartRequest
+         * @description Process start request envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        ProcessStartRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "process_start_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["ProcessStartBody"];
+        };
+        /**
+         * ProcessStartBody
+         * @description Process start request body.
+         *
+         *     Attributes:
+         *         mode: Execution mode (thread/process) override.
+         *         args: Constructor positional arguments override.
+         *         kwargs: Constructor keyword arguments override.
+         *         autostart: Toggle autostart flag (None keeps stored value).
+         */
+        ProcessStartBody: {
+            /**
+             * Mode
+             * @description Execution mode (thread/process) - for ProcessLauncherService, not constructor
+             * @example thread
+             * @example process
+             */
+            mode?: ("thread" | "process") | null;
+            /**
+             * Args
+             * @description Constructor positional arguments override
+             * @example [
+             *       "arg1",
+             *       2,
+             *       3
+             *     ]
+             */
+            args?: unknown[] | null;
+            /**
+             * Kwargs
+             * @description Constructor keyword arguments override
+             * @example {
+             *       "endpoint": "tcp://0.0.0.0:5555"
+             *     }
+             */
+            kwargs?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Autostart
+             * @description Toggle autostart flag; None keeps stored value
+             */
+            autostart?: boolean | null;
+        };
     };
     responses: never;
     parameters: never;
@@ -4144,15 +4127,6 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["LoginResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -4268,15 +4242,6 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["UserResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -4651,15 +4616,6 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Components["schemas"]["HTTPValidationError"];
-                };
             };
         };
     };

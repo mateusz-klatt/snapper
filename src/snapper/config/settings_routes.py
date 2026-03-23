@@ -54,6 +54,8 @@ from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.json_body import json_body
+from snapper.server.json_body import openapi_schema
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -150,13 +152,17 @@ async def get_setting_categories(
         )
 
 
-@router.post("/{key}/set", responses={404: {"description": "Setting not found"}})
+@router.post(
+    "/{key}/set",
+    responses={404: {"description": "Setting not found"}},
+    openapi_extra=openapi_schema(SettingUpdate),
+)
 async def set_setting(
     http_request: Request,
     key: str,
-    body: SettingUpdate,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    body: Annotated[SettingUpdate, Depends(json_body(SettingUpdate))],
 ) -> SettingResponse:
     """Set a setting value by key (update or create).
 
@@ -218,13 +224,17 @@ async def set_setting(
         )
 
 
-@router.post("/{key}/remove", responses={404: {"description": "Setting not found"}})
+@router.post(
+    "/{key}/remove",
+    responses={404: {"description": "Setting not found"}},
+    openapi_extra=openapi_schema(RemoveSettingRequest),
+)
 async def remove_setting(
     request: Request,
     key: str,
-    _body: RemoveSettingRequest,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    _body: Annotated[RemoveSettingRequest, Depends(json_body(RemoveSettingRequest))],
 ) -> MessageResponse:
     """Remove a setting by key (soft-delete via bitemporal close).
 

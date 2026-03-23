@@ -28,7 +28,7 @@ class TokenClaims(BaseModel):
         sid: Session ID for token rotation tracking.
     """
 
-    model_config = ConfigDict(extra="forbid", strict=False)
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     sub: str
     username: str

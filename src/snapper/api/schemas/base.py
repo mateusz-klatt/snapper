@@ -59,7 +59,7 @@ class StrictDataSchema[TypeT: str](BaseModel):
     type: TypeT
     sequence_id: int
     public_id: str
-    timestamp: datetime = Field(strict=False)
+    timestamp: datetime
     session_id: str
 
     def to_json(self) -> str:

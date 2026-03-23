@@ -71,6 +71,8 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.json_body import json_body
+from snapper.server.json_body import openapi_schema
 
 _REST_STREAM = "rest.control"
 
@@ -277,14 +279,15 @@ async def get_process_summary(
         404: {"description": "Template not found"},
         409: {"description": "Process name already exists"},
     },
+    openapi_extra=openapi_schema(ProcessCreateRequest),
 )
 async def create_process_configuration(
     http_request: Request,
-    body: ProcessCreateRequest,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     settings: Annotated[AppSettings, Depends(get_settings)],
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    body: Annotated[ProcessCreateRequest, Depends(json_body(ProcessCreateRequest))],
 ) -> ProcessCreateResponse:
     """Create a new process configuration from a template.
 
@@ -413,14 +416,14 @@ async def get_process_schema(
     )
 
 
-@router.post("/{name}/start")
+@router.post("/{name}/start", openapi_extra=openapi_schema(ProcessStartRequest))
 async def start_process(
     http_request: Request,
     name: str,
-    body: ProcessStartRequest,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    body: Annotated[ProcessStartRequest, Depends(json_body(ProcessStartRequest))],
 ) -> ProcessStartResponse:
     payload = body.payload
     result = await factory.start_process_by_name(

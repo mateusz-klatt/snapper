@@ -7,7 +7,6 @@ Request bodies are plain BaseModel (domain intent only). Each is wrapped
 in a PayloadRequest envelope that carries provenance fields.
 """
 
-from typing import Annotated
 from typing import Literal
 
 from pydantic import BaseModel
@@ -60,7 +59,7 @@ class CreateUserBody(BaseModel):
     username: str = Field(min_length=3, max_length=64)
     email: str | None = Field(default=None, max_length=255)
     password: str = Field(min_length=8)
-    role: Annotated[UserRole, Field(strict=False)]
+    role: UserRole
     is_active: bool = True
 
 
@@ -88,7 +87,7 @@ class UpdateUserBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: str | None = Field(default=None, max_length=255)
-    role: Annotated[UserRole, Field(strict=False)] | None = None
+    role: UserRole | None = None
     is_active: bool | None = None
 
 
