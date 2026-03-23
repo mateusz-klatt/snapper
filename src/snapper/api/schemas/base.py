@@ -8,10 +8,11 @@ provenance fields and strict type validation.
 Schema hierarchy::
 
     BaseModel
-    └── StrictDataSchema → ALL event payload items (provenance required)
-        ├── PayloadRequest[T]     → REST mutation request (payload: T)
-        ├── PayloadResponse[T]    → singleton REST response (payload: T)
-        └── PayloadListResponse[T] → list REST response (payload: list[T], count)
+    └── StrictBody            → strict structural schemas / request bodies (no provenance)
+        └── StrictDataSchema  → ALL event payload items (provenance required)
+            ├── PayloadRequest[T]     → REST mutation request (payload: T)
+            ├── PayloadResponse[T]    → singleton REST response (payload: T)
+            └── PayloadListResponse[T] → list REST response (payload: list[T], count)
 """
 
 from datetime import datetime
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 
-STRICT_CONFIG = ConfigDict(
+STRICT_BODY_CONFIG = ConfigDict(
     extra="forbid",
     strict=True,
     validate_default=True,
@@ -30,7 +31,21 @@ STRICT_CONFIG = ConfigDict(
 )
 
 
-class StrictDataSchema[TypeT: str](BaseModel):
+class StrictBody(BaseModel):
+    """Strict base for structural schemas and request bodies without provenance.
+
+    All request body classes and nested structural DTOs (stats, counts, info)
+    should inherit from StrictBody instead of plain BaseModel. This ensures
+    extra="forbid" (reject unknown fields) and strict=True (no type coercion)
+    across the entire schema layer.
+
+    For event payload items that carry provenance fields, use StrictDataSchema.
+    """
+
+    model_config = STRICT_BODY_CONFIG
+
+
+class StrictDataSchema[TypeT: str](StrictBody):
     """Base schema for all event payload items across ZMQ, WebSocket, and REST.
 
     Every event payload item inherits from this base, gaining a unique UUID7
@@ -53,8 +68,6 @@ class StrictDataSchema[TypeT: str](BaseModel):
         timestamp: Bus arrival timestamp (UTC), generated once at creation.
         session_id: Producer session identifier for provenance tracking.
     """
-
-    model_config = STRICT_CONFIG
 
     type: TypeT
     sequence_id: int
@@ -91,7 +104,7 @@ class PayloadRequest[TypeT: str, PayloadT](StrictDataSchema[TypeT]):
     Provenance fields live on the envelope (stamped by the client).
 
     Attributes:
-        payload: The request command body (plain BaseModel).
+        payload: The request command body (StrictBody).
     """
 
     payload: PayloadT
@@ -140,7 +153,8 @@ class MessageResponse(PayloadResponse[Literal["message"], str]):
 
 
 __all__ = [
-    "STRICT_CONFIG",
+    "STRICT_BODY_CONFIG",
+    "StrictBody",
     "StrictDataSchema",
     "PayloadRequest",
     "PayloadResponse",

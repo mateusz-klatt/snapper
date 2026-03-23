@@ -3,19 +3,18 @@
 This module defines response schemas for various health endpoints that provide
 insight into system status, ZMQ bridge health, and WebSocket statistics.
 
-Structural sub-schemas (nested fields) are plain BaseModel with extra="forbid"
-and carry no provenance fields.  Top-level response schemas use the
+Structural sub-schemas (nested fields) inherit StrictBody (strict validation,
+no provenance fields).  Top-level response schemas use the
 PayloadResponse[T, Data] envelope so every REST reply has a consistent shape.
 """
 
 from typing import Literal
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadResponse
+from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ComponentStatus
 from snapper.core.types import HealthStatus
@@ -23,7 +22,7 @@ from snapper.core.types import HealthStatus
 _CONN_STATS_DESC = "Connection statistics"
 
 
-class ConnectionStats(BaseModel):
+class ConnectionStats(StrictBody):
     """Connection-level statistics from the ZMQ-WebSocket bridge.
 
     Attributes:
@@ -34,8 +33,6 @@ class ConnectionStats(BaseModel):
         active_clients: Number of unique connected clients.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     active_connections: int = Field(default=0, description="Active WebSocket connections")
     zmq_subscribers: int = Field(default=0, description="Active ZMQ subscriber sockets")
     subscriber_tasks: int = Field(default=0, description="Running subscriber tasks")
@@ -43,7 +40,7 @@ class ConnectionStats(BaseModel):
     active_clients: int = Field(default=0, description="Unique connected clients")
 
 
-class TopicMetricSnapshot(BaseModel):
+class TopicMetricSnapshot(StrictBody):
     """Point-in-time snapshot of metrics for a single topic.
 
     Attributes:
@@ -60,8 +57,6 @@ class TopicMetricSnapshot(BaseModel):
         pattern: ZMQ subscription pattern (None if unconfigured).
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     active_subscribers: int = Field(default=0, description="Current subscriber count")
     received: int = Field(default=0, description="Total messages received")
     forwarded: int = Field(default=0, description="Messages forwarded to clients")
@@ -75,19 +70,17 @@ class TopicMetricSnapshot(BaseModel):
     pattern: str | None = Field(default=None, description="ZMQ subscription pattern")
 
 
-class HealthTopics(BaseModel):
+class HealthTopics(StrictBody):
     """Topic subscription statistics.
 
     Attributes:
         active: Number of currently active topics with subscribers.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     active: int = Field(description="Number of currently active topics")
 
 
-class GapStats(BaseModel):
+class GapStats(StrictBody):
     """Gap detection telemetry counters for a single detector.
 
     Attributes:
@@ -98,8 +91,6 @@ class GapStats(BaseModel):
         rejected_unstamped: Messages rejected due to missing provenance.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     gaps_detected: int = Field(default=0, description="Total missing messages detected")
     session_resets: int = Field(default=0, description="Producer session resets observed")
     duplicates: int = Field(default=0, description="Duplicate or reordered messages")
@@ -107,15 +98,13 @@ class GapStats(BaseModel):
     rejected_unstamped: int = Field(default=0, description="Messages without provenance")
 
 
-class GapDetectionStats(BaseModel):
+class GapDetectionStats(StrictBody):
     """Aggregated gap detection statistics from all detectors.
 
     Attributes:
         bridge: Gap stats from the ZMQ-to-WebSocket bridge detector.
         rest_clients: Per-session gap stats from REST client detectors.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     bridge: GapStats = Field(description="ZMQ bridge gap detection stats")
     rest_clients: dict[str, GapStats] = Field(
@@ -157,7 +146,7 @@ class HealthCheckResponse(PayloadResponse[Literal["health_check_response"], Heal
     type: Literal["health_check_response"] = "health_check_response"
 
 
-class ZmqComponents(BaseModel):
+class ZmqComponents(StrictBody):
     """ZMQ infrastructure component status.
 
     Attributes:
@@ -166,21 +155,17 @@ class ZmqComponents(BaseModel):
         active_connections: Number of active WebSocket connections.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     zmq_context: ComponentStatus = Field(description="ZMQ context status")
     websocket_manager: ComponentStatus = Field(description="WebSocket manager status")
     active_connections: int = Field(description="Number of active WebSocket connections")
 
 
-class ZmqConfig(BaseModel):
+class ZmqConfig(StrictBody):
     """ZMQ configuration information.
 
     Attributes:
         available_topics: List of available ZMQ topics for subscription.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     available_topics: list[str] = Field(description="List of available ZMQ topics")
 
@@ -222,7 +207,7 @@ class ZmqHealthResponse(PayloadResponse[Literal["zmq_health_response"], ZmqHealt
     type: Literal["zmq_health_response"] = "zmq_health_response"
 
 
-class WebSocketStats(BaseModel):
+class WebSocketStats(StrictBody):
     """WebSocket connection statistics.
 
     Attributes:
@@ -231,14 +216,12 @@ class WebSocketStats(BaseModel):
         client_count: Total client count.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     active_connections: int = Field(description="Number of active WebSocket connections")
     topic_subscribers: dict[str, int] = Field(description="Subscriber count per topic")
     client_count: int = Field(description="Total client count")
 
 
-class ZmqBridgeStats(BaseModel):
+class ZmqBridgeStats(StrictBody):
     """ZMQ bridge statistics.
 
     Attributes:
@@ -247,14 +230,12 @@ class ZmqBridgeStats(BaseModel):
         available_topics: List of available topics.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     active_topics: int = Field(description="Number of active ZMQ topics")
     subscriber_tasks: int = Field(description="Number of subscriber tasks")
     available_topics: list[str] = Field(description="List of available topics")
 
 
-class WsStatsConfig(BaseModel):
+class WsStatsConfig(StrictBody):
     """WebSocket statistics configuration.
 
     Attributes:
@@ -262,21 +243,17 @@ class WsStatsConfig(BaseModel):
         heartbeat_interval_ms: Heartbeat interval in milliseconds.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     broker_xpub: str = Field(description="ZMQ broker XPUB endpoint")
     heartbeat_interval_ms: int = Field(description="Heartbeat interval in milliseconds")
 
 
-class SubscriptionsStats(BaseModel):
+class SubscriptionsStats(StrictBody):
     """Subscription statistics.
 
     Attributes:
         per_topic: Subscriber count per topic.
         per_client: Topics subscribed per client.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     per_topic: dict[str, int] = Field(description="Subscriber count per topic")
     per_client: dict[str, list[str]] = Field(description="Topics subscribed per client")

@@ -4,13 +4,11 @@ This module defines Pydantic schemas for JWT token claims
 and token pair responses.
 """
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
-
+from snapper.api.schemas.base import StrictBody
 from snapper.auth.domain.roles import UserRole
 
 
-class TokenClaims(BaseModel):
+class TokenClaims(StrictBody):
     """JWT token claims schema.
 
     Contains all claims embedded in access and refresh tokens.
@@ -28,8 +26,6 @@ class TokenClaims(BaseModel):
         sid: Session ID for token rotation tracking.
     """
 
-    model_config = ConfigDict(extra="forbid", strict=True)
-
     sub: str
     username: str
     role: UserRole
@@ -40,7 +36,7 @@ class TokenClaims(BaseModel):
     sid: str
 
 
-class TokenPair(BaseModel):
+class TokenPair(StrictBody):
     """Internal token pair DTO.
 
     Carries access and refresh token strings between token manager

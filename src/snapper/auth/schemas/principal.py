@@ -7,12 +7,11 @@ because it has no provenance (no session_id, sequence_id, public_id).
 For the transportable user profile returned by API endpoints, see UserProfile.
 """
 
-from pydantic import BaseModel
-
+from snapper.api.schemas.base import StrictBody
 from snapper.auth.domain.roles import UserRole
 
 
-class AuthPrincipal(BaseModel):
+class AuthPrincipal(StrictBody):
     """Internal authentication principal from JWT claims.
 
     Used by auth dependencies (require_authentication, require_permission)

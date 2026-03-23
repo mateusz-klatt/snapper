@@ -5,8 +5,8 @@ endpoints, supporting process lifecycle operations (start, stop, create).
 
 Schema hierarchy follows these rules:
 
-- Nested structural schemas (fields inside other schemas) are plain BaseModel
-  with ``extra="forbid"`` and no provenance fields.
+- Nested structural schemas (fields inside other schemas) inherit ``StrictBody``
+  (strict validation, no provenance fields).
 - Top-level response schemas use ``PayloadResponse[..., XxxData]`` wrapping
   a new ``XxxData(StrictDataSchema)`` that carries the domain fields.
 - Schemas that are payloads in ``PayloadListResponse`` stay as
@@ -17,13 +17,12 @@ Schema hierarchy follows these rules:
 from typing import Any
 from typing import Literal
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
+from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
@@ -83,7 +82,7 @@ __all__ = [
 ]
 
 
-class ProcessStartBody(BaseModel):
+class ProcessStartBody(StrictBody):
     """Process start request body.
 
     Attributes:
@@ -92,8 +91,6 @@ class ProcessStartBody(BaseModel):
         kwargs: Constructor keyword arguments override.
         autostart: Toggle autostart flag (None keeps stored value).
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     mode: ProcessMode | None = Field(
         None,
@@ -126,7 +123,7 @@ class ProcessStartRequest(PayloadRequest[Literal["process_start_request"], Proce
     type: Literal["process_start_request"] = "process_start_request"
 
 
-class ProcessCreateBody(BaseModel):
+class ProcessCreateBody(StrictBody):
     """Process creation request body.
 
     Attributes:
@@ -138,8 +135,6 @@ class ProcessCreateBody(BaseModel):
         kwargs: Constructor keyword arguments.
         note: Optional note stored alongside configuration.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         ...,
@@ -185,15 +180,13 @@ class ProcessCreateRequest(PayloadRequest[Literal["process_create_request"], Pro
     type: Literal["process_create_request"] = "process_create_request"
 
 
-class TradeStartBody(BaseModel):
+class TradeStartBody(StrictBody):
     """Trade execution start request body.
 
     Attributes:
         strategy: Strategy name to trade with.
         paper: Enable paper trading mode.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     strategy: str = Field(description="Strategy name to trade with")
     paper: bool = Field(default=False, description="Enable paper trading mode")
@@ -209,7 +202,7 @@ class TradeStartRequest(PayloadRequest[Literal["trade_start_request"], TradeStar
     type: Literal["trade_start_request"] = "trade_start_request"
 
 
-class BacktestBody(BaseModel):
+class BacktestBody(StrictBody):
     """Backtest request body.
 
     Attributes:
@@ -217,8 +210,6 @@ class BacktestBody(BaseModel):
         start: Start date in YYYY-MM-DD format.
         end: End date in YYYY-MM-DD format.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     strategy: str = Field(description="Strategy name to backtest")
     start: str = Field(description="Start date in YYYY-MM-DD format")
@@ -235,7 +226,7 @@ class BacktestRequest(PayloadRequest[Literal["backtest_request"], BacktestBody])
     type: Literal["backtest_request"] = "backtest_request"
 
 
-class ProcessStatus(BaseModel):
+class ProcessStatus(StrictBody):
     """Process status nested structural schema.
 
     Represents the current status of a single process. Used as a nested
@@ -250,8 +241,6 @@ class ProcessStatus(BaseModel):
         error: Error message if failed.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     status: SpawnerProcessStatus = Field(
         description="Process status: not_running, running, stopped, completed, error"
     )
@@ -262,7 +251,7 @@ class ProcessStatus(BaseModel):
     error: str | None = Field(default=None, description="Error message if failed")
 
 
-class StrategyStatusPayload(BaseModel):
+class StrategyStatusPayload(StrictBody):
     """Strategy process status payload for the system status endpoint.
 
     Nested structural schema used inside SystemStatusData.
@@ -280,8 +269,6 @@ class StrategyStatusPayload(BaseModel):
         uptime: Process uptime string.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     strategy_name: str = Field(description="Strategy name")
     status: str = Field(description="Current strategy status")
     details: dict[str, Any] = Field(default={}, description="Full raw status")
@@ -294,7 +281,7 @@ class StrategyStatusPayload(BaseModel):
     uptime: str | None = Field(None, description="Process uptime")
 
 
-class ProcessCategoryCount(BaseModel):
+class ProcessCategoryCount(StrictBody):
     """Running/total count for a process category.
 
     Nested structural schema used inside ProcessSummaryData.
@@ -304,13 +291,11 @@ class ProcessCategoryCount(BaseModel):
         total: Total number of configured processes.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     running: int = Field(description="Number of currently running processes")
     total: int = Field(description="Total number of configured processes")
 
 
-class ProcessCreatedInfo(BaseModel):
+class ProcessCreatedInfo(StrictBody):
     """Process creation info nested structural schema.
 
     Used inside ProcessCreateData to describe the created process.
@@ -319,8 +304,6 @@ class ProcessCreatedInfo(BaseModel):
         name: Unique process name.
         template: Template used for creation.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(description=_UNIQUE_PROCESS_NAME_DESC)
     template: str = Field(description="Template used for creation")

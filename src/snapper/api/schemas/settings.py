@@ -3,20 +3,19 @@
 This module defines request/response schemas for the settings management
 endpoints, supporting CRUD operations on application settings.
 
-Request bodies are plain BaseModel (domain intent only). Each is wrapped
-in a PayloadRequest envelope that carries provenance fields.
+Request bodies inherit StrictBody (domain intent only, strict validation).
+Each is wrapped in a PayloadRequest envelope that carries provenance fields.
 """
 
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
+from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 
 
@@ -44,7 +43,7 @@ class SettingRead(StrictDataSchema[Literal["setting_read"]]):
     updated_by: str | None = None
 
 
-class SettingUpdateBody(BaseModel):
+class SettingUpdateBody(StrictBody):
     """Setting update request body.
 
     Attributes:
@@ -52,8 +51,6 @@ class SettingUpdateBody(BaseModel):
         category: Setting category (defaults to 'system').
         description: Optional description.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     value: str = Field(..., description="Setting value as string")
     category: str = Field(default="system", description="Setting category")
@@ -70,7 +67,7 @@ class SettingUpdate(PayloadRequest[Literal["setting_update"], SettingUpdateBody]
     type: Literal["setting_update"] = "setting_update"
 
 
-class SettingCreateBody(BaseModel):
+class SettingCreateBody(StrictBody):
     """Setting creation request body.
 
     Attributes:
@@ -79,8 +76,6 @@ class SettingCreateBody(BaseModel):
         category: Setting category (defaults to 'system').
         description: Optional description.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     key: str = Field(..., description="Setting key")
     value: str = Field(..., description="Setting value as string")
@@ -125,7 +120,7 @@ class SettingListResponse(PayloadListResponse[Literal["setting_list"], SettingRe
     type: Literal["setting_list"] = "setting_list"
 
 
-class RemoveSettingBody(BaseModel):
+class RemoveSettingBody(StrictBody):
     """Remove setting command body (empty).
 
     Command-style endpoint: no domain fields needed, provenance
@@ -134,8 +129,6 @@ class RemoveSettingBody(BaseModel):
     Attributes:
         (none — empty body signals intent via URL path)
     """
-
-    model_config = ConfigDict(extra="forbid")
 
 
 class RemoveSettingRequest(PayloadRequest[Literal["remove_setting_request"], RemoveSettingBody]):

@@ -3,21 +3,20 @@
 This module defines Pydantic schemas for authentication-related
 API requests including login, user management, and password changes.
 
-Request bodies are plain BaseModel (domain intent only). Each is wrapped
-in a PayloadRequest envelope that carries provenance fields.
+Request bodies inherit StrictBody (domain intent only, strict validation).
+Each is wrapped in a PayloadRequest envelope that carries provenance fields.
 """
 
 from typing import Literal
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
 from pydantic import Field
 
 from snapper.api.schemas.base import PayloadRequest
+from snapper.api.schemas.base import StrictBody
 from snapper.auth.domain.roles import UserRole
 
 
-class LoginBody(BaseModel):
+class LoginBody(StrictBody):
     """Login request body.
 
     Attributes:
@@ -25,8 +24,6 @@ class LoginBody(BaseModel):
         password: User's password.
         remember_me: If True, extends refresh token lifetime.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     username: str
     password: str
@@ -43,7 +40,7 @@ class LoginRequest(PayloadRequest[Literal["login_request"], LoginBody]):
     type: Literal["login_request"] = "login_request"
 
 
-class CreateUserBody(BaseModel):
+class CreateUserBody(StrictBody):
     """Create user request body.
 
     Attributes:
@@ -53,8 +50,6 @@ class CreateUserBody(BaseModel):
         role: User role to assign.
         is_active: Whether account is active.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     username: str = Field(min_length=3, max_length=64)
     email: str | None = Field(default=None, max_length=255)
@@ -73,7 +68,7 @@ class CreateUserRequest(PayloadRequest[Literal["create_user_request"], CreateUse
     type: Literal["create_user_request"] = "create_user_request"
 
 
-class UpdateUserBody(BaseModel):
+class UpdateUserBody(StrictBody):
     """Update user request body.
 
     All fields are optional - only provided fields are updated.
@@ -83,8 +78,6 @@ class UpdateUserBody(BaseModel):
         role: New role assignment.
         is_active: New active status.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     email: str | None = Field(default=None, max_length=255)
     role: UserRole | None = None
@@ -101,7 +94,7 @@ class UpdateUserRequest(PayloadRequest[Literal["update_user_request"], UpdateUse
     type: Literal["update_user_request"] = "update_user_request"
 
 
-class ChangePasswordBody(BaseModel):
+class ChangePasswordBody(StrictBody):
     """Change password request body.
 
     Used by authenticated users to change their own password.
@@ -110,8 +103,6 @@ class ChangePasswordBody(BaseModel):
         current_password: Current password for verification.
         new_password: New password (min 8 chars).
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     current_password: str
     new_password: str = Field(min_length=8)
@@ -127,7 +118,7 @@ class ChangePasswordRequest(PayloadRequest[Literal["change_password_request"], C
     type: Literal["change_password_request"] = "change_password_request"
 
 
-class AdminResetPasswordBody(BaseModel):
+class AdminResetPasswordBody(StrictBody):
     """Admin password reset request body.
 
     Used by admins to reset another user's password
@@ -136,8 +127,6 @@ class AdminResetPasswordBody(BaseModel):
     Attributes:
         new_password: New password to set (min 8 chars).
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     new_password: str = Field(min_length=8)
 
@@ -154,7 +143,7 @@ class AdminResetPasswordRequest(
     type: Literal["admin_reset_password_request"] = "admin_reset_password_request"
 
 
-class DeactivateUserBody(BaseModel):
+class DeactivateUserBody(StrictBody):
     """Deactivate user command body (empty).
 
     Command-style endpoint: no domain fields needed, provenance
@@ -163,8 +152,6 @@ class DeactivateUserBody(BaseModel):
     Attributes:
         (none — empty body signals intent via URL path)
     """
-
-    model_config = ConfigDict(extra="forbid")
 
 
 class DeactivateUserRequest(PayloadRequest[Literal["deactivate_user_request"], DeactivateUserBody]):
