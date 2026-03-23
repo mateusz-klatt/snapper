@@ -14,7 +14,6 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
 
-_INSTRUMENT_FK = "instruments.id"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 _KNOWN_TO_ACTIVE = "known_to = '9999-12-31T23:59:59+00:00'"
@@ -294,6 +293,7 @@ def upgrade() -> None:
         "candles",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("timeframe", sa.String(8), nullable=False),
         sa.Column("open_at", sa.DateTime(timezone=True), nullable=False),
@@ -308,7 +308,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_candles_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_candles_sequence_id"),
@@ -324,17 +323,19 @@ def upgrade() -> None:
     op.create_index(
         "uq_candle_itf_open",
         "candles",
-        ["instrument_id", "timeframe", "open_at"],
+        ["instrument_public_id", "timeframe", "open_at"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_candles_instrument_id", "candles", ["instrument_id"])
-    op.create_index("ix_candle_instrument_open", "candles", ["instrument_id", "open_at"])
+    op.create_index("ix_candles_instrument_public_id", "candles", ["instrument_public_id"])
+    op.create_index("ix_candle_instrument_open", "candles", ["instrument_public_id", "open_at"])
     op.create_table(
         "trades",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("trade_id", sa.String(64), nullable=False),
         sa.Column("price", sa.Float(), nullable=False),
@@ -344,7 +345,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("trade_id", name="uq_trade_trade_id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_trades_session_id"),
@@ -359,12 +359,14 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_trades_instrument_id", "trades", ["instrument_id"])
+    op.create_index("ix_trades_instrument_public_id", "trades", ["instrument_public_id"])
     op.create_index("ix_trades_timestamp", "trades", ["timestamp"])
-    op.create_index("ix_trade_instrument_ts", "trades", ["instrument_id", "timestamp"])
+    op.create_index("ix_trade_instrument_ts", "trades", ["instrument_public_id", "timestamp"])
     op.create_table(
         "ticks",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("bid", sa.Float(), nullable=True),
         sa.Column("ask", sa.Float(), nullable=True),
@@ -374,7 +376,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_ticks_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_ticks_sequence_id"),
@@ -388,11 +389,13 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_ticks_instrument_id", "ticks", ["instrument_id"])
-    op.create_index("ix_tick_instrument_ts", "ticks", ["instrument_id", "timestamp"])
+    op.create_index("ix_ticks_instrument_public_id", "ticks", ["instrument_public_id"])
+    op.create_index("ix_tick_instrument_ts", "ticks", ["instrument_public_id", "timestamp"])
     op.create_table(
         "orders",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("client_order_id", sa.String(64), nullable=True),
         sa.Column("exchange_order_id", sa.String(64), nullable=True),
@@ -411,7 +414,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_orders_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_orders_sequence_id"),
@@ -425,12 +427,13 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_orders_instrument_id", "orders", ["instrument_id"])
+    op.create_index("ix_orders_instrument_public_id", "orders", ["instrument_public_id"])
     op.create_index("ix_orders_client_order_id", "orders", ["client_order_id"])
     op.create_index("ix_orders_exchange_order_id", "orders", ["exchange_order_id"])
     op.create_index(
         "uq_orders_client_oid",
         "orders",
-        ["instrument_id", "client_order_id"],
+        ["instrument_public_id", "client_order_id"],
         unique=True,
         sqlite_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
         postgresql_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
@@ -438,7 +441,7 @@ def upgrade() -> None:
     op.create_index(
         "uq_orders_exchange_oid",
         "orders",
-        ["instrument_id", "exchange_order_id"],
+        ["instrument_public_id", "exchange_order_id"],
         unique=True,
         sqlite_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
         postgresql_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
@@ -462,7 +465,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["order_id"], ["orders.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_executions_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_executions_sequence_id"),
@@ -495,6 +497,7 @@ def upgrade() -> None:
         "positions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("quantity", sa.Float(), nullable=False),
         sa.Column("average_price", sa.Float(), nullable=False),
@@ -504,7 +507,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_positions_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_positions_sequence_id"),
@@ -518,18 +520,20 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index(
-        "uq_positions_instrument_id",
+        "uq_positions_instrument_public_id",
         "positions",
-        ["instrument_id"],
+        ["instrument_public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_positions_instrument_id", "positions", ["instrument_id"])
+    op.create_index("ix_positions_instrument_public_id", "positions", ["instrument_public_id"])
     op.create_table(
         "signals",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
         sa.Column("strength", sa.Float(), nullable=False),
@@ -541,7 +545,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_signals_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_signals_sequence_id"),
@@ -555,6 +558,7 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_signals_instrument_id", "signals", ["instrument_id"])
+    op.create_index("ix_signals_instrument_public_id", "signals", ["instrument_public_id"])
     op.create_index("ix_signals_fired_at", "signals", ["fired_at"])
     op.create_table(
         "users",
@@ -684,6 +688,7 @@ def upgrade() -> None:
         "instrument_specs",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("tick_size", sa.Float(), nullable=True),
         sa.Column("lot_size", sa.Float(), nullable=True),
@@ -699,7 +704,6 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["instrument_id"], [_INSTRUMENT_FK]),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_instrument_specs_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_instrument_specs_sequence_id"),
@@ -715,12 +719,15 @@ def upgrade() -> None:
     op.create_index(
         "uq_instrument_spec_instrument",
         "instrument_specs",
-        ["instrument_id"],
+        ["instrument_public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_instrument_specs_instrument_id", "instrument_specs", ["instrument_id"])
+    op.create_index(
+        "ix_instrument_specs_instrument_public_id", "instrument_specs", ["instrument_public_id"]
+    )
     op.create_table(
         "market_snapshots",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),

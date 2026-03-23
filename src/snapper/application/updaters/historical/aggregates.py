@@ -171,7 +171,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         self._db_sync: DatabaseRepository | None = None
         self._db_async: Repository | None = None
         self._loader: PolygonHistoricalLoader | None = None
-        self._instrument_cache: dict[str, int] = {}
+        self._instrument_cache: dict[str, tuple[int, str]] = {}
         self._symbol_mapper = SymbolMapperService.get_instance()
         self._tracker: SequenceTracker = SequenceTracker()
 
@@ -457,6 +457,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         chunk_end: date,
         max_ts: datetime,
         instrument_id: int,
+        instrument_public_id: str,
         timeframe: str,
     ) -> None:
         """Fetch candle data for a chunk and persist to database.
@@ -467,6 +468,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             chunk_end: Chunk end date.
             max_ts: Maximum allowed timestamp.
             instrument_id: Database instrument ID.
+            instrument_public_id: Stable public identity of the instrument.
             timeframe: Timeframe label string.
         """
         assert self._loader is not None
@@ -500,6 +502,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         rows = self._build_candle_rows(
             candles,
             instrument_id,
+            instrument_public_id,
             timeframe,
             self._tracker.session_id,
             lambda: self._tracker.next_sequence("candles"),
@@ -560,7 +563,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         assert self._loader is not None
         assert self._db_async is not None
         timeframe = _timeframe_label(self._multiplier, self._timespan)
-        instrument_id = await self._ensure_instrument(context)
+        instrument_id, instrument_public_id = await self._ensure_instrument(context)
         start_date, end_date, max_ts = self._compute_date_range()
         logger.info(
             f"Starting backfill for {context.polygon_symbol}",
@@ -582,7 +585,13 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 continue
             chunk_start, chunk_end = resolved
             await self._fetch_and_persist_chunk(
-                context, chunk_start, chunk_end, max_ts, instrument_id, timeframe
+                context,
+                chunk_start,
+                chunk_end,
+                max_ts,
+                instrument_id,
+                instrument_public_id,
+                timeframe,
             )
             chunk_end = chunk_start - timedelta(days=1)
 
@@ -727,8 +736,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         )
         return None
 
-    async def _ensure_instrument(self, context: _SymbolContext) -> int:
-        """Ensure instrument exists in database, return its ID.
+    async def _ensure_instrument(self, context: _SymbolContext) -> tuple[int, str]:
+        """Ensure instrument exists in database, return its ID and public_id.
 
         Uses cache to avoid repeated database lookups.  Resolves the
         Symbol.public_id from the database so the Instrument can reference
@@ -738,7 +747,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             context: Symbol context.
 
         Returns:
-            Database instrument ID.
+            Tuple of (instrument_id, instrument_public_id).
         """
         assert self._db_async is not None
         if context.native_symbol in self._instrument_cache:
@@ -747,7 +756,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         if symbol_pid is None:
             raise ValueError(f"No active Symbol row for {context.native_symbol}")
         quote_value = context.quote_currency or context.base_currency
-        instrument_id = await self._db_async.upsert_instrument(
+        result = await self._db_async.upsert_instrument(
             symbol_public_id=symbol_pid,
             symbol=context.native_symbol,
             exchange="polygon",
@@ -758,13 +767,14 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
-        self._instrument_cache[context.native_symbol] = instrument_id
-        return instrument_id
+        self._instrument_cache[context.native_symbol] = result
+        return result
 
     def _build_candle_rows(
         self,
         candles: Iterable[AggregateCandle],
         instrument_id: int,
+        instrument_public_id: str,
         timeframe: str,
         session_id: str,
         sequence_id_fn: Callable[[], int],
@@ -774,6 +784,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         Args:
             candles: Iterable of AggregateCandle objects.
             instrument_id: Database instrument ID.
+            instrument_public_id: Stable public identity of the instrument.
             timeframe: Timeframe label string.
             session_id: Session identifier for provenance stamping.
             sequence_id_fn: Callable returning next sequence number per row.
@@ -784,6 +795,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         return [
             {
                 "instrument_id": instrument_id,
+                "instrument_public_id": instrument_public_id,
                 "open_at": candle.timestamp,
                 "timestamp": datetime.now(UTC),
                 "timeframe": timeframe,

@@ -127,6 +127,7 @@ from snapper.data.models import SymbolAlias
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
@@ -548,7 +549,7 @@ def _create_candles_signals_router() -> APIRouter:
                 candles_query = await session.execute(
                     select(Candle)
                     .where(
-                        Candle.instrument_id == inst.id,
+                        Candle.instrument_public_id == inst.public_id,
                         Candle.timeframe == timeframe,
                         Candle.timestamp <= processing_date,
                         Candle.known_to > processing_date,
@@ -630,7 +631,13 @@ def _create_candles_signals_router() -> APIRouter:
         try:
             async with repo.session() as session:
                 since = processing_date - timedelta(hours=hours)
-                query = select(Signal, Instrument).join(Instrument)
+                query = select(Signal, Instrument).join(
+                    Instrument,
+                    and_(
+                        Signal.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, processing_date),
+                    ),
+                )
                 query = query.where(Signal.fired_at >= since)
                 query = query.where(
                     Signal.timestamp <= processing_date, Signal.known_to > processing_date
@@ -852,7 +859,13 @@ def _create_orders_executions_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
-                query = select(Order, Instrument).join(Instrument)
+                query = select(Order, Instrument).join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, processing_date),
+                    ),
+                )
                 query = query.where(
                     Order.timestamp <= processing_date, Order.known_to > processing_date
                 )
@@ -936,7 +949,13 @@ def _create_orders_executions_router() -> APIRouter:
                             Order.known_to > processing_date,
                         ),
                     )
-                    .join(Instrument, Order.instrument_id == Instrument.id)
+                    .join(
+                        Instrument,
+                        and_(
+                            Order.instrument_public_id == Instrument.public_id,
+                            *where_active(Instrument, processing_date),
+                        ),
+                    )
                     .where(Execution.timestamp <= processing_date)
                     .where(Execution.known_to > processing_date)
                     .order_by(desc(Execution.timestamp))
@@ -1005,7 +1024,13 @@ def _create_orders_executions_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
-                query = select(Position, Instrument).join(Instrument)
+                query = select(Position, Instrument).join(
+                    Instrument,
+                    and_(
+                        Position.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, processing_date),
+                    ),
+                )
                 query = query.where(
                     Position.timestamp <= processing_date,
                     Position.known_to > processing_date,

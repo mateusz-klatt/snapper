@@ -276,7 +276,7 @@ async def test_candle_loop_handles_errors(monkeypatch: pytest.MonkeyPatch) -> No
         raise RuntimeError("boom")
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=1)
+    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -423,7 +423,9 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     await pub._save_to_db("i", msg)
-    repo = SimpleNamespace(upsert_instrument=AsyncMock(return_value=1), upsert_candles=AsyncMock())
+    repo = SimpleNamespace(
+        upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")), upsert_candles=AsyncMock()
+    )
     pub.repository = repo
     resolve_mock = AsyncMock(return_value="fake-spid")
     monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
@@ -875,7 +877,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
     pub.running = True
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
-        upsert_instrument=AsyncMock(return_value=1),
+        upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
         upsert_candles=AsyncMock(),
     )
     pub._exchange_client = SimpleNamespace()
@@ -895,7 +897,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=1)
+    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.msg_publisher.send.assert_awaited_once()
     pub._ensure_instrument.assert_awaited()
@@ -983,7 +985,7 @@ async def test_save_to_db_uses_cached_instrument() -> None:
     Then the cached ID is used without querying the database.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub._instrument_cache["BTC-USD"] = 7
+    pub._instrument_cache["BTC-USD"] = (7, "inst-pub-7")
     pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
     candle = CandleData(
         session_id="",
@@ -1067,7 +1069,7 @@ async def test_candle_loop_breaks_when_stopped() -> None:
     pub.running = True
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
-        upsert_instrument=AsyncMock(return_value=1),
+        upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
         upsert_candles=AsyncMock(),
     )
     pub._exchange_client = SimpleNamespace()
@@ -1087,7 +1089,7 @@ async def test_candle_loop_breaks_when_stopped() -> None:
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=1)
+    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -1103,7 +1105,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
     pub.running = False
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
-        upsert_instrument=AsyncMock(return_value=1),
+        upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
         upsert_candles=AsyncMock(),
     )
     pub._exchange_client = SimpleNamespace()
@@ -1122,7 +1124,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
         )
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=1)
+    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.msg_publisher.send.assert_not_awaited()
 
@@ -1646,7 +1648,7 @@ class TestFeedPublisherCoverage:
             async for item in generator():
                 yield item
 
-        ensure_instrument_mock = AsyncMock(return_value=1)
+        ensure_instrument_mock = AsyncMock(return_value=(1, "inst-pub-1"))
         publisher_any._ensure_instrument = ensure_instrument_mock
         publisher_any._exchange_client = cast(
             Any,
@@ -1771,7 +1773,7 @@ class TestFeedPublisherCoverage:
         mock_settings.db_url = "sqlite:///:memory:"
         mock_get_settings.return_value = mock_settings
         mock_repository = SimpleNamespace(
-            upsert_instrument=AsyncMock(return_value=42),
+            upsert_instrument=AsyncMock(return_value=(42, "inst-pub-42")),
             upsert_candles=AsyncMock(),
         )
         resolve_mock = AsyncMock(return_value="fake-spid")
@@ -1813,7 +1815,7 @@ class TestFeedPublisherCoverage:
         mock_repository.upsert_candles.assert_awaited_once()
         await publisher_any._save_to_db("BTC-USD", bar_message)
         mock_repository.upsert_instrument.assert_awaited_once()
-        assert publisher_any._instrument_cache["BTC-USD"] == 42
+        assert publisher_any._instrument_cache["BTC-USD"] == (42, "inst-pub-42")
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1856,12 +1858,12 @@ class DummyRepository:
         self.candle_calls: list[list[dict[str, Any]]] = []
         self._next_id = 100
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         """Upsert instrument to repository."""
         self.instrument_calls.append(kwargs)
         current_id = self._next_id
         self._next_id += 1
-        return current_id
+        return (current_id, f"inst-pub-{current_id}")
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Upsert candles to repository."""
@@ -1926,7 +1928,7 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(repo.candle_calls) == 1
     assert repo.candle_calls[0][0]["instrument_id"] == 100
     cache = publisher._instrument_cache
-    assert cache["EUR-USD"] == 100
+    assert cache["EUR-USD"] == (100, "inst-pub-100")
     repo.instrument_calls.clear()
     await publisher._save_to_db("EUR-USD", bar_message)
     assert repo.instrument_calls == []
@@ -2056,7 +2058,7 @@ class TestFeedPublisherCandleLoop:
 
         publisher_any._publish_message = publish_stub
         publisher_any._save_to_db = save_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value=1)
+        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
         await publisher_any._candle_loop(
             ["BTC-USD", "ETH-USD"],
             "1m",
@@ -2129,7 +2131,7 @@ class TestFeedPublisherCandleLoop:
             published_topics.append(topic)
 
         publisher_any._publish_message = publish_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value=1)
+        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
         task = asyncio.create_task(publisher_any._candle_loop(["BTC-USD"], "1m"))
         await asyncio.sleep(0.05)
         publisher.running = False
@@ -2166,7 +2168,7 @@ class TestFeedPublisherCandleLoop:
         publisher.running = True
         publisher_any = cast(Any, publisher)
         publisher_any._exchange_client = mock_exchange_client
-        publisher_any._ensure_instrument = AsyncMock(return_value=1)
+        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
         await publisher_any._candle_loop(["BTC-USD"], "1m")
 
 
@@ -2335,8 +2337,8 @@ async def test_resolve_candle_public_id_cache_hit() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     ts = datetime(2026, 1, 1, tzinfo=UTC)
-    pub._candle_id_cache[(1, "1m")] = (ts, "existing-uuid")
-    result = pub._resolve_candle_public_id(1, "1m", ts)
+    pub._candle_id_cache[("inst-pub-1", "1m")] = (ts, "existing-uuid")
+    result = pub._resolve_candle_public_id("inst-pub-1", "1m", ts)
     assert result == "existing-uuid"
 
 
@@ -2351,10 +2353,10 @@ async def test_resolve_candle_public_id_different_open_at_generates_new() -> Non
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     ts_old = datetime(2026, 1, 1, tzinfo=UTC)
     ts_new = datetime(2026, 1, 1, 0, 1, tzinfo=UTC)
-    pub._candle_id_cache[(1, "1m")] = (ts_old, "existing-uuid")
-    result = pub._resolve_candle_public_id(1, "1m", ts_new)
+    pub._candle_id_cache[("inst-pub-1", "1m")] = (ts_old, "existing-uuid")
+    result = pub._resolve_candle_public_id("inst-pub-1", "1m", ts_new)
     assert result != "existing-uuid"
-    assert pub._candle_id_cache[(1, "1m")][0] == ts_new
+    assert pub._candle_id_cache[("inst-pub-1", "1m")][0] == ts_new
 
 
 @pytest.mark.asyncio
@@ -2401,7 +2403,7 @@ async def test_ensure_instrument_returns_none_for_unsplittable_symbol() -> None:
     Then: None is returned.
     """
     pub: Any = DummyPublisher(symbols=["INVALID"])
-    pub.repository = SimpleNamespace(upsert_instrument=AsyncMock(return_value=1))
+    pub.repository = SimpleNamespace(upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")))
     result = await pub._ensure_instrument("INVALID")
     assert result is None
 
@@ -2417,14 +2419,14 @@ async def test_ensure_instrument_resolves_and_caches(
     Then: The repository is called only once and result is cached.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    mock_upsert = AsyncMock(return_value=42)
+    mock_upsert = AsyncMock(return_value=(42, "inst-pub-42"))
     pub.repository = SimpleNamespace(upsert_instrument=mock_upsert)
     resolve_mock = AsyncMock(return_value="fake-spid")
     monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     first = await pub._ensure_instrument("BTC-USD")
     second = await pub._ensure_instrument("BTC-USD")
-    assert first == 42
-    assert second == 42
+    assert first == (42, "inst-pub-42")
+    assert second == (42, "inst-pub-42")
     resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
     call_kwargs = mock_upsert.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
@@ -2449,7 +2451,7 @@ async def test_ensure_instrument_returns_none_when_symbol_not_resolved(
     Then: The instrument upsert is skipped.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    mock_upsert = AsyncMock(return_value=42)
+    mock_upsert = AsyncMock(return_value=(42, "inst-pub-42"))
     pub.repository = SimpleNamespace(upsert_instrument=mock_upsert)
     resolve_mock = AsyncMock(return_value=None)
     monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)

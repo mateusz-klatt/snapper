@@ -28,9 +28,9 @@ from snapper.infrastructure.exchanges.implementations.paper import PaperExchange
 class DummyRepo(SimpleNamespace):
     """Stub repository for paper exchange tests."""
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         """Insert or update instrument record."""
-        return 1
+        return (1, "inst-pub-1")
 
     async def upsert_candles(self, rows: list[Any]) -> int:
         """Insert or update candle records."""

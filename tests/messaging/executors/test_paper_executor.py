@@ -28,7 +28,7 @@ def _make_repo_mock() -> MagicMock:
         and insert_execution configured as AsyncMock.
     """
     repo = MagicMock()
-    repo.upsert_instrument = AsyncMock(return_value=1)
+    repo.upsert_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     repo.insert_order = AsyncMock(return_value=(1, "order-uuid-0001"))
     repo.update_order = AsyncMock()
     repo.insert_execution = AsyncMock()

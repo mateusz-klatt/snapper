@@ -257,7 +257,7 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     Then: Order is inserted and ID returned.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=42)
+    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
     tracker = SequenceTracker()
@@ -313,7 +313,7 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
     Then: No instrument or order write is attempted.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=42)
+    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
     client.set_tracker(SequenceTracker())
@@ -359,7 +359,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     Then: base equals the full symbol and quote defaults to USD.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=42)
+    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
     tracker = SequenceTracker()
@@ -704,7 +704,7 @@ async def test_log_order_to_db_passes_provenance_when_tracker_set(
     Then: upsert_instrument receives non-empty session_id and sequence_id >= 1.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=42)
+    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-99"))
     client = DummyExchangeClient(repository=mock_repo)
     tracker = SequenceTracker()

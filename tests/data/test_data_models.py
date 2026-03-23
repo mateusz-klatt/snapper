@@ -89,6 +89,7 @@ class TestCandleModel:
         now = datetime.now(UTC)
         candle = Candle(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=now,
             timeframe="1h",
             open=49000.0,
@@ -100,6 +101,7 @@ class TestCandleModel:
             sequence_id=1,
         )
         assert candle.instrument_id == 1
+        assert candle.instrument_public_id == "test-instrument-uuid"
         assert candle.timestamp == now
         assert candle.timeframe == "1h"
         assert candle.open == pytest.approx(49000.0)
@@ -117,6 +119,7 @@ class TestCandleModel:
         """
         candle = Candle(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             timeframe="1h",
             open=50000.0,
@@ -147,6 +150,7 @@ class TestTradeModel:
         """
         trade = Trade(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=50000.0,
             size=1.5,
@@ -156,6 +160,7 @@ class TestTradeModel:
             sequence_id=1,
         )
         assert trade.instrument_id == 1
+        assert trade.instrument_public_id == "test-instrument-uuid"
         assert trade.price == pytest.approx(50000.0)
         assert trade.size == pytest.approx(1.5)
         assert trade.side == "buy"
@@ -171,6 +176,7 @@ class TestTradeModel:
         """
         trade = Trade(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=45000.0,
             size=2.0,
@@ -191,6 +197,7 @@ class TestTradeModel:
         """
         buy_trade = Trade(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=50000.0,
             size=1.0,
@@ -201,6 +208,7 @@ class TestTradeModel:
         )
         sell_trade = Trade(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=50000.0,
             size=1.0,
@@ -226,6 +234,7 @@ class TestOrderModel:
         now = datetime.now(UTC)
         order = Order(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             client_order_id="client-123",
             exchange_order_id="exchange-456",
             created_at=now,
@@ -241,6 +250,7 @@ class TestOrderModel:
             sequence_id=1,
         )
         assert order.instrument_id == 1
+        assert order.instrument_public_id == "test-instrument-uuid"
         assert order.client_order_id == "client-123"
         assert order.exchange_order_id == "exchange-456"
         assert order.side == "buy"
@@ -261,6 +271,7 @@ class TestOrderModel:
         now = datetime.now(UTC)
         order = Order(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             created_at=now,
             timestamp=now,
             side="buy",
@@ -284,6 +295,7 @@ class TestOrderModel:
         now = datetime.now(UTC)
         order = Order(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             created_at=now,
             timestamp=now,
             side="buy",
@@ -368,6 +380,7 @@ class TestPositionModel:
         """
         position = Position(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             quantity=2.5,
             average_price=48000.0,
             unrealized_pnl=5000.0,
@@ -377,6 +390,7 @@ class TestPositionModel:
             sequence_id=1,
         )
         assert position.instrument_id == 1
+        assert position.instrument_public_id == "test-instrument-uuid"
         assert position.quantity == pytest.approx(2.5)
         assert position.average_price == pytest.approx(48000.0)
         assert position.unrealized_pnl == pytest.approx(5000.0)
@@ -391,6 +405,7 @@ class TestPositionModel:
         """
         position = Position(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             quantity=1.0,
             average_price=45000.0,
             unrealized_pnl=0.0,
@@ -411,6 +426,7 @@ class TestPositionModel:
         """
         position = Position(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             quantity=1.0,
             average_price=50000.0,
             unrealized_pnl=2000.0,
@@ -645,6 +661,7 @@ class TestSignalEventModel:
         """
         event = Signal(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             side="buy",
             strength=0.8,
@@ -655,6 +672,7 @@ class TestSignalEventModel:
             sequence_id=1,
         )
         assert event.instrument_id == 1
+        assert event.instrument_public_id == "test-instrument-uuid"
         assert event.side == "buy"
         assert event.strength == pytest.approx(0.8)
         assert event.reason == "RSI oversold"
@@ -670,6 +688,7 @@ class TestSignalEventModel:
         """
         event = Signal(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             side="sell",
             strength=0.9,
@@ -689,6 +708,7 @@ class TestSignalEventModel:
         """
         event = Signal(
             instrument_id=1,
+            instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             side="buy",
             strength=0.7,
@@ -698,86 +718,6 @@ class TestSignalEventModel:
             sequence_id=1,
         )
         assert event.price is None
-
-
-class TestModelRelationships:
-    """Tests for SQLAlchemy model relationship definitions."""
-
-    def test_instrument_relationships(self) -> None:
-        """Test Instrument has candles and trades relations.
-
-        Given: An Instrument instance,
-        When: Checking relationship attributes,
-        Then: Has candles and trades attributes.
-        """
-        instrument = Instrument(
-            symbol="BTC-USD",
-            exchange="kraken",
-            base="BTC",
-            quote="USD",
-            session_id="test-session",
-            sequence_id=1,
-        )
-        assert hasattr(instrument, "candles")
-        assert hasattr(instrument, "trades")
-
-    def test_candle_relationship(self) -> None:
-        """Test Candle has instrument relation.
-
-        Given: A Candle instance,
-        When: Checking relationship attributes,
-        Then: Has instrument attribute.
-        """
-        candle = Candle(
-            instrument_id=1,
-            timestamp=datetime.now(UTC),
-            timeframe="1h",
-            open=50000.0,
-            high=51000.0,
-            low=49000.0,
-            close=50500.0,
-            volume=100.0,
-            session_id="test-session",
-            sequence_id=1,
-        )
-        assert hasattr(candle, "instrument")
-
-    def test_trade_relationship(self) -> None:
-        """Test Trade has instrument relation.
-
-        Given: A Trade instance,
-        When: Checking relationship attributes,
-        Then: Has instrument attribute.
-        """
-        trade = Trade(
-            instrument_id=1,
-            timestamp=datetime.now(UTC),
-            price=50000.0,
-            size=1.0,
-            side="buy",
-            trade_id="trade-123",
-            session_id="test-session",
-            sequence_id=1,
-        )
-        assert hasattr(trade, "instrument")
-
-    def test_signal_event_relationship(self) -> None:
-        """Test Signal has instrument relation.
-
-        Given: A Signal instance,
-        When: Checking relationship attributes,
-        Then: Has instrument attribute.
-        """
-        event = Signal(
-            instrument_id=1,
-            timestamp=datetime.now(UTC),
-            side="buy",
-            strength=0.8,
-            reason="Test signal",
-            session_id="test-session",
-            sequence_id=1,
-        )
-        assert hasattr(event, "instrument")
 
 
 class TestTZDateTime:

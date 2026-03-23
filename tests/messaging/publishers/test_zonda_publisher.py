@@ -201,7 +201,7 @@ class TestZondaPublisherLoops:
 
         publisher_any._publish_message = publish_stub
         publisher_any._save_to_db = save_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value=1)
+        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
         await publisher_any._candle_loop(["BTC-PLN"], "1m")
         assert len(published_messages) == 1
         topic, msg = published_messages[0]

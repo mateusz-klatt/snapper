@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import Any
 
 from loguru import logger
+from sqlalchemy import and_
 from sqlalchemy import desc
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,12 +32,12 @@ class SignalReadService:
         self.settings = get_settings()
         self.repo = get_repository(self.settings.db_url)
 
-    async def _resolve_instrument_id(
+    async def _resolve_instrument(
         self,
         signal: StrategySignal,
         exchange: str,
         tracker: SequenceTracker,
-    ) -> int | None:
+    ) -> tuple[int, str] | None:
         """Look up or lazily create the instrument row for a signal.
 
         Args:
@@ -45,8 +46,8 @@ class SignalReadService:
             tracker: SequenceTracker for provenance on upsert.
 
         Returns:
-            Integer instrument id, or ``None`` when the symbol cannot
-            be resolved.
+            Tuple of (instrument_id, instrument_public_id), or ``None``
+            when the symbol cannot be resolved.
         """
         async with self.repo.session() as session:
             i_ts, i_kt = where_active(Instrument)
@@ -60,7 +61,7 @@ class SignalReadService:
             )
             inst = inst_query.scalars().first()
         if inst:
-            return inst.id
+            return (int(inst.id), str(inst.public_id))
         parts = signal.instrument.split("-") if "-" in signal.instrument else [signal.instrument]
         base = parts[0]
         quote = parts[1] if len(parts) > 1 else "USD"
@@ -113,12 +114,14 @@ class SignalReadService:
             Signal event UUID or empty string on error.
         """
         try:
-            inst_id = await self._resolve_instrument_id(signal, exchange, tracker)
-            if inst_id is None:
+            result = await self._resolve_instrument(signal, exchange, tracker)
+            if result is None:
                 return ""
+            inst_id, inst_public_id = result
             async with self.repo.session() as session:
                 init_kwargs: dict[str, Any] = {
                     "instrument_id": inst_id,
+                    "instrument_public_id": inst_public_id,
                     "timestamp": timestamp or datetime.now(UTC),
                     "fired_at": signal.timestamp or datetime.now(UTC),
                     "side": signal.side,
@@ -164,7 +167,13 @@ class SignalReadService:
             async with self.repo.session() as session:
                 now = datetime.now(UTC)
                 since = now - timedelta(hours=hours)
-                query = select(Signal, Instrument).join(Instrument)
+                query = select(Signal, Instrument).join(
+                    Instrument,
+                    and_(
+                        Signal.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument),
+                    ),
+                )
                 query = query.where(Signal.fired_at >= since)
                 query = query.where(Signal.timestamp <= now, Signal.known_to > now)
                 if instrument:

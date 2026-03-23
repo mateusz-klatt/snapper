@@ -1274,6 +1274,7 @@ class MockInstrument:
     def __init__(self, inst_id: int = 1, symbol: str = "BTC-USD", exchange: str = "kraken") -> None:
         """Initialize the instance."""
         self.id = inst_id
+        self.public_id = "test-instrument-public-id"
         self.symbol = symbol
         self.exchange = exchange
 
@@ -1286,6 +1287,7 @@ class MockOrder:
         self.id = 1
         self.public_id = "order-uuid-1234"
         self.instrument_id = 1
+        self.instrument_public_id = "test-instrument-public-id"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.client_order_id = "client_123"
         self.exchange_order_id = "exch_456"
@@ -1312,6 +1314,7 @@ class MockSignal:
         self.id = 1
         self.public_id = "signal-uuid-1234"
         self.instrument_id = 1
+        self.instrument_public_id = "test-instrument-public-id"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.fired_at = dt.datetime(2024, 1, 1, 11, 59, tzinfo=dt.UTC)
         self.side = "buy"
@@ -1354,6 +1357,7 @@ class MockPosition:
         self.id = 1
         self.public_id = "position-uuid-1234"
         self.instrument_id = 1
+        self.instrument_public_id = "test-instrument-public-id"
         self.quantity = 1.5
         self.average_price = 48000.0
         self.unrealized_pnl = 3000.0

@@ -370,7 +370,7 @@ class ExchangeClientBase(ABC):
             if symbol_pid is None:
                 logger.error(f"No active Symbol row for {request.symbol}, cannot log order")
                 return None
-            instrument_id = await self.repository.upsert_instrument(
+            instrument_id, instrument_public_id = await self.repository.upsert_instrument(
                 symbol_public_id=symbol_pid,
                 symbol=request.symbol,
                 exchange=self.exchange_name,
@@ -382,6 +382,7 @@ class ExchangeClientBase(ABC):
             seq = self._tracker.next_sequence("orders")
             return await self.repository.insert_order(
                 instrument_id=instrument_id,
+                instrument_public_id=instrument_public_id,
                 client_order_id=order.client_order_id,
                 exchange_order_id=order.id,
                 created_at=datetime.fromtimestamp(order.timestamp, tz=UTC),

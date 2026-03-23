@@ -51,14 +51,16 @@ def assert_contiguous_intervals(versions: list[Any]) -> None:
         assert sorted_versions[-1].known_to == KNOWN_TO_MAX
 
 
-async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyRepository, int]:
+async def _create_repo_with_instrument(
+    tmp_path: Path,
+) -> tuple[SQLAlchemyRepository, int, str]:
     """Create a repository with a single instrument ready for use.
 
     Args:
         tmp_path: Pytest temporary directory.
 
     Returns:
-        Tuple of (repository, instrument_id).
+        Tuple of (repository, instrument_id, instrument_public_id).
 
     Uses a fixed historical timestamp so active-row lookups remain stable even
     if the host wall clock moves backwards during the test run.
@@ -82,7 +84,7 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
         await s.commit()
     spid = symbol.public_id
     assert spid is not None
-    inst_id = await repo.upsert_instrument(
+    inst_id, inst_public_id = await repo.upsert_instrument(
         symbol_public_id=spid,
         symbol="BTC-USD",
         base="BTC",
@@ -94,11 +96,12 @@ async def _create_repo_with_instrument(tmp_path: Path) -> tuple[SQLAlchemyReposi
         session_id="test-session",
         sequence_id=1,
     )
-    return repo, inst_id
+    return repo, inst_id, inst_public_id
 
 
 def _candle_row(
     instrument_id: int,
+    instrument_public_id: str,
     open_at: datetime,
     timestamp: datetime,
     close: float = 1.5,
@@ -107,6 +110,7 @@ def _candle_row(
 
     Args:
         instrument_id: FK to instruments table.
+        instrument_public_id: Logical FK (UUID string) to instruments table.
         open_at: Candle interval start time.
         timestamp: Bus/domain timestamp.
         close: Close price, defaults to 1.5.
@@ -116,6 +120,7 @@ def _candle_row(
     """
     return {
         "instrument_id": instrument_id,
+        "instrument_public_id": instrument_public_id,
         "timeframe": "1m",
         "open_at": open_at,
         "timestamp": timestamp,
@@ -144,13 +149,13 @@ class TestCandleBitemporal:
         When: The same (instrument_id, timeframe, open_at) is upserted at t2 > t1,
         Then: Two rows exist with same public_id, intervals [t1, t2) and [t2, MAX).
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
 
         async with repo.session() as s:
             rows = (
@@ -180,11 +185,11 @@ class TestCandleBitemporal:
         When: upsert_candles is called,
         Then: The DB record stores exactly that timestamp.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         explicit_ts = datetime(2024, 3, 15, 8, 30, 0, tzinfo=UTC)
         open_at = datetime(2024, 3, 15, 8, 0, 0, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, explicit_ts)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, explicit_ts)])
 
         async with repo.session() as s:
             row = (
@@ -211,13 +216,13 @@ class TestCandleBitemporal:
         When: Querying at boundary t2,
         Then: v2 is returned (timestamp <= t2 AND known_to > t2).
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
 
         async with repo.session() as s:
             at_t2 = (
@@ -266,15 +271,15 @@ class TestCandleBitemporal:
         When: get_candles is called,
         Then: Exactly one result is returned (the active version).
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
         t3 = datetime(2024, 6, 1, 12, 0, 30, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t2, close=105.0)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t3, close=110.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t3, close=110.0)])
 
         async with repo.session() as s:
             all_rows = (
@@ -309,13 +314,13 @@ class TestCandleBitemporal:
         When: get_latest_candle_ids is called,
         Then: The active version's public_id is returned.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
 
         async with repo.session() as s:
             active_row = (
@@ -335,7 +340,7 @@ class TestCandleBitemporal:
             expected_public_id = active_row.public_id
 
         latest = await repo.get_latest_candle_ids()
-        key = (inst_id, "1m")
+        key = (inst_public_id, "1m")
         assert key in latest
         returned_open_at, returned_public_id = latest[key]
         assert returned_public_id == expected_public_id
@@ -349,15 +354,15 @@ class TestCandleBitemporal:
         When: All three rows share the same (instrument_id, timeframe, open_at),
         Then: Only one has known_to == KNOWN_TO_MAX, and all coexist without error.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
         t3 = datetime(2024, 6, 1, 12, 0, 30, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t2)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t3)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t3)])
 
         async with repo.session() as s:
             all_rows = (
@@ -390,11 +395,12 @@ class TestOrderBitemporal:
         When: All three versions are loaded from the database,
         Then: They share the same public_id and form contiguous intervals.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         base_ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         order_id, order_public_id = await repo.insert_order(
             instrument_id=inst_id,
+            instrument_public_id=inst_public_id,
             client_order_id="cli-001",
             exchange_order_id=None,
             created_at=base_ts,
@@ -452,7 +458,7 @@ class TestSettingBitemporal:
         When: All three versions are loaded from the database,
         Then: They share the same public_id and form contiguous intervals.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
 
         async with repo.session() as s:
             now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
@@ -528,11 +534,12 @@ class TestExecutionDedup:
         When: Two executions with the same exec_id and order_public_id are inserted,
         Then: The second insert raises IntegrityError.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         base_ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         order_id, order_public_id = await repo.insert_order(
             instrument_id=inst_id,
+            instrument_public_id=inst_public_id,
             client_order_id="cli-dedup",
             exchange_order_id=None,
             created_at=base_ts,
@@ -912,12 +919,12 @@ class TestCandlePolicyBitemporal:
             and the new active with [t1, MAX). This documents current policy
             (not necessarily ideal but deterministic).
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
 
         async with repo.session() as s:
             rows = (
@@ -957,13 +964,13 @@ class TestCandlePolicyBitemporal:
             active record is created. This documents a known limitation:
             out-of-order timestamps are not supported.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t2, close=105.0)])
-        await repo.upsert_candles([_candle_row(inst_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
 
         async with repo.session() as s:
             rows = (
@@ -1036,7 +1043,7 @@ class TestUserBitemporal:
         When: The user is updated via close+insert at t2 with password_hash='hash_v2',
         Then: Querying active users by username returns exactly one row with the new hash.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
 
@@ -1080,7 +1087,7 @@ class TestUserBitemporal:
         When: All active users are queried,
         Then: Exactly 1 active user row is returned (not 3 versions).
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
         t3 = datetime(2024, 6, 1, 12, 2, 0, tzinfo=UTC)
@@ -1145,7 +1152,7 @@ class TestUserBitemporal:
         When: A user is created with an explicit timestamp,
         Then: Reading the user back shows timestamp is NOT None.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         await _create_user(repo, "carol", "hash_v1", now)
@@ -1167,7 +1174,7 @@ class TestUserBitemporal:
         When: A UserLoginEvent is appended (simulating authentication),
         Then: One UserLoginEvent row exists and still only 1 active User version.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         login_time = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
 
@@ -1209,7 +1216,7 @@ class TestUserBitemporal:
         When: list_login_events is queried at now,
         Then: Only the unclosed event is returned.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
         t_close = datetime(2024, 6, 1, 13, 0, 0, tzinfo=UTC)
@@ -1274,7 +1281,7 @@ class TestUserBitemporal:
         When: Queried at t_before (< t_close) and t_after (> t_close),
         Then: Visible at t_before, hidden at t_after.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t_close = datetime(2024, 6, 1, 14, 0, 0, tzinfo=UTC)
         t_before = datetime(2024, 6, 1, 13, 0, 0, tzinfo=UTC)
@@ -1341,7 +1348,7 @@ class TestUserBitemporal:
         When: A login event is inserted (simulating authentication),
         Then: The event has known_to == KNOWN_TO_MAX (open/active).
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         login_time = datetime(2024, 6, 1, 12, 10, 0, tzinfo=UTC)
 
@@ -1373,7 +1380,7 @@ class TestSettingsApiBitemporal:
         When: Updated twice via close+insert to 'v2' at t2 and 'v3' at t3,
         Then: Querying active settings returns exactly 1 row with value='v3'.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
         t3 = datetime(2024, 6, 1, 12, 2, 0, tzinfo=UTC)
@@ -1454,7 +1461,7 @@ class TestSettingsApiBitemporal:
         Then: The row still exists in the database with known_to != KNOWN_TO_MAX
             and querying active settings returns 0 for that key.
         """
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
 
@@ -1508,10 +1515,10 @@ class TestInstrumentBitemporal:
     @pytest.mark.asyncio
     async def test_upsert_same_payload_is_noop(self, tmp_path: Path) -> None:
         """Re-upserting identical payload returns same id, no new row."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
-        inst_id2 = await repo.upsert_instrument(
+        inst_id2, _ = await repo.upsert_instrument(
             symbol_public_id=spid,
             symbol="BTC-USD",
             base="BTC",
@@ -1528,7 +1535,7 @@ class TestInstrumentBitemporal:
     @pytest.mark.asyncio
     async def test_upsert_changed_payload_closes_old(self, tmp_path: Path) -> None:
         """Changed symbol/base/quote triggers close+insert with same public_id."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
@@ -1536,7 +1543,7 @@ class TestInstrumentBitemporal:
             old = (await s.execute(select(Instrument).where(Instrument.id == inst_id))).scalar_one()
             old_public_id = old.public_id
 
-        new_id = await repo.upsert_instrument(
+        new_id, _ = await repo.upsert_instrument(
             symbol_public_id=spid,
             symbol="BITCOIN-USD",
             base="BITCOIN",
@@ -1564,7 +1571,7 @@ class TestInstrumentBitemporal:
     @pytest.mark.asyncio
     async def test_upsert_preserves_public_id_across_versions(self, tmp_path: Path) -> None:
         """Three successive payload changes keep the same public_id."""
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
@@ -1597,11 +1604,11 @@ class TestInstrumentBitemporal:
     @pytest.mark.asyncio
     async def test_active_instrument_read_after_version(self, tmp_path: Path) -> None:
         """where_active returns only the latest version."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
-        new_id = await repo.upsert_instrument(
+        new_id, _ = await repo.upsert_instrument(
             symbol_public_id=spid,
             symbol="BTC-RENAMED",
             base="BTC",
@@ -1624,7 +1631,7 @@ class TestInstrumentBitemporal:
     @pytest.mark.asyncio
     async def test_partial_unique_allows_closed_duplicates(self, tmp_path: Path) -> None:
         """Closed rows with same (symbol_public_id, exchange) do not violate unique index."""
-        repo, _ = await _create_repo_with_instrument(tmp_path)
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
@@ -1655,12 +1662,18 @@ class TestInstrumentBitemporal:
 
     @pytest.mark.asyncio
     async def test_candles_use_active_instrument(self, tmp_path: Path) -> None:
-        """get_candles resolves the active instrument version, not closed ones."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        """Candles survive instrument rename via instrument_public_id.
+
+        Given: A candle linked to instrument v1 via instrument_public_id,
+        When: The instrument is renamed (close+insert, same public_id),
+        Then: Old symbol name finds no active instrument (returns 0 candles),
+            new symbol name resolves the same public_id and finds the candle.
+        """
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
-        await repo.upsert_candles([_candle_row(inst_id, t1, datetime.now(UTC))])
+        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, t1, datetime.now(UTC))])
 
         candles = await repo.get_candles(
             instrument="BTC-USD",
@@ -1671,7 +1684,7 @@ class TestInstrumentBitemporal:
         )
         assert len(candles) == 1
 
-        new_id = await repo.upsert_instrument(
+        new_id, _ = await repo.upsert_instrument(
             symbol_public_id=spid,
             symbol="BTC-RENAMED",
             base="BTC",
@@ -1698,7 +1711,7 @@ class TestInstrumentBitemporal:
             end=t1 + timedelta(hours=1),
             exchange="kraken",
         )
-        assert len(candles_new) == 0
+        assert len(candles_new) == 1
 
     @pytest.mark.asyncio
     async def test_resolve_symbol_public_id_as_of(self, tmp_path: Path) -> None:
@@ -1758,13 +1771,14 @@ class TestInstrumentBitemporal:
         old version is closed but the FK still resolves via plain join
         without temporal filter on Instrument.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         async with repo.session() as s:
             signal = Signal(
                 instrument_id=inst_id,
+                instrument_public_id=inst_public_id,
                 fired_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
                 side="buy",
@@ -1780,7 +1794,7 @@ class TestInstrumentBitemporal:
             await s.refresh(signal)
             signal_id = signal.id
 
-        new_id = await repo.upsert_instrument(
+        new_id, _ = await repo.upsert_instrument(
             symbol_public_id=spid,
             symbol="BTC-RENAMED",
             base="BTC",
@@ -1795,7 +1809,7 @@ class TestInstrumentBitemporal:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Signal, Instrument)
-                .join(Instrument)
+                .join(Instrument, Signal.instrument_id == Instrument.id)
                 .where(
                     Signal.timestamp <= now,
                     Signal.known_to > now,
@@ -1823,12 +1837,13 @@ class TestInstrumentRenameSemantics:
     @pytest.mark.asyncio
     async def test_orders_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
         """Order created on instrument v1 is visible after instrument v2."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         order_id, order_pid = await repo.insert_order(
             instrument_id=inst_id,
+            instrument_public_id=inst_public_id,
             client_order_id="cli-rename",
             exchange_order_id=None,
             created_at=datetime.now(UTC),
@@ -1841,7 +1856,7 @@ class TestInstrumentRenameSemantics:
             sequence_id=0,
         )
 
-        new_inst_id = await repo.upsert_instrument(
+        new_inst_id, _ = await repo.upsert_instrument(
             symbol_public_id=spid,
             symbol="BTC-RENAMED",
             base="BTC",
@@ -1856,7 +1871,7 @@ class TestInstrumentRenameSemantics:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Order, Instrument)
-                .join(Instrument)
+                .join(Instrument, Order.instrument_id == Instrument.id)
                 .where(Order.timestamp <= now, Order.known_to > now)
             )
             rows = result.all()
@@ -1870,12 +1885,13 @@ class TestInstrumentRenameSemantics:
     @pytest.mark.asyncio
     async def test_executions_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
         """Execution via order on instrument v1 is visible after instrument v2."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         order_id, order_pid = await repo.insert_order(
             instrument_id=inst_id,
+            instrument_public_id=inst_public_id,
             client_order_id="cli-exec-rename",
             exchange_order_id="ex-exec-rename",
             created_at=datetime.now(UTC),
@@ -1932,13 +1948,14 @@ class TestInstrumentRenameSemantics:
     @pytest.mark.asyncio
     async def test_positions_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
         """Position on instrument v1 is visible after instrument v2."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         async with repo.session() as s:
             pos = Position(
                 instrument_id=inst_id,
+                instrument_public_id=inst_public_id,
                 quantity=1.5,
                 average_price=50000.0,
                 unrealized_pnl=100.0,
@@ -1966,7 +1983,7 @@ class TestInstrumentRenameSemantics:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Position, Instrument)
-                .join(Instrument)
+                .join(Instrument, Position.instrument_id == Instrument.id)
                 .where(Position.timestamp <= now, Position.known_to > now)
             )
             rows = result.all()
@@ -1980,12 +1997,12 @@ class TestInstrumentRenameSemantics:
     @pytest.mark.asyncio
     async def test_store_signal_no_duplicate_instrument_versions(self, tmp_path: Path) -> None:
         """Repeated upsert_instrument with same payload does not create versions."""
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         for _ in range(5):
-            returned_id = await repo.upsert_instrument(
+            returned_id, _ = await repo.upsert_instrument(
                 symbol_public_id=spid,
                 symbol="BTC-USD",
                 base="BTC",
@@ -2068,13 +2085,14 @@ class TestInstrumentRenameSemantics:
         to v2, then verifies all three are still visible via FK join with
         no temporal filter on Instrument.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
         now = datetime.now(UTC)
 
         order_id, _ = await repo.insert_order(
             instrument_id=inst_id,
+            instrument_public_id=inst_public_id,
             client_order_id="cli-cross",
             exchange_order_id=None,
             created_at=now,
@@ -2090,6 +2108,7 @@ class TestInstrumentRenameSemantics:
         async with repo.session() as s:
             signal = Signal(
                 instrument_id=inst_id,
+                instrument_public_id=inst_public_id,
                 fired_at=now,
                 timestamp=now,
                 side="buy",
@@ -2102,6 +2121,7 @@ class TestInstrumentRenameSemantics:
             )
             pos = Position(
                 instrument_id=inst_id,
+                instrument_public_id=inst_public_id,
                 quantity=2.0,
                 average_price=50000.0,
                 unrealized_pnl=0.0,
@@ -2114,7 +2134,7 @@ class TestInstrumentRenameSemantics:
             s.add(pos)
             await s.commit()
 
-        new_inst_id = await repo.upsert_instrument(
+        new_inst_id, _ = await repo.upsert_instrument(
             symbol_public_id=spid,
             symbol="BTC-RENAMED",
             base="BTC",
@@ -2131,7 +2151,7 @@ class TestInstrumentRenameSemantics:
             orders = (
                 await s.execute(
                     select(Order, Instrument)
-                    .join(Instrument)
+                    .join(Instrument, Order.instrument_id == Instrument.id)
                     .where(Order.timestamp <= check_time, Order.known_to > check_time)
                 )
             ).all()
@@ -2141,7 +2161,7 @@ class TestInstrumentRenameSemantics:
             signals = (
                 await s.execute(
                     select(Signal, Instrument)
-                    .join(Instrument)
+                    .join(Instrument, Signal.instrument_id == Instrument.id)
                     .where(Signal.timestamp <= check_time, Signal.known_to > check_time)
                 )
             ).all()
@@ -2151,7 +2171,7 @@ class TestInstrumentRenameSemantics:
             positions = (
                 await s.execute(
                     select(Position, Instrument)
-                    .join(Instrument)
+                    .join(Instrument, Position.instrument_id == Instrument.id)
                     .where(Position.timestamp <= check_time, Position.known_to > check_time)
                 )
             ).all()
@@ -2165,12 +2185,13 @@ class TestInstrumentRenameSemantics:
         The instrument was 'BTC-USD' when the order was created, so the join
         should return 'BTC-USD' even though active instrument is now 'BTC-RENAMED'.
         """
-        repo, inst_id = await _create_repo_with_instrument(tmp_path)
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         await repo.insert_order(
             instrument_id=inst_id,
+            instrument_public_id=inst_public_id,
             client_order_id="cli-snapshot",
             exchange_order_id=None,
             created_at=datetime.now(UTC),
@@ -2197,7 +2218,7 @@ class TestInstrumentRenameSemantics:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Order, Instrument)
-                .join(Instrument)
+                .join(Instrument, Order.instrument_id == Instrument.id)
                 .where(Order.timestamp <= now, Order.known_to > now)
             )
             order, inst = result.one()

@@ -632,7 +632,7 @@ class _RepositoryStub:
         lot_size: float,
         session_id: str = "",
         sequence_id: int = 0,
-    ) -> None:
+    ) -> tuple[int, str]:
         self.calls.append(
             {
                 "symbol_public_id": symbol_public_id,
@@ -646,6 +646,7 @@ class _RepositoryStub:
                 "sequence_id": sequence_id,
             }
         )
+        return (1, "stub-inst-pub-id")
 
 
 class _SocketStub:
@@ -2175,7 +2176,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         trader_module,
         "get_repository",
-        lambda _url: SimpleNamespace(upsert_instrument=AsyncMock()),
+        lambda _url: SimpleNamespace(upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1"))),
     )
     monkeypatch.setattr(
         trader_module,

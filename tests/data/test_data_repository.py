@@ -348,7 +348,7 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
         await s.commit()
     spid = await resolve_symbol_public_id(repo, "BTC-USD")
     assert spid is not None
-    inst_id = await repo.upsert_instrument(
+    inst_id, inst_pub_id = await repo.upsert_instrument(
         symbol_public_id=spid,
         symbol="BTC-USD",
         base="BTC",
@@ -361,10 +361,12 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
         sequence_id=1,
     )
     assert inst_id > 0
+    assert isinstance(inst_pub_id, str)
     inserted = await repo.upsert_candles(
         [
             {
                 "instrument_id": inst_id,
+                "instrument_public_id": inst_pub_id,
                 "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                 "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 "timeframe": "1m",
@@ -398,6 +400,7 @@ async def test_repository_upserts_empty_lists(tmp_path: Path) -> None:
     await repo.create_all()
     assert await repo.upsert_candles([]) == 0
     assert await repo.upsert_trades([]) == 0
+    assert await repo.upsert_ticks([]) == 0
 
 
 def test_repository_factory_cloud_urls() -> None:
@@ -443,7 +446,7 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
         await s.commit()
     spid = await resolve_symbol_public_id(repo, "ETH-USD")
     assert spid is not None
-    inst_id = await repo.upsert_instrument(
+    inst_id, inst_pub_id = await repo.upsert_instrument(
         symbol_public_id=spid,
         symbol="ETH-USD",
         base="ETH",
@@ -458,6 +461,7 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
         {
             "trade_id": "1",
             "instrument_id": inst_id,
+            "instrument_public_id": inst_pub_id,
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "price": 100.0,
             "size": 0.5,
@@ -468,6 +472,7 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
         {
             "trade_id": "2",
             "instrument_id": inst_id,
+            "instrument_public_id": inst_pub_id,
             "timestamp": datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC),
             "price": 101.0,
             "size": 0.25,
@@ -478,3 +483,72 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
     ]
     inserted = await repo.upsert_trades(rows)
     assert inserted in (0, 1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_upsert_ticks_sqlite(tmp_path: Path) -> None:
+    """Test SQLAlchemyRepository upsert_ticks with SQLite.
+
+    Given: SQLite repository with instrument,
+    When: upsert_ticks is called with tick data,
+    Then: Inserts ticks successfully.
+    """
+    db_path = tmp_path / "t.db"
+    url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
+    repo = SQLAlchemyRepository(url)
+    await repo.create_all()
+    async with repo.session() as s:
+        s.add(
+            Symbol(
+                native_symbol="ETH-USD",
+                base="ETH",
+                quote="USD",
+                asset_type="crypto",
+                created_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
+            )
+        )
+        await s.commit()
+    spid = await resolve_symbol_public_id(repo, "ETH-USD")
+    assert spid is not None
+    inst_id, inst_pub_id = await repo.upsert_instrument(
+        symbol_public_id=spid,
+        symbol="ETH-USD",
+        base="ETH",
+        quote="USD",
+        exchange="kraken",
+        tick_size=0.01,
+        lot_size=0.001,
+        session_id="test-session",
+        sequence_id=1,
+    )
+    tick_rows = [
+        {
+            "instrument_id": inst_id,
+            "instrument_public_id": inst_pub_id,
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "bid": 99.5,
+            "ask": 100.5,
+            "last": 100.0,
+            "volume": 1000.0,
+            "session_id": "test-session",
+            "sequence_id": 1,
+        },
+        {
+            "public_id": "019d0000-0000-7000-8000-000000000001",
+            "instrument_id": inst_id,
+            "instrument_public_id": inst_pub_id,
+            "timestamp": datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC),
+            "bid": 99.0,
+            "ask": 101.0,
+            "last": 100.5,
+            "volume": 500.0,
+            "session_id": "test-session",
+            "sequence_id": 2,
+        },
+    ]
+    inserted = await repo.upsert_ticks(tick_rows)
+    assert inserted == 2

@@ -11,7 +11,6 @@ from sqlalchemy import Boolean
 from sqlalchemy import CheckConstraint
 from sqlalchemy import DateTime
 from sqlalchemy import Float
-from sqlalchemy import ForeignKey
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import String
@@ -24,7 +23,6 @@ from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
-from sqlalchemy.orm import relationship
 from sqlalchemy.types import TypeDecorator
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
@@ -102,7 +100,6 @@ __all__ = [
 ]
 
 
-_INSTRUMENT_FK = "instruments.id"
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_ACTIVE = text("known_to = '9999-12-31T23:59:59+00:00'")
 
@@ -160,8 +157,6 @@ class Instrument(TemporalMixin, Base):
     exchange: Mapped[str] = mapped_column(String(20))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str] = mapped_column(String(16))
-    candles: Mapped[list[Candle]] = relationship(back_populates="instrument")
-    trades: Mapped[list[Trade]] = relationship(back_populates="instrument")
 
 
 class Candle(TemporalMixin, Base):
@@ -171,14 +166,14 @@ class Candle(TemporalMixin, Base):
     __table_args__ = (
         Index(
             "uq_candle_itf_open",
-            "instrument_id",
+            "instrument_public_id",
             "timeframe",
             "open_at",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
-        Index("ix_candle_instrument_open", "instrument_id", "open_at"),
+        Index("ix_candle_instrument_open", "instrument_public_id", "open_at"),
         Index(
             "ix_candles_public_id",
             "public_id",
@@ -187,7 +182,8 @@ class Candle(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     open_at: Mapped[datetime] = mapped_column(TZDateTime())
     timeframe: Mapped[str] = mapped_column(String(8))
     open: Mapped[float] = mapped_column(Float)
@@ -197,7 +193,6 @@ class Candle(TemporalMixin, Base):
     volume: Mapped[float] = mapped_column(Float)
     vwap: Mapped[float | None] = mapped_column(Float)
     trades: Mapped[int | None] = mapped_column(Integer)
-    instrument: Mapped[Instrument] = relationship(back_populates="candles")
 
 
 class Tick(TemporalMixin, Base):
@@ -205,7 +200,7 @@ class Tick(TemporalMixin, Base):
 
     __tablename__ = "ticks"
     __table_args__ = (
-        Index("ix_tick_instrument_ts", "instrument_id", "timestamp"),
+        Index("ix_tick_instrument_ts", "instrument_public_id", "timestamp"),
         Index(
             "ix_ticks_public_id",
             "public_id",
@@ -214,7 +209,8 @@ class Tick(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     bid: Mapped[float | None] = mapped_column(Float)
     ask: Mapped[float | None] = mapped_column(Float)
     last: Mapped[float | None] = mapped_column(Float)
@@ -227,7 +223,7 @@ class Trade(TemporalMixin, Base):
     __tablename__ = "trades"
     __table_args__ = (
         UniqueConstraint("trade_id", name="uq_trade_trade_id"),
-        Index("ix_trade_instrument_ts", "instrument_id", "timestamp"),
+        Index("ix_trade_instrument_ts", "instrument_public_id", "timestamp"),
         Index(
             "ix_trades_public_id",
             "public_id",
@@ -236,12 +232,12 @@ class Trade(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
     trade_id: Mapped[str] = mapped_column(String(64))
-    instrument: Mapped[Instrument] = relationship(back_populates="trades")
 
 
 class Order(TemporalMixin, Base):
@@ -251,7 +247,7 @@ class Order(TemporalMixin, Base):
     __table_args__ = (
         Index(
             "uq_orders_client_oid",
-            "instrument_id",
+            "instrument_public_id",
             "client_order_id",
             unique=True,
             sqlite_where=text(
@@ -263,7 +259,7 @@ class Order(TemporalMixin, Base):
         ),
         Index(
             "uq_orders_exchange_oid",
-            "instrument_id",
+            "instrument_public_id",
             "exchange_order_id",
             unique=True,
             sqlite_where=text(
@@ -281,7 +277,8 @@ class Order(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
@@ -324,7 +321,7 @@ class Execution(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
+    order_id: Mapped[int] = mapped_column(Integer, index=True)
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exec_id: Mapped[str | None] = mapped_column(String(64))
     trade_id: Mapped[str | None] = mapped_column(String(64))
@@ -335,7 +332,6 @@ class Execution(TemporalMixin, Base):
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
-    order: Mapped[Order] = relationship()
 
 
 class Position(TemporalMixin, Base):
@@ -344,8 +340,8 @@ class Position(TemporalMixin, Base):
     __tablename__ = "positions"
     __table_args__ = (
         Index(
-            "uq_positions_instrument_id",
-            "instrument_id",
+            "uq_positions_instrument_public_id",
+            "instrument_public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
             postgresql_where=_KNOWN_TO_ACTIVE,
@@ -358,7 +354,8 @@ class Position(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
     unrealized_pnl: Mapped[float] = mapped_column(Float)
@@ -378,14 +375,14 @@ class Signal(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     fired_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(256))
     strategy_name: Mapped[str | None] = mapped_column(String(64))
     price: Mapped[float | None] = mapped_column(Float)
-    instrument: Mapped[Instrument] = relationship()
 
 
 class User(TemporalMixin, Base):
@@ -655,7 +652,7 @@ class InstrumentSpec(TemporalMixin, Base):
     __table_args__ = (
         Index(
             "uq_instrument_spec_instrument",
-            "instrument_id",
+            "instrument_public_id",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE,
             postgresql_where=_KNOWN_TO_ACTIVE,
@@ -668,7 +665,8 @@ class InstrumentSpec(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    instrument_id: Mapped[int] = mapped_column(ForeignKey(_INSTRUMENT_FK), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     tick_size: Mapped[float | None] = mapped_column(Float, comment="Minimum price increment")
     lot_size: Mapped[float | None] = mapped_column(Float, comment="Minimum order size increment")
     min_order_size: Mapped[float | None] = mapped_column(Float, comment="Minimum order size")

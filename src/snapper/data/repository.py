@@ -69,6 +69,7 @@ from snapper.data.models import Execution
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
+from snapper.data.models import Tick
 from snapper.data.models import Trade
 
 __all__ = [
@@ -252,25 +253,25 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def upsert_instrument(self, **kwargs: Any) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         """Insert or update instrument by (symbol_public_id, exchange).
 
         Temporal SCD2: compares payload (symbol, base, quote) against the
-        active version. Returns existing id when identical, close+inserts
-        when changed, or inserts fresh when not found.
+        active version. Returns existing (id, public_id) when identical,
+        close+inserts when changed, or inserts fresh when not found.
         """
         ...
 
     @abstractmethod
-    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
-        """Load the latest candle public_id per (instrument_id, timeframe).
+    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
+        """Load the latest candle public_id per (instrument_public_id, timeframe).
 
         Used by the publisher to populate the in-memory candle ID cache on
         startup so that live upserts reuse existing public_ids for the
         current open_at window.
 
         Returns:
-            Mapping of (instrument_id, timeframe) to (open_at, public_id).
+            Mapping of (instrument_public_id, timeframe) to (open_at, public_id).
         """
         ...
 
@@ -285,9 +286,15 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
+        """Insert ticks. Return inserted count."""
+        ...
+
+    @abstractmethod
     async def insert_order(
         self,
         instrument_id: int,
+        instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
         created_at: datetime,
@@ -450,41 +457,47 @@ class SQLAlchemyRepository(Repository):
                 await s.rollback()
                 raise
 
-    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
-        """Load the latest candle public_id per (instrument_id, timeframe)."""
+    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
+        """Load the latest candle public_id per (instrument_public_id, timeframe)."""
         async with self.session() as s:
             now = datetime.now(UTC)
             latest = (
                 select(
-                    Candle.instrument_id,
+                    Candle.instrument_public_id,
                     Candle.timeframe,
                     func.max(Candle.open_at).label("max_open_at"),
                 )
                 .where(Candle.timestamp <= now, Candle.known_to > now)
-                .group_by(Candle.instrument_id, Candle.timeframe)
+                .group_by(Candle.instrument_public_id, Candle.timeframe)
                 .subquery()
             )
             q = await s.execute(
-                select(Candle.instrument_id, Candle.timeframe, Candle.open_at, Candle.public_id)
+                select(
+                    Candle.instrument_public_id,
+                    Candle.timeframe,
+                    Candle.open_at,
+                    Candle.public_id,
+                )
                 .where(Candle.timestamp <= now, Candle.known_to > now)
                 .join(
                     latest,
                     and_(
-                        Candle.instrument_id == latest.c.instrument_id,
+                        Candle.instrument_public_id == latest.c.instrument_public_id,
                         Candle.timeframe == latest.c.timeframe,
                         Candle.open_at == latest.c.max_open_at,
                     ),
                 )
             )
             return {
-                (row.instrument_id, row.timeframe): (row.open_at, row.public_id) for row in q.all()
+                (row.instrument_public_id, row.timeframe): (row.open_at, row.public_id)
+                for row in q.all()
             }
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         """Insert or update instrument by (symbol_public_id, exchange).
 
         Temporal SCD2: looks up active version, compares payload
-        (symbol, base, quote). If identical returns existing id.
+        (symbol, base, quote). If identical returns existing (id, public_id).
         If different, closes old version and inserts new one with
         same public_id. If not found, inserts fresh.
         """
@@ -523,16 +536,16 @@ class SQLAlchemyRepository(Repository):
                     inst = q2.scalar_one_or_none()
                     if inst is None:
                         raise exc
-                    return int(inst.id)
+                    return (int(inst.id), str(inst.public_id))
                 await s.refresh(new_inst)
-                return int(new_inst.id)
+                return (int(new_inst.id), str(new_inst.public_id))
             payload_same = (
                 inst.symbol == filtered.get("symbol")
                 and inst.base == filtered.get("base")
                 and inst.quote == filtered.get("quote")
             )
             if payload_same:
-                return int(inst.id)
+                return (int(inst.id), str(inst.public_id))
             new_row = await close_and_insert(
                 s,
                 Instrument,
@@ -545,7 +558,7 @@ class SQLAlchemyRepository(Repository):
             )
             await s.commit()
             await s.refresh(new_row)
-            return int(new_row.id)
+            return (int(new_row.id), str(new_row.public_id))
 
     async def _upsert_batch(
         self, model: type[Base], rows: list[dict[str, Any]], index_elements: list[str]
@@ -622,7 +635,7 @@ class SQLAlchemyRepository(Repository):
                         await s.execute(
                             select(Candle)
                             .where(
-                                Candle.instrument_id == r["instrument_id"],
+                                Candle.instrument_public_id == r["instrument_public_id"],
                                 Candle.timeframe == r["timeframe"],
                                 Candle.open_at == r["open_at"],
                                 Candle.timestamp <= bus_time,
@@ -650,9 +663,22 @@ class SQLAlchemyRepository(Repository):
             return 0
         return await self._upsert_batch(Trade, rows, ["trade_id"])
 
+    async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
+        """Insert ticks as append-only (no dedup key)."""
+        if not rows:
+            return 0
+        for r in rows:
+            if "public_id" not in r:
+                r["public_id"] = str(uuid7())
+        async with self.session() as s:
+            s.add_all([Tick(**r) for r in rows])
+            await s.commit()
+            return len(rows)
+
     async def insert_order(
         self,
         instrument_id: int,
+        instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
         created_at: datetime,
@@ -669,6 +695,7 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             order = Order(
                 instrument_id=instrument_id,
+                instrument_public_id=instrument_public_id,
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
                 created_at=created_at,
@@ -715,6 +742,7 @@ class SQLAlchemyRepository(Repository):
             new_order = Order(
                 public_id=old_order.public_id,
                 instrument_id=old_order.instrument_id,
+                instrument_public_id=old_order.instrument_public_id,
                 client_order_id=old_order.client_order_id,
                 exchange_order_id=exchange_order_id or old_order.exchange_order_id,
                 created_at=old_order.created_at,
@@ -813,7 +841,7 @@ class SQLAlchemyRepository(Repository):
                     Candle.trades,
                 )
                 .where(
-                    Candle.instrument_id == inst.id,
+                    Candle.instrument_public_id == inst.public_id,
                     Candle.timeframe == timeframe,
                     Candle.open_at >= start,
                     Candle.open_at <= end,
@@ -865,7 +893,7 @@ class SQLAlchemyRepository(Repository):
                     Trade.trade_id,
                 )
                 .where(
-                    Trade.instrument_id == inst.id,
+                    Trade.instrument_public_id == inst.public_id,
                     Trade.timestamp >= start,
                     Trade.timestamp <= end,
                     Trade.known_to > now,

@@ -174,6 +174,7 @@ async def test_upsert_candles_closes_old_and_inserts_new(
     rows = [
         {
             "instrument_id": 1,
+            "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -238,6 +239,7 @@ async def test_upsert_candles_inserts_new_when_no_existing(
     rows = [
         {
             "instrument_id": 1,
+            "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -281,6 +283,7 @@ async def test_upsert_candles_preserves_caller_supplied_public_id(
     rows = [
         {
             "instrument_id": 1,
+            "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -321,6 +324,7 @@ async def test_upsert_candles_preserves_caller_supplied_known_to(
     rows = [
         {
             "instrument_id": 1,
+            "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -361,6 +365,7 @@ async def test_upsert_candles_generates_timestamp_when_missing(
     rows = [
         {
             "instrument_id": 1,
+            "instrument_public_id": "fake-inst-pid",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
             "open": 100.0,
@@ -510,10 +515,10 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         "tick_size": 0.01,
         "lot_size": 0.001,
     }
-    instrument_id = await repo.upsert_instrument(
+    instrument_id, instrument_public_id = await repo.upsert_instrument(
         **instrument_payload, session_id="test-session", sequence_id=1
     )
-    duplicate_id = await repo.upsert_instrument(
+    duplicate_id, _ = await repo.upsert_instrument(
         **instrument_payload, session_id="test-session", sequence_id=1
     )
     assert duplicate_id == instrument_id
@@ -521,6 +526,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     candle_rows = [
         {
             "instrument_id": instrument_id,
+            "instrument_public_id": instrument_public_id,
             "timeframe": "1m",
             "open_at": base_ts,
             "timestamp": base_ts,
@@ -536,6 +542,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         },
         {
             "instrument_id": instrument_id,
+            "instrument_public_id": instrument_public_id,
             "timeframe": "1m",
             "open_at": base_ts + timedelta(minutes=1),
             "timestamp": base_ts + timedelta(minutes=1),
@@ -555,6 +562,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     trade_rows = [
         {
             "instrument_id": instrument_id,
+            "instrument_public_id": instrument_public_id,
             "timestamp": base_ts,
             "price": 10.5,
             "size": 0.25,
@@ -565,6 +573,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         },
         {
             "instrument_id": instrument_id,
+            "instrument_public_id": instrument_public_id,
             "timestamp": base_ts + timedelta(minutes=1),
             "price": 11.5,
             "size": 0.5,
@@ -593,6 +602,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     assert len(trade_results) == 2
     order_id, order_public_id = await repo.insert_order(
         instrument_id=instrument_id,
+        instrument_public_id=instrument_public_id,
         client_order_id="client-1",
         exchange_order_id=None,
         created_at=base_ts,
@@ -803,11 +813,11 @@ class DummyRepository(Repository):
         """Return dummy dialect name."""
         return "dummy"
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
-        """Upsert instrument - no-op returning 0."""
-        return 0
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+        """Upsert instrument - no-op returning (0, stub-public-id)."""
+        return (0, "stub-public-id")
 
-    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
+    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load latest candle IDs - returns empty dict for dummy."""
         return {}
 
@@ -822,6 +832,7 @@ class DummyRepository(Repository):
     async def insert_order(
         self,
         instrument_id: int,
+        instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
         created_at: datetime,
@@ -1183,6 +1194,7 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "instrument_id": 1,
+                    "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -1226,6 +1238,7 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "instrument_id": 1,
+                    "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -1241,6 +1254,7 @@ class TestSQLAlchemyRepositoryDialects:
                 },
                 {
                     "instrument_id": 1,
+                    "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -1289,6 +1303,7 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "instrument_id": 1,
+                    "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -1374,13 +1389,15 @@ class TestSQLAlchemyRepositoryDialects:
         """Verify upsert methods return 0 for empty input.
 
         Given: Empty row list,
-        When: upsert_candles/upsert_trades is called,
+        When: upsert_candles/upsert_trades/upsert_ticks is called,
         Then: Returns 0 without database operation.
         """
         result_candles = await mock_postgres_repo.upsert_candles([])
         assert result_candles == 0
         result_trades = await mock_postgres_repo.upsert_trades([])
         assert result_trades == 0
+        result_ticks = await mock_postgres_repo.upsert_ticks([])
+        assert result_ticks == 0
 
     @pytest.mark.asyncio
     async def test_upsert_instrument_with_integrity_error(
@@ -1398,6 +1415,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_session.execute.return_value = mock_result
         mock_instrument = Mock()
         mock_instrument.id = 123
+        mock_instrument.public_id = "mock-public-id-123"
         mock_session.add = Mock()
         mock_session.commit.side_effect = [IntegrityError("duplicate", "params", Exception()), None]
         mock_result2 = Mock()
@@ -1418,7 +1436,7 @@ class TestSQLAlchemyRepositoryDialects:
                 session_id="test-session",
                 sequence_id=1,
             )
-            assert result == 123
+            assert result == (123, "mock-public-id-123")
             mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1471,6 +1489,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_result = Mock()
         mock_instrument = Mock()
         mock_instrument.id = 456
+        mock_instrument.public_id = "mock-public-id-456"
         mock_instrument.symbol = "ETH-USD"
         mock_instrument.base = "ETH"
         mock_instrument.quote = "USD"
@@ -1490,7 +1509,7 @@ class TestSQLAlchemyRepositoryDialects:
                 session_id="test-session",
                 sequence_id=1,
             )
-            assert result == 456
+            assert result == (456, "mock-public-id-456")
             mock_session.add.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1703,7 +1722,7 @@ class _MinimalRepository(Repository):
     def dialect_name(self) -> str:
         return "sqlite"
 
-    async def get_latest_candle_ids(self) -> dict[tuple[int, str], tuple[datetime, str]]:
+    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
         return {}
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
@@ -1712,12 +1731,13 @@ class _MinimalRepository(Repository):
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         return 0
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
-        return 0
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+        return (0, "stub-public-id")
 
     async def insert_order(
         self,
         instrument_id: int,
+        instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
         created_at: datetime,

@@ -79,8 +79,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._last_data_timestamps: dict[str, float] = {}
         self._unknown_symbols_logged: set[str] = set()
         self.repository: Repository | None = None
-        self._instrument_cache: dict[str, int] = {}
-        self._candle_id_cache: dict[tuple[int, str], tuple[datetime, str]] = {}
+        self._instrument_cache: dict[str, tuple[int, str]] = {}
+        self._candle_id_cache: dict[tuple[str, str], tuple[datetime, str]] = {}
         self._exchange_client: T | None = None
 
     @abstractmethod
@@ -257,19 +257,19 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return cast(MarketDataExchange, self._get_exchange_name())
 
-    async def _ensure_instrument(self, native_symbol: str) -> int | None:
-        """Resolve instrument_id for a native symbol, using cache.
+    async def _ensure_instrument(self, native_symbol: str) -> tuple[int, str] | None:
+        """Resolve (instrument_id, instrument_public_id) for a native symbol, using cache.
 
         Args:
             native_symbol: Native exchange symbol (e.g. 'BTC-USD').
 
         Returns:
-            Database instrument ID, or None if symbol cannot be split or
-            the symbol has no active Symbol row.
+            Tuple of (instrument_id, instrument_public_id), or None if symbol
+            cannot be split or the symbol has no active Symbol row.
         """
-        instrument_id = self._instrument_cache.get(native_symbol)
-        if instrument_id is not None:
-            return instrument_id
+        cached = self._instrument_cache.get(native_symbol)
+        if cached is not None:
+            return cached
         try:
             base_currency, quote_currency = native_symbol.split("-", 1)
         except ValueError:
@@ -283,7 +283,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if symbol_pid is None:
             logger.warning(f"MarketDataPublisherService: No active Symbol row for {native_symbol}")
             return None
-        instrument_id = await self.repository.upsert_instrument(
+        instrument_id, instrument_public_id = await self.repository.upsert_instrument(
             symbol_public_id=symbol_pid,
             symbol=native_symbol,
             exchange=self._get_exchange_name(),
@@ -294,27 +294,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
-        self._instrument_cache[native_symbol] = instrument_id
-        return instrument_id
+        self._instrument_cache[native_symbol] = (instrument_id, instrument_public_id)
+        return (instrument_id, instrument_public_id)
 
     def _resolve_candle_public_id(
-        self, instrument_id: int, timeframe: str, open_at: datetime
+        self, instrument_public_id: str, timeframe: str, open_at: datetime
     ) -> str:
         """Resolve the public_id for a candle from the in-memory cache.
 
-        If the cache holds a matching (instrument_id, timeframe) entry whose
-        open_at equals the incoming value, the existing public_id is reused.
-        Otherwise a new UUID7 is generated and the cache is updated.
+        If the cache holds a matching (instrument_public_id, timeframe) entry
+        whose open_at equals the incoming value, the existing public_id is
+        reused.  Otherwise a new UUID7 is generated and the cache is updated.
 
         Args:
-            instrument_id: Database instrument primary key.
+            instrument_public_id: Instrument public identity string.
             timeframe: Candle timeframe (e.g. '1m').
             open_at: Candle interval start time.
 
         Returns:
             The public_id string to use for this candle on ZMQ and in the DB.
         """
-        cache_key = (instrument_id, timeframe)
+        cache_key = (instrument_public_id, timeframe)
         cached = self._candle_id_cache.get(cache_key)
         if cached is not None and cached[0] == open_at:
             return cached[1]
@@ -341,11 +341,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if not self.running:
                     break
                 native_symbol = candle.symbol
-                instrument_id = await self._ensure_instrument(native_symbol)
-                if instrument_id is None:
+                result = await self._ensure_instrument(native_symbol)
+                if result is None:
                     continue
+                _, instrument_public_id = result
                 public_id = self._resolve_candle_public_id(
-                    instrument_id, timeframe, candle.interval_begin
+                    instrument_public_id, timeframe, candle.interval_begin
                 )
                 topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
                 candle_msg = CandleData(
@@ -521,9 +522,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             candle_msg: CandleData containing OHLCV data to persist.
         """
         try:
-            instrument_id = await self._ensure_instrument(native_symbol)
-            if instrument_id is None:
+            result = await self._ensure_instrument(native_symbol)
+            if result is None:
                 return
+            instrument_id, instrument_public_id = result
             timeframe = candle_msg.timeframe or "1m"
             open_price = candle_msg.open if candle_msg.open is not None else candle_msg.close
             high_price = candle_msg.high if candle_msg.high is not None else candle_msg.close
@@ -534,6 +536,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             candle_row: dict[str, Any] = {
                 "public_id": candle_msg.public_id,
                 "instrument_id": instrument_id,
+                "instrument_public_id": instrument_public_id,
                 "open_at": candle_msg.open_at,
                 "timestamp": candle_msg.timestamp,
                 "timeframe": timeframe,

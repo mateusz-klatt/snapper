@@ -100,9 +100,9 @@ class _StubAsyncRepo:
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
-        self.return_value = 42
+        self.return_value: tuple[int, str] = (42, "stub-instrument-pub-id")
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         self.calls.append(dict(kwargs))
         return self.return_value
 
@@ -263,10 +263,12 @@ async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfil
         base_currency="ETH",
         quote_currency="USD",
     )
-    ensure_instrument = cast(Callable[[Any], Awaitable[int]], cast(Any, service)._ensure_instrument)
-    instrument_id = await ensure_instrument(context)
-    repeated_id = await ensure_instrument(context)
-    assert instrument_id == repeated_id == async_repo.return_value
+    ensure_instrument = cast(
+        Callable[[Any], Awaitable[tuple[int, str]]], cast(Any, service)._ensure_instrument
+    )
+    result = await ensure_instrument(context)
+    repeated_result = await ensure_instrument(context)
+    assert result == repeated_result == async_repo.return_value
     assert len(async_repo.calls) == 1
     call = async_repo.calls[0]
     assert call["symbol"] == "ETH-USD"
@@ -298,7 +300,9 @@ async def test_ensure_instrument_raises_when_symbol_not_resolved(
         base_currency="ETH",
         quote_currency="USD",
     )
-    ensure_instrument = cast(Callable[[Any], Awaitable[int]], cast(Any, service)._ensure_instrument)
+    ensure_instrument = cast(
+        Callable[[Any], Awaitable[tuple[int, str]]], cast(Any, service)._ensure_instrument
+    )
     with pytest.raises(ValueError, match="No active Symbol row for ETH-USD"):
         await ensure_instrument(context)
 
@@ -341,7 +345,9 @@ def test_build_candle_rows(service: PolygonAggregatesBackfillService) -> None:
         return seq_counter[0]
 
     tracker_any = cast(Any, service)._tracker
-    rows = service._build_candle_rows(candles, 7, "1m", tracker_any.session_id, _seq_fn)
+    rows = service._build_candle_rows(
+        candles, 7, "inst-pub-7", "1m", tracker_any.session_id, _seq_fn
+    )
     assert rows[0]["instrument_id"] == 7
     assert rows[0]["vwap"] == pytest.approx(101.5)
     assert rows[1]["vwap"] is None
@@ -433,7 +439,7 @@ async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch
     loader.fetch_aggregates = AsyncMock(return_value=[])
     svc._loader = loader
     repo: Any = SimpleNamespace()
-    repo.upsert_instrument = AsyncMock(return_value=1)
+    repo.upsert_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     repo.upsert_candles = AsyncMock(return_value=0)
     svc._db_async = repo
     svc._instrument_cache = {}
@@ -479,7 +485,7 @@ def test_build_candle_rows_converts_values() -> None:
         )
     ]
     svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows(candles, 1, "1m", "", lambda: 0)
+    rows = svc._build_candle_rows(candles, 1, "inst-pub-1", "1m", "", lambda: 0)
     assert rows[0]["instrument_id"] == 1
     assert rows[0]["vwap"] is None
 
@@ -551,7 +557,9 @@ async def test_process_symbol_skips_small_chunk_when_all_csv_exist(
     Then: No fetch_aggregates calls made.
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=2, resume=True, save_csv=True)
-    svc._db_async = cast(Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=1)))
+    svc._db_async = cast(
+        Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")))
+    )
 
     class Loader:
         def __init__(self) -> None:
@@ -596,7 +604,7 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
     svc._db_async = cast(
         Any,
         SimpleNamespace(
-            upsert_instrument=AsyncMock(return_value=1),
+            upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
             upsert_candles=AsyncMock(return_value=1),
         ),
     )
@@ -663,7 +671,7 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
     svc._db_async = cast(
         Any,
         SimpleNamespace(
-            upsert_instrument=AsyncMock(return_value=7),
+            upsert_instrument=AsyncMock(return_value=(7, "inst-pub-7")),
             upsert_candles=AsyncMock(return_value=1),
         ),
     )
@@ -721,7 +729,9 @@ async def test_process_symbol_day_timespan_skips_when_csv_exist(tmp_path: Any) -
         save_csv=True,
         timespan="day",
     )
-    svc._db_async = cast(Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=11)))
+    svc._db_async = cast(
+        Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=(11, "inst-pub-11")))
+    )
     existing_file = tmp_path / "exists.csv"
     existing_file.touch()
 
@@ -761,7 +771,9 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
     Then: Zero fetch calls made.
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=40, resume=True, save_csv=True)
-    svc._db_async = cast(Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=3)))
+    svc._db_async = cast(
+        Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=(3, "inst-pub-3")))
+    )
 
     class FrozenDatetime(datetime):
         @classmethod
@@ -1073,9 +1085,9 @@ class _StubBackfillAsyncRepo:
         self.calls: list[dict[str, Any]] = []
         self.upsert_candles_called = 0
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         self.calls.append({"upsert_instrument": kwargs})
-        return 1
+        return (1, "stub-backfill-inst-pub-id")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
         self.upsert_candles_called += len(rows)
@@ -1285,7 +1297,7 @@ async def test_build_candle_rows_with_vwap_none() -> None:
         )
     ]
     svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows(candles, 1, "1m", "", lambda: 0)
+    rows = svc._build_candle_rows(candles, 1, "inst-pub-1", "1m", "", lambda: 0)
     assert len(rows) == 1
     assert rows[0]["vwap"] is None
 
@@ -1589,8 +1601,8 @@ class _DummyRepo:
 class _DummyAsyncRepo:
     """Test dummy for async repository."""
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
-        return 1
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+        return (1, "dummy-inst-pub-id")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
         return len(rows)
@@ -1937,9 +1949,9 @@ class _RepoStub:
         self.instrument_calls: list[dict[str, Any]] = []
         self.candle_batches: list[list[dict[str, object]]] = []
 
-    async def upsert_instrument(self, **kwargs: Any) -> int:
+    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         self.instrument_calls.append(kwargs)
-        return 77
+        return (77, "inst-pub-77")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
         self.candle_batches.append(rows)
@@ -2160,9 +2172,9 @@ async def test_ensure_instrument_caches_id(
     """
     calls: list[dict[str, Any]] = []
 
-    async def upsert_instrument(**kwargs: Any) -> int:
+    async def upsert_instrument(**kwargs: Any) -> tuple[int, str]:
         calls.append(kwargs)
-        return 42
+        return (42, "inst-pub-42")
 
     service, _ = service_and_mapper
     service_private = cast(Any, service)
@@ -2175,7 +2187,7 @@ async def test_ensure_instrument_caches_id(
     )
     first = await service_private._ensure_instrument(context)
     second = await service_private._ensure_instrument(context)
-    assert first == second == 42
+    assert first == second == (42, "inst-pub-42")
     assert len(calls) == 1
     assert calls[0]["quote"] == "BTC"
 
@@ -2199,7 +2211,7 @@ def test_build_candle_rows_converts_values_decimal() -> None:
         transactions=10,
     )
     svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows([candle], 7, "1m", "", lambda: 0)
+    rows = svc._build_candle_rows([candle], 7, "inst-pub-7", "1m", "", lambda: 0)
     assert len(rows) == 1
     row = rows[0]
     assert row["instrument_id"] == 7
