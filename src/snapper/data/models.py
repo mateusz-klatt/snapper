@@ -183,7 +183,6 @@ class Candle(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     open_at: Mapped[datetime] = mapped_column(TZDateTime())
     timeframe: Mapped[str] = mapped_column(String(8))
     open: Mapped[float] = mapped_column(Float)
@@ -210,7 +209,6 @@ class Tick(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     bid: Mapped[float | None] = mapped_column(Float)
     ask: Mapped[float | None] = mapped_column(Float)
     last: Mapped[float | None] = mapped_column(Float)
@@ -233,7 +231,6 @@ class Trade(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
@@ -278,7 +275,6 @@ class Order(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
@@ -321,7 +317,6 @@ class Execution(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    order_id: Mapped[int] = mapped_column(Integer, index=True)
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exec_id: Mapped[str | None] = mapped_column(String(64))
     trade_id: Mapped[str | None] = mapped_column(String(64))
@@ -355,7 +350,6 @@ class Position(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
     unrealized_pnl: Mapped[float] = mapped_column(Float)
@@ -376,7 +370,6 @@ class Signal(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     fired_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
@@ -666,7 +659,6 @@ class InstrumentSpec(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     tick_size: Mapped[float | None] = mapped_column(Float, comment="Minimum price increment")
     lot_size: Mapped[float | None] = mapped_column(Float, comment="Minimum order size increment")
     min_order_size: Mapped[float | None] = mapped_column(Float, comment="Minimum order size")

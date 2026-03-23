@@ -217,12 +217,11 @@ class PaperExchangeClient(ExchangeClientBase):
             order.filled = order.amount
             order.remaining = 0.0
             if order.db_order_id is not None and order.db_order_public_id is not None:
-                new_order_id = await self._log_order_update_to_db(
+                await self._log_order_update_to_db(
                     db_order_id=order.db_order_id,
                     status=OrderStatusEnum.CLOSED,
                 )
                 await self._log_execution_to_db(
-                    db_order_id=new_order_id if new_order_id is not None else order.db_order_id,
                     order_public_id=order.db_order_public_id,
                     execution=execution,
                 )

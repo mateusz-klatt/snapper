@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import update
@@ -61,6 +62,7 @@ async def _create_repo_with_instrument(
 
     Returns:
         Tuple of (repository, instrument_id, instrument_public_id).
+        The instrument_id is retained for SCD2 close operations.
 
     Uses a fixed historical timestamp so active-row lookups remain stable even
     if the host wall clock moves backwards during the test run.
@@ -100,7 +102,6 @@ async def _create_repo_with_instrument(
 
 
 def _candle_row(
-    instrument_id: int,
     instrument_public_id: str,
     open_at: datetime,
     timestamp: datetime,
@@ -109,7 +110,6 @@ def _candle_row(
     """Build a candle row dict with sensible defaults.
 
     Args:
-        instrument_id: FK to instruments table.
         instrument_public_id: Logical FK (UUID string) to instruments table.
         open_at: Candle interval start time.
         timestamp: Bus/domain timestamp.
@@ -119,7 +119,6 @@ def _candle_row(
         Dict suitable for upsert_candles.
     """
     return {
-        "instrument_id": instrument_id,
         "instrument_public_id": instrument_public_id,
         "timeframe": "1m",
         "open_at": open_at,
@@ -146,7 +145,7 @@ class TestCandleBitemporal:
         """Upsert same candle twice creates contiguous half-open intervals.
 
         Given: A candle inserted at t1,
-        When: The same (instrument_id, timeframe, open_at) is upserted at t2 > t1,
+        When: The same (instrument_public_id, timeframe, open_at) is upserted at t2 > t1,
         Then: Two rows exist with same public_id, intervals [t1, t2) and [t2, MAX).
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
@@ -154,15 +153,15 @@ class TestCandleBitemporal:
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
 
         async with repo.session() as s:
             rows = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.timeframe == "1m",
                             Candle.open_at == open_at,
                         )
@@ -189,14 +188,14 @@ class TestCandleBitemporal:
         explicit_ts = datetime(2024, 3, 15, 8, 30, 0, tzinfo=UTC)
         open_at = datetime(2024, 3, 15, 8, 0, 0, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, explicit_ts)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, explicit_ts)])
 
         async with repo.session() as s:
             row = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.open_at == open_at,
                         )
                     )
@@ -221,15 +220,15 @@ class TestCandleBitemporal:
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
 
         async with repo.session() as s:
             at_t2 = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.timeframe == "1m",
                             Candle.open_at == open_at,
                             Candle.timestamp <= t2,
@@ -247,7 +246,7 @@ class TestCandleBitemporal:
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.timeframe == "1m",
                             Candle.open_at == open_at,
                             Candle.timestamp <= t1,
@@ -277,16 +276,16 @@ class TestCandleBitemporal:
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
         t3 = datetime(2024, 6, 1, 12, 0, 30, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t3, close=110.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t3, close=110.0)])
 
         async with repo.session() as s:
             all_rows = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.open_at == open_at,
                         )
                     )
@@ -319,15 +318,15 @@ class TestCandleBitemporal:
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
 
         async with repo.session() as s:
             active_row = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.open_at == open_at,
                             Candle.known_to == KNOWN_TO_MAX,
                         )
@@ -351,7 +350,7 @@ class TestCandleBitemporal:
         """Partial unique index allows multiple closed rows with same business key.
 
         Given: A candle inserted, then upserted twice (creating 3 rows total),
-        When: All three rows share the same (instrument_id, timeframe, open_at),
+        When: All three rows share the same (instrument_public_id, timeframe, open_at),
         Then: Only one has known_to == KNOWN_TO_MAX, and all coexist without error.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
@@ -360,16 +359,16 @@ class TestCandleBitemporal:
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
         t3 = datetime(2024, 6, 1, 12, 0, 30, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t3)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t3)])
 
         async with repo.session() as s:
             all_rows = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.timeframe == "1m",
                             Candle.open_at == open_at,
                         )
@@ -399,7 +398,6 @@ class TestOrderBitemporal:
         base_ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         order_id, order_public_id = await repo.insert_order(
-            instrument_id=inst_id,
             instrument_public_id=inst_public_id,
             client_order_id="cli-001",
             exchange_order_id=None,
@@ -538,7 +536,6 @@ class TestExecutionDedup:
         base_ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         order_id, order_public_id = await repo.insert_order(
-            instrument_id=inst_id,
             instrument_public_id=inst_public_id,
             client_order_id="cli-dedup",
             exchange_order_id=None,
@@ -552,7 +549,7 @@ class TestExecutionDedup:
             sequence_id=0,
         )
 
-        new_order_id = await repo.update_order(
+        await repo.update_order(
             order_id=order_id,
             status="filled",
             updated_at=base_ts + timedelta(seconds=5),
@@ -562,7 +559,6 @@ class TestExecutionDedup:
         )
 
         await repo.insert_execution(
-            order_id=new_order_id,
             order_public_id=order_public_id,
             timestamp=base_ts + timedelta(seconds=10),
             side="buy",
@@ -578,7 +574,6 @@ class TestExecutionDedup:
 
         with pytest.raises(IntegrityError):
             await repo.insert_execution(
-                order_id=new_order_id,
                 order_public_id=order_public_id,
                 timestamp=base_ts + timedelta(seconds=15),
                 side="buy",
@@ -923,15 +918,15 @@ class TestCandlePolicyBitemporal:
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
 
         async with repo.session() as s:
             rows = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.timeframe == "1m",
                             Candle.open_at == open_at,
                         )
@@ -969,15 +964,15 @@ class TestCandlePolicyBitemporal:
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t2, close=105.0)])
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
 
         async with repo.session() as s:
             rows = (
                 (
                     await s.execute(
                         select(Candle).where(
-                            Candle.instrument_id == inst_id,
+                            Candle.instrument_public_id == inst_public_id,
                             Candle.timeframe == "1m",
                             Candle.open_at == open_at,
                         )
@@ -1673,7 +1668,7 @@ class TestInstrumentBitemporal:
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
-        await repo.upsert_candles([_candle_row(inst_id, inst_public_id, t1, datetime.now(UTC))])
+        await repo.upsert_candles([_candle_row(inst_public_id, t1, datetime.now(UTC))])
 
         candles = await repo.get_candles(
             instrument="BTC-USD",
@@ -1764,12 +1759,11 @@ class TestInstrumentBitemporal:
 
     @pytest.mark.asyncio
     async def test_fact_records_survive_instrument_rename(self, tmp_path: Path) -> None:
-        """Signals/orders referencing old instrument_id remain visible after rename.
+        """Signals/orders referencing old instrument_public_id remain visible after rename.
 
-        Fact tables (signals, orders) join Instrument by integer FK which
-        points to a specific version. After close+insert on Instrument the
-        old version is closed but the FK still resolves via plain join
-        without temporal filter on Instrument.
+        Fact tables (signals, orders) join Instrument by public_id which is
+        stable across SCD2 versions. After close+insert on Instrument, the
+        fact still resolves via a temporal join that picks the active version.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
@@ -1777,7 +1771,6 @@ class TestInstrumentBitemporal:
 
         async with repo.session() as s:
             signal = Signal(
-                instrument_id=inst_id,
                 instrument_public_id=inst_public_id,
                 fired_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
@@ -1809,7 +1802,14 @@ class TestInstrumentBitemporal:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Signal, Instrument)
-                .join(Instrument, Signal.instrument_id == Instrument.id)
+                .join(
+                    Instrument,
+                    and_(
+                        Signal.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= now,
+                        Instrument.known_to > now,
+                    ),
+                )
                 .where(
                     Signal.timestamp <= now,
                     Signal.known_to > now,
@@ -1819,19 +1819,18 @@ class TestInstrumentBitemporal:
             assert len(rows) == 1
             sig, inst = rows[0]
             assert sig.id == signal_id
-            assert inst.id == inst_id
-            assert inst.symbol == "BTC-USD"
+            assert inst.id == new_id
+            assert inst.symbol == "BTC-RENAMED"
 
 
 class TestInstrumentRenameSemantics:
     """Contract tests: fact records survive Instrument rename.
 
     Instruments use SCD2 close+insert. Fact tables (orders, signals,
-    executions, positions) reference Instrument by integer FK which pins
-    to a specific version.  After rename the old version is closed, but
-    facts must remain visible via a plain FK join with no temporal filter
-    on Instrument.  The joined Instrument row shows the snapshot that was
-    current when the fact was created.
+    executions, positions) reference Instrument by public_id which is
+    stable across SCD2 versions. After rename the old version is closed,
+    but facts remain visible via a temporal join on Instrument. The joined
+    Instrument row shows the currently active version of the instrument.
     """
 
     @pytest.mark.asyncio
@@ -1842,7 +1841,6 @@ class TestInstrumentRenameSemantics:
         assert spid is not None
 
         order_id, order_pid = await repo.insert_order(
-            instrument_id=inst_id,
             instrument_public_id=inst_public_id,
             client_order_id="cli-rename",
             exchange_order_id=None,
@@ -1871,7 +1869,14 @@ class TestInstrumentRenameSemantics:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Order, Instrument)
-                .join(Instrument, Order.instrument_id == Instrument.id)
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= now,
+                        Instrument.known_to > now,
+                    ),
+                )
                 .where(Order.timestamp <= now, Order.known_to > now)
             )
             rows = result.all()
@@ -1879,8 +1884,8 @@ class TestInstrumentRenameSemantics:
             order, inst = rows[0]
             assert order.id == order_id
             assert order.public_id == order_pid
-            assert inst.id == inst_id
-            assert inst.symbol == "BTC-USD"
+            assert inst.id == new_inst_id
+            assert inst.symbol == "BTC-RENAMED"
 
     @pytest.mark.asyncio
     async def test_executions_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
@@ -1890,7 +1895,6 @@ class TestInstrumentRenameSemantics:
         assert spid is not None
 
         order_id, order_pid = await repo.insert_order(
-            instrument_id=inst_id,
             instrument_public_id=inst_public_id,
             client_order_id="cli-exec-rename",
             exchange_order_id="ex-exec-rename",
@@ -1905,7 +1909,6 @@ class TestInstrumentRenameSemantics:
         )
 
         exec_id = await repo.insert_execution(
-            order_id=order_id,
             order_public_id=order_pid,
             timestamp=datetime.now(UTC),
             side="buy",
@@ -1933,8 +1936,22 @@ class TestInstrumentRenameSemantics:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Execution, Order, Instrument)
-                .join(Order, Execution.order_id == Order.id)
-                .join(Instrument, Order.instrument_id == Instrument.id)
+                .join(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        Order.timestamp <= now,
+                        Order.known_to > now,
+                    ),
+                )
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= now,
+                        Instrument.known_to > now,
+                    ),
+                )
                 .where(Execution.timestamp <= now, Execution.known_to > now)
             )
             rows = result.all()
@@ -1942,8 +1959,7 @@ class TestInstrumentRenameSemantics:
             execution, order, inst = rows[0]
             assert execution.id == exec_id
             assert order.public_id == order_pid
-            assert inst.id == inst_id
-            assert inst.symbol == "BTC-USD"
+            assert inst.symbol == "BTC-RENAMED"
 
     @pytest.mark.asyncio
     async def test_positions_remain_visible_after_instrument_rename(self, tmp_path: Path) -> None:
@@ -1954,7 +1970,6 @@ class TestInstrumentRenameSemantics:
 
         async with repo.session() as s:
             pos = Position(
-                instrument_id=inst_id,
                 instrument_public_id=inst_public_id,
                 quantity=1.5,
                 average_price=50000.0,
@@ -1983,7 +1998,14 @@ class TestInstrumentRenameSemantics:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Position, Instrument)
-                .join(Instrument, Position.instrument_id == Instrument.id)
+                .join(
+                    Instrument,
+                    and_(
+                        Position.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= now,
+                        Instrument.known_to > now,
+                    ),
+                )
                 .where(Position.timestamp <= now, Position.known_to > now)
             )
             rows = result.all()
@@ -1991,8 +2013,7 @@ class TestInstrumentRenameSemantics:
             position, inst = rows[0]
             assert position.id == pos_id
             assert position.quantity == 1.5
-            assert inst.id == inst_id
-            assert inst.symbol == "BTC-USD"
+            assert inst.symbol == "BTC-RENAMED"
 
     @pytest.mark.asyncio
     async def test_store_signal_no_duplicate_instrument_versions(self, tmp_path: Path) -> None:
@@ -2082,8 +2103,8 @@ class TestInstrumentRenameSemantics:
         """Cross-cutting: orders, signals, positions all survive instrument rename.
 
         Creates one of each fact type on instrument v1, renames instrument
-        to v2, then verifies all three are still visible via FK join with
-        no temporal filter on Instrument.
+        to v2, then verifies all three are still visible via temporal join
+        on Instrument. The joined Instrument shows the active version.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
@@ -2091,7 +2112,6 @@ class TestInstrumentRenameSemantics:
         now = datetime.now(UTC)
 
         order_id, _ = await repo.insert_order(
-            instrument_id=inst_id,
             instrument_public_id=inst_public_id,
             client_order_id="cli-cross",
             exchange_order_id=None,
@@ -2107,7 +2127,6 @@ class TestInstrumentRenameSemantics:
 
         async with repo.session() as s:
             signal = Signal(
-                instrument_id=inst_id,
                 instrument_public_id=inst_public_id,
                 fired_at=now,
                 timestamp=now,
@@ -2120,7 +2139,6 @@ class TestInstrumentRenameSemantics:
                 sequence_id=1,
             )
             pos = Position(
-                instrument_id=inst_id,
                 instrument_public_id=inst_public_id,
                 quantity=2.0,
                 average_price=50000.0,
@@ -2151,46 +2169,67 @@ class TestInstrumentRenameSemantics:
             orders = (
                 await s.execute(
                     select(Order, Instrument)
-                    .join(Instrument, Order.instrument_id == Instrument.id)
+                    .join(
+                        Instrument,
+                        and_(
+                            Order.instrument_public_id == Instrument.public_id,
+                            Instrument.timestamp <= check_time,
+                            Instrument.known_to > check_time,
+                        ),
+                    )
                     .where(Order.timestamp <= check_time, Order.known_to > check_time)
                 )
             ).all()
             assert len(orders) == 1
-            assert orders[0][1].symbol == "BTC-USD"
+            assert orders[0][1].symbol == "BTC-RENAMED"
 
             signals = (
                 await s.execute(
                     select(Signal, Instrument)
-                    .join(Instrument, Signal.instrument_id == Instrument.id)
+                    .join(
+                        Instrument,
+                        and_(
+                            Signal.instrument_public_id == Instrument.public_id,
+                            Instrument.timestamp <= check_time,
+                            Instrument.known_to > check_time,
+                        ),
+                    )
                     .where(Signal.timestamp <= check_time, Signal.known_to > check_time)
                 )
             ).all()
             assert len(signals) == 1
-            assert signals[0][1].symbol == "BTC-USD"
+            assert signals[0][1].symbol == "BTC-RENAMED"
 
             positions = (
                 await s.execute(
                     select(Position, Instrument)
-                    .join(Instrument, Position.instrument_id == Instrument.id)
+                    .join(
+                        Instrument,
+                        and_(
+                            Position.instrument_public_id == Instrument.public_id,
+                            Instrument.timestamp <= check_time,
+                            Instrument.known_to > check_time,
+                        ),
+                    )
                     .where(Position.timestamp <= check_time, Position.known_to > check_time)
                 )
             ).all()
             assert len(positions) == 1
-            assert positions[0][1].symbol == "BTC-USD"
+            assert positions[0][1].symbol == "BTC-RENAMED"
 
     @pytest.mark.asyncio
     async def test_instrument_join_shows_version_snapshot(self, tmp_path: Path) -> None:
-        """Fact joined to closed instrument shows the snapshot from creation time.
+        """Temporal join picks active instrument; unfiltered join returns both versions.
 
-        The instrument was 'BTC-USD' when the order was created, so the join
-        should return 'BTC-USD' even though active instrument is now 'BTC-RENAMED'.
+        With public_id-based joins, a temporal filter on Instrument selects
+        the active version (BTC-RENAMED). An unfiltered join returns both
+        the old closed version and the new active version.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         await repo.insert_order(
-            instrument_id=inst_id,
             instrument_public_id=inst_public_id,
             client_order_id="cli-snapshot",
             exchange_order_id=None,
@@ -2218,11 +2257,18 @@ class TestInstrumentRenameSemantics:
             now = datetime.now(UTC)
             result = await s.execute(
                 select(Order, Instrument)
-                .join(Instrument, Order.instrument_id == Instrument.id)
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= now,
+                        Instrument.known_to > now,
+                    ),
+                )
                 .where(Order.timestamp <= now, Order.known_to > now)
             )
             order, inst = result.one()
-            assert inst.symbol == "BTC-USD"
+            assert inst.symbol == "BTC-RENAMED"
 
             active_inst = (
                 await s.execute(select(Instrument).where(*where_active(Instrument)))

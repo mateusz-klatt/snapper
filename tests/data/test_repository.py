@@ -173,7 +173,6 @@ async def test_upsert_candles_closes_old_and_inserts_new(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_id": 1,
             "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
@@ -238,7 +237,6 @@ async def test_upsert_candles_inserts_new_when_no_existing(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_id": 1,
             "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
@@ -282,7 +280,6 @@ async def test_upsert_candles_preserves_caller_supplied_public_id(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_id": 1,
             "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
@@ -323,7 +320,6 @@ async def test_upsert_candles_preserves_caller_supplied_known_to(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_id": 1,
             "instrument_public_id": "fake-inst-pid",
             "open_at": ts,
             "timestamp": ts,
@@ -364,7 +360,6 @@ async def test_upsert_candles_generates_timestamp_when_missing(
     before = datetime.now(UTC)
     rows = [
         {
-            "instrument_id": 1,
             "instrument_public_id": "fake-inst-pid",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
@@ -525,7 +520,6 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     base_ts = datetime.now(UTC) - timedelta(minutes=10)
     candle_rows = [
         {
-            "instrument_id": instrument_id,
             "instrument_public_id": instrument_public_id,
             "timeframe": "1m",
             "open_at": base_ts,
@@ -541,7 +535,6 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             "sequence_id": 1,
         },
         {
-            "instrument_id": instrument_id,
             "instrument_public_id": instrument_public_id,
             "timeframe": "1m",
             "open_at": base_ts + timedelta(minutes=1),
@@ -561,7 +554,6 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     assert inserted_candles == 2
     trade_rows = [
         {
-            "instrument_id": instrument_id,
             "instrument_public_id": instrument_public_id,
             "timestamp": base_ts,
             "price": 10.5,
@@ -572,7 +564,6 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             "sequence_id": 1,
         },
         {
-            "instrument_id": instrument_id,
             "instrument_public_id": instrument_public_id,
             "timestamp": base_ts + timedelta(minutes=1),
             "price": 11.5,
@@ -601,7 +592,6 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     )
     assert len(trade_results) == 2
     order_id, order_public_id = await repo.insert_order(
-        instrument_id=instrument_id,
         instrument_public_id=instrument_public_id,
         client_order_id="client-1",
         exchange_order_id=None,
@@ -623,7 +613,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         filled_size=0.5,
         average_price=10.55,
     )
-    order_v3 = await repo.update_order(
+    await repo.update_order(
         order_id=order_v2,
         status="filled",
         updated_at=base_ts + timedelta(minutes=2),
@@ -633,7 +623,6 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         error=None,
     )
     execution_id = await repo.insert_execution(
-        order_id=order_v3,
         order_public_id=order_public_id,
         timestamp=base_ts + timedelta(minutes=2, seconds=30),
         side="buy",
@@ -829,9 +818,12 @@ class DummyRepository(Repository):
         """Upsert trades - no-op returning 0."""
         return 0
 
+    async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
+        """Upsert ticks - no-op returning 0."""
+        return 0
+
     async def insert_order(
         self,
-        instrument_id: int,
         instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
@@ -856,20 +848,25 @@ class DummyRepository(Repository):
         session_id: str,
         sequence_id: int,
         exchange_order_id: str | None = None,
-        err: str | None = None,
+        error: str | None = None,
+        filled_size: float | None = None,
+        average_price: float | None = None,
     ) -> int:
         """Update order - no-op returning 0."""
         return 0
 
     async def insert_execution(
         self,
-        order_id: int,
         order_public_id: str,
-        ts: datetime,
+        timestamp: datetime,
+        side: str,
+        status: str,
         price: float,
         size: float,
         fee: float,
         fee_asset: str,
+        session_id: str,
+        sequence_id: int,
         exec_id: str | None = None,
         trade_id: str | None = None,
     ) -> int:
@@ -1193,7 +1190,6 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             rows: list[dict[str, Any]] = [
                 {
-                    "instrument_id": 1,
                     "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
@@ -1237,7 +1233,6 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             rows: list[dict[str, Any]] = [
                 {
-                    "instrument_id": 1,
                     "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
@@ -1253,7 +1248,6 @@ class TestSQLAlchemyRepositoryDialects:
                     "sequence_id": 1,
                 },
                 {
-                    "instrument_id": 1,
                     "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
@@ -1302,7 +1296,6 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             rows: list[dict[str, Any]] = [
                 {
-                    "instrument_id": 1,
                     "instrument_public_id": "fake-inst-pid",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
@@ -1344,7 +1337,6 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "trade_id": "trade_1",
-                    "instrument_id": 1,
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "side": "buy",
                     "size": 100.0,
@@ -1372,7 +1364,6 @@ class TestSQLAlchemyRepositoryDialects:
             rows: list[dict[str, Any]] = [
                 {
                     "trade_id": "trade_1",
-                    "instrument_id": 1,
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "side": "buy",
                     "size": 100.0,
@@ -1731,12 +1722,14 @@ class _MinimalRepository(Repository):
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         return 0
 
+    async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
+        return 0
+
     async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
         return (0, "stub-public-id")
 
     async def insert_order(
         self,
-        instrument_id: int,
         instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
@@ -1761,19 +1754,24 @@ class _MinimalRepository(Repository):
         sequence_id: int,
         exchange_order_id: str | None = None,
         error: str | None = None,
+        filled_size: float | None = None,
+        average_price: float | None = None,
     ) -> int:
         """Update order - no-op returning 0."""
         return 0
 
     async def insert_execution(
         self,
-        order_id: int,
         order_public_id: str,
         timestamp: datetime,
+        side: str,
+        status: str,
         price: float,
         size: float,
         fee: float,
         fee_asset: str,
+        session_id: str,
+        sequence_id: int,
         exec_id: str | None = None,
         trade_id: str | None = None,
     ) -> int:

@@ -97,12 +97,21 @@ Persistence layer with SQLAlchemy:
     fields. Objects published via MessagePublisher, REST middleware, or WS
     handlers get real values stamped before delivery.
 
-    All ORM models use a dual-key pattern:
+    All ORM models use a dual-key identity pattern:
 
-    - `id` (INTEGER, internal PK, never exposed outside repository)
-    - `public_id` (UUID7 string, external identifier)
+    - `id` (INTEGER, internal PK) — row/version identifier for SCD2 close
+        operations: SELECT → lock → close by id → INSERT new version.
+        Never exposed outside the repository layer.
+    - `public_id` (UUID7 string) — logical entity identifier for domain
+        joins and external references. Stable across SCD2 versions.
     - `timestamp` (DateTime, system time / known_from)
     - `known_to` (DateTime NOT NULL, default KNOWN_TO_MAX = 9999-12-31T23:59:59 UTC, active rows have known_to == KNOWN_TO_MAX; query pattern: `WHERE timestamp <= :t AND known_to > :t`)
+
+    No hard foreign keys between temporal entities. All domain joins use
+    `child.instrument_public_id == Instrument.public_id` (or
+    `Execution.order_public_id == Order.public_id`) with temporal filters.
+    This enables future archival of closed SCD2 rows without breaking
+    referential integrity.
 
 - **SQLAlchemyRepository** (`repository.py`) — Async CRUD for SQLite/PostgreSQL
 - **DatabaseRepository** (`repository.py`) — Sync access for scripts and background updaters
@@ -199,8 +208,22 @@ FastAPI application:
 Shared API schemas and WebSocket auth helpers (not route definitions):
 
 - **Schemas** (`schemas/`) — Pydantic request/response models (health, process, settings).
-  All REST API response models inherit from `StrictDataSchema`, so they carry
-  per-item provenance (`public_id`, `session_id`, `sequence_id`, `timestamp`, `type`)
+
+    Schema class hierarchy:
+
+    ```text
+    BaseModel
+    ├── PartialBody           — extra="ignore", strict=True (GapEnvelope, WsTokenPayload)
+    ├── StrictBody            — extra="forbid", strict=True (request bodies, nested DTOs)
+    │   └── StrictDataSchema  — + provenance (all event payloads, REST/WS/ZMQ)
+    │       ├── PayloadRequest[T]
+    │       ├── PayloadResponse[T]
+    │       └── PayloadListResponse[T]
+    ├── ExchangeResponse      — extra="allow", strict=True (exchange API parsing)
+    ├── ExchangeRequest       — extra="forbid", strict=True (outgoing exchange requests)
+    └── BaseSettings          — BootstrapSettingsLoader (env var config)
+    ```
+
 - **Auth** (`auth/`) — WebSocket token service and schemas
 
 Route modules live closer to their domains: `server/app.py` (assembly and
@@ -264,24 +287,34 @@ SQLite for development, PostgreSQL for production.
 ### Schema
 
 ```sql
--- Main tables
-instruments     -- Financial instruments
-candles         -- OHLCV data
-trades          -- Transaction history
-orders          -- Orders
-executions      -- Executions
-positions       -- Positions
+-- Market data (joined to instruments via instrument_public_id)
+instruments         -- Financial instruments (logical key: symbol_public_id + exchange)
+candles             -- OHLCV data
+ticks               -- Real-time price snapshots
+trades              -- Transaction history
+market_snapshots    -- Denormalized market data snapshots
 
--- Strategies
-signals         -- Signals
+-- Trading (joined to instruments via instrument_public_id)
+orders              -- Order history
+executions          -- Order executions (joined to orders via order_public_id)
+positions           -- Portfolio positions
+signals             -- Strategy signals
+
+-- Symbol management
+symbols             -- Symbol identity + versioned attributes (SCD2)
+symbol_aliases      -- Exchange-specific symbol mappings
+symbol_exchange_capabilities -- Exchange-specific capabilities
+
+-- Instrument specifications
+instrument_specs    -- Trading specifications (tick_size, lot_size, limits)
 
 -- System
-users           -- Users
-settings        -- Settings (encrypted)
-symbols         -- Symbol identity + versioned attributes (SCD2)
-symbol_aliases  -- Symbol aliases (exchange-specific symbol mappings)
-user_login_events -- Authentication event log
-process_runs    -- Process history
+users               -- User accounts
+settings            -- Settings (encrypted)
+user_login_events   -- Authentication event log
+process_runs        -- Background process execution records
+control             -- Audit log (commands, auth events, mutations)
+telemetry           -- High-volume operational events (toggleable)
 ```
 
 ### Migrations

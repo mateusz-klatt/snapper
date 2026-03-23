@@ -348,7 +348,7 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
         await s.commit()
     spid = await resolve_symbol_public_id(repo, "BTC-USD")
     assert spid is not None
-    inst_id, inst_pub_id = await repo.upsert_instrument(
+    _, inst_pub_id = await repo.upsert_instrument(
         symbol_public_id=spid,
         symbol="BTC-USD",
         base="BTC",
@@ -360,12 +360,10 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
         session_id="test-session",
         sequence_id=1,
     )
-    assert inst_id > 0
     assert isinstance(inst_pub_id, str)
     inserted = await repo.upsert_candles(
         [
             {
-                "instrument_id": inst_id,
                 "instrument_public_id": inst_pub_id,
                 "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                 "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
@@ -446,7 +444,7 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
         await s.commit()
     spid = await resolve_symbol_public_id(repo, "ETH-USD")
     assert spid is not None
-    inst_id, inst_pub_id = await repo.upsert_instrument(
+    _, inst_pub_id = await repo.upsert_instrument(
         symbol_public_id=spid,
         symbol="ETH-USD",
         base="ETH",
@@ -460,7 +458,6 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
     rows = [
         {
             "trade_id": "1",
-            "instrument_id": inst_id,
             "instrument_public_id": inst_pub_id,
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "price": 100.0,
@@ -471,7 +468,6 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
         },
         {
             "trade_id": "2",
-            "instrument_id": inst_id,
             "instrument_public_id": inst_pub_id,
             "timestamp": datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC),
             "price": 101.0,
@@ -514,7 +510,7 @@ async def test_upsert_ticks_sqlite(tmp_path: Path) -> None:
         await s.commit()
     spid = await resolve_symbol_public_id(repo, "ETH-USD")
     assert spid is not None
-    inst_id, inst_pub_id = await repo.upsert_instrument(
+    _, inst_pub_id = await repo.upsert_instrument(
         symbol_public_id=spid,
         symbol="ETH-USD",
         base="ETH",
@@ -527,7 +523,6 @@ async def test_upsert_ticks_sqlite(tmp_path: Path) -> None:
     )
     tick_rows = [
         {
-            "instrument_id": inst_id,
             "instrument_public_id": inst_pub_id,
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "bid": 99.5,
@@ -539,7 +534,6 @@ async def test_upsert_ticks_sqlite(tmp_path: Path) -> None:
         },
         {
             "public_id": "019d0000-0000-7000-8000-000000000001",
-            "instrument_id": inst_id,
             "instrument_public_id": inst_pub_id,
             "timestamp": datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC),
             "bid": 99.0,

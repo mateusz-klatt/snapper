@@ -37,7 +37,7 @@ class SignalReadService:
         signal: StrategySignal,
         exchange: str,
         tracker: SequenceTracker,
-    ) -> tuple[int, str] | None:
+    ) -> str | None:
         """Look up or lazily create the instrument row for a signal.
 
         Args:
@@ -46,8 +46,8 @@ class SignalReadService:
             tracker: SequenceTracker for provenance on upsert.
 
         Returns:
-            Tuple of (instrument_id, instrument_public_id), or ``None``
-            when the symbol cannot be resolved.
+            The instrument_public_id string, or ``None`` when the symbol
+            cannot be resolved.
         """
         async with self.repo.session() as session:
             i_ts, i_kt = where_active(Instrument)
@@ -61,7 +61,7 @@ class SignalReadService:
             )
             inst = inst_query.scalars().first()
         if inst:
-            return (int(inst.id), str(inst.public_id))
+            return str(inst.public_id)
         parts = signal.instrument.split("-") if "-" in signal.instrument else [signal.instrument]
         base = parts[0]
         quote = parts[1] if len(parts) > 1 else "USD"
@@ -69,7 +69,7 @@ class SignalReadService:
         if symbol_pid is None:
             logger.error(f"No active Symbol row for {signal.instrument}")
             return None
-        return await self.repo.upsert_instrument(
+        _id, public_id = await self.repo.upsert_instrument(
             symbol_public_id=symbol_pid,
             symbol=signal.instrument,
             exchange=exchange,
@@ -80,6 +80,7 @@ class SignalReadService:
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("instruments"),
         )
+        return public_id
 
     async def store_signal(
         self,
@@ -114,13 +115,11 @@ class SignalReadService:
             Signal event UUID or empty string on error.
         """
         try:
-            result = await self._resolve_instrument(signal, exchange, tracker)
-            if result is None:
+            inst_public_id = await self._resolve_instrument(signal, exchange, tracker)
+            if inst_public_id is None:
                 return ""
-            inst_id, inst_public_id = result
             async with self.repo.session() as session:
                 init_kwargs: dict[str, Any] = {
-                    "instrument_id": inst_id,
                     "instrument_public_id": inst_public_id,
                     "timestamp": timestamp or datetime.now(UTC),
                     "fired_at": signal.timestamp or datetime.now(UTC),

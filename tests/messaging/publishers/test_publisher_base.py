@@ -1815,7 +1815,7 @@ class TestFeedPublisherCoverage:
         mock_repository.upsert_candles.assert_awaited_once()
         await publisher_any._save_to_db("BTC-USD", bar_message)
         mock_repository.upsert_instrument.assert_awaited_once()
-        assert publisher_any._instrument_cache["BTC-USD"] == (42, "inst-pub-42")
+        assert publisher_any._instrument_cache["BTC-USD"] == "inst-pub-42"
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1926,9 +1926,9 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     assert call["session_id"] == publisher._tracker.session_id
     assert call["sequence_id"] == 1
     assert len(repo.candle_calls) == 1
-    assert repo.candle_calls[0][0]["instrument_id"] == 100
+    assert repo.candle_calls[0][0]["instrument_public_id"] == "inst-pub-100"
     cache = publisher._instrument_cache
-    assert cache["EUR-USD"] == (100, "inst-pub-100")
+    assert cache["EUR-USD"] == "inst-pub-100"
     repo.instrument_calls.clear()
     await publisher._save_to_db("EUR-USD", bar_message)
     assert repo.instrument_calls == []
@@ -2425,8 +2425,8 @@ async def test_ensure_instrument_resolves_and_caches(
     monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     first = await pub._ensure_instrument("BTC-USD")
     second = await pub._ensure_instrument("BTC-USD")
-    assert first == (42, "inst-pub-42")
-    assert second == (42, "inst-pub-42")
+    assert first == "inst-pub-42"
+    assert second == "inst-pub-42"
     resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
     call_kwargs = mock_upsert.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"

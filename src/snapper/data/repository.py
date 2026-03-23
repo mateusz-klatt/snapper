@@ -24,7 +24,7 @@ Example:
 
     Upserting candles::
 
-        rows = [{"instrument_id": 1, "timeframe": "1m", ...}]
+        rows = [{"instrument_public_id": "...", "timeframe": "1m", ...}]
         inserted = await repo.upsert_candles(rows)
 """
 
@@ -293,7 +293,6 @@ class Repository(ABC):
     @abstractmethod
     async def insert_order(
         self,
-        instrument_id: int,
         instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
@@ -332,7 +331,6 @@ class Repository(ABC):
     @abstractmethod
     async def insert_execution(
         self,
-        order_id: int,
         order_public_id: str,
         timestamp: datetime,
         side: str,
@@ -610,10 +608,11 @@ class SQLAlchemyRepository(Repository):
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Close-old + insert-new (SCD Type 2) for candle rows.
 
-        When a candle with the same (instrument_id, timeframe, open_at) already
-        exists as an active row (known_to == KNOWN_TO_MAX), the old row is closed
-        by setting its known_to to now, and a new row is inserted carrying the
-        same public_id.  This preserves full history of intra-interval updates.
+        When a candle with the same (instrument_public_id, timeframe, open_at)
+        already exists as an active row (known_to == KNOWN_TO_MAX), the old row
+        is closed by setting its known_to to now, and a new row is inserted
+        carrying the same public_id.  This preserves full history of
+        intra-interval updates.
 
         Rows without ``public_id`` get a generated UUID7 automatically.
         """
@@ -677,7 +676,6 @@ class SQLAlchemyRepository(Repository):
 
     async def insert_order(
         self,
-        instrument_id: int,
         instrument_public_id: str,
         client_order_id: str | None,
         exchange_order_id: str | None,
@@ -694,7 +692,6 @@ class SQLAlchemyRepository(Repository):
         """Insert new order record and return (id, public_id) tuple."""
         async with self.session() as s:
             order = Order(
-                instrument_id=instrument_id,
                 instrument_public_id=instrument_public_id,
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
@@ -741,7 +738,6 @@ class SQLAlchemyRepository(Repository):
             await s.execute(update(Order).where(Order.id == order_id).values(known_to=now))
             new_order = Order(
                 public_id=old_order.public_id,
-                instrument_id=old_order.instrument_id,
                 instrument_public_id=old_order.instrument_public_id,
                 client_order_id=old_order.client_order_id,
                 exchange_order_id=exchange_order_id or old_order.exchange_order_id,
@@ -769,7 +765,6 @@ class SQLAlchemyRepository(Repository):
 
     async def insert_execution(
         self,
-        order_id: int,
         order_public_id: str,
         timestamp: datetime,
         side: str,
@@ -786,7 +781,6 @@ class SQLAlchemyRepository(Repository):
         """Insert execution record and return generated ID."""
         async with self.session() as s:
             execution = Execution(
-                order_id=order_id,
                 order_public_id=order_public_id,
                 exec_id=exec_id,
                 trade_id=trade_id,

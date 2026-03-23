@@ -79,7 +79,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._last_data_timestamps: dict[str, float] = {}
         self._unknown_symbols_logged: set[str] = set()
         self.repository: Repository | None = None
-        self._instrument_cache: dict[str, tuple[int, str]] = {}
+        self._instrument_cache: dict[str, str] = {}
         self._candle_id_cache: dict[tuple[str, str], tuple[datetime, str]] = {}
         self._exchange_client: T | None = None
 
@@ -257,15 +257,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return cast(MarketDataExchange, self._get_exchange_name())
 
-    async def _ensure_instrument(self, native_symbol: str) -> tuple[int, str] | None:
-        """Resolve (instrument_id, instrument_public_id) for a native symbol, using cache.
+    async def _ensure_instrument(self, native_symbol: str) -> str | None:
+        """Resolve instrument_public_id for a native symbol, using cache.
 
         Args:
             native_symbol: Native exchange symbol (e.g. 'BTC-USD').
 
         Returns:
-            Tuple of (instrument_id, instrument_public_id), or None if symbol
-            cannot be split or the symbol has no active Symbol row.
+            The instrument_public_id string, or None if the symbol cannot be
+            split or has no active Symbol row.
         """
         cached = self._instrument_cache.get(native_symbol)
         if cached is not None:
@@ -283,7 +283,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if symbol_pid is None:
             logger.warning(f"MarketDataPublisherService: No active Symbol row for {native_symbol}")
             return None
-        instrument_id, instrument_public_id = await self.repository.upsert_instrument(
+        _id, instrument_public_id = await self.repository.upsert_instrument(
             symbol_public_id=symbol_pid,
             symbol=native_symbol,
             exchange=self._get_exchange_name(),
@@ -294,8 +294,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
-        self._instrument_cache[native_symbol] = (instrument_id, instrument_public_id)
-        return (instrument_id, instrument_public_id)
+        self._instrument_cache[native_symbol] = instrument_public_id
+        return instrument_public_id
 
     def _resolve_candle_public_id(
         self, instrument_public_id: str, timeframe: str, open_at: datetime
@@ -341,10 +341,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if not self.running:
                     break
                 native_symbol = candle.symbol
-                result = await self._ensure_instrument(native_symbol)
-                if result is None:
+                instrument_public_id = await self._ensure_instrument(native_symbol)
+                if instrument_public_id is None:
                     continue
-                _, instrument_public_id = result
                 public_id = self._resolve_candle_public_id(
                     instrument_public_id, timeframe, candle.interval_begin
                 )
@@ -522,10 +521,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             candle_msg: CandleData containing OHLCV data to persist.
         """
         try:
-            result = await self._ensure_instrument(native_symbol)
-            if result is None:
+            instrument_public_id = await self._ensure_instrument(native_symbol)
+            if instrument_public_id is None:
                 return
-            instrument_id, instrument_public_id = result
             timeframe = candle_msg.timeframe or "1m"
             open_price = candle_msg.open if candle_msg.open is not None else candle_msg.close
             high_price = candle_msg.high if candle_msg.high is not None else candle_msg.close
@@ -535,7 +533,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             trades = candle_msg.trades if candle_msg.trades is not None else 0
             candle_row: dict[str, Any] = {
                 "public_id": candle_msg.public_id,
-                "instrument_id": instrument_id,
                 "instrument_public_id": instrument_public_id,
                 "open_at": candle_msg.open_at,
                 "timestamp": candle_msg.timestamp,

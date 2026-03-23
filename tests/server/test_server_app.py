@@ -1286,7 +1286,6 @@ class MockOrder:
         """Initialize the instance."""
         self.id = 1
         self.public_id = "order-uuid-1234"
-        self.instrument_id = 1
         self.instrument_public_id = "test-instrument-public-id"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.client_order_id = "client_123"
@@ -1313,7 +1312,6 @@ class MockSignal:
         """Initialize the instance."""
         self.id = 1
         self.public_id = "signal-uuid-1234"
-        self.instrument_id = 1
         self.instrument_public_id = "test-instrument-public-id"
         self.timestamp = dt.datetime(2024, 1, 1, 12, 0, tzinfo=dt.UTC)
         self.fired_at = dt.datetime(2024, 1, 1, 11, 59, tzinfo=dt.UTC)
@@ -1333,7 +1331,6 @@ class MockExecution:
         """Initialize the instance."""
         self.id = 1
         self.public_id = "execution-uuid-1234"
-        self.order_id = 1
         self.order_public_id = "order-uuid-1234"
         self.exec_id = "exec-001"
         self.trade_id = "trade-001"
@@ -1356,7 +1353,6 @@ class MockPosition:
         """Initialize the instance."""
         self.id = 1
         self.public_id = "position-uuid-1234"
-        self.instrument_id = 1
         self.instrument_public_id = "test-instrument-public-id"
         self.quantity = 1.5
         self.average_price = 48000.0

@@ -294,7 +294,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("timeframe", sa.String(8), nullable=False),
         sa.Column("open_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("open", sa.Float(), nullable=False),
@@ -328,7 +327,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_candles_instrument_id", "candles", ["instrument_id"])
     op.create_index("ix_candles_instrument_public_id", "candles", ["instrument_public_id"])
     op.create_index("ix_candle_instrument_open", "candles", ["instrument_public_id", "open_at"])
     op.create_table(
@@ -336,7 +334,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("trade_id", sa.String(64), nullable=False),
         sa.Column("price", sa.Float(), nullable=False),
         sa.Column("size", sa.Float(), nullable=False),
@@ -358,7 +355,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_trades_instrument_id", "trades", ["instrument_id"])
     op.create_index("ix_trades_instrument_public_id", "trades", ["instrument_public_id"])
     op.create_index("ix_trades_timestamp", "trades", ["timestamp"])
     op.create_index("ix_trade_instrument_ts", "trades", ["instrument_public_id", "timestamp"])
@@ -367,7 +363,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("bid", sa.Float(), nullable=True),
         sa.Column("ask", sa.Float(), nullable=True),
         sa.Column("last", sa.Float(), nullable=True),
@@ -388,7 +383,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_ticks_instrument_id", "ticks", ["instrument_id"])
     op.create_index("ix_ticks_instrument_public_id", "ticks", ["instrument_public_id"])
     op.create_index("ix_tick_instrument_ts", "ticks", ["instrument_public_id", "timestamp"])
     op.create_table(
@@ -396,7 +390,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("client_order_id", sa.String(64), nullable=True),
         sa.Column("exchange_order_id", sa.String(64), nullable=True),
         sa.Column("side", sa.String(4), nullable=False),
@@ -426,7 +419,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_orders_instrument_id", "orders", ["instrument_id"])
     op.create_index("ix_orders_instrument_public_id", "orders", ["instrument_public_id"])
     op.create_index("ix_orders_client_order_id", "orders", ["client_order_id"])
     op.create_index("ix_orders_exchange_order_id", "orders", ["exchange_order_id"])
@@ -450,7 +442,6 @@ def upgrade() -> None:
         "executions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
-        sa.Column("order_id", sa.Integer(), nullable=False),
         sa.Column("order_public_id", sa.String(36), nullable=False),
         sa.Column("exec_id", sa.String(64), nullable=True),
         sa.Column("trade_id", sa.String(64), nullable=True),
@@ -477,7 +468,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_executions_order_id", "executions", ["order_id"])
     op.create_index("ix_executions_order_public_id", "executions", ["order_public_id"])
     op.create_index(
         "uq_executions_order_exec",
@@ -498,7 +488,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("quantity", sa.Float(), nullable=False),
         sa.Column("average_price", sa.Float(), nullable=False),
         sa.Column("unrealized_pnl", sa.Float(), nullable=False),
@@ -527,14 +516,12 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_positions_instrument_id", "positions", ["instrument_id"])
     op.create_index("ix_positions_instrument_public_id", "positions", ["instrument_public_id"])
     op.create_table(
         "signals",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
         sa.Column("strength", sa.Float(), nullable=False),
         sa.Column("reason", sa.String(256), nullable=False),
@@ -557,7 +544,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_signals_instrument_id", "signals", ["instrument_id"])
     op.create_index("ix_signals_instrument_public_id", "signals", ["instrument_public_id"])
     op.create_index("ix_signals_fired_at", "signals", ["fired_at"])
     op.create_table(
@@ -689,7 +675,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("instrument_id", sa.Integer(), nullable=False),
         sa.Column("tick_size", sa.Float(), nullable=True),
         sa.Column("lot_size", sa.Float(), nullable=True),
         sa.Column("min_order_size", sa.Float(), nullable=True),
@@ -724,7 +709,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_instrument_specs_instrument_id", "instrument_specs", ["instrument_id"])
     op.create_index(
         "ix_instrument_specs_instrument_public_id", "instrument_specs", ["instrument_public_id"]
     )

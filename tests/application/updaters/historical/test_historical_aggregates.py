@@ -263,12 +263,10 @@ async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfil
         base_currency="ETH",
         quote_currency="USD",
     )
-    ensure_instrument = cast(
-        Callable[[Any], Awaitable[tuple[int, str]]], cast(Any, service)._ensure_instrument
-    )
+    ensure_instrument = cast(Callable[[Any], Awaitable[str]], cast(Any, service)._ensure_instrument)
     result = await ensure_instrument(context)
     repeated_result = await ensure_instrument(context)
-    assert result == repeated_result == async_repo.return_value
+    assert result == repeated_result == async_repo.return_value[1]
     assert len(async_repo.calls) == 1
     call = async_repo.calls[0]
     assert call["symbol"] == "ETH-USD"
@@ -345,10 +343,8 @@ def test_build_candle_rows(service: PolygonAggregatesBackfillService) -> None:
         return seq_counter[0]
 
     tracker_any = cast(Any, service)._tracker
-    rows = service._build_candle_rows(
-        candles, 7, "inst-pub-7", "1m", tracker_any.session_id, _seq_fn
-    )
-    assert rows[0]["instrument_id"] == 7
+    rows = service._build_candle_rows(candles, "inst-pub-7", "1m", tracker_any.session_id, _seq_fn)
+    assert rows[0]["instrument_public_id"] == "inst-pub-7"
     assert rows[0]["vwap"] == pytest.approx(101.5)
     assert rows[1]["vwap"] is None
     assert rows[1]["trades"] is None
@@ -485,8 +481,8 @@ def test_build_candle_rows_converts_values() -> None:
         )
     ]
     svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows(candles, 1, "inst-pub-1", "1m", "", lambda: 0)
-    assert rows[0]["instrument_id"] == 1
+    rows = svc._build_candle_rows(candles, "inst-pub-1", "1m", "", lambda: 0)
+    assert rows[0]["instrument_public_id"] == "inst-pub-1"
     assert rows[0]["vwap"] is None
 
 
@@ -1297,7 +1293,7 @@ async def test_build_candle_rows_with_vwap_none() -> None:
         )
     ]
     svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows(candles, 1, "inst-pub-1", "1m", "", lambda: 0)
+    rows = svc._build_candle_rows(candles, "inst-pub-1", "1m", "", lambda: 0)
     assert len(rows) == 1
     assert rows[0]["vwap"] is None
 
@@ -2187,7 +2183,7 @@ async def test_ensure_instrument_caches_id(
     )
     first = await service_private._ensure_instrument(context)
     second = await service_private._ensure_instrument(context)
-    assert first == second == (42, "inst-pub-42")
+    assert first == second == "inst-pub-42"
     assert len(calls) == 1
     assert calls[0]["quote"] == "BTC"
 
@@ -2211,10 +2207,10 @@ def test_build_candle_rows_converts_values_decimal() -> None:
         transactions=10,
     )
     svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows([candle], 7, "inst-pub-7", "1m", "", lambda: 0)
+    rows = svc._build_candle_rows([candle], "inst-pub-7", "1m", "", lambda: 0)
     assert len(rows) == 1
     row = rows[0]
-    assert row["instrument_id"] == 7
+    assert row["instrument_public_id"] == "inst-pub-7"
     assert row["open_at"] == candle.timestamp
     assert row["timeframe"] == "1m"
     assert row["open"] == 1.0

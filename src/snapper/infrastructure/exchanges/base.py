@@ -370,7 +370,7 @@ class ExchangeClientBase(ABC):
             if symbol_pid is None:
                 logger.error(f"No active Symbol row for {request.symbol}, cannot log order")
                 return None
-            instrument_id, instrument_public_id = await self.repository.upsert_instrument(
+            _id, instrument_public_id = await self.repository.upsert_instrument(
                 symbol_public_id=symbol_pid,
                 symbol=request.symbol,
                 exchange=self.exchange_name,
@@ -381,7 +381,6 @@ class ExchangeClientBase(ABC):
             )
             seq = self._tracker.next_sequence("orders")
             return await self.repository.insert_order(
-                instrument_id=instrument_id,
                 instrument_public_id=instrument_public_id,
                 client_order_id=order.client_order_id,
                 exchange_order_id=order.id,
@@ -441,7 +440,6 @@ class ExchangeClientBase(ABC):
 
     async def _log_execution_to_db(
         self,
-        db_order_id: int,
         order_public_id: str,
         execution: ExecutionUpdate,
     ) -> None:
@@ -451,7 +449,6 @@ class ExchangeClientBase(ABC):
         fully filled to record the execution details.
 
         Args:
-            db_order_id: Database order ID that was executed.
             order_public_id: Logical order identity (stable across versions).
             execution: Execution details including price, size, and fees.
         """
@@ -460,7 +457,6 @@ class ExchangeClientBase(ABC):
         try:
             seq = self._tracker.next_sequence("executions")
             await self.repository.insert_execution(
-                order_id=db_order_id,
                 order_public_id=order_public_id,
                 timestamp=execution.timestamp,
                 side=execution.side.value,

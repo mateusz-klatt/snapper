@@ -88,7 +88,6 @@ class TestCandleModel:
         """
         now = datetime.now(UTC)
         candle = Candle(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=now,
             timeframe="1h",
@@ -100,7 +99,6 @@ class TestCandleModel:
             session_id="test-session",
             sequence_id=1,
         )
-        assert candle.instrument_id == 1
         assert candle.instrument_public_id == "test-instrument-uuid"
         assert candle.timestamp == now
         assert candle.timeframe == "1h"
@@ -118,7 +116,6 @@ class TestCandleModel:
         Then: High >= open,close,low and low <= all.
         """
         candle = Candle(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             timeframe="1h",
@@ -149,7 +146,6 @@ class TestTradeModel:
         Then: All fields match provided values.
         """
         trade = Trade(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=50000.0,
@@ -159,7 +155,6 @@ class TestTradeModel:
             session_id="test-session",
             sequence_id=1,
         )
-        assert trade.instrument_id == 1
         assert trade.instrument_public_id == "test-instrument-uuid"
         assert trade.price == pytest.approx(50000.0)
         assert trade.size == pytest.approx(1.5)
@@ -175,7 +170,6 @@ class TestTradeModel:
         Then: Value equals size * price.
         """
         trade = Trade(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=45000.0,
@@ -196,7 +190,6 @@ class TestTradeModel:
         Then: Both buy and sell are supported.
         """
         buy_trade = Trade(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=50000.0,
@@ -207,7 +200,6 @@ class TestTradeModel:
             sequence_id=1,
         )
         sell_trade = Trade(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             price=50000.0,
@@ -233,7 +225,6 @@ class TestOrderModel:
         """
         now = datetime.now(UTC)
         order = Order(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             client_order_id="client-123",
             exchange_order_id="exchange-456",
@@ -249,7 +240,6 @@ class TestOrderModel:
             session_id="test-session",
             sequence_id=1,
         )
-        assert order.instrument_id == 1
         assert order.instrument_public_id == "test-instrument-uuid"
         assert order.client_order_id == "client-123"
         assert order.exchange_order_id == "exchange-456"
@@ -270,7 +260,6 @@ class TestOrderModel:
         """
         now = datetime.now(UTC)
         order = Order(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             created_at=now,
             timestamp=now,
@@ -294,7 +283,6 @@ class TestOrderModel:
         """
         now = datetime.now(UTC)
         order = Order(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             created_at=now,
             timestamp=now,
@@ -322,7 +310,6 @@ class TestExecutionModel:
         Then: All fields match provided values.
         """
         execution = Execution(
-            order_id=1,
             order_public_id="order-pub-id-1",
             timestamp=datetime.now(UTC),
             side="buy",
@@ -334,7 +321,6 @@ class TestExecutionModel:
             session_id="test-session",
             sequence_id=1,
         )
-        assert execution.order_id == 1
         assert execution.order_public_id == "order-pub-id-1"
         assert execution.price == pytest.approx(50000.0)
         assert execution.size == pytest.approx(1.0)
@@ -350,7 +336,6 @@ class TestExecutionModel:
         Then: Percentage is between 0 and 100.
         """
         execution = Execution(
-            order_id=1,
             order_public_id="order-pub-id-1",
             timestamp=datetime.now(UTC),
             side="buy",
@@ -379,7 +364,6 @@ class TestPositionModel:
         Then: All fields match provided values.
         """
         position = Position(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             quantity=2.5,
             average_price=48000.0,
@@ -389,7 +373,6 @@ class TestPositionModel:
             session_id="test-session",
             sequence_id=1,
         )
-        assert position.instrument_id == 1
         assert position.instrument_public_id == "test-instrument-uuid"
         assert position.quantity == pytest.approx(2.5)
         assert position.average_price == pytest.approx(48000.0)
@@ -404,7 +387,6 @@ class TestPositionModel:
         Then: Value equals quantity * average_price.
         """
         position = Position(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             quantity=1.0,
             average_price=45000.0,
@@ -425,7 +407,6 @@ class TestPositionModel:
         Then: Total equals sum of both.
         """
         position = Position(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             quantity=1.0,
             average_price=50000.0,
@@ -660,7 +641,6 @@ class TestSignalEventModel:
         Then: All fields match provided values.
         """
         event = Signal(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             side="buy",
@@ -671,7 +651,6 @@ class TestSignalEventModel:
             session_id="test-session",
             sequence_id=1,
         )
-        assert event.instrument_id == 1
         assert event.instrument_public_id == "test-instrument-uuid"
         assert event.side == "buy"
         assert event.strength == pytest.approx(0.8)
@@ -687,7 +666,6 @@ class TestSignalEventModel:
         Then: Strength is between 0 and 1.
         """
         event = Signal(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             side="sell",
@@ -707,7 +685,6 @@ class TestSignalEventModel:
         Then: Price field is None.
         """
         event = Signal(
-            instrument_id=1,
             instrument_public_id="test-instrument-uuid",
             timestamp=datetime.now(UTC),
             side="buy",
