@@ -161,6 +161,9 @@ class ProcessRunRecorder:
         return [
             {
                 "public_id": run.public_id,
+                "session_id": run.session_id,
+                "sequence_id": run.sequence_id,
+                "timestamp": run.timestamp,
                 "process_name": run.process_name,
                 "status": run.status,
                 "role": run.role,

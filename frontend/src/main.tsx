@@ -28,7 +28,7 @@ ReactDOM.createRoot(rootElement).render(
           duration: 4000,
           style: {
             background: 'var(--color-dark-100)',
-            color: 'var(--color-dark-800)',
+            color: 'var(--color-alpine-900)',
             border: '1px solid var(--color-dark-500)',
           },
           success: {

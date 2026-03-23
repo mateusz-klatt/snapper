@@ -2894,6 +2894,9 @@ async def test_get_recent_runs_with_filter(monkeypatch: pytest.MonkeyPatch) -> N
     runs = [
         SimpleNamespace(
             public_id="1",
+            session_id="test-sid",
+            sequence_id=1,
+            timestamp=now,
             process_name="demo",
             status="ok",
             role="core",

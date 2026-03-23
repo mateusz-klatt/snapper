@@ -1409,6 +1409,9 @@ class TestGetRecentRuns:
         """
         mock_run = MagicMock()
         mock_run.public_id = "run-123"
+        mock_run.session_id = "test-sid"
+        mock_run.sequence_id = 1
+        mock_run.timestamp = datetime(2024, 1, 1, tzinfo=UTC)
         mock_run.process_name = "test_process"
         mock_run.status = "succeeded"
         mock_run.role = "core"
